@@ -536,7 +536,7 @@ function load_fw_specific(version) {
     }
 
     if (0x800 <= value && value < 0x850) {
-        return import('/rop/800.mjs');
+       return import('../rop/800.mjs'); // <--- Sobe um nível e entra em rop
     }
 
     throw RangeError('firmware not supported');
