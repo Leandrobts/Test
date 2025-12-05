@@ -1,32 +1,11 @@
-/* Copyright (C) 2023-2025 anonymous
-
-This file is part of PSFree.
-
-PSFree is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as
-published by the Free Software Foundation, either version 3 of the
-License, or (at your option) any later version.
-
-PSFree is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.  */
-
-import { mem } from '/module/mem.mjs';
-import { KB } from '/module/offset.mjs';
-import { ChainBase, get_gadget } from '/module/chain.mjs';
-import { BufferView } from '/module/rw.mjs';
-
+import { mem } from '../module/mem.mjs'; // <--- Volta um nível para sair de rop/ e ir para module/
+import { KB } from '../module/offset.mjs';
+import { ChainBase, get_gadget } from '../module/chain.mjs';
+import { BufferView } from '../module/rw.mjs';
 import {
-    get_view_vector,
-    resolve_import,
-    init_syscall_array,
-} from '/module/memtools.mjs';
-
-import * as off from '/module/offset.mjs';
+    get_view_vector, resolve_import, init_syscall_array,
+} from '../module/memtools.mjs';
+import * as off from '../module/offset.mjs';
 
 // WebKit offsets of imported functions
 const offset_wk_stack_chk_fail = 0x8d8;
