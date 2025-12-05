@@ -1,44 +1,14 @@
-/* Copyright (C) 2025 anonymous
-This file is part of PSFree.
-
-PSFree is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as
-published by the Free Software Foundation, either version 3 of the
-License, or (at your option) any later version.
-
-PSFree is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.  */
-
-// Lapse is a kernel exploit for PS4 [5.00, 12.50) and PS5 [1.00-10.20). It
-// takes advantage of a bug in aio_multi_delete(). Take a look at the comment
-// at the race_one() function here for a brief summary.
-
-// debug comment legend:
-// * PANIC - code will make the system vulnerable to a kernel panic or it will
-//   perform a operation that might panic
-// * RESTORE - code will repair kernel panic vulnerability
-// * MEMLEAK - memory leaks that our code will induce
-
-import { Int } from '/module/int64.mjs';
-import { mem } from '/module/mem.mjs';
-import { log, die, hex, hexdump } from '/module/utils.mjs';
-import { cstr, jstr } from '/module/memtools.mjs';
-import { page_size, context_size } from '/module/offset.mjs';
-import { Chain } from '/module/chain.mjs';
-
+import { Int } from './module/int64.mjs';
+import { mem } from './module/mem.mjs';
+import { log, die, hex, hexdump } from './module/utils.mjs';
+import { cstr, jstr } from './module/memtools.mjs';
+import { page_size, context_size } from './module/offset.mjs';
+import { Chain } from './module/chain.mjs';
 import {
-    View1, View2, View4,
-    Word, Long, Pointer,
-    Buffer,
-} from '/module/view.mjs';
-
-import * as rop from '/module/chain.mjs';
-import * as config from '/config.mjs';
+    View1, View2, View4, Word, Long, Pointer, Buffer,
+} from './module/view.mjs';
+import * as rop from './module/chain.mjs';
+import * as config from './config.mjs';
 
 const t1 = performance.now();
 
