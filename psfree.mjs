@@ -1,55 +1,12 @@
-/* Copyright (C) 2023-2025 anonymous
-
-This file is part of PSFree.
-
-PSFree is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as
-published by the Free Software Foundation, either version 3 of the
-License, or (at your option) any later version.
-
-PSFree is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.  */
-
-// PSFree is a WebKit exploit using CVE-2022-22620 to gain arbitrary read/write
-//
-// vulnerable:
-// * PS4 [6.00, 10.00)
-// * PS5 [1.00, 6.00)
-//
-// * CelesteBlue from ps4-dev on discord.com
-//   * Helped in figuring out the size of WebCore::SerializedScriptValue and
-//     its needed offsets on different firmwares.
-//   * figured out the range of vulnerable firmwares
-// * janisslsm from ps4-dev on discord.com
-//   * Helped in figuring out the size of JSC::ArrayBufferContents and its
-//     needed offsets on different firmwares.
-// * Kameleon_ from ps4-dev on discord.com - tester
-// * SlidyBat from PS5 R&D discord.com
-//   * Helped in figuring out the size of JSC::ArrayBufferContents and its
-//     needed offsets on different firmwares (PS5).
-
-import { Int } from '/module/int64.mjs';
-import { Memory } from '/module/mem.mjs';
-import { KB, MB } from '/module/offset.mjs';
-import { BufferView } from '/module/rw.mjs';
-
+import { Int } from './module/int64.mjs';
+import { Memory } from './module/mem.mjs';
+import { KB, MB } from './module/offset.mjs';
+import { BufferView } from './module/rw.mjs';
 import {
-    die,
-    DieError,
-    log,
-    clear_log,
-    sleep,
-    hex,
-    align,
-} from '/module/utils.mjs';
-
-import * as config from '/config.mjs';
-import * as off from '/module/offset.mjs';
+    die, DieError, log, clear_log, sleep, hex, align,
+} from './module/utils.mjs';
+import * as config from './config.mjs';
+import * as off from './module/offset.mjs';
 
 // check if we are running on a supported firmware version
 const [is_ps4, version] = (() => {
@@ -857,6 +814,6 @@ async function main() {
 
     clear_log();
     // path to your script that will use the exploit
-    import('./scripts/lapse.mjs');
+    import('./lapse.mjs'); // Use ./ para garantir que busca na mesma pasta
 }
 main();
