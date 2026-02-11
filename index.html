@@ -1,753 +1,340 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>History API Fuzzer </title>
+  <meta charset="UTF-8">
+  <title>PS4 T8 Scan — DROP + Stale/Changed After Detach (Minimal Log)</title>
 </head>
 <body>
+  <h2>PS4 T8 Scan — MessageChannel Transfer DROP + Stale/Changed After Detach</h2>
 
-<button id="btnRun" onclick="runAll()">RODAR TODOS OS 50 TESTES</button>
-<button onclick="location.reload()">RESET (reload page)</button>
+  <button id="run">RUN AUTO</button>
+  <button id="stop">STOP</button>
+  <button id="reset">Reset log</button>
 
-<pre id="log"></pre>
+  <p>
+    Attempts per size (N):
+    <input id="n" type="number" value="30" min="1" step="1">
+    &nbsp; Timeout (ms):
+    <input id="timeout" type="number" value="200" min="50" step="50">
+    &nbsp; Delay (ms):
+    <input id="delay" type="number" value="10" min="0" step="5">
+    &nbsp; Pressure (0..10):
+    <input id="pressure" type="number" value="5" min="0" max="10" step="1">
+  </p>
+
+  <p>
+    Sizes (bytes) CSV (vazio = padrão buckets):
+    <input id="sizes" type="text" size="60" placeholder="4096,8192,16384,32768,65536,131072,262144,524288,1048576">
+  </p>
+
+  <pre id="log"></pre>
 
 <script>
 (function(){
-"use strict";
+  "use strict";
 
-const $log = document.getElementById("log");
-const $btn = document.getElementById("btnRun");
-let STOP = false;
+  var $log = document.getElementById("log");
+  function ts(){ return Date.now(); }
+  function logLine(s){ $log.textContent += "[" + ts() + "] " + s + "\n"; }
+  function resetLog(){ $log.textContent=""; logLine("Reset."); }
 
-function log(m) { $log.textContent += m + "\n"; console.log(m); }
-function alert(m) { const msg = "[ALERTA] " + m; $log.textContent += msg + "\n"; console.error(msg); }
-
-function randHex(n){ return ((Math.random()*(1<<24))|0).toString(16).padStart(6,"0").slice(0,n||4); }
-function hrefNoHash(){ return location.href.split("#")[0]; }
-
-// Helper: aguarda com timeout
-function waitPop(ms){
-  return new Promise(function(resolve){
-    let arrived = false;
-    const h = function(ev){
-      if(arrived) return;
-      arrived = true;
-      window.removeEventListener("popstate", h);
-      resolve({ ok:true, state:ev.state });
-    };
-    window.addEventListener("popstate", h);
-    setTimeout(function(){
-      if(!arrived){ arrived=true; window.removeEventListener("popstate", h); resolve({ok:false}); }
-    }, ms);
-  });
-}
-
-// ============================================================
-// BATERIA DE 50 TESTES
-// ============================================================
-
-const TESTES = [
-
-// ===== GRUPO 1: History state manipulation extremo =====
-{
-  id: 1,
-  desc: "replaceState com state null",
-  fn: async function(){
-    history.replaceState(null, "");
-    const st = history.state;
-    if(st !== null) alert("T1: state deveria ser null, got " + typeof st);
+  function toJSON(x){
+    try { return JSON.stringify(x); } catch(e){ return String(x); }
   }
-},
-{
-  id: 2,
-  desc: "replaceState com state undefined",
-  fn: async function(){
-    history.replaceState(undefined, "");
-    const st = history.state;
-    if(st !== null && st !== undefined) alert("T2: state inesperado: " + st);
+
+  function parseSizesCSV(s){
+    s = (s || "").trim();
+    if (!s) return null;
+    var parts = s.split(",");
+    var out = [];
+    for (var i=0;i<parts.length;i++){
+      var v = parseInt(parts[i].trim(),10);
+      if (isFinite(v) && v > 0) out.push(v);
+    }
+    return out.length ? out : null;
   }
-},
-{
-  id: 3,
-  desc: "replaceState com objeto circular",
-  fn: async function(){
-    const obj = { a: 1 };
-    obj.self = obj;
+
+  function defaultSizes(){
+    return [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
+  }
+
+  function isArrayBuffer(x){
+    if (!x) return false;
+    var tag = Object.prototype.toString.call(x);
+    if (tag === "[object ArrayBuffer]") return true;
+    // fallback-ish
+    return (typeof x.byteLength === "number" && typeof x.slice === "function");
+  }
+
+  function clampInt(v, lo, hi, def){
+    v = parseInt(v,10);
+    if (!isFinite(v)) return def;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+  }
+
+  // Pressure: bounded, same-size allocations. NOT unbounded spray.
+  function doPressureSameSize(sz, level){
+    if (!level) return;
+    // Budget: cap total at ~16MB per call (conservador).
+    var budget = 16 * 1024 * 1024;
+    var per = Math.max(sz, 1024);
+    var maxCount = Math.floor(budget / per);
+    // Level scales count, but never exceeds maxCount.
+    var count = Math.min(maxCount, Math.max(0, Math.floor((level / 10) * maxCount)));
+    var junk = [];
+    for (var i=0;i<count;i++){
+      junk.push(new ArrayBuffer(per));
+    }
+    // keep briefly, then release
+    return junk;
+  }
+
+  // Read probe on pre-existing typed array view after detach.
+  // Expected: length becomes 0 and u8[0] is undefined (or throws).
+  function safeReadU8(u8){
     try {
-      history.replaceState(obj, "");
-      alert("T3: replaceState com circular nao lancou erro");
-    } catch(e) {
-      // esperado
-    }
-  }
-},
-{
-  id: 4,
-  desc: "replaceState com ArrayBuffer gigante (100MB)",
-  fn: async function(){
-    try {
-      const huge = new ArrayBuffer(100*1024*1024);
-      history.replaceState({ buf: huge }, "");
-      alert("T4: 100MB ArrayBuffer em state foi aceito");
-    } catch(e) {
-      // esperado falhar por memoria
-    }
-  }
-},
-{
-  id: 5,
-  desc: "replaceState 1000x sem yield",
-  fn: async function(){
-    const start = Date.now();
-    for(let i=0; i<1000; i++){
-      history.replaceState({ seq: i }, "");
-    }
-    const st = history.state;
-    if(st && st.seq !== 999) alert("T5: esperado seq=999, got " + st.seq);
-    if(Date.now() - start > 5000) alert("T5: 1000 replaceState levou mais de 5s");
-  }
-},
-{
-  id: 6,
-  desc: "replaceState durante popstate callback",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    history.pushState({ id: "B" }, "");
-    window.onpopstate = function(ev){
-      history.replaceState({ injected: true, orig: ev.state }, "");
-    };
-    history.back();
-    await waitPop(1000);
-    const st = history.state;
-    if(st && st.injected) alert("T6: replaceState durante popstate foi processado");
-  }
-},
-{
-  id: 7,
-  desc: "pushState 500x criando entries massivas",
-  fn: async function(){
-    const before = history.length;
-    for(let i=0; i<500; i++){
-      history.pushState({ id: i }, "");
-    }
-    const after = history.length;
-    if(after - before !== 500) alert("T7: esperado delta=500, got " + (after-before));
-  }
-},
-{
-  id: 8,
-  desc: "replaceState com string de 10MB",
-  fn: async function(){
-    try {
-      const big = "X".repeat(10*1024*1024);
-      history.replaceState({ data: big }, "");
-      const st = history.state;
-      if(st && st.data && st.data.length === 10*1024*1024) alert("T8: 10MB string em state OK");
-    } catch(e) {
-      // esperado falhar
-    }
-  }
-},
-
-// ===== GRUPO 2: URL manipulation edge cases =====
-{
-  id: 9,
-  desc: "replaceState com URL de 10000 chars",
-  fn: async function(){
-    const longUrl = hrefNoHash() + "?" + "a".repeat(10000);
-    try {
-      history.replaceState(null, "", longUrl);
-      if(location.href.length > 10000) alert("T9: URL de 10k chars foi aceita");
-    } catch(e) {}
-  }
-},
-{
-  id: 10,
-  desc: "pushState com URL invalida (sem protocolo)",
-  fn: async function(){
-    try {
-      history.pushState(null, "", "example.com/test");
-      alert("T10: URL invalida foi aceita");
-    } catch(e) {
-      // esperado
-    }
-  }
-},
-{
-  id: 11,
-  desc: "replaceState alternando URL 500x",
-  fn: async function(){
-    const url1 = hrefNoHash() + "?a=1";
-    const url2 = hrefNoHash() + "?b=2";
-    for(let i=0; i<500; i++){
-      history.replaceState(null, "", i % 2 === 0 ? url1 : url2);
-    }
-    if(location.href !== url2) alert("T11: URL final inesperada");
-  }
-},
-
-// ===== GRUPO 3: Burst + navigation races =====
-{
-  id: 12,
-  desc: "burst 300 + back imediato",
-  fn: async function(){
-    history.pushState({ id: "X" }, "");
-    for(let i=0; i<300; i++) history.replaceState({ seq: i }, "");
-    history.back();
-    const r = await waitPop(2000);
-    if(!r.ok) alert("T12: timeout apos burst=300");
-  }
-},
-{
-  id: 13,
-  desc: "burst 500 + forward",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    history.pushState({ id: "B" }, "");
-    history.back();
-    await waitPop(500);
-    for(let i=0; i<500; i++) history.replaceState({ seq: i }, "");
-    history.forward();
-    const r = await waitPop(2000);
-    if(!r.ok) alert("T13: timeout no forward apos burst=500");
-  }
-},
-{
-  id: 14,
-  desc: "burst durante back em andamento",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    history.pushState({ id: "B" }, "");
-    history.back();
-    // burst DURANTE o back (nao espera pop)
-    for(let i=0; i<200; i++) history.replaceState({ seq: i }, "");
-    const r = await waitPop(2000);
-    if(!r.ok) alert("T14: burst durante back causou timeout");
-  }
-},
-{
-  id: 15,
-  desc: "go(-50) em history com 10 entries",
-  fn: async function(){
-    for(let i=0; i<10; i++) history.pushState({ id: i }, "");
-    history.go(-50);
-    const r = await waitPop(1000);
-    if(!r.ok) alert("T15: go(-50) nao entregou popstate");
-  }
-},
-
-// ===== GRUPO 4: State deserialization stress =====
-{
-  id: 16,
-  desc: "state com 1000 nested objects",
-  fn: async function(){
-    let obj = { val: 0 };
-    for(let i=0; i<1000; i++){
-      obj = { nested: obj, val: i };
-    }
-    try {
-      history.replaceState(obj, "");
-      const st = history.state;
-      if(!st || !st.nested) alert("T16: nested 1000x corrompeu");
-    } catch(e) {
-      alert("T16: exception com nested 1000x: " + e.message);
-    }
-  }
-},
-{
-  id: 17,
-  desc: "state com 10000 keys no objeto",
-  fn: async function(){
-    const obj = {};
-    for(let i=0; i<10000; i++) obj["k"+i] = i;
-    history.replaceState(obj, "");
-    const st = history.state;
-    if(!st || Object.keys(st).length !== 10000) alert("T17: 10k keys corrompeu");
-  }
-},
-{
-  id: 18,
-  desc: "state com Map e Set",
-  fn: async function(){
-    const m = new Map(); m.set("a", 1);
-    const s = new Set(); s.add(42);
-    history.replaceState({ map: m, set: s }, "");
-    const st = history.state;
-    // Map/Set nao sao structured-cloneable em WebKit antigo
-    if(st && (st.map instanceof Map || st.set instanceof Set)){
-      alert("T18: Map/Set foram clonados (inesperado)");
-    }
-  }
-},
-{
-  id: 19,
-  desc: "state com ImageData",
-  fn: async function(){
-    const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = 100;
-    const ctx = canvas.getContext("2d");
-    const imgData = ctx.getImageData(0,0,100,100);
-    try {
-      history.replaceState({ img: imgData }, "");
-      const st = history.state;
-      if(st && st.img) alert("T19: ImageData foi clonado");
-    } catch(e) {}
-  }
-},
-{
-  id: 20,
-  desc: "state com Date object",
-  fn: async function(){
-    const d = new Date();
-    history.replaceState({ date: d }, "");
-    const st = history.state;
-    if(st && st.date instanceof Date) alert("T20: Date manteve tipo (esperado perder)");
-  }
-},
-
-// ===== GRUPO 5: Timing races =====
-{
-  id: 21,
-  desc: "replaceState + back no mesmo tick",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    history.replaceState({ id: "B" }, "");
-    history.back();
-    const r = await waitPop(1000);
-    if(!r.ok) alert("T21: replace+back no mesmo tick causou timeout");
-  }
-},
-{
-  id: 22,
-  desc: "back + back sequencial",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    history.pushState({ id: "B" }, "");
-    history.pushState({ id: "C" }, "");
-    history.back();
-    history.back();
-    let count = 0;
-    const h = function(){ count++; };
-    window.addEventListener("popstate", h);
-    await new Promise(r => setTimeout(r, 1000));
-    window.removeEventListener("popstate", h);
-    if(count !== 2) alert("T22: 2 back() gerou " + count + " popstate(s)");
-  }
-},
-{
-  id: 23,
-  desc: "go(0) nao deveria disparar popstate",
-  fn: async function(){
-    let fired = false;
-    const h = function(){ fired = true; };
-    window.addEventListener("popstate", h);
-    history.go(0);
-    await new Promise(r => setTimeout(r, 500));
-    window.removeEventListener("popstate", h);
-    if(fired) alert("T23: go(0) disparou popstate (nao deveria)");
-  }
-},
-
-// ===== GRUPO 6: Memory pressure + GC =====
-{
-  id: 24,
-  desc: "burst + force GC via allocations",
-  fn: async function(){
-    for(let i=0; i<200; i++) history.replaceState({ seq: i }, "");
-    let trash = [];
-    for(let i=0; i<5000; i++) trash.push(new ArrayBuffer(8192));
-    trash = null;
-    await new Promise(r => setTimeout(r, 100));
-    const st = history.state;
-    if(!st || st.seq === undefined) alert("T24: state corrompeu apos GC");
-  }
-},
-{
-  id: 25,
-  desc: "state com weak reference simulation",
-  fn: async function(){
-    const holder = { data: new Array(1000).fill(1) };
-    history.replaceState({ ref: holder }, "");
-    holder.data = null; // solta referencia
-    let trash = [];
-    for(let i=0; i<3000; i++) trash.push(new ArrayBuffer(8192));
-    trash = null;
-    await new Promise(r => setTimeout(r, 100));
-    const st = history.state;
-    if(st && st.ref && st.ref.data === null) alert("T25: ref no state foi alterada externamente");
-  }
-},
-
-// ===== GRUPO 7: Hash manipulation =====
-{
-  id: 26,
-  desc: "replaceState alternando hash 1000x",
-  fn: async function(){
-    for(let i=0; i<1000; i++){
-      history.replaceState(null, "", hrefNoHash() + "#hash" + i);
-    }
-    if(!location.hash.endsWith("999")) alert("T26: hash final inesperado");
-  }
-},
-{
-  id: 27,
-  desc: "pushState com hash -> back com hash",
-  fn: async function(){
-    history.pushState(null, "", hrefNoHash() + "#a");
-    history.pushState(null, "", hrefNoHash() + "#b");
-    history.back();
-    const r = await waitPop(1000);
-    if(!r.ok) alert("T27: back com hash timeout");
-    if(!location.hash.endsWith("#a")) alert("T27: hash final errado");
-  }
-},
-
-// ===== GRUPO 8: State integrity checks =====
-{
-  id: 28,
-  desc: "verificar se state eh deep-cloned",
-  fn: async function(){
-    const obj = { arr: [1,2,3] };
-    history.replaceState(obj, "");
-    obj.arr.push(4);
-    const st = history.state;
-    if(st && st.arr && st.arr.length === 4) alert("T28: state nao foi deep-cloned");
-  }
-},
-{
-  id: 29,
-  desc: "state com typed arrays",
-  fn: async function(){
-    const u8 = new Uint8Array([1,2,3,4]);
-    history.replaceState({ typed: u8 }, "");
-    const st = history.state;
-    if(st && st.typed && !(st.typed instanceof Uint8Array)){
-      alert("T29: Uint8Array perdeu tipo");
-    }
-  }
-},
-{
-  id: 30,
-  desc: "state seq consistency apos burst",
-  fn: async function(){
-    for(let i=0; i<200; i++) history.replaceState({ seq: i }, "");
-    const st = history.state;
-    if(st && st.seq !== 199) alert("T30: esperado seq=199, got " + st.seq);
-  }
-},
-
-// ===== GRUPO 9: Navigation loop detection =====
-{
-  id: 31,
-  desc: "back em loop (50x)",
-  fn: async function(){
-    for(let i=0; i<50; i++) history.pushState({ id: i }, "");
-    for(let i=0; i<50; i++) history.back();
-    await new Promise(r => setTimeout(r, 2000));
-    // browser nao deveria crashar
-  }
-},
-{
-  id: 32,
-  desc: "forward em loop sem history ahead",
-  fn: async function(){
-    for(let i=0; i<50; i++) history.forward();
-    await new Promise(r => setTimeout(r, 500));
-    // nao deveria crashar
-  }
-},
-
-// ===== GRUPO 10: Cross-origin simulation (same-origin) =====
-{
-  id: 33,
-  desc: "pushState com query param gigante",
-  fn: async function(){
-    const q = "x".repeat(5000);
-    try {
-      history.pushState(null, "", hrefNoHash() + "?" + q);
-      if(location.search.length > 5000) alert("T33: query de 5k chars aceita");
-    } catch(e) {}
-  }
-},
-
-// ===== GRUPO 11: Exception handling =====
-{
-  id: 34,
-  desc: "replaceState com getter que lanca erro",
-  fn: async function(){
-    const obj = {};
-    Object.defineProperty(obj, "boom", {
-      get: function(){ throw new Error("BOOM"); }
-    });
-    try {
-      history.replaceState(obj, "");
-      alert("T34: getter com erro nao impediu replaceState");
-    } catch(e) {
-      // esperado
-    }
-  }
-},
-{
-  id: 35,
-  desc: "popstate handler que lanca erro",
-  fn: async function(){
-    history.pushState({ id: "X" }, "");
-    window.onpopstate = function(){ throw new Error("CRASH"); };
-    history.back();
-    await new Promise(r => setTimeout(r, 500));
-    // nao deveria crashar browser
-  }
-},
-
-// ===== GRUPO 12: Desync scenarios =====
-{
-  id: 36,
-  desc: "burst + verificar ultimo seq com delay",
-  fn: async function(){
-    for(let i=0; i<300; i++) history.replaceState({ seq: i }, "");
-    await new Promise(r => setTimeout(r, 50));
-    const st = history.state;
-    if(st && st.seq !== 299) alert("T36: seq=" + st.seq + " esperado 299");
-  }
-},
-{
-  id: 37,
-  desc: "replaceState 100x + navegar + verificar state",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    for(let i=0; i<100; i++) history.replaceState({ seq: i }, "");
-    history.pushState({ id: "B" }, "");
-    history.back();
-    const r = await waitPop(1000);
-    if(r.ok && r.state){
-      if(r.state.seq === undefined) alert("T37: state do back perdeu seq");
-    }
-  }
-},
-
-// ===== GRUPO 13: Payload extremo =====
-{
-  id: 38,
-  desc: "state com array de 100k elementos",
-  fn: async function(){
-    const big = new Array(100000).fill(42);
-    history.replaceState({ arr: big }, "");
-    const st = history.state;
-    if(!st || !st.arr || st.arr.length !== 100000) alert("T38: array 100k corrompeu");
-  }
-},
-{
-  id: 39,
-  desc: "state com string Unicode complexa",
-  fn: async function(){
-    const unicode = "💀".repeat(10000);
-    history.replaceState({ emoji: unicode }, "");
-    const st = history.state;
-    if(!st || st.emoji.length !== 10000) alert("T39: unicode corrompeu");
-  }
-},
-
-// ===== GRUPO 14: Boundary conditions =====
-{
-  id: 40,
-  desc: "replaceState exatamente no threshold (15)",
-  fn: async function(){
-    history.pushState({ id: "X" }, "");
-    for(let i=0; i<15; i++) history.replaceState({ seq: i }, "");
-    history.back();
-    const r = await waitPop(1000);
-    if(!r.ok) alert("T40: burst=15 causou timeout (threshold)");
-  }
-},
-{
-  id: 41,
-  desc: "replaceState exatamente no threshold (20)",
-  fn: async function(){
-    history.pushState({ id: "X" }, "");
-    for(let i=0; i<20; i++) history.replaceState({ seq: i }, "");
-    history.back();
-    const r = await waitPop(1000);
-    if(!r.ok) alert("T41: burst=20 causou timeout");
-  }
-},
-
-// ===== GRUPO 15: Multi-navigation =====
-{
-  id: 42,
-  desc: "back + forward + back rapido",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    history.pushState({ id: "B" }, "");
-    history.pushState({ id: "C" }, "");
-    history.back();
-    await waitPop(200);
-    history.forward();
-    await waitPop(200);
-    history.back();
-    const r = await waitPop(1000);
-    if(!r.ok) alert("T42: navegacao rapida causou timeout");
-  }
-},
-
-// ===== GRUPO 16: Title manipulation =====
-{
-  id: 43,
-  desc: "replaceState com title de 10k chars",
-  fn: async function(){
-    const title = "T".repeat(10000);
-    history.replaceState(null, title);
-    if(document.title.length > 10000) alert("T43: title gigante foi aceito");
-  }
-},
-
-// ===== GRUPO 17: Concurrent operations =====
-{
-  id: 44,
-  desc: "replaceState em 2 entries diferentes rapidamente",
-  fn: async function(){
-    history.pushState({ id: "A" }, "");
-    history.pushState({ id: "B" }, "");
-    history.replaceState({ id: "A2" }, "");
-    history.back();
-    await waitPop(200);
-    history.replaceState({ id: "A3" }, "");
-    history.forward();
-    const r = await waitPop(1000);
-    if(!r.ok) alert("T44: replace em entries diferentes timeout");
-  }
-},
-
-// ===== GRUPO 18: Edge do burst =====
-{
-  id: 45,
-  desc: "burst=199 (1 a menos que 200)",
-  fn: async function(){
-    history.pushState({ id: "X" }, "");
-    for(let i=0; i<199; i++) history.replaceState({ seq: i }, "");
-    history.back();
-    const r = await waitPop(2000);
-    if(!r.ok) alert("T45: burst=199 timeout");
-  }
-},
-{
-  id: 46,
-  desc: "burst=201 (1 a mais que 200)",
-  fn: async function(){
-    history.pushState({ id: "X" }, "");
-    for(let i=0; i<201; i++) history.replaceState({ seq: i }, "");
-    history.back();
-    const r = await waitPop(2000);
-    if(!r.ok) alert("T46: burst=201 timeout");
-  }
-},
-
-// ===== GRUPO 19: Regression checks =====
-{
-  id: 47,
-  desc: "CVE-2022-22620 style (replaceState no onblur)",
-  fn: async function(){
-    const input = document.createElement("input");
-    document.body.appendChild(input);
-    history.pushState(null, "", location + "#test47");
-    history.pushState(null, "");
-    input.focus();
-    input.onblur = function(){ history.replaceState({ injected: true }, ""); };
-    history.back();
-    const r = await waitPop(1000);
-    document.body.removeChild(input);
-    if(r.ok && r.state && r.state.injected) alert("T47: CVE-2022-22620 pattern funcionou");
-  }
-},
-
-// ===== GRUPO 20: Final stress =====
-{
-  id: 48,
-  desc: "burst 1000 + back",
-  fn: async function(){
-    history.pushState({ id: "X" }, "");
-    for(let i=0; i<1000; i++) history.replaceState({ seq: i }, "");
-    history.back();
-    const r = await waitPop(3000);
-    if(!r.ok) alert("T48: burst=1000 timeout");
-  }
-},
-{
-  id: 49,
-  desc: "10 burst de 200 em sequencia",
-  fn: async function(){
-    for(let b=0; b<10; b++){
-      history.pushState({ burst: b }, "");
-      for(let i=0; i<200; i++) history.replaceState({ burst: b, seq: i }, "");
-    }
-    const st = history.state;
-    if(!st || st.burst !== 9) alert("T49: ultimo burst nao commitou");
-  }
-},
-{
-  id: 50,
-  desc: "Final: burst 500 + GC + back",
-  fn: async function(){
-    history.pushState({ id: "FINAL" }, "");
-    for(let i=0; i<500; i++) history.replaceState({ seq: i }, "");
-    let trash = [];
-    for(let i=0; i<10000; i++) trash.push(new ArrayBuffer(4096));
-    trash = null;
-    await new Promise(r => setTimeout(r, 100));
-    history.back();
-    const r = await waitPop(3000);
-    if(!r.ok) alert("T50: burst=500 + GC timeout");
-  }
-}
-
-];
-
-// ============================================================
-// RUNNER
-// ============================================================
-window.runAll = async function(){
-  $btn.disabled = true;
-  STOP = false;
-  $log.textContent = "";
-  log("Iniciando 50 testes...");
-  log("Mostrando apenas ALERTAS (comportamento anormal).");
-  log("Se crashar = POC de bug real.\n");
-
-  let alertCount = 0;
-  const start = Date.now();
-
-  for(let i=0; i<TESTES.length; i++){
-    if(STOP) break;
-    const t = TESTES[i];
-    try {
-      await t.fn();
-    } catch(e) {
-      alert("T" + t.id + " EXCEPTION: " + e.message);
-      alertCount++;
-    }
-    
-    if(i % 10 === 9){
-      log("... " + (i+1) + "/50 completos");
-      await new Promise(r => setTimeout(r, 50));
+      return { threw:false, v: u8[0], len: u8.length };
+    } catch(e){
+      return { threw:true, err: (e && e.name) ? e.name : "ERR" };
     }
   }
 
-  const elapsed = ((Date.now() - start)/1000).toFixed(1);
-  log("\n=== FINAL ===");
-  log("50 testes completos em " + elapsed + "s");
-  log("ALERTAS encontrados: " + alertCount);
-  
-  if(alertCount === 0){
-    log("\nNenhum alerta. Comportamento consistente neste browser.");
-  } else {
-    log("\n" + alertCount + " alertas encontrados.");
-    log("Revise os ALERTAS acima para identificar comportamentos anormais.");
-  }
-  
-  $btn.disabled = false;
-};
+  var running = false;
+  var stopRequested = false;
 
+  function runAuto(){
+    if (running) return;
+    stopRequested = false;
+    running = true;
+
+    if (typeof MessageChannel !== "function") {
+      logLine("ERRO: MessageChannel não disponível.");
+      running = false;
+      return;
+    }
+
+    var N = clampInt(document.getElementById("n").value, 1, 10000, 30);
+    var timeoutMs = clampInt(document.getElementById("timeout").value, 50, 10000, 200);
+    var delayMs = clampInt(document.getElementById("delay").value, 0, 5000, 10);
+    var pressure = clampInt(document.getElementById("pressure").value, 0, 10, 5);
+    var sizes = parseSizesCSV(document.getElementById("sizes").value) || defaultSizes();
+
+    logLine("============================================================");
+    logLine("RUN AUTO :: scan sizes (T8 base) + stale/changed probes");
+    logLine("Config :: " + toJSON({ N:N, timeoutMs:timeoutMs, delayMs:delayMs, pressure:pressure, sizes:sizes }));
+    logLine("============================================================");
+
+    // Aggregated results by size.
+    var agg = {}; // size -> stats
+    function initStats(sz){
+      agg[sz] = {
+        N: 0,
+        detach_ok: 0,
+        drop: 0,
+        throw_post: 0,
+        stale_AA: 0,
+        changed_no_write: 0,
+        other: 0,
+        samples: [] // keep a few only
+      };
+    }
+    for (var si=0;si<sizes.length;si++){
+      initStats(String(sizes[si]));
+    }
+
+    var siIdx = 0;
+    var attemptIdx = 0;
+
+    function next(){
+      if (stopRequested) return finish();
+      if (siIdx >= sizes.length) return finish();
+
+      var sz = sizes[siIdx];
+      var key = String(sz);
+      var st = agg[key];
+
+      if (attemptIdx >= N){
+        // move to next size
+        siIdx++;
+        attemptIdx = 0;
+        return setTimeout(next, 0);
+      }
+
+      attemptIdx++;
+      st.N++;
+
+      // Progress: only every 10
+      if ((attemptIdx % 10) === 0) {
+        logLine("progress size=" + sz + " " + attemptIdx + "/" + N);
+      }
+
+      // --- Attempt body
+      var ch = new MessageChannel();
+      var ab = new ArrayBuffer(sz);
+      var u8 = new Uint8Array(ab);
+
+      // Place sentinels (multiple offsets to avoid trivialities).
+      // Keep it simple/minimal.
+      u8[0] = 0xAA;
+      if (sz > 64) u8[63] = 0xAA;
+      if (sz > 256) u8[255] = 0xAA;
+
+      var got = undefined;
+      ch.port2.onmessage = function(ev){ got = ev.data; };
+
+      var postThrew = false;
+      try {
+        ch.port1.postMessage(ab, [ab]); // transfer => sender should detach
+      } catch(e) {
+        postThrew = true;
+      }
+
+      // wait timeoutMs then evaluate
+      setTimeout(function(){
+        if (stopRequested) return finish();
+
+        var senderLen = 0;
+        try { senderLen = ab.byteLength; } catch(_) { senderLen = -1; }
+
+        if (postThrew) {
+          st.other++;
+          return afterDelay();
+        }
+
+        if (senderLen !== 0) {
+          // Not detached path (unexpected in this harness)
+          st.other++;
+          return afterDelay();
+        }
+
+        // detached sender
+        if (got === undefined || got === null) {
+          // DROP
+          st.drop++;
+
+          // Post-drop probe A/B: attempt to read from pre-existing u8 view.
+          // A: immediate read
+          var r1 = safeReadU8(u8);
+
+          // Pressure (bounded) then B: late read
+          var junk = doPressureSameSize(sz, pressure);
+          var r2 = safeReadU8(u8);
+          // release
+          junk = null;
+
+          // Classification:
+          // - "stale_AA": got 0xAA after detach (strong)
+          // - "changed_no_write": got a NUMBER not 0xAA (and not undefined) after pressure (strong)
+          // - "throw_post": throws accessing view after detach (expected-ish)
+          var stale = false;
+          var changed = false;
+          var threw = false;
+
+          if (r1 && r1.threw) threw = true;
+          if (r2 && r2.threw) threw = true;
+
+          if (!r1.threw && r1.v === 0xAA) stale = true;
+          if (!r2.threw && typeof r2.v === "number" && r2.v !== 0xAA) changed = true;
+
+          if (stale) st.stale_AA++;
+          if (changed) st.changed_no_write++;
+          if (threw) st.throw_post++;
+
+          // Keep only a few samples per size
+          if (st.samples.length < 3 && (stale || changed)) {
+            st.samples.push({
+              i: attemptIdx-1,
+              kind: "DROP+probe",
+              sz: sz,
+              senderLen: senderLen,
+              r1: r1,
+              r2: r2
+            });
+          }
+
+          return afterDelay();
+        }
+
+        // receiver got something: validate ArrayBuffer and sentinel
+        if (isArrayBuffer(got)) {
+          try {
+            var ru8 = new Uint8Array(got);
+            var ok = (ru8.length === sz && ru8[0] === 0xAA);
+            if (ok) st.detach_ok++;
+            else st.other++;
+          } catch(e2) {
+            st.other++;
+          }
+        } else {
+          st.other++;
+        }
+
+        return afterDelay();
+      }, timeoutMs);
+
+      function afterDelay(){
+        // cleanup ports best-effort
+        try { ch.port1.close(); } catch(_) {}
+        try { ch.port2.close(); } catch(_) {}
+        ch = null;
+        // slight delay between attempts
+        if (delayMs) setTimeout(next, delayMs);
+        else setTimeout(next, 0);
+      }
+    }
+
+    function finish(){
+      if (!running) return;
+      running = false;
+
+      // Print compact summary per size (one line)
+      logLine("------------------------------------------------------------");
+      logLine("RESULT SUMMARY (per size):");
+      for (var i=0;i<sizes.length;i++){
+        var sz = sizes[i];
+        var st = agg[String(sz)];
+        logLine("sz=" + sz +
+          " N=" + st.N +
+          " detach_ok=" + st.detach_ok +
+          " drop=" + st.drop +
+          " staleAA=" + st.stale_AA +
+          " changedNoWrite=" + st.changed_no_write +
+          " postThrow=" + st.throw_post +
+          " other=" + st.other
+        );
+      }
+
+      // Print only “hot” samples
+      logLine("------------------------------------------------------------");
+      logLine("HOT SAMPLES (max 3 per size):");
+      for (var j=0;j<sizes.length;j++){
+        var szz = sizes[j];
+        var sst = agg[String(szz)];
+        if (sst.samples.length) {
+          logLine("sz=" + szz + " samples=" + toJSON(sst.samples));
+        }
+      }
+      logLine("DONE.");
+    }
+
+    next();
+  }
+
+  document.getElementById("run").onclick = runAuto;
+  document.getElementById("stop").onclick = function(){
+    stopRequested = true;
+    logLine("STOP requested.");
+  };
+  document.getElementById("reset").onclick = function(){
+    stopRequested = true;
+    running = false;
+    resetLog();
+  };
+
+  resetLog();
 })();
 </script>
 </body>
 </html>
-
