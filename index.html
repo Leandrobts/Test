@@ -2,338 +2,283 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>PS4 T8 Scan — DROP + Stale/Changed After Detach (Minimal Log)</title>
+  <title>PS4 T8 Minimal — DROP (Fast vs Confirmed) + Queue Integrity</title>
 </head>
 <body>
-  <h2>PS4 T8 Scan — MessageChannel Transfer DROP + Stale/Changed After Detach</h2>
+  <h2>PS4 T8 Minimal — DROP Confirm + Queue Integrity (Minimal Log)</h2>
 
   <button id="run">RUN AUTO</button>
   <button id="stop">STOP</button>
   <button id="reset">Reset log</button>
 
-  <p>
-    Attempts per size (N):
-    <input id="n" type="number" value="30" min="1" step="1">
-    &nbsp; Timeout (ms):
-    <input id="timeout" type="number" value="200" min="50" step="50">
-    &nbsp; Delay (ms):
-    <input id="delay" type="number" value="10" min="0" step="5">
-    &nbsp; Pressure (0..10):
-    <input id="pressure" type="number" value="5" min="0" max="10" step="1">
-  </p>
-
-  <p>
-    Sizes (bytes) CSV (vazio = padrão buckets):
-    <input id="sizes" type="text" size="60" placeholder="4096,8192,16384,32768,65536,131072,262144,524288,1048576">
-  </p>
+  <div>
+    Attempts (N): <input id="N" type="number" value="30" min="1" step="1">
+    FastTimeout (ms): <input id="fast" type="number" value="1" min="0" step="1">
+    LateCheck (ms): <input id="late" type="number" value="800" min="0" step="50">
+    Delay between attempts (ms): <input id="delay" type="number" value="10" min="0" step="5">
+    Pressure (1..5): <input id="p" type="number" value="3" min="1" max="5" step="1">
+  </div>
 
   <pre id="log"></pre>
 
 <script>
-(function(){
+(() => {
   "use strict";
 
-  var $log = document.getElementById("log");
+  const $log   = document.getElementById("log");
+  const $N     = document.getElementById("N");
+  const $fast  = document.getElementById("fast");
+  const $late  = document.getElementById("late");
+  const $delay = document.getElementById("delay");
+  const $p     = document.getElementById("p");
+
+  let STOP = false;
+
   function ts(){ return Date.now(); }
-  function logLine(s){ $log.textContent += "[" + ts() + "] " + s + "\n"; }
-  function resetLog(){ $log.textContent=""; logLine("Reset."); }
+  function logLine(s){ $log.textContent += `[${ts()}] ${s}\n`; }
+  function reset(){ $log.textContent = ""; logLine("Reset."); }
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+  function j(x){ try { return JSON.stringify(x); } catch(e){ return String(x); } }
 
-  function toJSON(x){
-    try { return JSON.stringify(x); } catch(e){ return String(x); }
-  }
-
-  function parseSizesCSV(s){
-    s = (s || "").trim();
-    if (!s) return null;
-    var parts = s.split(",");
-    var out = [];
-    for (var i=0;i<parts.length;i++){
-      var v = parseInt(parts[i].trim(),10);
-      if (isFinite(v) && v > 0) out.push(v);
+  // Lightweight pressure (avoid DoS)
+  function heapPressure(level){
+    const L = Math.max(1, Math.min(5, level|0));
+    const chunks = [12, 20, 28, 36, 44][L-1];
+    const size   = [0x4000, 0x6000, 0x8000, 0xA000, 0xC000][L-1];
+    const bufs = [];
+    for (let i = 0; i < chunks; i++){
+      const ab = new ArrayBuffer(size);
+      const u8 = new Uint8Array(ab);
+      u8[0] = (i & 0xFF);
+      u8[u8.length - 1] = ((i * 17) & 0xFF);
+      bufs.push(u8);
     }
-    return out.length ? out : null;
+    return bufs;
   }
 
-  function defaultSizes(){
-    return [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
+  function waitMessageOnce(port, ms){
+    // Resolves with: { ok:true, data } if message arrives before ms
+    // Resolves with: { ok:false, timeout:true } if not
+    return new Promise((resolve) => {
+      let done = false;
+      let t = null;
+
+      function finish(obj){
+        if (done) return;
+        done = true;
+        try { port.onmessage = null; } catch(_){}
+        if (t !== null) clearTimeout(t);
+        resolve(obj);
+      }
+
+      port.onmessage = (ev) => finish({ ok:true, data: ev.data });
+
+      if (ms >= 0) {
+        t = setTimeout(() => finish({ ok:false, timeout:true }), ms);
+      }
+    });
   }
 
-  function isArrayBuffer(x){
-    if (!x) return false;
-    var tag = Object.prototype.toString.call(x);
-    if (tag === "[object ArrayBuffer]") return true;
-    // fallback-ish
-    return (typeof x.byteLength === "number" && typeof x.slice === "function");
-  }
+  async function queueIntegrityTest(K, waitMs){
+    // fresh channel only (clean invariant test)
+    const ch = new MessageChannel();
+    const got = [];
+    ch.port2.onmessage = (ev) => { got.push(ev.data); };
 
-  function clampInt(v, lo, hi, def){
-    v = parseInt(v,10);
-    if (!isFinite(v)) return def;
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-  }
-
-  // Pressure: bounded, same-size allocations. NOT unbounded spray.
-  function doPressureSameSize(sz, level){
-    if (!level) return;
-    // Budget: cap total at ~16MB per call (conservador).
-    var budget = 16 * 1024 * 1024;
-    var per = Math.max(sz, 1024);
-    var maxCount = Math.floor(budget / per);
-    // Level scales count, but never exceeds maxCount.
-    var count = Math.min(maxCount, Math.max(0, Math.floor((level / 10) * maxCount)));
-    var junk = [];
-    for (var i=0;i<count;i++){
-      junk.push(new ArrayBuffer(per));
+    for (let i = 1; i <= K; i++){
+      try { ch.port1.postMessage({ seq: i }); } catch(_) {}
     }
-    // keep briefly, then release
-    return junk;
-  }
 
-  // Read probe on pre-existing typed array view after detach.
-  // Expected: length becomes 0 and u8[0] is undefined (or throws).
-  function safeReadU8(u8){
-    try {
-      return { threw:false, v: u8[0], len: u8.length };
-    } catch(e){
-      return { threw:true, err: (e && e.name) ? e.name : "ERR" };
+    await sleep(waitMs);
+
+    // Check: count==K and strict order 1..K
+    let okCount = (got.length === K);
+    let okOrder = true;
+    let seen = Object.create(null);
+    let dup = 0;
+
+    for (let i = 0; i < got.length; i++){
+      const v = got[i] && got[i].seq;
+      if (typeof v !== "number") { okOrder = false; continue; }
+      if (seen[v]) dup++;
+      seen[v] = 1;
+      if (v !== (i+1)) okOrder = false;
     }
+
+    // Missing?
+    let missing = 0;
+    for (let i = 1; i <= K; i++){
+      if (!seen[i]) missing++;
+    }
+
+    // cleanup
+    try { ch.port1.close(); ch.port2.close(); } catch(_) {}
+
+    return {
+      K,
+      gotCount: got.length,
+      okCount,
+      okOrder,
+      missing,
+      dup
+    };
   }
 
-  var running = false;
-  var stopRequested = false;
+  async function runOnce(i, cfg, stats, samples){
+    // ---- T8 transfer attempt ----
+    const ch = new MessageChannel();
 
-  function runAuto(){
-    if (running) return;
-    stopRequested = false;
-    running = true;
+    // victim
+    const ab = new ArrayBuffer(4096);
+    const u8 = new Uint8Array(ab);
+    u8[0] = 0xAA;
 
-    if (typeof MessageChannel !== "function") {
-      logLine("ERRO: MessageChannel não disponível.");
-      running = false;
+    // pressure (to mimic your “good conditions” without DoS)
+    const keep = heapPressure(cfg.pressure);
+
+    let postThrew = false;
+    try { ch.port1.postMessage(ab, [ab]); }
+    catch(e){ postThrew = true; }
+
+    if (postThrew){
+      stats.post_throw++;
+      try { ch.port1.close(); ch.port2.close(); } catch(_){}
       return;
     }
 
-    var N = clampInt(document.getElementById("n").value, 1, 10000, 30);
-    var timeoutMs = clampInt(document.getElementById("timeout").value, 50, 10000, 200);
-    var delayMs = clampInt(document.getElementById("delay").value, 0, 5000, 10);
-    var pressure = clampInt(document.getElementById("pressure").value, 0, 10, 5);
-    var sizes = parseSizesCSV(document.getElementById("sizes").value) || defaultSizes();
-
-    logLine("============================================================");
-    logLine("RUN AUTO :: scan sizes (T8 base) + stale/changed probes");
-    logLine("Config :: " + toJSON({ N:N, timeoutMs:timeoutMs, delayMs:delayMs, pressure:pressure, sizes:sizes }));
-    logLine("============================================================");
-
-    // Aggregated results by size.
-    var agg = {}; // size -> stats
-    function initStats(sz){
-      agg[sz] = {
-        N: 0,
-        detach_ok: 0,
-        drop: 0,
-        throw_post: 0,
-        stale_AA: 0,
-        changed_no_write: 0,
-        other: 0,
-        samples: [] // keep a few only
-      };
-    }
-    for (var si=0;si<sizes.length;si++){
-      initStats(String(sizes[si]));
+    // senderLen classification (after transfer attempt)
+    const senderLen0 = ab.byteLength;
+    if (senderLen0 !== 0 && senderLen0 !== 4096){
+      stats.sender_impossible++;
+      if (samples.sender_impossible.length < 2) samples.sender_impossible.push({ i, senderLen: senderLen0 });
+      try { ch.port1.close(); ch.port2.close(); } catch(_){}
+      return;
     }
 
-    var siIdx = 0;
-    var attemptIdx = 0;
+    // FAST wait: did receiver get a message quickly?
+    const fastRes = await waitMessageOnce(ch.port2, cfg.fastMs);
 
-    function next(){
-      if (stopRequested) return finish();
-      if (siIdx >= sizes.length) return finish();
+    if (senderLen0 === 0) {
+      // transfer path expected: receiver should eventually get ArrayBuffer
+      if (!fastRes.ok) {
+        stats.drop_fast++;
 
-      var sz = sizes[siIdx];
-      var key = String(sz);
-      var st = agg[key];
+        // LATE confirm: wait longer to distinguish "late delivery" vs "confirmed drop"
+        const lateRes = await waitMessageOnce(ch.port2, cfg.lateMs);
 
-      if (attemptIdx >= N){
-        // move to next size
-        siIdx++;
-        attemptIdx = 0;
-        return setTimeout(next, 0);
-      }
+        if (lateRes.ok) {
+          stats.late_delivery++;
 
-      attemptIdx++;
-      st.N++;
-
-      // Progress: only every 10
-      if ((attemptIdx % 10) === 0) {
-        logLine("progress size=" + sz + " " + attemptIdx + "/" + N);
-      }
-
-      // --- Attempt body
-      var ch = new MessageChannel();
-      var ab = new ArrayBuffer(sz);
-      var u8 = new Uint8Array(ab);
-
-      // Place sentinels (multiple offsets to avoid trivialities).
-      // Keep it simple/minimal.
-      u8[0] = 0xAA;
-      if (sz > 64) u8[63] = 0xAA;
-      if (sz > 256) u8[255] = 0xAA;
-
-      var got = undefined;
-      ch.port2.onmessage = function(ev){ got = ev.data; };
-
-      var postThrew = false;
-      try {
-        ch.port1.postMessage(ab, [ab]); // transfer => sender should detach
-      } catch(e) {
-        postThrew = true;
-      }
-
-      // wait timeoutMs then evaluate
-      setTimeout(function(){
-        if (stopRequested) return finish();
-
-        var senderLen = 0;
-        try { senderLen = ab.byteLength; } catch(_) { senderLen = -1; }
-
-        if (postThrew) {
-          st.other++;
-          return afterDelay();
-        }
-
-        if (senderLen !== 0) {
-          // Not detached path (unexpected in this harness)
-          st.other++;
-          return afterDelay();
-        }
-
-        // detached sender
-        if (got === undefined || got === null) {
-          // DROP
-          st.drop++;
-
-          // Post-drop probe A/B: attempt to read from pre-existing u8 view.
-          // A: immediate read
-          var r1 = safeReadU8(u8);
-
-          // Pressure (bounded) then B: late read
-          var junk = doPressureSameSize(sz, pressure);
-          var r2 = safeReadU8(u8);
-          // release
-          junk = null;
-
-          // Classification:
-          // - "stale_AA": got 0xAA after detach (strong)
-          // - "changed_no_write": got a NUMBER not 0xAA (and not undefined) after pressure (strong)
-          // - "throw_post": throws accessing view after detach (expected-ish)
-          var stale = false;
-          var changed = false;
-          var threw = false;
-
-          if (r1 && r1.threw) threw = true;
-          if (r2 && r2.threw) threw = true;
-
-          if (!r1.threw && r1.v === 0xAA) stale = true;
-          if (!r2.threw && typeof r2.v === "number" && r2.v !== 0xAA) changed = true;
-
-          if (stale) st.stale_AA++;
-          if (changed) st.changed_no_write++;
-          if (threw) st.throw_post++;
-
-          // Keep only a few samples per size
-          if (st.samples.length < 3 && (stale || changed)) {
-            st.samples.push({
-              i: attemptIdx-1,
-              kind: "DROP+probe",
-              sz: sz,
-              senderLen: senderLen,
-              r1: r1,
-              r2: r2
-            });
-          }
-
-          return afterDelay();
-        }
-
-        // receiver got something: validate ArrayBuffer and sentinel
-        if (isArrayBuffer(got)) {
-          try {
-            var ru8 = new Uint8Array(got);
-            var ok = (ru8.length === sz && ru8[0] === 0xAA);
-            if (ok) st.detach_ok++;
-            else st.other++;
-          } catch(e2) {
-            st.other++;
+          // optional: verify type quickly (minimal)
+          const t = Object.prototype.toString.call(lateRes.data);
+          if (t !== "[object ArrayBuffer]" && samples.bad_type.length < 2) {
+            samples.bad_type.push({ i, gotType: t });
+            stats.bad_payload_type++;
           }
         } else {
-          st.other++;
+          stats.drop_confirmed++;
+          if (samples.drop_confirmed.length < 2) {
+            samples.drop_confirmed.push({ i, senderLen: senderLen0, note: "no msg fast and no msg by lateCheck" });
+          }
+
+          // ---- Only on DROP_CONFIRMED: run a clean queue integrity test on a fresh channel ----
+          const qi = await queueIntegrityTest(cfg.queueK, cfg.queueWaitMs);
+          if (!qi.okCount || !qi.okOrder || qi.missing || qi.dup) {
+            stats.queue_invariant_fail++;
+            if (samples.queue_fail.length < 2) samples.queue_fail.push({ i, qi });
+          } else {
+            stats.queue_ok++;
+          }
         }
-
-        return afterDelay();
-      }, timeoutMs);
-
-      function afterDelay(){
-        // cleanup ports best-effort
-        try { ch.port1.close(); } catch(_) {}
-        try { ch.port2.close(); } catch(_) {}
-        ch = null;
-        // slight delay between attempts
-        if (delayMs) setTimeout(next, delayMs);
-        else setTimeout(next, 0);
+      } else {
+        stats.detach_ok_fast++;
+        // minimal type check
+        const t = Object.prototype.toString.call(fastRes.data);
+        if (t !== "[object ArrayBuffer]") stats.bad_payload_type++;
       }
+    } else {
+      // clone/no-detach path (rare): not our focus
+      stats.no_detach_or_clone++;
     }
 
-    function finish(){
-      if (!running) return;
-      running = false;
+    // keep alive
+    if (keep && keep.length) keep[0][0] ^= 0;
 
-      // Print compact summary per size (one line)
-      logLine("------------------------------------------------------------");
-      logLine("RESULT SUMMARY (per size):");
-      for (var i=0;i<sizes.length;i++){
-        var sz = sizes[i];
-        var st = agg[String(sz)];
-        logLine("sz=" + sz +
-          " N=" + st.N +
-          " detach_ok=" + st.detach_ok +
-          " drop=" + st.drop +
-          " staleAA=" + st.stale_AA +
-          " changedNoWrite=" + st.changed_no_write +
-          " postThrow=" + st.throw_post +
-          " other=" + st.other
-        );
-      }
-
-      // Print only “hot” samples
-      logLine("------------------------------------------------------------");
-      logLine("HOT SAMPLES (max 3 per size):");
-      for (var j=0;j<sizes.length;j++){
-        var szz = sizes[j];
-        var sst = agg[String(szz)];
-        if (sst.samples.length) {
-          logLine("sz=" + szz + " samples=" + toJSON(sst.samples));
-        }
-      }
-      logLine("DONE.");
-    }
-
-    next();
+    // cleanup
+    try { ch.port1.close(); ch.port2.close(); } catch(_){}
   }
 
-  document.getElementById("run").onclick = runAuto;
-  document.getElementById("stop").onclick = function(){
-    stopRequested = true;
-    logLine("STOP requested.");
-  };
-  document.getElementById("reset").onclick = function(){
-    stopRequested = true;
-    running = false;
-    resetLog();
-  };
+  async function runAuto(){
+    STOP = false;
 
-  resetLog();
+    const cfg = {
+      N: Math.max(1, parseInt($N.value||"30",10)),
+      fastMs: Math.max(0, parseInt($fast.value||"1",10)),
+      lateMs: Math.max(0, parseInt($late.value||"800",10)),
+      delayMs: Math.max(0, parseInt($delay.value||"10",10)),
+      pressure: Math.max(1, Math.min(5, parseInt($p.value||"3",10))),
+
+      // Queue test parameters (kept constant, minimal)
+      queueK: 8,
+      queueWaitMs: 200
+    };
+
+    logLine(`RUN AUTO :: N=${cfg.N} fast=${cfg.fastMs}ms late=${cfg.lateMs}ms delay=${cfg.delayMs}ms pressure=${cfg.pressure}`);
+
+    const stats = {
+      detach_ok_fast: 0,
+      drop_fast: 0,
+      late_delivery: 0,
+      drop_confirmed: 0,
+
+      post_throw: 0,
+      sender_impossible: 0,
+      no_detach_or_clone: 0,
+
+      bad_payload_type: 0,
+
+      queue_ok: 0,
+      queue_invariant_fail: 0
+    };
+
+    const samples = {
+      drop_confirmed: [],
+      queue_fail: [],
+      sender_impossible: [],
+      bad_type: []
+    };
+
+    for (let i = 0; i < cfg.N; i++){
+      if (STOP) break;
+
+      await runOnce(i, cfg, stats, samples);
+
+      if ((i+1) % 10 === 0) logLine(`progress: ${i+1}/${cfg.N}`);
+      if (cfg.delayMs) await sleep(cfg.delayMs);
+    }
+
+    logLine("RESULT SUMMARY:");
+    logLine(j(stats));
+
+    const hot = [];
+    if (samples.drop_confirmed.length) hot.push({ kind:"drop_confirmed", samples: samples.drop_confirmed });
+    if (samples.queue_fail.length) hot.push({ kind:"queue_invariant_fail", samples: samples.queue_fail });
+    if (samples.sender_impossible.length) hot.push({ kind:"sender_impossible", samples: samples.sender_impossible });
+    if (samples.bad_type.length) hot.push({ kind:"bad_payload_type", samples: samples.bad_type });
+
+    if (hot.length){
+      logLine("SAMPLES (hot):");
+      logLine(j(hot));
+    }
+
+    logLine("DONE.");
+  }
+
+  document.getElementById("run").onclick = () => runAuto().catch(e => logLine("ERR: " + (e && e.name ? e.name : String(e))));
+  document.getElementById("stop").onclick = () => { STOP = true; logLine("STOP requested."); };
+  document.getElementById("reset").onclick = reset;
+
+  reset();
 })();
 </script>
 </body>
