@@ -1,332 +1,170 @@
 
 <!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8" />
-  <title>PS4 T8 Recheck — DROP vs Late Delivery + Queue Integrity (Minimal)</title>
-</head>
+<html>
+<head><meta charset="UTF-8"><title>PS4 DROP + UaD Timing + Queue Integrity</title></head>
 <body>
-  <h2>PS4 T8 Recheck — DROP vs Late Delivery + Queue Integrity (Minimal)</h2>
+<h2>PS4 MessageChannel: DROP + UaD Timing + Pós-DROP Queue Integrity</h2>
 
-  <button id="run">RUN AUTO</button>
-  <button id="stop">STOP</button>
-  <button id="reset">Reset log</button>
+<button onclick="run()">RUN AUTO</button>
+<button onclick="stop()">STOP</button>
+<button onclick="resetLog()">Reset log</button>
 
-  <div>
-    Attempts (N):
-    <input id="N" type="number" value="60" min="1" step="1">
-    AB size (bytes):
-    <input id="abSize" type="number" value="4096" min="256" step="256">
-    FastTimeout (ms):
-    <input id="fast" type="number" value="2" min="0" step="1">
-    LateCheck (ms):
-    <input id="late" type="number" value="1500" min="0" step="50">
-    Delay between attempts (ms):
-    <input id="delay" type="number" value="20" min="0" step="5">
-    Pressure (0..5):
-    <input id="p" type="number" value="3" min="0" max="5" step="1">
-    Queue K (messages):
-    <input id="K" type="number" value="3" min="1" max="8" step="1">
-  </div>
+<p>
+Attempts: <input id="n" type="number" value="30">
+Delay(ms): <input id="delay" type="number" value="30">
+Timeout(ms): <input id="timeout" type="number" value="200">
+LateCheck(ms): <input id="late" type="number" value="800">
+</p>
 
-  <pre id="log"></pre>
+<pre id="log"></pre>
 
 <script>
-(() => {
-  "use strict";
+let RUN = false;
 
-  const $log  = document.getElementById("log");
-  const $N    = document.getElementById("N");
-  const $abSz = document.getElementById("abSize");
-  const $fast = document.getElementById("fast");
-  const $late = document.getElementById("late");
-  const $delay= document.getElementById("delay");
-  const $p    = document.getElementById("p");
-  const $K    = document.getElementById("K");
+function log(s){ document.getElementById("log").textContent += `[${Date.now()}] ${s}\n`; }
+function resetLog(){ document.getElementById("log").textContent=""; log("Reset."); }
+function stop(){ RUN = false; }
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+function microtask(){ return Promise.resolve(); }
 
-  let STOP = false;
+async function run(){
+  RUN = true;
+  const N = +n.value|0;
+  const delayMs = +delay.value|0;
+  const timeoutMs = +timeout.value|0;
+  const lateMs = +late.value|0;
 
-  function ts(){ return Date.now(); }
-  function logLine(s){ $log.textContent += "[" + ts() + "] " + s + "\n"; }
-  function resetLog(){ $log.textContent = ""; logLine("Reset."); }
-  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-  function j(x){ try { return JSON.stringify(x); } catch(e){ return String(x); } }
+  log("============================================================");
+  log(`RUN AUTO :: N=${N} timeout=${timeoutMs}ms delay=${delayMs}ms lateCheck=${lateMs}ms`);
+  log("============================================================");
 
-  async function withTimeout(p, ms){
-    if (ms <= 0) return await p;
-    let t;
-    const to = new Promise((_, rej) => { t = setTimeout(() => rej(new Error("TIMEOUT")), ms); });
-    try { return await Promise.race([p, to]); }
-    finally { clearTimeout(t); }
-  }
+  const stats = {
+    detach_ok:0,
+    drop_fast:0,
+    drop_confirmed:0,
+    late_delivery:0,
 
-  // Controlado (evita DoS): pressão leve/moderada, apenas para "chacoalhar" scheduling/GC.
-  function pressure(level){
-    level = Math.max(0, Math.min(5, level|0));
-    if (!level) return null;
+    // UaD-timing probes (mais sensíveis)
+    uad_index_no_throw:0,   // se NÃO lançar ao ler u8[0] após detach → suspeito
+    uad_dataview_no_throw:0,
 
-    const bufs = [];
-    const chunks = [0, 12, 24, 36, 48, 60][level];     // máx 60
-    const size   = [0, 0x4000, 0x5000, 0x6000, 0x7000, 0x8000][level]; // máx 32KB
+    // Pós-DROP Queue Integrity
+    queue_suspect_after_drop:0,
+    queue_ok_after_drop:0
+  };
 
-    for (let i = 0; i < chunks; i++) {
-      const ab = new ArrayBuffer(size);
-      const u8 = new Uint8Array(ab);
-      // toque mínimo para materializar
-      u8[0] = (i & 0xFF);
-      u8[u8.length - 1] = ((i * 17) & 0xFF);
-      bufs.push(u8);
-    }
-    return bufs;
-  }
+  let samples = [];
 
-  // Núcleo do recheck:
-  // - drop_fast: senderLen==0 e não chegou payload dentro do FastTimeout
-  // - late_delivery: chegou payload depois do fast (mas até LateCheck)
-  // - drop_confirmed: senderLen==0 e payload não chegou nem até LateCheck
-  // - queue_invariant_fail: após drop_fast, envia K mensagens com attemptId e valida (count e order)
-  async function runAttempt(i, cfg, stats, samples){
-    const attemptId = ((ts() & 0x7fffffff) + "_" + i);
-
+  for (let i=0; i<N && RUN; i++){
     const ch = new MessageChannel();
-    let gotPayload = undefined;
-    let gotAt = -1;
 
-    // fila pós-drop (somente mensagens com attemptId atual)
-    let q = [];
-    ch.port2.onmessage = (ev) => {
-      const d = ev.data;
-      // Primeiro payload esperado: ArrayBuffer transferido
-      if (gotPayload === undefined) {
-        gotPayload = d;
-        gotAt = ts();
-        return;
-      }
-      // Depois: mensagens de fila
-      if (d && d.__attemptId === attemptId) q.push(d);
-    };
-
-    // AB “vítima”
-    const abSize = cfg.abSize;
-    const ab = new ArrayBuffer(abSize);
+    // payload
+    const ab = new ArrayBuffer(4096);
     const u8 = new Uint8Array(ab);
     u8[0] = 0xAA;
 
-    let postThrew = false;
-    try {
-      ch.port1.postMessage(ab, [ab]);
-    } catch (e) {
-      postThrew = true;
-    }
+    let got = undefined;
+    let gotAt = -1;
 
-    if (postThrew) {
-      stats.post_throw++;
-      // cleanup
-      try { ch.port1.close(); ch.port2.close(); } catch(_){}
-      return;
-    }
+    ch.port2.onmessage = (ev) => { got = ev.data; gotAt = Date.now(); };
 
-    // Observação do senderLen imediatamente após postMessage:
-    // se transfer ocorreu, senderLen tende a 0 "logo"; mas pode ser assíncrono.
-    // Então usamos duas janelas:
-    //   - FastTimeout: diagnostica "drop_fast"
-    //   - LateCheck: confirma entrega tardia vs drop confirmado
-    const t0 = ts();
+    // transfer
+    let threw = false;
+    try { ch.port1.postMessage(ab, [ab]); }
+    catch(e){ threw = true; }
 
-    // Fast wait (mínimo)
-    if (cfg.fastMs > 0) await sleep(cfg.fastMs);
+    if (threw){ await sleep(delayMs); continue; }
 
-    const senderLenFast = ab.byteLength; // 0 ou abSize (ou algo impossível)
-    if (senderLenFast !== 0 && senderLenFast !== abSize) {
-      stats.sender_impossible++;
-      if (samples.sender_impossible.length < 3) {
-        samples.sender_impossible.push({ i, senderLenFast, abSize });
-      }
-      try { ch.port1.close(); ch.port2.close(); } catch(_){}
-      return;
-    }
+    // Observação rápida (fast path)
+    await microtask();       // microtask timing
+    const senderLen_mt = ab.byteLength;
 
-    // Se já chegou algo, é "detach_ok_fast" (entrega rápida)
-    if (gotPayload !== undefined) {
-      stats.detach_ok_fast++;
-      // opcional: sanity do tipo
-      const okType = (Object.prototype.toString.call(gotPayload) === "[object ArrayBuffer]");
-      if (!okType) stats.bad_payload_type++;
-      // cleanup
-      try { ch.port1.close(); ch.port2.close(); } catch(_){}
-      return;
-    }
+    await sleep(0);          // task timing
+    const senderLen_t0 = ab.byteLength;
 
-    // Se ainda não chegou e senderLenFast==0 => drop_fast candidato
-    let sawDropFast = false;
-    if (senderLenFast === 0) {
-      stats.drop_fast++;
-      sawDropFast = true;
-    } else {
-      // senderLenFast==abSize e sem payload: isso é "no_detach_or_clone_fast"
-      stats.no_detach_or_clone_fast++;
-    }
+    await sleep(delayMs);    // estabiliza
+    const senderLen = ab.byteLength;
 
-    // Pós-drop_fast: probe de fila (K mensagens) para ver invariantes (ordem/contagem)
-    // Importante: só faz se drop_fast (para manter base do seu sinal).
-    if (sawDropFast && cfg.K > 0) {
-      // Pressão leve antes de postar fila (para simular condições onde drop_fast aparece)
-      const keep = pressure(cfg.pressure);
-      await Promise.resolve();
+    const detached = (senderLen === 0);
+    if (detached) stats.detach_ok++;
 
-      // Envia K msgs com attemptId e seq
+    // classifica DROP rápido (fast)
+    const isFastDrop = detached && (got === undefined);
+    if (isFastDrop) stats.drop_fast++;
+
+    // UaD timing probes: após DETACH, ler índice e DataView DEVEM falhar (normalmente TypeError).
+    // Se NÃO falhar, é uma janela “concreta” (não prova exploração, mas prova uso pós-detach).
+    if (detached){
+      // Probe 1: u8[0] deve lançar em buffer detached (se não lançar -> suspeito)
       try {
-        for (let k = 1; k <= cfg.K; k++) {
-          ch.port1.postMessage({ __attemptId: attemptId, seq: k });
-        }
-      } catch (e) {
-        stats.queue_post_throw++;
-      }
+        void u8[0];
+        // se chegou aqui, não lançou
+        stats.uad_index_no_throw++;
+        if (samples.length < 3) samples.push({i, kind:"uad_index_no_throw", senderLen_mt, senderLen_t0, senderLen});
+      } catch(e){}
 
-      // mantém keep vivo
-      if (keep && keep.length) keep[0][0] ^= 0;
+      // Probe 2: DataView em detached deve lançar ao construir ou ao ler
+      try {
+        const dv = new DataView(ab);
+        void dv.getUint8(0);
+        stats.uad_dataview_no_throw++;
+        if (samples.length < 3) samples.push({i, kind:"uad_dataview_no_throw", senderLen_mt, senderLen_t0, senderLen});
+      } catch(e){}
     }
 
-    // Late window: espera até lateMs (contado desde t0)
-    const remaining = Math.max(0, cfg.lateMs - (ts() - t0));
-    if (remaining > 0) await sleep(remaining);
-
-    const senderLenLate = ab.byteLength;
-
-    // Classificação final do payload
-    if (gotPayload === undefined) {
-      // Não chegou nada
-      if (senderLenLate === 0) {
+    // Confirma se é DROP real ou “late delivery”
+    if (isFastDrop){
+      await sleep(lateMs);
+      if (got !== undefined){
+        stats.late_delivery++;
+        if (samples.length < 3) samples.push({i, kind:"late_delivery", gotType: typeof got, gotAt});
+      } else {
         stats.drop_confirmed++;
-        if (samples.drop_confirmed.length < 3) {
-          samples.drop_confirmed.push({ i, senderLenLate, gotType: "undefined" });
-        }
-      } else {
-        // sem payload e senderLen != 0 => clone ou falha de entrega (ou scheduling extremo)
-        stats.no_payload_late++;
-        if (samples.no_payload_late.length < 3) {
-          samples.no_payload_late.push({ i, senderLenLate, abSize });
-        }
-      }
-    } else {
-      // Chegou payload no late => entrega tardia
-      stats.late_delivery++;
-      const dt = gotAt - t0;
-      if (samples.late_delivery.length < 3) {
-        samples.late_delivery.push({ i, dtMs: dt, senderLenLate });
-      }
+        // Pós-DROP Queue Integrity: manda sequência curta e valida ordem.
+        // Se a fila estiver corrompida, você vê missing/outOfOrder.
+        const tokens = ["A","B","C"];
+        const recv = [];
+        const chq = new MessageChannel();
+        chq.port2.onmessage = (ev)=> recv.push(ev.data);
 
-      const okType = (Object.prototype.toString.call(gotPayload) === "[object ArrayBuffer]");
-      if (!okType) stats.bad_payload_type++;
-    }
+        // “toca” a fila: 3 mensagens pequenas
+        chq.port1.postMessage(tokens[0]);
+        chq.port1.postMessage(tokens[1]);
+        chq.port1.postMessage(tokens[2]);
 
-    // Validação de fila (somente se drop_fast)
-    if (sawDropFast && cfg.K > 0) {
-      // Filtra e valida
-      const gotCount = q.length;
-      let okCount = (gotCount === cfg.K);
-      let okOrder = true;
-      for (let idx = 0; idx < Math.min(gotCount, cfg.K); idx++) {
-        if (!q[idx] || q[idx].seq !== (idx + 1)) { okOrder = false; break; }
-      }
+        await sleep(timeoutMs);
 
-      if (okCount && okOrder) {
-        stats.queue_ok++;
-      } else {
-        stats.queue_invariant_fail++;
-        if (samples.queue_fail.length < 3) {
-          samples.queue_fail.push({
-            i,
-            expectK: cfg.K,
-            gotCount,
-            firstSeq: q[0] ? q[0].seq : null,
-            outOfOrder: !okOrder
-          });
+        const okCount = (recv.length === 3);
+        const okOrder = okCount && (recv[0]==="A" && recv[1]==="B" && recv[2]==="C");
+
+        if (okOrder){
+          stats.queue_ok_after_drop++;
+        } else {
+          stats.queue_suspect_after_drop++;
+          if (samples.length < 3) samples.push({i, kind:"queue_suspect_after_drop", recv});
         }
+
+        try { chq.port1.close(); chq.port2.close(); } catch(e){}
       }
     }
 
-    // cleanup forte (evita “lixo” entre attempts)
-    try { ch.port1.close(); ch.port2.close(); } catch(_){}
+    // progresso mínimo
+    if ((i+1) % 10 === 0) log(`progress: ${i+1}/${N}`);
+    await sleep(delayMs);
+
+    try { ch.port1.close(); ch.port2.close(); } catch(e){}
   }
 
-  async function runAuto(){
-    STOP = false;
-
-    const cfg = {
-      N: Math.max(1, ($N.value|0) || 60),
-      abSize: Math.max(256, ($abSz.value|0) || 4096),
-      fastMs: Math.max(0, ($fast.value|0) || 2),
-      lateMs: Math.max(0, ($late.value|0) || 1500),
-      delayMs: Math.max(0, ($delay.value|0) || 20),
-      pressure: Math.max(0, Math.min(5, ($p.value|0) || 0)),
-      K: Math.max(0, Math.min(8, ($K.value|0) || 3))
-    };
-
-    logLine("RUN AUTO :: " + j({
-      N: cfg.N, abSize: cfg.abSize, fastMs: cfg.fastMs, lateMs: cfg.lateMs,
-      delayMs: cfg.delayMs, pressure: cfg.pressure, K: cfg.K
-    }));
-
-    const stats = {
-      detach_ok_fast: 0,        // payload chegou rápido
-      late_delivery: 0,         // payload chegou depois do fast
-      drop_fast: 0,             // senderLen=0 e sem payload no fast
-      drop_confirmed: 0,        // senderLen=0 e sem payload até late
-      no_detach_or_clone_fast: 0,
-      no_payload_late: 0,
-
-      post_throw: 0,
-      queue_post_throw: 0,
-
-      sender_impossible: 0,
-      bad_payload_type: 0,
-
-      queue_ok: 0,
-      queue_invariant_fail: 0
-    };
-
-    const samples = {
-      late_delivery: [],
-      drop_confirmed: [],
-      queue_fail: [],
-      sender_impossible: [],
-      no_payload_late: []
-    };
-
-    for (let i = 0; i < cfg.N; i++) {
-      if (STOP) break;
-      await runAttempt(i, cfg, stats, samples);
-
-      if ((i + 1) % 10 === 0) logLine("progress: " + (i + 1) + "/" + cfg.N);
-      if (cfg.delayMs) await sleep(cfg.delayMs);
-    }
-
-    logLine("RESULT SUMMARY:");
-    logLine(j(stats));
-
-    // Só imprime amostras “quentes” (máx 3 cada)
-    const hot = [];
-    if (samples.drop_confirmed.length) hot.push({ kind: "drop_confirmed", samples: samples.drop_confirmed });
-    if (samples.queue_fail.length)     hot.push({ kind: "queue_invariant_fail", samples: samples.queue_fail });
-    if (samples.late_delivery.length)  hot.push({ kind: "late_delivery", samples: samples.late_delivery });
-    if (samples.sender_impossible.length) hot.push({ kind: "sender_impossible", samples: samples.sender_impossible });
-    if (samples.no_payload_late.length) hot.push({ kind: "no_payload_late", samples: samples.no_payload_late });
-
-    if (hot.length) {
-      logLine("SAMPLES (hot):");
-      logLine(j(hot));
-    }
-
-    logLine("DONE.");
+  log("------------------------------------------------------------");
+  log("RESULT SUMMARY:");
+  log(JSON.stringify(stats));
+  if (samples.length){
+    log("SAMPLES:");
+    log(JSON.stringify(samples));
   }
-
-  document.getElementById("run").onclick = () => runAuto().catch(e => logLine("ERR: " + (e && e.name ? e.name : String(e))));
-  document.getElementById("stop").onclick = () => { STOP = true; logLine("STOP requested."); };
-  document.getElementById("reset").onclick = resetLog;
-
-  resetLog();
-})();
+  log("DONE.");
+}
+resetLog();
 </script>
 </body>
 </html>
