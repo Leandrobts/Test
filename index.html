@@ -1,248 +1,241 @@
-
 <!DOCTYPE html>
-<meta charset="utf-8">
-<title>PS4 T8 Recheck — DROP Confirm + Post-Detach DataView Oracle (Minimal)</title>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>PS4 T8 DROP Finder (Auto-Scan Minimal)</title>
+</head>
+<body>
+  <h3>PS4 T8 DROP Finder (Auto-Scan Minimal)</h3>
 
-<h3>PS4 T8 Recheck — DROP Confirm + Post-Detach DataView Oracle (Minimal)</h3>
+  <button id="run">RUN AUTO-SCAN</button>
+  <button id="stop">STOP</button>
+  <button id="reset">Reset</button>
 
-<button id="run">RUN AUTO</button>
-<button id="stop">STOP</button>
-<button id="reset">Reset log</button>
+  <div>
+    N por config: <input id="N" type="number" value="40" min="5" step="5">
+    Delay entre tentativas (ms): <input id="delay" type="number" value="0" min="0" step="1">
+  </div>
 
-<div>
-  N: <input id="N" type="number" value="60" min="1" step="1">
-  fastTimeout(ms): <input id="fast" type="number" value="2" min="0" step="1">
-  lateWait(ms): <input id="late" type="number" value="1500" min="0" step="50">
-  delay(ms): <input id="delay" type="number" value="30" min="0" step="5">
-  pressure(0..3): <input id="p" type="number" value="1" min="0" max="3" step="1">
-</div>
+  <div>
+    Baseline FastWait (ms): <input id="fast0" type="number" value="0" min="0" step="1">
+    Baseline LateWait (ms): <input id="late0" type="number" value="800" min="0" step="50">
+    Baseline Pressure (0..3): <input id="p0" type="number" value="1" min="0" max="3" step="1">
+  </div>
 
-<pre id="log"></pre>
+  <pre id="log"></pre>
 
 <script>
 (() => {
   "use strict";
+
   const $log = document.getElementById("log");
   const $N = document.getElementById("N");
-  const $fast = document.getElementById("fast");
-  const $late = document.getElementById("late");
   const $delay = document.getElementById("delay");
-  const $p = document.getElementById("p");
+  const $fast0 = document.getElementById("fast0");
+  const $late0 = document.getElementById("late0");
+  const $p0 = document.getElementById("p0");
 
   let STOP = false;
 
-  const ts = () => Date.now();
-  const logLine = (s) => ($log.textContent += `[${ts()}] ${s}\n`);
-  const reset = () => { $log.textContent = ""; logLine("Reset."); };
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const j = (x) => { try { return JSON.stringify(x); } catch(e){ return String(x); } };
+  function ts(){ return Date.now(); }
+  function logLine(s){ $log.textContent += `[${ts()}] ${s}\n`; }
+  function reset(){ $log.textContent = ""; logLine("Reset."); }
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
+  // pressão controlada (0..3), sem DoS
   function pressure(level){
-    // 0..3: bem controlado (não DoS)
     if (!level) return null;
-    const chunks = [0, 24, 48, 72][level];
-    const size   = [0, 0x6000, 0x8000, 0xA000][level];
-    const keep = [];
-    for (let i=0;i<chunks;i++){
+    const bufs = [];
+    const chunks = [0, 24, 48, 72][Math.max(0, Math.min(3, level))];
+    const size   = [0, 0x4000, 0x6000, 0x8000][Math.max(0, Math.min(3, level))];
+    for (let i = 0; i < chunks; i++){
       const ab = new ArrayBuffer(size);
       const u8 = new Uint8Array(ab);
       u8[0] = i & 0xFF;
-      u8[u8.length-1] = (i*13) & 0xFF;
-      keep.push(u8);
+      u8[u8.length - 1] = (i * 13) & 0xFF;
+      bufs.push(u8);
     }
-    return keep;
+    return bufs;
   }
 
-  async function runOnce(i, cfg, stats, samples){
-    const ch = new MessageChannel();
+  function j(x){
+    try { return JSON.stringify(x); } catch(e){ return String(x); }
+  }
 
-    // Victim
+  async function wait0(ms){
+    // mantém o “jeito PS4” de aguardar: microtask + setTimeout
+    // ms=0/1 costuma ser onde janela aparece
+    if (ms <= 0) {
+      await Promise.resolve();
+      await new Promise(r => setTimeout(r, 0));
+      return;
+    }
+    await new Promise(r => setTimeout(r, ms));
+  }
+
+  async function attemptOnce(cfg, stats){
+    if (typeof MessageChannel !== "function") {
+      stats.noMC++;
+      return;
+    }
+
+    const ch = new MessageChannel();
+    let got = undefined;
+
+    ch.port2.onmessage = (ev) => { got = ev.data; };
+
     const ab = new ArrayBuffer(4096);
     const u8 = new Uint8Array(ab);
-    const dv = new DataView(ab);
     u8[0] = 0xAA;
 
-    let got = undefined;
-    let gotAt = 0;
+    // pressão antes do transfer ajuda a “perturbar” fila/memória sem DOS
+    pressure(cfg.pressure);
 
-    ch.port2.onmessage = (ev) => { got = ev.data; gotAt = ts(); };
+    let threw = false;
+    try { ch.port1.postMessage(ab, [ab]); }
+    catch(e){ threw = true; }
 
-    // Transfer
-    try {
-      ch.port1.postMessage(ab, [ab]);
-    } catch(e){
-      stats.post_throw++;
-      if (samples.post_throw.length < 3) samples.post_throw.push({i, err: (e&&e.name)||"ERR"});
-      return;
-    }
+    if (threw) { stats.transfer_throw++; return; }
 
-    // FAST WAIT (para reproduzir “drop_fast”)
-    if (cfg.fastTimeoutMs > 0) await sleep(cfg.fastTimeoutMs);
-
-    const senderLenFast = ab.byteLength;
-    const gotFast = !(got === undefined || got === null);
-
-    if (senderLenFast === 0 && !gotFast) {
-      stats.drop_fast++;
-    }
-
-    // LATE WAIT (confirmar se era só entrega atrasada)
-    if (cfg.lateWaitMs > 0) await sleep(cfg.lateWaitMs);
+    // FAST WAIT (onde nasce o drop_fast)
+    await wait0(cfg.fastWait);
 
     const senderLen = ab.byteLength;
-    const gotLate = !(got === undefined || got === null);
-
-    // Classificações base
-    if (senderLen === 0 && gotLate) {
-      stats.detach_ok++;
-    } else if (senderLen === 0 && !gotLate) {
-      // DROP CONFIRMADO: detached + nada chegou mesmo depois do late wait
-      stats.drop_confirmed++;
-      if (samples.drop_confirmed.length < 3) {
-        samples.drop_confirmed.push({i, senderLen, gotType: (got === null ? "null" : "undefined")});
-      }
-
-      // sanity: canal ainda funciona? (fila pós-drop)
-      const q = [];
-      ch.port2.onmessage = (ev) => q.push(ev.data);
-      try { ch.port1.postMessage({k:1}); ch.port1.postMessage({k:2}); ch.port1.postMessage({k:3}); } catch(e){}
-
-      await sleep(50);
-
-      const ok = (q.length === 3 && q[0]?.k===1 && q[1]?.k===2 && q[2]?.k===3);
-      if (ok) stats.queue_ok++;
-      else {
-        stats.queue_bad++;
-        if (samples.queue_bad.length < 3) samples.queue_bad.push({i, gotCount:q.length, first:q[0]?.k});
-      }
-      return;
-    } else if (senderLen === 4096 && gotLate) {
-      stats.no_detach_or_clone++;
-      return;
-    } else if (senderLen !== 0 && senderLen !== 4096) {
+    if (senderLen !== 0 && senderLen !== 4096) {
       stats.sender_impossible++;
-      if (samples.sender_impossible.length < 3) samples.sender_impossible.push({i, senderLen});
-      return;
-    } else {
-      stats.other++;
       return;
     }
 
-    // A partir daqui: detach_ok
-    // Oracle forte: DataView pós-detach deve lançar (em engines corretas).
-    let dvOK = false, dvErr = null, dvVal = null;
-    try { dvVal = dv.getUint8(0); dvOK = true; }
-    catch(e){ dvErr = (e && e.name) ? e.name : "ERR"; }
+    if (senderLen !== 0) {
+      // clone path (raro)
+      stats.clone++;
+      return;
+    }
 
-    // TypedArray index normalmente vira undefined (sem throw). Isso não é “bug” sozinho.
-    let taVal = null, taThrew = false;
-    try { taVal = u8[0]; } catch(e){ taThrew = true; }
+    // detach path
+    stats.detach_ok++;
 
-    // Invariantes do view
-    const inv = {
-      abLen: ab.byteLength,
-      u8Len: u8.length,
-      u8ByteLen: u8.byteLength
-    };
+    if (got === undefined || got === null) {
+      stats.drop_fast++;
 
-    // Se DataView leu após detach, isso é “hot” (bem melhor que u8[0]).
-    if (dvOK) {
-      stats.dv_read_after_detach++;
-      if (samples.dv_read_after_detach.length < 3) {
-        samples.dv_read_after_detach.push({i, dvVal, taVal, taThrew, inv});
+      // LATE CONFIRM (se continuar undefined, vira "drop_confirmed")
+      await wait0(cfg.lateWait);
+
+      if (got === undefined || got === null) {
+        stats.drop_confirmed++;
+
+        // “fila pós-drop”: manda 3 mensagens e checa consistência
+        let q = [];
+        ch.port2.onmessage = (ev) => { q.push(ev.data); };
+        try {
+          ch.port1.postMessage({k:1});
+          ch.port1.postMessage({k:2});
+          ch.port1.postMessage({k:3});
+        } catch(_) {}
+
+        await wait0(200); // curto
+
+        const ok = (q.length === 3 && q[0] && q[1] && q[2] && q[0].k===1 && q[1].k===2 && q[2].k===3);
+        if (ok) stats.queue_ok++;
+        else stats.queue_bad++;
       }
     } else {
-      stats.dv_throw_after_detach++;
+      stats.recv_ok++;
     }
-
-    // Pressão leve e recheck (só para “changed without write”, se existir)
-    const keep = pressure(cfg.pressure);
-    await Promise.resolve();
-
-    if (dvOK) {
-      // re-leitura: mudou sem write?
-      let dvOK2=false, dvVal2=null;
-      try { dvVal2 = dv.getUint8(0); dvOK2 = true; } catch(e){}
-      if (dvOK2 && dvVal2 !== dvVal) {
-        stats.dv_changed_no_write++;
-        if (samples.dv_changed_no_write.length < 3) {
-          samples.dv_changed_no_write.push({i, before:dvVal, after:dvVal2, inv});
-        }
-      }
-    }
-
-    if (keep && keep.length) keep[0][0] ^= 0;
   }
 
-  async function runAuto(){
+  function score(s){
+    // prioridade: drop_confirmed > queue_bad > drop_fast
+    return (s.drop_confirmed * 1000) + (s.queue_bad * 50) + (s.drop_fast * 5);
+  }
+
+  async function runConfig(cfg, N, delayMs){
+    const stats = {
+      detach_ok:0, recv_ok:0, clone:0,
+      drop_fast:0, drop_confirmed:0,
+      queue_ok:0, queue_bad:0,
+      sender_impossible:0, transfer_throw:0,
+      noMC:0
+    };
+
+    for (let i = 0; i < N; i++){
+      if (STOP) break;
+      await attemptOnce(cfg, stats);
+      if (delayMs) await sleep(delayMs);
+    }
+    return stats;
+  }
+
+  async function runAutoScan(){
     STOP = false;
 
-    const cfg = {
-      N: Math.max(1, parseInt($N.value||"60",10)),
-      fastTimeoutMs: Math.max(0, parseInt($fast.value||"2",10)),
-      lateWaitMs: Math.max(0, parseInt($late.value||"1500",10)),
-      delayMs: Math.max(0, parseInt($delay.value||"30",10)),
-      pressure: Math.max(0, Math.min(3, parseInt($p.value||"1",10)))
+    const N = Math.max(5, parseInt($N.value || "40", 10));
+    const delayMs = Math.max(0, parseInt($delay.value || "0", 10));
+
+    const base = {
+      fastWait: Math.max(0, parseInt($fast0.value || "0", 10)),
+      lateWait: Math.max(0, parseInt($late0.value || "800", 10)),
+      pressure: Math.max(0, Math.min(3, parseInt($p0.value || "1", 10)))
     };
 
-    logLine(`RUN AUTO :: N=${cfg.N} fast=${cfg.fastTimeoutMs}ms late=${cfg.lateWaitMs}ms delay=${cfg.delayMs}ms pressure=${cfg.pressure}`);
+    logLine(`AUTO-SCAN start :: N=${N} delay=${delayMs} base=${j(base)}`);
 
-    const stats = {
-      detach_ok: 0,
-      drop_fast: 0,
-      drop_confirmed: 0,
-      post_throw: 0,
-      sender_impossible: 0,
-      no_detach_or_clone: 0,
-      other: 0,
+    // Varre "em volta" do baseline (não aumenta tudo!)
+    const fastList = [base.fastWait, 0, 1, 2, 5].filter((v,i,a)=>a.indexOf(v)===i);
+    const lateList = [base.lateWait, 200, 400, 800, 1200, 1500].filter((v,i,a)=>a.indexOf(v)===i);
+    const pList    = [base.pressure, 0, 1, 2, 3].filter((v,i,a)=>a.indexOf(v)===i);
 
-      queue_ok: 0,
-      queue_bad: 0,
+    let best = null;
 
-      dv_throw_after_detach: 0,
-      dv_read_after_detach: 0,
-      dv_changed_no_write: 0
-    };
+    let total = 0;
+    for (const fastWait of fastList){
+      for (const lateWait of lateList){
+        for (const pressureLevel of pList){
+          if (STOP) break;
 
-    const samples = {
-      drop_confirmed: [],
-      queue_bad: [],
-      sender_impossible: [],
-      post_throw: [],
-      dv_read_after_detach: [],
-      dv_changed_no_write: []
-    };
+          const cfg = { fastWait, lateWait, pressure: pressureLevel };
+          total++;
 
-    for (let i=0;i<cfg.N;i++){
+          const stats = await runConfig(cfg, N, delayMs);
+          const sc = score(stats);
+
+          // log mínimo por config
+          logLine(`CFG#${total} fast=${fastWait} late=${lateWait} p=${pressureLevel} :: ${j(stats)}`);
+
+          if (!best || sc > best.score){
+            best = { cfg, stats, score: sc };
+            logLine(`BEST UPDATE :: score=${best.score} cfg=${j(best.cfg)} stats=${j(best.stats)}`);
+          }
+
+          // se achou drop_confirmed, para cedo (isso é o que interessa)
+          if (stats.drop_confirmed > 0){
+            logLine("STOP EARLY: drop_confirmed>0 encontrado.");
+            STOP = true;
+            break;
+          }
+        }
+        if (STOP) break;
+      }
       if (STOP) break;
-      await runOnce(i, cfg, stats, samples);
-      if ((i+1) % 10 === 0) logLine(`progress: ${i+1}/${cfg.N}`);
-      if (cfg.delayMs) await sleep(cfg.delayMs);
     }
 
-    logLine("RESULT SUMMARY:");
-    logLine(j(stats));
-
-    const hot = [];
-    if (samples.dv_read_after_detach.length) hot.push({kind:"DV_READ_AFTER_DETACH", samples: samples.dv_read_after_detach});
-    if (samples.dv_changed_no_write.length) hot.push({kind:"DV_CHANGED_NO_WRITE", samples: samples.dv_changed_no_write});
-    if (samples.drop_confirmed.length) hot.push({kind:"DROP_CONFIRMED", samples: samples.drop_confirmed});
-    if (samples.queue_bad.length) hot.push({kind:"QUEUE_BAD_AFTER_DROP", samples: samples.queue_bad});
-    if (samples.sender_impossible.length) hot.push({kind:"SENDER_LEN_IMPOSSIBLE", samples: samples.sender_impossible});
-    if (samples.post_throw.length) hot.push({kind:"POST_THROW", samples: samples.post_throw});
-
-    if (hot.length) {
-      logLine("HOT SAMPLES:");
-      logLine(j(hot));
+    if (best){
+      logLine("==== BEST RESULT ====");
+      logLine(`best_cfg=${j(best.cfg)}`);
+      logLine(`best_stats=${j(best.stats)}`);
+    } else {
+      logLine("No results.");
     }
 
-    logLine("DONE.");
+    logLine("AUTO-SCAN done.");
   }
 
-  document.getElementById("run").onclick = () => runAuto().catch(e => logLine("ERR: " + ((e&&e.name)||String(e))));
+  document.getElementById("run").onclick = () => runAutoScan().catch(e => logLine("ERR: " + ((e&&e.name)||String(e))));
   document.getElementById("stop").onclick = () => { STOP = true; logLine("STOP requested."); };
   document.getElementById("reset").onclick = reset;
 
   reset();
 })();
 </script>
+</body>
+</html>
