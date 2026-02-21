@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 28 - RegExp lastIndex Mutation</title></head>
+<body>
+<h2>TEST 28 — RegExp.lastIndex Mutacao Durante exec() (JIT Loop Crash)</h2>
+<p><b>Alvo:</b> crash / loop infinito detectavel via RegExp com flag <code>/g</code> cujo
+<code>lastIndex</code> e modificado por um getter com side-effect</p>
+<p><b>Por que crasha:</b> o JIT especializa loops <code>while(re.exec(str))</code> assumindo
+que <code>lastIndex</code> avanca monotonicamente. Se um getter em <code>lastIndex</code>
+retorna um valor decrescente, o motor entra em loop infinito ou acessa buffer de string
+com indice negativo/stale.</p>
+
+<pre id="log">Pronto.</pre>
+<button onclick="runTest1()">LASTINDEX GETTER DECRESCENTE</button>
+<button onclick="runTest2()">LASTINDEX GETTER COM SIDE-EFFECT</button>
+<button onclick="runTest3()">REGEXP EXEC EM STRING MUTANTE</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<30000;i++) t.push({x:i}); t=null;
+}
+
+function runTest1() {
+  log.textContent = '[TEST 28-A] RegExp lastIndex getter decrescente...\n';
+  try {
+    var re = /a/g;
+    var str = 'aababaababaab';
+    var readCount = 0;
+    var writeCount = 0;
+    var LIMIT = 1000;
+
+    // Substituir lastIndex por getter/setter com comportamento anomalo
+    var _lastIndex = 0;
+    Object.defineProperty(re, 'lastIndex', {
+      get: function() {
+        readCount++;
+        // Apos 10 leituras, comecar a retornar valor DECRESCENTE
+        if(readCount > 10) {
+          _lastIndex = Math.max(0, _lastIndex - 2); // retrocede!
+        }
+        return _lastIndex;
+      },
+      set: function(v) {
+        writeCount++;
+        _lastIndex = v;
+      },
+      configurable: true
+    });
+
+    info('RegExp com lastIndex getter anomalo. Iniciando exec loop...');
+    var matches = 0;
+    var iter = 0;
+
+    while(iter < LIMIT) {
+      iter++;
+      var result = re.exec(str);
+      if(result === null) {
+        info('exec() retornou null em iter=' + iter);
+        break;
+      }
+      matches++;
+      if(matches <= 5 || matches % 100 === 0) {
+        info('Match #' + matches + ': "' + result[0] + '" em index=' + result.index + ' | lastIndex=' + _lastIndex);
+      }
+    }
+
+    info('Total iters: ' + iter + ' | Matches: ' + matches + ' | lastIndex reads: ' + readCount);
+    if(iter >= LIMIT) {
+      alerta('LOOP ATINGIU LIMITE DE ' + LIMIT + ' ITERACOES: possivel loop infinito por lastIndex decrescente! (Motor nao detectou o retrocesso)');
+    } else if(matches > str.length) {
+      alerta('MATCHES EXCESSIVOS: ' + matches + ' matches em string de ' + str.length + ' chars — lastIndex retrocedendo causou re-match!');
+    } else {
+      ok('Loop terminou normalmente: ' + matches + ' matches em ' + iter + ' iters');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO NO EXEC LOOP: ' + e.message + ' — motor detectou state invalido!');
+  }
+}
+
+function runTest2() {
+  log.textContent = '[TEST 28-B] lastIndex setter com side-effect no buffer...\n';
+  try {
+    var re = /(\w+)/g;
+    var str = 'hello world test phrase end';
+
+    var setCount = 0;
+    var _lastIndex = 0;
+    var victim_buf = new Float64Array(100);
+    for(var i = 0; i < 100; i++) victim_buf[i] = i * 1.1;
+
+    Object.defineProperty(re, 'lastIndex', {
+      get: function() { return _lastIndex; },
+      set: function(v) {
+        setCount++;
+        _lastIndex = v;
+        if(setCount === 3) {
+          // Na 3a escrita em lastIndex: corromper victim_buf
+          info('lastIndex setter #3: corrompendo victim_buf...');
+          for(var k = 0; k < 10; k++) victim_buf[k] = 0xDEAD;
+          forceGC();
+        }
+      },
+      configurable: true
+    });
+
+    var results = [];
+    var match;
+    while((match = re.exec(str)) !== null) {
+      results.push(match[0]);
+    }
+
+    info('Matches: ' + results.join(', '));
+    info('setCount: ' + setCount);
+    info('victim_buf[0]: ' + victim_buf[0] + ' | victim_buf[9]: ' + victim_buf[9]);
+
+    if(victim_buf[0] === 0xDEAD) {
+      alerta('victim_buf CORROMPIDO durante exec loop: victim_buf[0]=' + victim_buf[0] + ' — side-effect no lastIndex setter confirmado!');
+    }
+
+    // Verificar integridade dos matches
+    var expectedWords = str.split(' ');
+    if(results.length !== expectedWords.length) {
+      alerta('NUMERO DE MATCHES INCORRETO: ' + results.length + ' obtidos, ' + expectedWords.length + ' esperados — side-effect afetou o exec!');
+    } else {
+      ok('Matches corretos: ' + results.length + ' palavras encontradas.');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO: ' + e.message);
+  }
+}
+
+function runTest3() {
+  log.textContent = '[TEST 28-C] RegExp.exec em string que se modifica durante match...\n';
+  try {
+    var re = /(\d+)/g;
+
+    // Criar string-like com valueOf que muda o conteudo
+    var callCount = 0;
+    var strings = ['123 456 789', '000 000 000', 'abc def ghi'];
+    var strProxy = {
+      toString: function() {
+        callCount++;
+        var s = strings[callCount % strings.length];
+        info('toString() #' + callCount + ': retornando "' + s + '"');
+        return s;
+      },
+      valueOf: function() { return this.toString(); }
+    };
+
+    info('Chamando re.exec() com string-proxy mutante...');
+    var match1 = re.exec(strProxy);
+    info('Match 1: ' + (match1 ? match1[0] : 'null') + ' | re.lastIndex=' + re.lastIndex);
+
+    var match2 = re.exec(strProxy);
+    info('Match 2: ' + (match2 ? match2[0] : 'null') + ' | re.lastIndex=' + re.lastIndex);
+
+    var match3 = re.exec(strProxy);
+    info('Match 3: ' + (match3 ? match3[0] : 'null') + ' | re.lastIndex=' + re.lastIndex);
+
+    info('callCount (toString chamado): ' + callCount);
+
+    if(callCount > 3) {
+      alerta('toString CHAMADO ' + callCount + ' VEZES: motor chama toString multiplas vezes por exec() — string pode ser diferente entre cada chamada durante o mesmo match!');
+    }
+
+    // Tentar com String() explicito mas que muda internamente
+    re.lastIndex = 0;
+    var str = '100 200 300';
+    var poisonedStr = new String(str);
+    poisonedStr.valueOf = function() {
+      return Math.random() < 0.5 ? str : 'xyz abc def'; // muda a cada chamada
+    };
+
+    var poisonedMatches = [];
+    var m;
+    var safety = 0;
+    while((m = re.exec(poisonedStr)) !== null && safety < 100) {
+      poisonedMatches.push(m[0]);
+      safety++;
+    }
+    info('Matches com string poisonada: ' + poisonedMatches.join(', '));
+    if(poisonedMatches.length === 0) {
+      alerta('NENHUM MATCH em string com valueOf mutante — motor pode ter usado valueOf apenas na conversao inicial.');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO NO EXEC COM STRING MUTANTE: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

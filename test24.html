@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 24 - Async/Await Microtask UAF</title></head>
+<body>
+<h2>TEST 24 — Async/Await Microtask Queue + Invalidacao de Objeto</h2>
+<p><b>Alvo:</b> crash / valor invalido quando o objeto acessado num <code>await</code>
+e coletado pelo GC antes do microtask ser executado</p>
+<p><b>Por que crasha:</b> ao fazer <code>await obj.method()</code>, o motor enfileira um
+microtask. Se <code>obj</code> e nulificado e o GC coleta entre o <code>await</code>
+e a retomada, o microtask pode acessar o objeto via ponteiro stale.</p>
+
+<pre id="log">Pronto.</pre>
+<button onclick="runTest1()">AWAIT + OBJETO NULIFICADO</button>
+<button onclick="runTest2()">AWAIT CHAIN + GC</button>
+<button onclick="runTest3()">PROMISE MICROTASK FLOOD</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<80000;i++) t.push({x:i, y: new Float32Array(4)}); t=null;
+}
+
+function runTest1() {
+  log.textContent = '[TEST 24-A] await com objeto nulificado antes da retomada...\n';
+
+  var sharedRef = {
+    data: new Float64Array(10000), // ~80KB no objeto
+    id: 0xDEAD,
+    compute: function() {
+      var sum = 0;
+      for(var i = 0; i < this.data.length; i++) sum += this.data[i];
+      return sum;
+    }
+  };
+  // Preencher com sentinel
+  for(var i = 0; i < sharedRef.data.length; i++) sharedRef.data[i] = i * 1.337;
+
+  async function asyncConsumer(ref) {
+    info('asyncConsumer: iniciando. ref.id=' + ref.id);
+
+    // Aguardar um tick — durante este await, nulificamos ref externamente
+    await Promise.resolve();
+
+    // Retomada do await
+    info('asyncConsumer: retomada. Verificando ref...');
+    try {
+      var result = ref.compute();
+      info('ref.compute() = ' + result);
+
+      // Verificar se o resultado bate com o esperado
+      var expected = (sharedRef ? sharedRef.data.length : 10000) * 1.337 * 4999.5;
+      if(Math.abs(result - expected) > 1) {
+        alerta('VALOR CORROMPIDO apos await: esperado ~' + expected.toFixed(0) + ' obtido ' + result.toFixed(0) + ' — dado do objeto pode estar corrompido!');
+      } else {
+        ok('ref.compute() correto: ' + result.toFixed(2));
+      }
+    } catch(e) {
+      alerta('EXCECAO ao acessar ref apos await + GC: ' + e.message);
+    }
+  }
+
+  // Iniciar async
+  var promise = asyncConsumer(sharedRef);
+
+  // Imediatamente apos iniciar, nulificar sharedRef e forcar GC
+  info('Nulificando sharedRef e forcando GC antes da retomada do await...');
+  sharedRef = null;
+  forceGC(); forceGC();
+
+  promise.catch(function(e) {
+    alerta('Promise rejeitada: ' + e.message);
+  });
+}
+
+function runTest2() {
+  log.textContent = '[TEST 24-B] Chain de awaits com GC entre cada etapa...\n';
+
+  var stage = 0;
+  var corruption_detected = false;
+
+  async function longChain() {
+    var buf = new ArrayBuffer(1024 * 128); // 128KB no frame da funcao async
+    var view = new Uint32Array(buf);
+    var SENTINEL = 0xCAFEBABE;
+    view[0] = SENTINEL;
+    view[view.length - 1] = SENTINEL;
+
+    for(var step = 0; step < 20; step++) {
+      await new Promise(function(res) { setTimeout(res, 0); }); // yield do event loop
+      stage = step;
+
+      // Verificar integridade do buffer no frame apos cada await
+      if(view[0] !== SENTINEL || view[view.length-1] !== SENTINEL) {
+        corruption_detected = true;
+        alerta('CORRUPCAO NO STEP ' + step + ': view[0]=' + view[0].toString(16) +
+          ' view[last]=' + view[view.length-1].toString(16) + ' esperado 0xcafebabe!');
+        break;
+      }
+      info('Step ' + step + ': frame intacto. view[0]=' + view[0].toString(16));
+    }
+
+    return { stage: stage, ok: !corruption_detected };
+  }
+
+  // Iniciar a chain
+  var p = longChain();
+
+  // Aplicar GC repetidamente enquanto a chain executa
+  var gcInterval = setInterval(function() {
+    forceGC();
+  }, 50);
+
+  p.then(function(result) {
+    clearInterval(gcInterval);
+    info('Chain concluida. stage=' + result.stage + ' | ok=' + result.ok);
+    if(!corruption_detected) ok('Nenhuma corrupcao detectada nas 20 etapas.');
+  }).catch(function(e) {
+    clearInterval(gcInterval);
+    alerta('Promise da chain rejeitada: ' + e.message);
+  });
+}
+
+function runTest3() {
+  log.textContent = '[TEST 24-C] Flood de microtasks com objetos efemeros...\n';
+  try {
+    var N = 10000;
+    var resolved = 0;
+    var rejected = 0;
+    var corrupted = 0;
+
+    info('Criando ' + N + ' promises com objetos efemeros...');
+
+    var promises = [];
+    for(var i = 0; i < N; i++) {
+      (function(idx) {
+        // Objeto criado inline - pode ser coletado antes do then() rodar
+        var ephemeral = {
+          id: idx,
+          buf: new ArrayBuffer(4096),
+          check: function() { return this.id === idx; }
+        };
+
+        var p = Promise.resolve(ephemeral).then(function(obj) {
+          resolved++;
+          if(!obj.check()) {
+            corrupted++;
+            if(corrupted <= 3) {
+              alerta('OBJETO CORROMPIDO em then #' + idx + ': obj.id=' + obj.id + ' esperado=' + idx);
+            }
+          }
+          // Retornar outro objeto efemero para a chain
+          return { prev: obj.id, next: idx + 1 };
+        }).then(function(result) {
+          // Segundo then: verificar que o resultado do primeiro then esta integro
+          if(result.prev !== idx) {
+            corrupted++;
+            if(corrupted <= 3) {
+              alerta('RESULTADO CORROMPIDO no segundo then: prev=' + result.prev + ' esperado=' + idx);
+            }
+          }
+        });
+
+        promises.push(p);
+      })(i);
+    }
+
+    info(N + ' promises criadas. Aguardando resolucao...');
+
+    // GC durante a fila de microtasks
+    forceGC(); forceGC();
+
+    Promise.all(promises).then(function() {
+      info('Todas as ' + N + ' promises resolvidas.');
+      info('resolved=' + resolved + ' | corrupted=' + corrupted);
+      if(corrupted > 0) {
+        alerta('TOTAL DE CORRUPCOES: ' + corrupted + '/' + N + ' objetos com valor invalido na fila de microtask!');
+      } else {
+        ok('Sem corrupcoes na fila de microtasks (' + N + ' promises).');
+      }
+    }).catch(function(e) {
+      alerta('Promise.all rejeitada: ' + e.message);
+    });
+
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

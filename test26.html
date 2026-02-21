@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 26 - Indexed Getter JIT Crash</title></head>
+<body>
+<h2>TEST 26 — Getter em Indice Numerico de Array (JIT Crash)</h2>
+<p><b>Alvo:</b> crash no JIT via <code>Object.defineProperty</code> em indice numerico de array
+cujo getter retorna tipo inesperado ou tem side-effects</p>
+<p><b>Por que crasha:</b> JSC trata arrays com getters em indices como "slow path".
+Se o JIT ja especializou a funcao para "fast path" (acesso direto ao butterfly)
+e encontra um getter no meio, pode despachar para o handler errado.
+O valor retornado pelo getter e interpretado com o tipo do butterfly antigo.</p>
+
+<pre id="log">Pronto.</pre>
+<button onclick="runTest1()">GETTER INDICE ZERO (hot path)</button>
+<button onclick="runTest2()">GETTER NO MEIO DO ARRAY</button>
+<button onclick="runTest3()">GETTER QUE CRESCE O ARRAY</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<50000;i++) t.push({x:i}); t=null;
+}
+
+function runTest1() {
+  log.textContent = '[TEST 26-A] Getter em arr[0] apos warmup JIT...\n';
+  try {
+    // Funcao que acessa arr[0] - JIT especializa para double
+    function readFirst(arr) {
+      return arr[0] + 1.0; // JIT: arr[0] e double, resultado e double
+    }
+
+    // Warmup: arr[0] e sempre double
+    var clean = [1.1, 2.2, 3.3, 4.4, 5.5];
+    for(var i = 0; i < 100000; i++) readFirst(clean);
+    info('Warmup readFirst (100k): OK | clean[0]=' + clean[0]);
+
+    // Agora definir getter em clean[0]
+    var getterCallCount = 0;
+    var EVIL_OBJ = { poison: 0xDEADC0DE, valueOf: function() { return 99.9; } };
+
+    Object.defineProperty(clean, 0, {
+      get: function() {
+        getterCallCount++;
+        forceGC(); // GC dentro do getter
+        return EVIL_OBJ; // Retornar objeto, nao double!
+      },
+      configurable: true
+    });
+
+    info('Getter instalado em clean[0]. Chamando readFirst com getter...');
+
+    // JIT vai chamar o getter mas o resultado foi especializado para double
+    try {
+      var result = readFirst(clean);
+      info('readFirst(clean) com getter: ' + result);
+      info('getterCallCount: ' + getterCallCount);
+
+      // Se resultado e 100.9, valueOf foi chamado corretamente
+      // Se resultado e NaN, tipo foi confundido
+      // Se resultado e um objeto, JIT nao coerceu corretamente
+      if(typeof result === 'object') {
+        alerta('RESULTADO E OBJETO: JIT nao coerceu o retorno do getter de arr[0] para number!');
+      } else if(isNaN(result)) {
+        alerta('RESULTADO E NaN: getter retornou objeto mas JIT tratou como NaN — possivel type confusion!');
+      } else if(result === 100.9) {
+        ok('valueOf chamado: result=100.9 (comportamento correto)');
+      } else {
+        alerta('RESULTADO INESPERADO: ' + result + ' — esperado 100.9 (valueOf) ou NaN. Caminho inesperado no JIT!');
+      }
+    } catch(e) {
+      alerta('EXCECAO em readFirst com getter: ' + e.message + ' — deopt/crash capturado!');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+
+function runTest2() {
+  log.textContent = '[TEST 26-B] Getter no meio de array durante iteracao JIT...\n';
+  try {
+    var arr = [];
+    var TRAP_IDX = 50;
+    for(var i = 0; i < 100; i++) arr.push(i * 2.0);
+
+    // Funcao JIT: soma todos os elementos
+    function sumArray(a) {
+      var s = 0.0;
+      for(var i = 0; i < a.length; i++) s += a[i];
+      return s;
+    }
+
+    // Warmup sem getter
+    for(var w = 0; w < 50000; w++) sumArray(arr);
+    info('Warmup sumArray (50k): OK. Soma esperada=' + sumArray(arr));
+
+    // Instalar getter no meio (idx 50)
+    var trapFired = false;
+    var savedArr = arr;
+    Object.defineProperty(arr, TRAP_IDX, {
+      get: function() {
+        if(!trapFired) {
+          trapFired = true;
+          // Converter todos os outros elementos para string no meio da soma
+          for(var k = 0; k < savedArr.length; k++) {
+            if(k !== TRAP_IDX) savedArr[k] = 'STR_' + k; // muda butterfly de double para contiguous
+          }
+          forceGC();
+          info('Getter em arr[' + TRAP_IDX + ']: elementos convertidos para string!');
+        }
+        return 9999.0;
+      },
+      configurable: true
+    });
+
+    info('Getter instalado em arr[' + TRAP_IDX + ']. Chamando sumArray...');
+    try {
+      var result = sumArray(arr);
+      info('sumArray resultado: ' + result);
+
+      // A soma deveria ser completamente NaN pois strings foram inseridas
+      if(!isNaN(result) && result === (sumArray.toString().indexOf('s += a') > -1 ? result : result)) {
+        // Verificar se a soma ignorou as strings
+        var manualSum = 0;
+        for(var j = 0; j < arr.length; j++) {
+          var v = arr[j];
+          manualSum += (typeof v === 'number' ? v : parseFloat(v) || 0);
+        }
+        if(Math.abs(result - manualSum) > 0.01) {
+          alerta('SOMA INCONSISTENTE: JIT retornou ' + result.toFixed(2) + ' mas soma manual e ' + manualSum.toFixed(2) + ' — JIT usou valores antes do side-effect!');
+        }
+      }
+    } catch(e) {
+      alerta('EXCECAO NA SOMA COM GETTER: ' + e.message + ' — iteracao JIT invalida!');
+    }
+
+    info('trapFired: ' + trapFired);
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+
+function runTest3() {
+  log.textContent = '[TEST 26-C] Getter que EXPANDE o array durante leitura de indice...\n';
+  try {
+    var arr = [1.0, 2.0, 3.0, 4.0, 5.0];
+    var originalLength = arr.length;
+    var getterTriggered = false;
+
+    // Getter no indice 2 que expande o array radicalmente
+    Object.defineProperty(arr, 2, {
+      get: function() {
+        if(!getterTriggered) {
+          getterTriggered = true;
+          // Expandir o array: butterfly realoca
+          for(var k = 5; k < 100000; k++) arr[k] = k * 0.1;
+          info('Getter em arr[2]: array expandido de ' + originalLength + ' para ' + arr.length);
+          forceGC(); // GC com butterfly antigo possivelmente solto
+        }
+        return 2.5; // retornar valor "correto"
+      },
+      configurable: true
+    });
+
+    info('Array inicial: ' + arr.length + ' | Chamando operacoes...');
+
+    // Copiar o array (usa indices e length)
+    try {
+      var copy = arr.slice();
+      info('slice() result: length=' + copy.length + ' | copy[2]=' + copy[2]);
+      if(copy.length === originalLength) {
+        alerta('slice() CAPTUROU APENAS ' + originalLength + ' ELEMENTOS apesar do array ter sido expandido para ' + arr.length + ' dentro do getter — slice usou length antigo!');
+      } else if(copy.length === arr.length) {
+        ok('slice() capturou array expandido: ' + copy.length + ' elementos');
+      }
+    } catch(e) {
+      alerta('EXCECAO NO SLICE: ' + e.message);
+    }
+
+    // Array.from sobre o array expandido
+    getterTriggered = false; // resetar para testar Array.from
+    try {
+      var fromResult = Array.from(arr);
+      info('Array.from result: length=' + fromResult.length);
+    } catch(e) {
+      alerta('EXCECAO NO ARRAY.FROM: ' + e.message);
+    }
+
+    info('arr.length final: ' + arr.length);
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

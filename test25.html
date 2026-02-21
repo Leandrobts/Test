@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 25 - Array.length Getter Re-entrant</title></head>
+<body>
+<h2>TEST 25 — Array.length Getter com Side-Effect em splice/push/pop</h2>
+<p><b>Alvo:</b> crash via re-entrada em operacoes de array quando o getter de <code>length</code>
+tem side-effects que modificam o proprio array</p>
+<p><b>Por que crasha:</b> operacoes como <code>splice</code>, <code>push</code> e <code>concat</code>
+leem <code>length</code> internamente. Se um getter customizado para <code>length</code> modifica
+o array (troca de butterfly) durante essa leitura, o motor pode seguir um ponteiro stale
+para o storage anterior.</p>
+
+<pre id="log">Pronto.</pre>
+<button onclick="runTest1()">LENGTH GETTER em SPLICE</button>
+<button onclick="runTest2()">LENGTH GETTER em CONCAT</button>
+<button onclick="runTest3()">LENGTH GETTER em Array.from</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<50000;i++) t.push({x:i}); t=null;
+}
+
+function runTest1() {
+  log.textContent = '[TEST 25-A] Array.length getter re-entrante em splice...\n';
+  try {
+    // Array-like object cujo length tem side-effect
+    var inSplice = false;
+    var lengthGetCount = 0;
+    var underlying = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8];
+
+    var sneaky = {};
+    // Copiar elementos
+    for(var i = 0; i < underlying.length; i++) sneaky[i] = underlying[i];
+
+    Object.defineProperty(sneaky, 'length', {
+      get: function() {
+        lengthGetCount++;
+        if(!inSplice && lengthGetCount > 2) {
+          inSplice = true;
+          // Side-effect: mudar o tipo dos elementos durante leitura de length
+          for(var k = 0; k < underlying.length; k++) {
+            this[k] = {evil: k}; // Double → object type change
+          }
+          forceGC();
+          info('length getter #' + lengthGetCount + ': elementos convertidos de double para objeto');
+          inSplice = false;
+        }
+        return underlying.length;
+      },
+      configurable: true
+    });
+
+    info('Object-like com ' + underlying.length + ' elementos. Chamando splice...');
+
+    // splice usa length internamente
+    var removed = Array.prototype.splice.call(sneaky, 2, 2);
+    info('splice(2,2) resultado: ' + JSON.stringify(removed));
+    info('sneaky apos splice: length=' + sneaky.length);
+    info('sneaky[0]=' + JSON.stringify(sneaky[0]) + ' sneaky[1]=' + JSON.stringify(sneaky[1]));
+    info('lengthGetCount total: ' + lengthGetCount);
+
+    // Verificar se algum elemento double "vazou" como objeto apos splice
+    var leaks = 0;
+    for(var j = 0; j < sneaky.length; j++) {
+      if(typeof sneaky[j] === 'number') leaks++;
+    }
+    if(leaks > 0) {
+      alerta('ELEMENTOS NUMERICOS SOBREVIVERAM ao side-effect: ' + leaks + ' doubles apos conversao para objeto no getter. Caminho de splice nao re-leu length!');
+    } else {
+      ok('Todos elementos convertidos: getter executado corretamente durante splice.');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO DURANTE SPLICE COM GETTER: ' + e.message);
+  }
+}
+
+function runTest2() {
+  log.textContent = '[TEST 25-B] Array.length getter em Array.concat...\n';
+  try {
+    var base = [10.1, 20.2, 30.3];
+    var appendee = [40.4, 50.5, 60.6];
+
+    var getLengthCalls = 0;
+    var sideEffectDone = false;
+
+    Object.defineProperty(appendee, 'length', {
+      get: function() {
+        getLengthCalls++;
+        if(!sideEffectDone && getLengthCalls >= 1) {
+          sideEffectDone = true;
+          // Trocar proto de appendee durante concat
+          Object.setPrototypeOf(appendee, {
+            toJSON: function() { return 'evil'; },
+            valueOf: function() { return -1; }
+          });
+          // Alterar elemento 0 para objeto
+          appendee[0] = { poisoned: true, valueOf: function(){ return 99.9; } };
+          forceGC();
+          info('length getter: proto trocado e appendee[0] envenenado');
+        }
+        return 3; // mentir sobre length apos modificacao
+      },
+      configurable: true
+    });
+
+    info('Chamando base.concat(appendee)...');
+    var result = base.concat(appendee);
+    info('Resultado concat: length=' + result.length);
+    result.forEach(function(v, i) {
+      info('  result[' + i + '] = ' + JSON.stringify(v) + ' (tipo: ' + typeof v + ')');
+    });
+
+    // Se result[3] e o objeto envenenado, pode causar issues em operacoes futuras
+    if(typeof result[3] === 'object') {
+      alerta('OBJETO ENVENENADO no resultado de concat: result[3]=' + JSON.stringify(result[3]) + ' — concat copiou objeto com valueOf customizado!');
+
+      // Tentar usar o resultado em operacao numerica
+      var sum = result.reduce(function(acc, v) { return acc + v; }, 0);
+      info('reduce(sum) do resultado: ' + sum);
+      if(isNaN(sum) || sum === 0) {
+        alerta('REDUCE CORROMPIDO: soma=' + sum + ' esperado ~210.3 — elemento envenenado afetou calculo!');
+      }
+    }
+
+    info('getLengthCalls: ' + getLengthCalls);
+  } catch(e) {
+    alerta('EXCECAO NO CONCAT: ' + e.message);
+  }
+}
+
+function runTest3() {
+  log.textContent = '[TEST 25-C] Array.from com length getter re-entrante...\n';
+  try {
+    var data = new Float64Array(100);
+    for(var i = 0; i < 100; i++) data[i] = i * 1.1;
+
+    var lengthReadCount = 0;
+    var source = {
+      get length() {
+        lengthReadCount++;
+        if(lengthReadCount === 2) {
+          // Na segunda leitura de length (durante Array.from), zerar data
+          info('length getter #2: zerando data...');
+          data.fill(0); // Sobreescrever todos os valores
+          forceGC();
+        }
+        return 100;
+      }
+    };
+
+    // Preencher source com getters que leem data[]
+    for(var j = 0; j < 100; j++) {
+      (function(idx) {
+        Object.defineProperty(source, idx, {
+          get: function() { return data[idx]; }, // lê de data
+          enumerable: true
+        });
+      })(j);
+    }
+
+    info('Chamando Array.from(source)...');
+    var result = Array.from(source);
+
+    info('Array.from result: length=' + result.length);
+    info('result[0]=' + result[0] + ' result[99]=' + result[99]);
+    info('lengthReadCount=' + lengthReadCount);
+
+    // Checar se alguns valores sao 0 (data zerado no meio) e outros nao
+    var zeros = result.filter(function(v) { return v === 0; }).length;
+    var nonzeros = result.filter(function(v) { return v !== 0; }).length;
+    info('Zeros: ' + zeros + ' | Non-zeros: ' + nonzeros);
+
+    if(zeros > 0 && nonzeros > 0) {
+      alerta('RESULTADO PARCIALMENTE CORROMPIDO: ' + zeros + ' zeros e ' + nonzeros + ' nao-zeros no mesmo array — Array.from leu antes e depois do side-effect!');
+    } else if(zeros === 100) {
+      ok('Todos zeros: data foi zerado antes de qualquer leitura.');
+    } else {
+      ok('Nenhum zero: data nao foi zerado antes das leituras.');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO NO ARRAY.FROM: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

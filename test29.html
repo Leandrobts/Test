@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 29 - TypedArray.set() Overlap + Detach</title></head>
+<body>
+<h2>TEST 29 — TypedArray.set() com Views Sobrepostas + Detach Race</h2>
+<p><b>Alvo:</b> crash / corrupcao de memoria via <code>TypedArray.set()</code> quando a fonte
+e o destino compartilham o mesmo buffer (sobreposicao), ou quando o buffer e detachado
+durante a operacao via side-effect no getter de um elemento</p>
+<p><b>Por que crasha:</b> <code>set()</code> tem otimizacao de <code>memmove</code> interno.
+Se a fonte e detachada durante a copia (via Proxy/getter), o motor pode continuar
+lendo da regiao de memoria liberada.</p>
+
+<pre id="log">Pronto.</pre>
+<button onclick="runTest1()">SET() COM SOBREPOSICAO</button>
+<button onclick="runTest2()">SET() COM PROXY SOURCE</button>
+<button onclick="runTest3()">SET() APOS DETACH DA SOURCE</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<50000;i++) t.push({x:i}); t=null;
+}
+
+function runTest1() {
+  log.textContent = '[TEST 29-A] TypedArray.set() com views sobrepostas no mesmo buffer...\n';
+  try {
+    var SIZE = 1024;
+    var buf = new ArrayBuffer(SIZE * 8); // 8KB
+    var full = new Float64Array(buf); // view completa
+    var first_half = new Float64Array(buf, 0, SIZE / 2); // primeiros 512
+    var second_half = new Float64Array(buf, (SIZE / 2) * 8); // ultimos 512
+
+    // Preencher com valores distintos
+    for(var i = 0; i < SIZE; i++) full[i] = i * 1.0;
+    info('Buffer: ' + SIZE + ' doubles | full[0]=' + full[0] + ' full[' + (SIZE-1) + ']=' + full[SIZE-1]);
+
+    // Copiar second_half para first_half com sobreposicao parcial
+    // Se set() nao usar memmove corretamente, pode corromper dados antes de copiar
+    var OVERLAP_OFFSET = SIZE / 4; // sobreposicao de 256 elementos
+    var overlap_src = new Float64Array(buf, OVERLAP_OFFSET * 8, SIZE / 2); // indices 256..767
+    var overlap_dst = new Float64Array(buf, 0, SIZE / 2); // indices 0..511
+
+    info('src range: [' + OVERLAP_OFFSET + ', ' + (OVERLAP_OFFSET + SIZE/2 - 1) + ']');
+    info('dst range: [0, ' + (SIZE/2 - 1) + ']');
+    info('Sobreposicao em: [' + OVERLAP_OFFSET + ', ' + (SIZE/2 - 1) + '] (' + (SIZE/2 - OVERLAP_OFFSET) + ' elementos)');
+
+    // Copiar (overlapping regions no mesmo buffer!)
+    overlap_dst.set(overlap_src);
+
+    // Verificar: dst[i] deve ser antigo valor de src[i] = full[OVERLAP_OFFSET + i]
+    var corrupted = 0;
+    for(var j = 0; j < SIZE / 2; j++) {
+      var expected = OVERLAP_OFFSET + j; // valor original em full[OVERLAP_OFFSET + j]
+      if(Math.abs(overlap_dst[j] - expected) > 0.001) {
+        corrupted++;
+        if(corrupted <= 5) {
+          alerta('CORRUPCAO em dst[' + j + ']: esperado=' + expected + ' obtido=' + overlap_dst[j] + ' — set() escreveu antes de ler na regiao sobreposta!');
+        }
+      }
+    }
+    if(corrupted === 0) {
+      ok('set() com sobreposicao: sem corrupcao detectada (' + SIZE/2 + ' valores corretos)');
+    } else {
+      alerta('TOTAL DE CORRUPCOES: ' + corrupted + '/' + (SIZE/2) + ' elementos errados!');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO: ' + e.message);
+  }
+}
+
+function runTest2() {
+  log.textContent = '[TEST 29-B] TypedArray.set() com Proxy como source...\n';
+  try {
+    var dst = new Float64Array(100);
+    var srcBuf = new ArrayBuffer(100 * 8);
+    var srcRaw = new Float64Array(srcBuf);
+    for(var i = 0; i < 100; i++) srcRaw[i] = i * 2.0;
+
+    var getCount = 0;
+    var transferDone = false;
+
+    // Proxy sobre srcRaw que na metade do set() transfere o buffer
+    var srcProxy = new Proxy(srcRaw, {
+      get: function(target, prop, receiver) {
+        if(typeof prop === 'string' && !isNaN(parseInt(prop))) {
+          getCount++;
+          var idx = parseInt(prop);
+          if(idx === 50 && !transferDone) {
+            transferDone = true;
+            // Transferir srcBuf durante o set()!
+            postMessage('transfer', '*', [srcBuf]);
+            forceGC();
+            info('Proxy: buffer transferido durante set() no elemento idx=50! srcBuf.byteLength=' + srcBuf.byteLength);
+          }
+          try {
+            return target[idx];
+          } catch(e2) {
+            alerta('ACESSO A ELEMENTO POS-DETACH via Proxy: target[' + idx + '] = ' + e2.message);
+            return 0;
+          }
+        }
+        return Reflect.get(target, prop, receiver);
+      }
+    });
+
+    info('Chamando dst.set(proxy_source)...');
+    try {
+      dst.set(srcProxy);
+      info('set() concluido. getCount=' + getCount);
+
+      // Verificar integridade do destino
+      var errors = 0;
+      for(var j = 0; j < dst.length; j++) {
+        var expected = j * 2.0;
+        if(Math.abs(dst[j] - expected) > 0.001) {
+          errors++;
+          if(errors <= 5) {
+            info('dst[' + j + ']=' + dst[j] + ' esperado=' + expected);
+          }
+        }
+      }
+
+      if(errors > 0) {
+        alerta('CORRUPCAO NO DESTINO: ' + errors + '/100 elementos com valor errado apos set() com buffer transferido no meio!');
+      } else if(!transferDone) {
+        info('Buffer nao foi transferido (set() nao usou getter individual)');
+      } else {
+        ok('Todos os valores corretos apesar da transferencia no meio do set()');
+      }
+
+    } catch(e2) {
+      alerta('EXCECAO EM set() COM PROXY SOURCE: ' + e2.message + ' — motor detectou acesso a buffer detachado!');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+
+function runTest3() {
+  log.textContent = '[TEST 29-C] TypedArray.set() com source detachado ANTES da chamada...\n';
+  try {
+    var srcBuf = new ArrayBuffer(1024 * 8);
+    var srcView = new Float64Array(srcBuf);
+    for(var i = 0; i < 1024; i++) srcView[i] = i * 3.0;
+
+    var dstBuf = new ArrayBuffer(1024 * 8);
+    var dstView = new Float64Array(dstBuf);
+
+    info('src: ' + srcView.length + ' doubles | dst: ' + dstView.length + ' doubles');
+
+    // Caso 1: detach src antes do set()
+    postMessage('', '*', [srcBuf]);
+    info('srcBuf detachado. srcBuf.byteLength=' + srcBuf.byteLength + ' srcView.length=' + srcView.length);
+
+    try {
+      dstView.set(srcView); // srcView esta sobre buffer detachado
+      info('set(detachedView) concluiu. Verificando dst...');
+      // Se nao lancou excecao: ver o que foi copiado
+      var allZero = true;
+      var allSentinel = true;
+      for(var j = 0; j < dstView.length; j++) {
+        if(dstView[j] !== 0) allZero = false;
+        if(dstView[j] !== j * 3.0) allSentinel = false;
+      }
+      if(allZero) {
+        ok('dst todo zero: set() de view detachada copiou zeros (seguro)');
+      } else if(!allSentinel) {
+        alerta('VALORES INESPERADOS NO DST apos set() de view detachada — possivel leitura de heap apos detach!');
+        info('dst[0]=' + dstView[0] + ' dst[1]=' + dstView[1] + ' dst[1023]=' + dstView[1023]);
+      } else {
+        alerta('VALORES ORIGINAIS COPIADOS DE VIEW DETACHADA: set() leu do buffer liberado!');
+      }
+    } catch(e2) {
+      ok('set(detachedView) lancou excecao esperada: ' + e2.message);
+    }
+
+    // Caso 2: set() de TypedArray com offset fora do destino
+    var shortSrc = new Float64Array([1.1, 2.2, 3.3]);
+    try {
+      dstView.set(shortSrc, dstView.length - 2); // cabe 2, mas source tem 3
+      alerta('set() COM OFFSET OOB NAO LANCOU EXCECAO: ' + dstView[dstView.length-1] + ' — OOB write!');
+    } catch(e2) {
+      ok('set() com offset OOB lancou: ' + e2.message);
+    }
+
+    // Caso 3: offset negativo
+    try {
+      dstView.set(shortSrc, -1);
+      alerta('set() COM OFFSET NEGATIVO (-1) NAO LANCOU EXCECAO!');
+    } catch(e2) {
+      ok('set() com offset=-1 lancou: ' + e2.message);
+    }
+
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

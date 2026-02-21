@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 22 - Generator Suspended UAF</title></head>
+<body>
+<h2>TEST 22 — Generator Object Suspenso + GC (UAF)</h2>
+<p><b>Alvo:</b> crash / leitura invalida quando um generator suspenso e parcialmente coletado pelo GC</p>
+<p><b>Por que crasha:</b> um generator suspenso no meio de um <code>yield</code> guarda o frame de pilha
+inteiro (variaveis locais, TypedArrays, closures) no heap. Se o GC coleta objetos referenciados
+por esse frame enquanto o generator ainda esta suspenso, retomar via <code>.next()</code> acessa
+memoria liberada.</p>
+
+<pre id="log">Pronto.</pre>
+<button onclick="runTest1()">GENERATOR + BUFFER UAF</button>
+<button onclick="runTest2()">GENERATOR POOL (1000 suspensos)</button>
+<button onclick="runTest3()">GENERATOR RECURSIVO</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<80000;i++) t.push({a:i,b:new Uint8Array(4)}); t=null;
+}
+
+function runTest1() {
+  log.textContent = '[TEST 22-A] Generator suspenso com ArrayBuffer no frame...\n';
+
+  function* genWithBuffer() {
+    var buf = new ArrayBuffer(1024 * 256); // 256KB no frame do generator
+    var view = new Float64Array(buf);
+    for(var i = 0; i < view.length; i++) view[i] = i * 1.337;
+
+    info('Generator: buf criado no frame. byteLength=' + buf.byteLength);
+    yield 'checkpoint_1'; // SUSPENSO AQUI
+
+    // Quando retomado, buf deve ainda estar valido
+    var sum = 0;
+    for(var j = 0; j < 100; j++) sum += view[j];
+    info('Generator retomado. sum dos primeiros 100=' + sum);
+
+    yield 'checkpoint_2';
+
+    // Acessar buf apos segundo suspend/resume
+    var last = view[view.length - 1];
+    info('Generator: view[last] = ' + last);
+    if(last !== (view.length - 1) * 1.337) {
+      alerta('VALOR CORROMPIDO no frame do generator apos GC: esperado=' +
+        ((view.length-1)*1.337) + ' obtido=' + last);
+    }
+    yield 'done';
+  }
+
+  try {
+    var gen = genWithBuffer();
+
+    var r1 = gen.next();
+    info('Apos next() #1: value=' + r1.value + ' done=' + r1.done);
+
+    // GC agressivo enquanto generator esta suspenso
+    info('Forcando GC com generator suspenso no checkpoint_1...');
+    forceGC(); forceGC(); forceGC();
+
+    var r2 = gen.next();
+    info('Apos next() #2: value=' + r2.value + ' done=' + r2.done);
+
+    forceGC(); forceGC();
+
+    var r3 = gen.next();
+    info('Apos next() #3: value=' + r3.value + ' done=' + r3.done);
+
+    var r4 = gen.next();
+    info('Done: ' + r4.done);
+
+  } catch(e) {
+    alerta('EXCECAO ao retomar generator: ' + e.message + ' — frame pode estar corrompido!');
+  }
+}
+
+function runTest2() {
+  log.textContent = '[TEST 22-B] Pool de 1000 generators suspensos...\n';
+
+  function* heavyGen(id) {
+    var localBuf = new ArrayBuffer(65536); // 64KB por generator
+    var localView = new Uint32Array(localBuf);
+    localView[0] = id;
+    localView[1] = 0xDEADC0DE;
+    yield { id: id, sentinel: localView[1] };
+    // Segundo yield - verificar integridade
+    yield { id: id, check: localView[0] === id && localView[1] === 0xDEADC0DE };
+  }
+
+  var pool = [];
+  try {
+    info('Criando 1000 generators suspensos (cada um com 64KB no frame)...');
+    for(var i = 0; i < 1000; i++) {
+      var g = heavyGen(i);
+      g.next(); // Avanca para o primeiro yield (suspenso)
+      pool.push(g);
+    }
+    info('Pool criado: ' + pool.length + ' generators suspensos | ~' + (pool.length * 64) + 'KB em frames');
+
+    // GC massivo com todos suspensos
+    info('GC massivo com todos suspensos...');
+    forceGC(); forceGC(); forceGC();
+
+    // Retomar todos e checar integridade
+    var corrupted = 0;
+    var errors    = 0;
+    for(var j = 0; j < pool.length; j++) {
+      try {
+        var result = pool[j].next();
+        if(!result.value.check) corrupted++;
+      } catch(e2) {
+        errors++;
+      }
+    }
+
+    if(corrupted > 0) {
+      alerta('CORRUPCAO: ' + corrupted + '/' + pool.length + ' generators com valor invalido apos GC!');
+    } else if(errors > 0) {
+      alerta('EXCECOES ao retomar: ' + errors + '/' + pool.length + ' — frames podem estar corrompidos!');
+    } else {
+      ok('Todos os ' + pool.length + ' generators intactos apos GC.');
+    }
+  } catch(e) {
+    alerta('EXCECAO geral: ' + e.message);
+  }
+}
+
+function runTest3() {
+  log.textContent = '[TEST 22-C] Generator recursivo (generator chamando generator)...\n';
+
+  function* inner(depth, buf) {
+    var view = new Uint32Array(buf);
+    view[0] = depth;
+    yield depth;
+    var check = view[0];
+    if(check !== depth) {
+      alerta('CORRUPCAO em inner depth=' + depth + ': esperado ' + depth + ' obtido ' + check);
+    }
+    return check;
+  }
+
+  function* outer(maxDepth) {
+    var bufs = [];
+    for(var d = 0; d < maxDepth; d++) {
+      var buf = new ArrayBuffer(4096);
+      bufs.push(buf);
+      yield* inner(d, buf); // delegar para generator interno
+    }
+    yield 'outer_done';
+  }
+
+  try {
+    var gen = outer(500);
+    var results = [];
+    var stepCount = 0;
+
+    // Avançar de 10 em 10, aplicando GC entre grupos
+    var result;
+    while(!(result = gen.next()).done) {
+      results.push(result.value);
+      stepCount++;
+      if(stepCount % 50 === 0) {
+        forceGC();
+        info('Step ' + stepCount + ' | ultimo valor=' + result.value);
+      }
+    }
+
+    info('Generator recursivo concluido: ' + stepCount + ' yields');
+    info('Ultimo valor: ' + results[results.length-1]);
+
+    // Verificar sequencia
+    var outOfSeq = 0;
+    for(var i = 0; i < Math.min(results.length, 500); i++) {
+      if(results[i] !== i) outOfSeq++;
+    }
+    if(outOfSeq > 0) {
+      alerta('SEQUENCIA CORROMPIDA: ' + outOfSeq + ' valores fora de ordem apos GC entre yields!');
+    } else {
+      ok('Sequencia intacta nos primeiros 500 valores.');
+    }
+  } catch(e) {
+    alerta('EXCECAO no generator recursivo: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

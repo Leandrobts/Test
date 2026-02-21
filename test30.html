@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 30 - Error.stack + Structured Clone Crash</title></head>
+<body>
+<h2>TEST 30 — Error.stack Info Leak + Structured Clone Crash</h2>
+<p><b>Alvo:</b> info leak via <code>Error.stack</code> (enderecos de retorno) e crash via
+<code>postMessage</code> structured clone de objetos nao-clonáveis ou ciclicos</p>
+<p><b>Por que crasha:</b> 1) <code>Error.stack</code> pode revelar enderecos de codigo JIT em
+alguns WebKit/JSC. 2) structured clone de objeto ciclico pode causar stack overflow
+no serializador. 3) Clonar objeto com getter que lanca excecao pode deixar o serializador
+em estado invalido.</p>
+
+<pre id="log">Pronto.</pre>
+<button onclick="runTest1()">ERROR.STACK LEAK</button>
+<button onclick="runTest2()">STRUCTURED CLONE CICLICO</button>
+<button onclick="runTest3()">CLONE COM GETTER EXPLOSIVO</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<50000;i++) t.push({x:i}); t=null;
+}
+
+function runTest1() {
+  log.textContent = '[TEST 30-A] Error.stack para info leak de enderecos...\n';
+  try {
+    // Capturar stack de diferentes profundidades
+    function level3() { return new Error('deep'); }
+    function level2() { return level3(); }
+    function level1() { return level2(); }
+
+    var err = level1();
+    var stack = err.stack;
+    info('Error.stack disponivel: ' + (stack ? 'SIM' : 'NAO'));
+
+    if(!stack) {
+      ok('Error.stack nao disponivel neste browser — sem leak possivel via este vetor.');
+      return;
+    }
+
+    info('Stack length: ' + stack.length + ' chars');
+    info('Stack (primeiros 500 chars):');
+    info(stack.slice(0, 500));
+
+    // Analisar stack em busca de enderecos de memoria (hex com 8+ digitos)
+    var hexPattern = /0x[0-9a-fA-F]{8,16}/g;
+    var addrs = stack.match(hexPattern);
+    if(addrs && addrs.length > 0) {
+      alerta('ENDERECOS HEX NO STACK TRACE: ' + addrs.join(', ') + ' — possivel leak de enderecos de codigo JIT!');
+    } else {
+      ok('Sem enderecos hex brutos no stack. Analisando numeros de linha...');
+    }
+
+    // Tentar extrair nome de arquivo / linha para deducao de layout
+    var linePattern = /:(\d+):(\d+)/g;
+    var lines = [];
+    var m;
+    while((m = linePattern.exec(stack)) !== null) {
+      lines.push('linha ' + m[1] + ' col ' + m[2]);
+    }
+    info('Posicoes no stack: ' + lines.join(', '));
+
+    // Stack via Error.captureStackTrace (se disponivel)
+    if(typeof Error.captureStackTrace === 'function') {
+      var obj = {};
+      Error.captureStackTrace(obj, runTest1);
+      alerta('Error.captureStackTrace DISPONIVEL: ' + (obj.stack ? obj.stack.slice(0, 200) : 'null'));
+    }
+
+    // Tentar stack de funcao JIT compilada
+    function jitFn(x) {
+      if(x < 0) return new Error('jit path').stack;
+      return x + 1;
+    }
+    for(var i = 0; i < 100000; i++) jitFn(i); // JIT compile
+    var jitStack = jitFn(-1);
+    info('Stack de funcao JIT-compilada: ' + (jitStack ? jitStack.slice(0,200) : 'null'));
+
+    var jitAddrs = jitStack && jitStack.match(hexPattern);
+    if(jitAddrs && jitAddrs.length > 0) {
+      alerta('ENDERECOS NO STACK DE FUNCAO JIT: ' + jitAddrs.join(', ') + ' — leak de enderecos de codigo nativo!');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO: ' + e.message);
+  }
+}
+
+function runTest2() {
+  log.textContent = '[TEST 30-B] Structured clone de objeto ciclico via postMessage...\n';
+  try {
+    // Objeto 1: diretamente ciclico
+    var cyclic = { a: 1, b: null };
+    cyclic.b = cyclic; // ciclo direto
+
+    info('Tentando postMessage(cyclic)...');
+    try {
+      postMessage(cyclic, '*');
+      alerta('postMessage(CICLICO) NAO LANCOU EXCECAO — clone estrutural aceitou ciclo!');
+    } catch(e2) {
+      ok('postMessage(ciclico) lancou: ' + e2.message);
+    }
+
+    // Objeto 2: ciclo indireto (profundidade 1000)
+    var chain = { level: 0, next: null };
+    var current = chain;
+    for(var i = 1; i < 1000; i++) {
+      current.next = { level: i, next: null };
+      current = current.next;
+    }
+    current.next = chain; // fechar o ciclo no nivel 999 → 0
+
+    info('Tentando postMessage(chain ciclico de 1000 niveis)...');
+    try {
+      postMessage(chain, '*');
+      alerta('postMessage(CHAIN CICLICO) NAO LANCOU — stack overflow no serializador nao ocorreu!');
+    } catch(e2) {
+      ok('postMessage(chain) lancou: ' + e2.message);
+    }
+
+    // Objeto 3: aninhamento extremo (sem ciclo, mas profundidade > stack do serializador)
+    var deep = {};
+    var node = deep;
+    for(var j = 0; j < 100000; j++) {
+      node.child = { depth: j };
+      node = node.child;
+    }
+    info('Tentando postMessage(objeto com 100k niveis de profundidade)...');
+    try {
+      postMessage(deep, '*');
+      alerta('postMessage(100k NIVEIS) NAO LANCOU — serializador aceitou profundidade extrema!');
+    } catch(e2) {
+      ok('postMessage(100k niveis) lancou: ' + e2.message);
+    }
+
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+
+function runTest3() {
+  log.textContent = '[TEST 30-C] Structured clone com getter que lanca excecao...\n';
+  try {
+    // O structured clone algorithm le propriedades do objeto
+    // Se uma propriedade tem getter que lanca, o serializador deve abortar limpo
+    var evilObj = {
+      safe_a: 'hello',
+      safe_b: new ArrayBuffer(1024),
+      get evil_prop() {
+        info('evil_prop getter chamado durante clone!');
+        forceGC();
+        throw new Error('Getter explodiu durante clone');
+      },
+      safe_c: [1, 2, 3]
+    };
+
+    info('Tentando postMessage(objeto com getter explosivo)...');
+    try {
+      postMessage(evilObj, '*');
+      alerta('postMessage(GETTER EXPLOSIVO) NAO LANCOU — clone nao chamou o getter ou ignorou excecao!');
+    } catch(e2) {
+      ok('postMessage(getter explosivo) lancou: ' + e2.message);
+    }
+
+    // Verificar se o estado do motor ficou valido apos o erro no clone
+    info('Verificando estado do motor apos clone falho...');
+    var testObj = { x: 1.337, arr: new Float64Array(10) };
+    testObj.arr.fill(99.9);
+    try {
+      postMessage(testObj, '*');
+      info('postMessage(objeto valido) apos falha: OK');
+    } catch(e2) {
+      alerta('postMessage(VALIDO) FALHOU APOS CLONE INVALIDO: ' + e2.message + ' — estado do serializador corrompido!');
+    }
+
+    // Objeto com Symbol (nao clonável) misturado com dados validos
+    var withSymbol = {
+      normal: 42,
+      sym: Symbol('test'),
+      buf: new ArrayBuffer(512)
+    };
+    info('Tentando postMessage(objeto com Symbol)...');
+    try {
+      postMessage(withSymbol, '*');
+      info('postMessage(com Symbol) nao lancou — Symbol foi ignorado ou aceito');
+    } catch(e2) {
+      ok('postMessage(com Symbol) lancou: ' + e2.message);
+    }
+
+    // Tentar clone de funcao (nao clonável por spec)
+    var withFn = {
+      data: [1,2,3],
+      fn: function() { return 42; }
+    };
+    info('Tentando postMessage(objeto com funcao)...');
+    try {
+      postMessage(withFn, '*');
+      info('postMessage(com funcao) nao lancou — funcao foi ignorada ou aceita');
+    } catch(e2) {
+      ok('postMessage(com funcao) lancou: ' + e2.message);
+    }
+
+    // Verificar estado final: operacao basica deve funcionar
+    var a = new Float64Array(4);
+    a.set([1.1, 2.2, 3.3, 4.4]);
+    var result = a[0] + a[1] + a[2] + a[3];
+    if(Math.abs(result - 11.0) < 0.001) {
+      ok('Estado do motor OK apos todos os testes de clone. result=' + result);
+    } else {
+      alerta('ESTADO DO MOTOR SUSPEITO: calculo basico retornou ' + result + ' (esperado ~11.0)!');
+    }
+
+  } catch(e) {
+    alerta('EXCECAO GERAL: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>
