@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 31 - postMessage Ciclo: Follow-up Exploit</title></head>
+<body>
+<h2>TEST 31 — postMessage Cíclico: Do Achado ao Primitivo</h2>
+
+<p><b>Achado original (TEST 30):</b> o PS4 aceita <code>postMessage(cíclico)</code> sem lançar
+<code>DataCloneError</code>, o que viola a spec ECMAScript.</p>
+
+<p><b>O que investigamos aqui:</b></p>
+<ul>
+  <li><b>31-A</b> Receber o objeto cíclico no <code>onmessage</code> — o que chega do outro lado?</li>
+  <li><b>31-B</b> Usar o objeto recebido em operações que assumem grafo acíclico (JSON, WeakMap, for..in)</li>
+  <li><b>31-C</b> Ciclo com <code>ArrayBuffer</code> transferable + referência circular → double-free potencial</li>
+  <li><b>31-D</b> Ciclo profundo controlado → mapear limite antes do stack overflow</li>
+</ul>
+
+<pre id="log">Pronto. Execute os testes na ordem A → B → C → D.</pre>
+<button onclick="runA()">31-A: RECEBER CICLO</button>
+<button onclick="runB()">31-B: OPERAR NO CICLO</button>
+<button onclick="runC()">31-C: CICLO + TRANSFER</button>
+<button onclick="runD()">31-D: MAPEAR LIMITE</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+function sep()    { log.textContent += '\n' + '-'.repeat(60); }
+
+// Guardar objetos recebidos via onmessage para 31-B
+var receivedObjects = [];
+
+window.onmessage = function(e) {
+  var obj = e.data;
+  receivedObjects.push(obj);
+  info('onmessage recebeu: typeof=' + typeof obj);
+
+  if(obj === null || obj === undefined) {
+    alerta('OBJETO CHEGOU COMO NULL/UNDEFINED — serializador colapsa o ciclo para null!');
+    return;
+  }
+
+  // Tentar detectar se o ciclo foi preservado
+  try {
+    var isCyclic = false;
+    var seen = [];
+    function detectCycle(o, depth) {
+      if(depth > 1000) { isCyclic = true; return; }
+      if(typeof o !== 'object' || o === null) return;
+      if(seen.indexOf(o) !== -1) { isCyclic = true; return; }
+      seen.push(o);
+      Object.keys(o).forEach(function(k) { detectCycle(o[k], depth+1); });
+    }
+    detectCycle(obj, 0);
+
+    if(isCyclic) {
+      alerta('CICLO PRESERVADO NO OBJETO RECEBIDO VIA onmessage! O deserializador reconstruiu a referencia circular. Grafo ciclico ao vivo na memoria do motor!');
+    } else {
+      info('Ciclo nao detectado no objeto recebido (profundidade segura)');
+    }
+  } catch(ex) {
+    alerta('EXCECAO AO ANALISAR OBJETO RECEBIDO: ' + ex.message + ' — possivel loop infinito interrompido pelo motor!');
+  }
+
+  info('Objeto recebido tem ' + Object.keys(obj).length + ' chaves proprias');
+  Object.keys(obj).forEach(function(k) {
+    info('  chave "' + k + '": typeof=' + typeof obj[k]);
+  });
+};
+
+// ─── 31-A ────────────────────────────────────────────────────────────────────
+function runA() {
+  log.textContent = '[TEST 31-A] Enviar ciclo e observar o que chega no onmessage...\n';
+  sep();
+
+  // Ciclo simples direto
+  var simple = { id: 'simple', value: 42 };
+  simple.self = simple;
+  info('Enviando ciclo simples: {id, value, self: [self]}');
+  try {
+    postMessage(simple, '*');
+    ok('postMessage(simple cyclic) nao lancou — confirmado novamente');
+  } catch(e) {
+    alerta('postMessage(simple) lancou desta vez: ' + e.message);
+  }
+
+  // Ciclo com dados concretos (ArrayBuffer NÃO transferido — só referenciado)
+  var withBuf = {
+    id: 'withBuf',
+    buf: new ArrayBuffer(1024),
+    view: null,
+    next: null
+  };
+  withBuf.view = new Uint32Array(withBuf.buf);
+  withBuf.view[0] = 0xDEADC0DE;
+  withBuf.next = withBuf; // ciclo
+  info('Enviando ciclo com ArrayBuffer (sem transfer)...');
+  try {
+    postMessage(withBuf, '*');
+    ok('postMessage(withBuf cyclic) nao lancou');
+  } catch(e) {
+    alerta('postMessage(withBuf) lancou: ' + e.message);
+  }
+
+  // Ciclo entre dois objetos (A → B → A)
+  var nodeA = { id: 'A', data: new Float64Array([1.1, 2.2, 3.3]) };
+  var nodeB = { id: 'B', data: new Float64Array([4.4, 5.5, 6.6]) };
+  nodeA.next = nodeB;
+  nodeB.next = nodeA;
+  info('Enviando ciclo A→B→A...');
+  try {
+    postMessage(nodeA, '*');
+    ok('postMessage(A→B→A) nao lancou');
+  } catch(e) {
+    alerta('postMessage(A→B→A) lancou: ' + e.message);
+  }
+
+  info('Aguardando onmessage... (objetos recebidos aparecerao acima)');
+}
+
+// ─── 31-B ────────────────────────────────────────────────────────────────────
+function runB() {
+  log.textContent = '[TEST 31-B] Operar em objetos ciclicos recebidos...\n';
+  sep();
+
+  if(receivedObjects.length === 0) {
+    info('Nenhum objeto recebido ainda. Execute 31-A primeiro e aguarde 1s.');
+    return;
+  }
+
+  info('Objetos disponiveis para operacao: ' + receivedObjects.length);
+
+  receivedObjects.forEach(function(obj, idx) {
+    if(!obj || typeof obj !== 'object') return;
+    info('\n--- Objeto #' + idx + ' (id=' + obj.id + ') ---');
+
+    // 1. JSON.stringify em objeto potencialmente ciclico
+    try {
+      var json = JSON.stringify(obj);
+      alerta('JSON.stringify(obj#' + idx + ') NAO LANCOU — produziu: ' + json.slice(0,100));
+    } catch(e) {
+      ok('JSON.stringify lancou corretamente: ' + e.message);
+    }
+
+    // 2. Object.keys / for..in — pode loop infinito se ciclo preservado
+    try {
+      var keys = [];
+      var limit = 0;
+      for(var k in obj) {
+        keys.push(k);
+        if(++limit > 10000) {
+          alerta('for..in ULTRAPASSOU 10000 ITERACOES em obj#' + idx + ' — LOOP INFINITO em objeto ciclico!');
+          break;
+        }
+      }
+      info('for..in produziu ' + keys.length + ' chaves: ' + keys.slice(0,10).join(', '));
+    } catch(e) {
+      alerta('for..in lancou excecao: ' + e.message);
+    }
+
+    // 3. WeakMap com referencia ciclica como chave
+    try {
+      var wm = new WeakMap();
+      wm.set(obj, 'tracked');
+      info('WeakMap.set(obj#' + idx + '): OK | has=' + wm.has(obj));
+      // Criar versao da chave apos GC forcado
+      var pressure = [];
+      for(var i = 0; i < 50000; i++) pressure.push({x:i});
+      pressure = null;
+      info('WeakMap.has(obj#' + idx + ') apos GC: ' + wm.has(obj));
+    } catch(e) {
+      alerta('WeakMap com ciclo lancou: ' + e.message);
+    }
+
+    // 4. structuredClone reverso — tentar clonar o que foi recebido
+    if(typeof structuredClone === 'function') {
+      try {
+        var clone = structuredClone(obj);
+        alerta('structuredClone(obj#' + idx + ' ciclico) NAO LANCOU — clone: ' + typeof clone);
+      } catch(e) {
+        ok('structuredClone(ciclico) lancou: ' + e.message);
+      }
+    } else {
+      info('structuredClone nao disponivel neste browser');
+    }
+
+    // 5. Reenvia o objeto ciclico via postMessage (ciclo de mensagens)
+    try {
+      postMessage(obj, '*');
+      info('Re-postMessage(obj#' + idx + '): nao lancou — ciclo reencaminhado!');
+    } catch(e) {
+      ok('Re-postMessage lancou: ' + e.message);
+    }
+  });
+}
+
+// ─── 31-C ────────────────────────────────────────────────────────────────────
+function runC() {
+  log.textContent = '[TEST 31-C] Ciclo + ArrayBuffer TRANSFERIDO — double-free potencial...\n';
+  sep();
+
+  // Cenario: objeto ciclico onde o ciclo inclui um ArrayBuffer transferable
+  // O clone estrutural faz transfer (zerando o buffer original)
+  // Se o ciclo causa o buffer a aparecer DUAS VEZES na lista de transfer,
+  // o motor pode tentar liberá-lo duas vezes (double-free)
+
+  var buf1 = new ArrayBuffer(1024 * 512); // 512KB
+  var view1 = new Uint32Array(buf1);
+  view1[0] = 0xCAFEBABE;
+
+  var container = {
+    id: 'container',
+    primary: buf1,
+    alias: buf1,   // MESMA REFERENCIA — buffer aparece duas vezes
+    back: null
+  };
+  container.back = container; // ciclo
+
+  info('buf1.byteLength antes: ' + buf1.byteLength);
+  info('container.primary === container.alias: ' + (container.primary === container.alias));
+
+  // Tentar transferir o mesmo buffer DUAS VEZES na lista de transferables
+  try {
+    postMessage(container, '*', [buf1, buf1]); // buf1 duplicado na lista!
+    alerta('postMessage com MESMO BUFFER DUAS VEZES na lista de transfer nao lancou! buf1.byteLength=' + buf1.byteLength + ' — possivel double-transfer/double-free!');
+  } catch(e) {
+    ok('postMessage com buffer duplicado lancou: ' + e.message);
+  }
+
+  info('buf1.byteLength apos tentativa: ' + buf1.byteLength);
+
+  // Caso 2: objeto ciclico com Buffer transferido — motor deve rejeitar ciclo OU transfer
+  var buf2 = new ArrayBuffer(1024 * 256);
+  var cyclic2 = { data: buf2, self: null };
+  cyclic2.self = cyclic2;
+
+  info('\nbuf2.byteLength antes: ' + buf2.byteLength);
+  try {
+    postMessage(cyclic2, '*', [buf2]);
+    alerta('postMessage(CICLICO + TRANSFER) nao lancou! buf2.byteLength=' + buf2.byteLength + ' — motor transferiu buffer de objeto ciclico!');
+  } catch(e) {
+    ok('postMessage(ciclico + transfer) lancou: ' + e.message);
+    info('buf2.byteLength apos erro: ' + buf2.byteLength);
+    if(buf2.byteLength === 0) {
+      alerta('BUFFER FOI ZERADO (transferido) MESMO COM EXCECAO! Motor fez transfer antes de detectar o ciclo — estado inconsistente!');
+    }
+  }
+
+  // Caso 3: dois buffers, cada um referenciando o outro via ciclo
+  var bufA = new ArrayBuffer(65536);
+  var bufB = new ArrayBuffer(65536);
+  var objA = { buf: bufA, partner: null };
+  var objB = { buf: bufB, partner: objA };
+  objA.partner = objB; // ciclo entre dois objetos com buffers distintos
+
+  info('\nTentando postMessage(A⟷B ciclico, [bufA, bufB])...');
+  try {
+    postMessage(objA, '*', [bufA, bufB]);
+    alerta('postMessage(A⟷B + 2 transfers) nao lancou! bufA=' + bufA.byteLength + ' bufB=' + bufB.byteLength);
+  } catch(e) {
+    ok('postMessage(A⟷B + transfers) lancou: ' + e.message);
+    info('bufA.byteLength=' + bufA.byteLength + ' | bufB.byteLength=' + bufB.byteLength);
+    if(bufA.byteLength === 0 && bufB.byteLength > 0) {
+      alerta('APENAS bufA FOI ZERADO: motor transferiu parcialmente antes de detectar ciclo — estado assimetrico!');
+    } else if(bufA.byteLength === 0 && bufB.byteLength === 0) {
+      alerta('AMBOS OS BUFFERS ZERADOS com excecao: motor fez todos os transfers antes de checar o ciclo — dados perdidos!');
+    }
+  }
+}
+
+// ─── 31-D ────────────────────────────────────────────────────────────────────
+function runD() {
+  log.textContent = '[TEST 31-D] Mapear limite exato de profundidade antes do crash...\n';
+  sep();
+  info('Objetivo: encontrar N onde postMessage(depth=N) lanca e postMessage(depth=N-1) nao lanca.');
+  info('Isso define o limite do serializador no PS4 e confirma se e recursivo (stack-based).');
+
+  var lastOk   = 0;
+  var firstErr = -1;
+
+  function buildChain(depth) {
+    var root = { depth: 0, next: null };
+    var cur = root;
+    for(var i = 1; i <= depth; i++) {
+      cur.next = { depth: i, next: null };
+      cur = cur.next;
+    }
+    return root; // SEM ciclo — profundidade pura
+  }
+
+  // Testar profundidades em saltos de 100, depois afinar
+  var steps = [100, 500, 1000, 2000, 3000, 5000, 7500, 10000];
+  var stepIdx = 0;
+
+  function testStep() {
+    if(stepIdx >= steps.length) {
+      sep();
+      info('Varredura completa.');
+      info('Ultima profundidade OK: ' + lastOk);
+      info('Primeira com erro: ' + (firstErr === -1 ? '> ' + steps[steps.length-1] : firstErr));
+      if(firstErr > 0) {
+        info('Limite do serializador: entre ' + lastOk + ' e ' + firstErr + ' nos');
+        alerta('LIMITE DE SERIALIZACAO MAPEADO: entre ' + lastOk + ' e ' + firstErr + ' nos. Profundidade exata indica se serializador usa recursao (stack-based) ou iteracao (heap-based).');
+      }
+      return;
+    }
+
+    var depth = steps[stepIdx];
+    var chain = buildChain(depth);
+    try {
+      postMessage(chain, '*');
+      lastOk = depth;
+      info('depth=' + depth + ': OK (postMessage nao lancou)');
+    } catch(e) {
+      if(firstErr === -1) firstErr = depth;
+      info('depth=' + depth + ': ERRO — ' + e.message);
+    }
+    stepIdx++;
+    setTimeout(testStep, 50);
+  }
+
+  testStep();
+}
+</script>
+</body>
+</html>
