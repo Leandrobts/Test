@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>TEST 01 - TypedArray Memory Bomb</title>
+</head>
+<body>
+
+<h2>TEST 01 - TypedArray Memory Bomb</h2>
+<p>Alvo: OOM / crash via alocacao massiva de Float64Arrays</p>
+<p>API: ArrayBuffer, Float64Array, Uint32Array</p>
+<p>Firmware alvo: todos (memory pressure universal)</p>
+
+<pre id="log">Aguardando inicio...</pre>
+<button onclick="startTest()">INICIAR TESTE</button>
+<button onclick="triggerGC()">FORCAR GC</button>
+
+<script>
+var log = document.getElementById('log');
+var arrays = [];
+var iteration = 0;
+
+function append(msg) {
+  log.textContent += '\n' + msg;
+}
+
+function triggerGC() {
+  // Forcibly trigger GC on JavaScriptCore
+  for (var i = 0; i < 10000; i++) {
+    var tmp = new Array(1000);
+    for (var j = 0; j < 1000; j++) tmp[j] = {};
+  }
+  append('[GC] Ciclo de objetos temporarios criado para pressionar GC');
+}
+
+function startTest() {
+  append('[01] Iniciando alocacao de TypedArrays...');
+  append('[01] Cada bloco = 256MB de Float64Array');
+  append('[01] Objetivo: esgotar heap do processo WebKit');
+
+  var step = 0;
+
+  function allocStep() {
+    try {
+      // 256MB chunk: 32 * 1024 * 1024 doubles = 256MB
+      var size = 32 * 1024 * 1024;
+      var buf = new ArrayBuffer(size * 8);
+      var arr = new Float64Array(buf);
+
+      // Touch every page to force physical allocation (avoid lazy alloc)
+      for (var i = 0; i < size; i += 512) {
+        arr[i] = 1.337 + i;
+      }
+
+      arrays.push(arr);
+      step++;
+      append('[01] Bloco ' + step + ' alocado | Total: ~' + (step * 256) + 'MB');
+
+      // Additional pressure: parallel Uint32Array views
+      var view = new Uint32Array(buf);
+      arrays.push(view);
+
+      setTimeout(allocStep, 50);
+    } catch(e) {
+      append('[01] EXCECAO: ' + e.message);
+      append('[01] Ultimo estado: ' + step + ' blocos = ~' + (step * 256) + 'MB');
+      append('[01] SE O BROWSER NAO CRASHOU: testar com blocos menores em loop mais rapido');
+      // Escalate: try rapid small allocations after OOM hint
+      rapidFire();
+    }
+  }
+
+  allocStep();
+}
+
+function rapidFire() {
+  append('[01] Modo rapid-fire: alocacoes pequenas em serie...');
+  var small = [];
+  try {
+    for (var i = 0; i < 100000; i++) {
+      small.push(new Float64Array(4096));
+    }
+  } catch(e) {
+    append('[01] Rapid-fire excecao: ' + e.message);
+  }
+}
+</script>
+
+</body>
+</html>

