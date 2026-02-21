@@ -2,58 +2,57 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PS4 Fullscreen Blur + document.write Teardown Test</title>
+<title>PS4 Browser Research - Test Suite v2</title>
 </head>
 <body>
 
-<h1>Teardown Audit – START + Blur + document.write</h1>
-<button onclick="start()">START</button>
-<pre id="log"></pre>
+<h1>PS4 Browser Crash Research - FW 13.04</h1>
+<p>User-Agent: <span id="ua"></span></p>
+<hr>
+
+<h2>Batch 1 - Memory / Crash POC (Tests 01-10)</h2>
+<table border="1" cellpadding="6">
+<tr><th>#</th><th>Tecnica</th><th>APIs Alvo</th><th>Sinal Positivo</th><th>Link</th></tr>
+<tr><td>01</td><td>TypedArray Memory Bomb</td><td>Float64Array, ArrayBuffer</td><td>OOM / crash</td><td><a href="test01.html">ABRIR</a></td></tr>
+<tr><td>02</td><td>ArrayBuffer Detach Race</td><td>postMessage, transferable</td><td>Leitura pos-detach</td><td><a href="test02.html">ABRIR</a></td></tr>
+<tr><td>03</td><td>FontFaceSet UAF Pattern</td><td>FontFaceSet, FontFace</td><td>Crash no heap</td><td><a href="test03.html">ABRIR</a></td></tr>
+<tr><td>04</td><td>Canvas 2D Extreme</td><td>Canvas, ImageData</td><td>OOM / backing store crash</td><td><a href="test04.html">ABRIR</a></td></tr>
+<tr><td>05</td><td>Web Worker OOM Flood</td><td>Worker, Blob, transfer</td><td>Thread crash / OOM</td><td><a href="test05.html">ABRIR</a></td></tr>
+<tr><td>06</td><td>DOM Recursive Bomb</td><td>createElement, cloneNode</td><td>Stack overflow</td><td><a href="test06.html">ABRIR</a></td></tr>
+<tr><td>07</td><td>ImageData Heap Spray</td><td>ImageData, history.state</td><td>Uninit memory leak</td><td><a href="test07.html">ABRIR</a></td></tr>
+<tr><td>08</td><td>JSC Type Confusion</td><td>JIT, Array, Getter</td><td>Valor corrompido / crash</td><td><a href="test08.html">ABRIR</a></td></tr>
+<tr><td>09</td><td>Regex + String Bomb</td><td>RegExp, String</td><td>OOM na string heap</td><td><a href="test09.html">ABRIR</a></td></tr>
+<tr><td>10</td><td>rAF + Detached Node Race</td><td>requestAnimationFrame, DOM</td><td>UAF no render</td><td><a href="test10.html">ABRIR</a></td></tr>
+</table>
+
+<br>
+<h2>Batch 2 - Exploit Primitives (Tests 11-20) - sem DoS puro, HackerOne-friendly</h2>
+<table border="1" cellpadding="6">
+<tr><th>#</th><th>Tecnica</th><th>APIs Alvo</th><th>Primitivo Buscado</th><th>Link</th></tr>
+<tr><td>11</td><td>Symbol.species Type Confusion</td><td>TypedArray, Symbol.species</td><td>addrof (double como ponteiro)</td><td><a href="test11.html">ABRIR</a></td></tr>
+<tr><td>12</td><td>Proxy Trap UAF Pattern</td><td>Proxy, Reflect, GC</td><td>Acesso a objeto coletado</td><td><a href="test12.html">ABRIR</a></td></tr>
+<tr><td>13</td><td>Iterator Protocol Abuse</td><td>Symbol.iterator, spread, Array.from</td><td>Type mismatch em spread</td><td><a href="test13.html">ABRIR</a></td></tr>
+<tr><td>14</td><td>Arguments Aliasing JIT</td><td>arguments, non-strict, JIT</td><td>addrof via args[0] alias</td><td><a href="test14.html">ABRIR</a></td></tr>
+<tr><td>15</td><td>setPrototypeOf During Enumeration</td><td>Object.setPrototypeOf, for..in</td><td>OOB read em butterfly stale</td><td><a href="test15.html">ABRIR</a></td></tr>
+<tr><td>16</td><td>Canvas toDataURL Info Leak</td><td>Canvas, toDataURL, PNG</td><td>Pixel leak / premult alpha</td><td><a href="test16.html">ABRIR</a></td></tr>
+<tr><td>17</td><td>WeakRef Zombie / FinalizationRegistry</td><td>WeakMap, WeakRef, GC</td><td>Objeto ressuscitado (UAF)</td><td><a href="test17.html">ABRIR</a></td></tr>
+<tr><td>18</td><td>eval + Function JIT Deopt</td><td>eval, Function(), with</td><td>Deopt race / scope escape</td><td><a href="test18.html">ABRIR</a></td></tr>
+<tr><td>19</td><td>localStorage Boundary Abuse</td><td>localStorage, StorageEvent</td><td>Crash / info leak via storage</td><td><a href="test19.html">ABRIR</a></td></tr>
+<tr><td>20</td><td>String Method Side-Effects</td><td>Symbol.replace, Symbol.split, JIT</td><td>Type confusion em replace/split</td><td><a href="test20.html">ABRIR</a></td></tr>
+</table>
+
+<hr>
+<h2>Guia de leitura de resultados</h2>
+<p><b>Browser fecha:</b> crash confirmado - anote o teste e o botao exato clicado</p>
+<p><b>"EXCECAO" no log:</b> motor detectou anomalia - pode indicar caminho vulneravel</p>
+<p><b>Valor como 0xDEADC0DE como float:</b> possivel primitivo de type confusion (addrof)</p>
+<p><b>Non-zero em buffer zerado:</b> uninit memory leak - potencial info disclosure reportavel</p>
+<p><b>Inconsistencia length/byteLength:</b> type confusion de TypedArray confirmada</p>
+<p><b>Sem efeito:</b> patch aplicado - tentar variante ou proximo teste</p>
 
 <script>
-const log = m => document.getElementById("log").textContent += m + "\n";
-
-let arr;
-let bufferRef;
-
-function dump(tag) {
-    log("=== " + tag + " ===");
-    log("length: " + arr.length);
-    log("byteLength: " + arr.byteLength);
-    log("buffer same: " + (arr.buffer === bufferRef));
-    for (let i = 0; i < arr.length; i++) {
-        log("[" + i + "] = " + arr[i]);
-    }
-}
-
-function start() {
-    log("[*] START pressed");
-
-    arr = new Float64Array(8);
-    for (let i = 0; i < arr.length; i++) {
-        arr[i] = 0xBEEF + i;
-    }
-    bufferRef = arr.buffer;
-
-    dump("INITIAL");
-
-    const el = document.documentElement;
-    if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-
-    window.onblur = () => {
-        log("");
-        log("[!] BLUR detected");
-
-        dump("PRE-document.write");
-
-        log("[*] Triggering document.write teardown");
-
-        document.open();
-        document.write("<html><body><h1>Teardown</h1></body></html>");
-        document.close();
-    };
-}
+document.getElementById('ua').textContent = navigator.userAgent;
 </script>
-
 </body>
 </html>
+
