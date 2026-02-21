@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 16 - Canvas toDataURL Info Leak</title></head>
+<body>
+<h2>TEST 16 - Canvas toDataURL / toBlob Pipeline Abuse</h2>
+<p>Alvo: info leak / crash via pipeline de conversao do canvas</p>
+<p>API: Canvas 2D, toDataURL, createImageBitmap (se disponivel), atob/btoa</p>
+<p>Tecnica 1: desenhar conteudo de memoria (TypedArray com dados nao-inicializados)
+no canvas e extrair via toDataURL - pode vazar bits de heap via pixels.
+Tecnica 2: race entre drawImage e resize para causar leitura OOB no backing store.</p>
+
+<canvas id="c1" width="256" height="256"></canvas>
+<canvas id="c2" width="256" height="256"></canvas>
+<pre id="log">Aguardando...</pre>
+<button onclick="testUninitPixelLeak()">UNINIT PIXEL LEAK</button>
+<button onclick="testDrawImageRace()">DRAWIMAGE RACE</button>
+<button onclick="testDataURLParse()">DATAURL EXTREMO</button>
+<button onclick="testPixelFeedback()">CANVAS FEEDBACK LOOP</button>
+
+<script>
+var log = document.getElementById('log');
+var c1 = document.getElementById('c1');
+var c2 = document.getElementById('c2');
+var ctx1 = c1.getContext('2d');
+var ctx2 = c2.getContext('2d');
+
+function append(msg) { log.textContent += '\n' + msg; }
+
+function forceGC() {
+  var t = []; for (var i = 0; i < 30000; i++) t.push({a:i}); t = null;
+}
+
+function testUninitPixelLeak() {
+  append('[16] Uninit pixel leak: colocar TypedArray nao-inicializado no canvas...');
+  try {
+    // ImageData criado com new ImageData() tem buffer ZERADO pela spec
+    // Mas e se usarmos um ArrayBuffer transferido e recuperado?
+    var W = 256, H = 256;
+    var buf = new ArrayBuffer(W * H * 4);
+    var view = new Uint8Array(buf);
+
+    // Preencher com padrao reconhecivel
+    for (var i = 0; i < view.length; i += 4) {
+      view[i]     = 0xDE; // R
+      view[i + 1] = 0xAD; // G
+      view[i + 2] = 0xBE; // B
+      view[i + 3] = 0xEF; // A
+    }
+
+    // Criar ImageData a partir do ArrayBuffer manualmente
+    // Verificar se o canvas preserva exatamente os bytes
+    var imgData = new ImageData(new Uint8ClampedArray(buf), W, H);
+    ctx1.putImageData(imgData, 0, 0);
+
+    // Ler de volta
+    var readBack = ctx1.getImageData(0, 0, W, H);
+
+    // Comparar: qualquer diferenca pode indicar processamento/normalizacao dos pixels
+    var diffs = 0;
+    for (var j = 0; j < view.length; j++) {
+      if (readBack.data[j] !== view[j]) diffs++;
+    }
+    append('[16] Pixels escritos: ' + view.length/4);
+    append('[16] Pixels com diferenca apos putImageData/getImageData: ' + diffs);
+
+    // Verificar canal alpha especificamente (premultiplied alpha pode vazar informacao)
+    var alphaIssues = 0;
+    for (var k = 3; k < readBack.data.length; k += 4) {
+      if (readBack.data[k] !== 0xEF) alphaIssues++;
+    }
+    append('[16] Alpha channel issues (premult?): ' + alphaIssues);
+
+    // Agora extrair via toDataURL e analisar o PNG resultante
+    var dataUrl = c1.toDataURL('image/png');
+    append('[16] toDataURL length: ' + dataUrl.length);
+
+    // Decodificar base64 e verificar header PNG
+    var b64 = dataUrl.split(',')[1];
+    var binary = atob(b64);
+    append('[16] PNG binary length: ' + binary.length);
+    append('[16] PNG header: ' + binary.slice(0, 8).split('').map(function(c) {
+      return '0x' + c.charCodeAt(0).toString(16).padStart(2,'0');
+    }).join(' '));
+
+    // Verificar se pixels DE -> EF estao preservados no PNG
+    var preserved = binary.indexOf('\xDE\xAD\xBE\xEF');
+    append('[16] Padrao DEADBEEF no PNG: ' + (preserved >= 0 ? 'ENCONTRADO em offset ' + preserved : 'nao encontrado (compressao PNG)'));
+
+  } catch(e) {
+    append('[16] Uninit pixel leak EXCECAO: ' + e.message);
+  }
+}
+
+function testDrawImageRace() {
+  append('[16] drawImage race: resize do canvas durante drawImage...');
+  try {
+    // Desenhar no c2
+    ctx2.fillStyle = 'red';
+    ctx2.fillRect(0, 0, 256, 256);
+    ctx2.fillStyle = 'blue';
+    ctx2.fillRect(64, 64, 128, 128);
+
+    var frames = 0;
+    var TOTAL = 2000;
+
+    // Loop de drawImage + resize rapido
+    function raceLoop() {
+      if (frames >= TOTAL) {
+        append('[16] Race loop completo: ' + frames + ' frames');
+        return;
+      }
+
+      // Desenhar o c2 no c1
+      try {
+        ctx1.drawImage(c2, 0, 0, c1.width, c1.height);
+      } catch(e) {
+        append('[16] drawImage excecao em frame ' + frames + ': ' + e.message);
+      }
+
+      // Resize c2 imediatamente (invalida o backing store durante drawImage?)
+      if (frames % 5 === 0) {
+        var newW = 128 + (frames % 128);
+        var newH = 128 + (frames % 128);
+        c2.width = newW;
+        c2.height = newH;
+        // Redesenhar c2 no novo tamanho
+        ctx2 = c2.getContext('2d');
+        ctx2.fillStyle = frames % 2 === 0 ? 'green' : 'yellow';
+        ctx2.fillRect(0, 0, newW, newH);
+      }
+
+      // Ler pixels imediatamente apos drawImage de canvas que foi resized
+      if (frames % 100 === 0) {
+        var px = ctx1.getImageData(0, 0, 1, 1).data;
+        append('[16] Frame ' + frames + ': pixel[0,0] = rgba(' + Array.from(px).join(',') + ')');
+      }
+
+      frames++;
+      requestAnimationFrame(raceLoop);
+    }
+
+    requestAnimationFrame(raceLoop);
+
+  } catch(e) {
+    append('[16] DrawImage race EXCECAO: ' + e.message);
+  }
+}
+
+function testDataURLParse() {
+  append('[16] toDataURL extremo: qualidades e formatos de borda...');
+
+  var tests = [
+    { type: 'image/jpeg', quality: 0.0,   label: 'jpeg q=0.0 (minima)' },
+    { type: 'image/jpeg', quality: 1.0,   label: 'jpeg q=1.0 (maxima)' },
+    { type: 'image/jpeg', quality: -1,    label: 'jpeg q=-1 (invalido)' },
+    { type: 'image/jpeg', quality: 2.0,   label: 'jpeg q=2.0 (acima do max)' },
+    { type: 'image/png',  quality: 0.5,   label: 'png (quality ignorada)' },
+    { type: 'image/webp', quality: 0.5,   label: 'webp (pode nao suportar)' },
+    { type: 'image/bmp',  quality: undefined, label: 'bmp' },
+    { type: 'image/gif',  quality: undefined, label: 'gif' },
+    { type: 'text/html',  quality: undefined, label: 'tipo invalido' },
+    { type: '',           quality: undefined, label: 'tipo vazio' },
+  ];
+
+  // Desenhar algo no canvas
+  ctx1.fillStyle = '#ff0000';
+  ctx1.fillRect(0, 0, 256, 256);
+  ctx1.fillStyle = '#00ff00';
+  ctx1.fillRect(64, 64, 128, 128);
+
+  for (var t = 0; t < tests.length; t++) {
+    try {
+      var test = tests[t];
+      var url;
+      if (test.quality !== undefined) {
+        url = c1.toDataURL(test.type, test.quality);
+      } else {
+        url = c1.toDataURL(test.type);
+      }
+      var format = url.split(';')[0].split(':')[1];
+      append('[16] ' + test.label + ': formato=' + format + ' | len=' + url.length);
+    } catch(e) {
+      append('[16] ' + tests[t].label + ' EXCECAO: ' + e.message);
+    }
+  }
+
+  // Canvas de tamanho zero
+  try {
+    var tiny = document.createElement('canvas');
+    tiny.width = 0; tiny.height = 0;
+    var tinyCtx = tiny.getContext('2d');
+    var tinyUrl = tiny.toDataURL();
+    append('[16] Canvas 0x0 toDataURL: ' + tinyUrl);
+  } catch(e) {
+    append('[16] Canvas 0x0 EXCECAO: ' + e.message);
+  }
+}
+
+function testPixelFeedback() {
+  append('[16] Canvas feedback loop: canvas desenha em si mesmo...');
+  try {
+    var W = 256, H = 256;
+    ctx1.fillStyle = 'rgba(100, 150, 200, 0.5)';
+    ctx1.fillRect(0, 0, W, H);
+
+    var iter = 0;
+    var MAX = 500;
+    var hash = 0;
+
+    function feedbackLoop() {
+      if (iter >= MAX) {
+        append('[16] Feedback loop completo: ' + iter + ' iters | hash=' + hash.toString(16));
+        return;
+      }
+
+      // Desenhar o canvas em si mesmo - comportamento undefined
+      try {
+        ctx1.drawImage(c1, 0, 0);
+      } catch(e) {
+        append('[16] drawImage(self) excecao em iter ' + iter + ': ' + e.message);
+        return;
+      }
+
+      // Aplicar transformacoes
+      ctx1.globalAlpha = 0.99;
+      ctx1.translate(0.1, 0.1);
+      ctx1.rotate(0.001);
+
+      if (iter % 50 === 0) {
+        // Amostrar pixel para detectar corrupcao
+        var px = ctx1.getImageData(W/2, H/2, 1, 1).data;
+        var sample = (px[0] << 16) | (px[1] << 8) | px[2];
+        hash ^= sample;
+        append('[16] Iter ' + iter + ': pixel central = 0x' + sample.toString(16));
+      }
+
+      iter++;
+      requestAnimationFrame(feedbackLoop);
+    }
+
+    feedbackLoop();
+  } catch(e) {
+    append('[16] Pixel feedback EXCECAO: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

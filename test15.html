@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>TEST 15 - Prototype Swap During Enumeration</title></head>
+<body>
+<h2>TEST 15 - setPrototypeOf Durante Enumeracao</h2>
+<p>Alvo: crash / comportamento indefinido ao trocar prototype de objeto durante for..in / Object.keys</p>
+<p>API: Object.setPrototypeOf, Object.keys, for..in, Reflect.ownKeys</p>
+<p>Tecnica: o motor enumera as propriedades de um objeto e faz cache do prototype chain.
+Trocar o __proto__ durante a enumeracao invalida este cache. Em JSC isto pode levar
+a leitura de slot de propriedade no butterfly errado (OOB read) ou seguir ponteiro stale.</p>
+
+<pre id="log">Aguardando...</pre>
+<button onclick="testForInSwap()">FOR..IN PROTO SWAP</button>
+<button onclick="testReflectOwnKeys()">REFLECT.OWNKEYS SWAP</button>
+<button onclick="testInheritedEnum()">ENUM HERDADO</button>
+<button onclick="testJSONSwap()">JSON STRINGIFY SWAP</button>
+
+<script>
+var log = document.getElementById('log');
+function append(msg) { log.textContent += '\n' + msg; }
+
+function forceGC() {
+  var t = [];
+  for (var i = 0; i < 30000; i++) t.push({a:i, b:'x'.repeat(10)});
+  t = null;
+}
+
+function testForInSwap() {
+  append('[15] for..in com setPrototypeOf durante a enumeracao...');
+
+  try {
+    // Proto A: tem 50 propriedades
+    var protoA = {};
+    for (var i = 0; i < 50; i++) protoA['propA_' + i] = i * 10;
+
+    // Proto B: tem propriedades diferentes
+    var protoB = {};
+    for (var i = 0; i < 50; i++) protoB['propB_' + i] = i * 100;
+
+    // Objeto target com propriedades proprias
+    var target = Object.create(protoA);
+    for (var i = 0; i < 20; i++) target['own_' + i] = i;
+
+    var enumerated = [];
+    var swapped = false;
+    var swapAt = 10; // Trocar na 10a prop enumerada
+
+    for (var key in target) {
+      enumerated.push(key);
+
+      if (enumerated.length === swapAt && !swapped) {
+        swapped = true;
+        // Trocar prototype durante o loop
+        Object.setPrototypeOf(target, protoB);
+        forceGC();
+        append('[15] Prototype trocado de protoA para protoB na prop #' + swapAt);
+        append('[15] Prox props deveriam ser de protoB...');
+      }
+    }
+
+    append('[15] Total propriedades enumeradas: ' + enumerated.length);
+    append('[15] Props de protoA encontradas: ' + enumerated.filter(function(k) { return k.startsWith('propA_'); }).length);
+    append('[15] Props de protoB encontradas: ' + enumerated.filter(function(k) { return k.startsWith('propB_'); }).length);
+    append('[15] Props proprias encontradas: ' + enumerated.filter(function(k) { return k.startsWith('own_'); }).length);
+
+    // Verificar o proto atual
+    append('[15] prototype atual: ' + (Object.getPrototypeOf(target) === protoB ? 'protoB' : 'outro'));
+
+  } catch(e) {
+    append('[15] for..in swap EXCECAO: ' + e.message);
+  }
+}
+
+function testReflectOwnKeys() {
+  append('[15] Reflect.ownKeys com prototype swap durante getter...');
+  try {
+    var protoC = {};
+    var protoD = { evil: 'injected' };
+
+    var swappedObj = null;
+
+    // Usar getter que faz side-effect quando acessado durante enumeracao
+    var obj = Object.create(protoC);
+    for (var i = 0; i < 30; i++) {
+      if (i === 15) {
+        // Definir getter com side-effect na prop do meio
+        Object.defineProperty(obj, 'prop_' + i, {
+          get: function() {
+            if (!swappedObj) {
+              swappedObj = this;
+              Object.setPrototypeOf(this, protoD);
+              forceGC();
+              append('[15] Getter: prototype trocado para protoD durante Reflect.ownKeys');
+            }
+            return 'gotcha_' + i;
+          },
+          enumerable: true,
+          configurable: true
+        });
+      } else {
+        obj['prop_' + i] = i;
+      }
+    }
+
+    // Reflect.ownKeys enumera apenas props proprias (nao herdadas)
+    // Mas getters podem ter side-effects ao serem invocados
+    var ownKeys = Reflect.ownKeys(obj);
+    append('[15] Reflect.ownKeys length: ' + ownKeys.length);
+    append('[15] Proto trocado? ' + (swappedObj !== null));
+
+    // Agora acessar as props - proto foi trocado
+    var vals = ownKeys.map(function(k) {
+      try { return obj[k]; }
+      catch(e2) { return 'ERR:' + e2.message; }
+    });
+    append('[15] Valores com proto trocado: ' + vals.slice(12, 18).join(', '));
+    append('[15] obj.evil (de protoD): ' + obj.evil);
+
+  } catch(e) {
+    append('[15] Reflect.ownKeys EXCECAO: ' + e.message);
+  }
+}
+
+function testInheritedEnum() {
+  append('[15] Enumeracao de propriedades herdadas em cadeia longa...');
+  try {
+    // Construir chain de prototipos com 1000 niveis
+    var chain = [{}];
+    for (var i = 0; i < 1000; i++) {
+      var next = Object.create(chain[chain.length - 1]);
+      next['level_' + i] = i;
+      chain.push(next);
+    }
+
+    var deepObj = chain[chain.length - 1];
+    append('[15] Objeto com 1000 niveis de proto criado');
+
+    // Enumerar TODAS as propriedades herdadas
+    var allKeys = [];
+    for (var k in deepObj) {
+      allKeys.push(k);
+
+      // Na metade da chain, trocar o proto do objeto base
+      if (allKeys.length === 500) {
+        Object.setPrototypeOf(chain[0], {injected: 0xCAFE});
+        append('[15] Proto da base da chain trocado em allKeys.length=500');
+      }
+    }
+
+    append('[15] Total props enumeradas: ' + allKeys.length);
+    append('[15] injected acessivel? ' + deepObj.injected);
+
+  } catch(e) {
+    append('[15] Inherited enum EXCECAO: ' + e.message);
+  }
+}
+
+function testJSONSwap() {
+  append('[15] JSON.stringify com prototype swap em toJSON...');
+  try {
+    var protoBase = {};
+    for (var i = 0; i < 20; i++) protoBase['base_' + i] = i;
+
+    var protoEvil = {};
+    for (var i = 0; i < 20; i++) protoEvil['evil_' + i] = 'INJECTED_' + i;
+
+    var jsonObj = Object.create(protoBase);
+    for (var i = 0; i < 10; i++) jsonObj['own_' + i] = i;
+
+    var toJsonCalled = 0;
+
+    // toJSON e chamado pelo JSON.stringify
+    jsonObj.toJSON = function() {
+      toJsonCalled++;
+      append('[15] toJSON #' + toJsonCalled + ' chamado');
+
+      if (toJsonCalled === 1) {
+        // Na primeira chamada de toJSON, trocar prototype
+        Object.setPrototypeOf(this, protoEvil);
+        forceGC();
+        append('[15] Prototype trocado dentro de toJSON');
+
+        // Retornar um objeto que referencia this (com proto agora diferente)
+        return this;
+      }
+      return '[recursao evitada]';
+    };
+
+    try {
+      var json = JSON.stringify(jsonObj);
+      append('[15] JSON.stringify result length: ' + json.length);
+      append('[15] Contem evil? ' + (json.indexOf('INJECTED') !== -1));
+      append('[15] Contem base? ' + (json.indexOf('base_') !== -1));
+    } catch(je) {
+      append('[15] JSON.stringify EXCECAO: ' + je.message);
+    }
+
+    append('[15] toJSON chamado ' + toJsonCalled + ' vez(es)');
+    append('[15] Proto atual de jsonObj: ' + (Object.getPrototypeOf(jsonObj) === protoEvil ? 'protoEvil' : 'outro'));
+
+  } catch(e) {
+    append('[15] JSON swap EXCECAO: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>
