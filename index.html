@@ -2,26 +2,26 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PoC #1 — Sanity Checks (ArrayBuffer Leak)</title>
+<title>PoC #2 — Sanity Checks (JIT Type Confusion)</title>
 <style>
   body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
-  h2 { color: #f90; }
-  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #f90; white-space: pre-wrap; }
+  h2 { color: #4af; }
+  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #4af; white-space: pre-wrap; }
   .ok    { color: #4f4; }
   .alert { color: #f44; font-weight: bold; }
   .info  { color: #aaa; }
   .warn  { color: #fa4; }
-  button { background: #f90; color: #000; border: none; padding: 10px 24px;
+  button { background: #4af; color: #000; border: none; padding: 10px 24px;
            font-size: 14px; font-weight: bold; cursor: pointer; margin: 4px; }
   #log { margin-top: 10px; display: block; }
 </style>
 </head>
 <body>
 
-<h2>PoC #1 — Sanity Checks (ArrayBuffer / Transfer Semantics)</h2>
+<h2>PoC #2 — Sanity Checks (JIT / Coerção de Tipos)</h2>
 <pre>
-Objetivo: Validar se o vazamento reportado não é apenas o comportamento 
-legítimo e esperado da especificação StructuredSerializeWithTransfer.
+Objetivo: Validar se as primitivas de Type Confusion não são apenas
+mecanismos seguros de fallback (Deopt) ou coerções padrão da spec (ToNumber/ToString).
 </pre>
 
 <button onclick="runSanityChecks()">▶ EXECUTAR SANITY CHECKS</button>
@@ -41,69 +41,109 @@ function alert_(m){ line('alert', '[VULN]  ' + m); }
 function warn(m)  { line('warn',  '[WARN]  ' + m); }
 function sep()    { line('info',  '─'.repeat(60)); }
 
+var WARMUP = 60000;
+
+function buildGadget(phase, payloadRef) {
+  return {
+    [Symbol.replace]: function(str) {
+      if (phase[0] === 'warmup') return str; 
+      return payloadRef[0]; // Retorna diretamente o payload no ataque
+    }
+  };
+}
+
+function strLen(s, handler) {
+  return s.replace(handler, '').length;
+}
+
+function readViaLength(arr, len) {
+  return arr[len >>> 0];
+}
+
 async function runSanityChecks() {
   log.textContent = '';
-  info('=== INICIANDO SANITY CHECKS (ArrayBuffer) ===');
+  info('=== INICIANDO SANITY CHECKS (JIT) ===');
   sep();
 
-  // 1. Criando buffer de teste
-  var secretBuf = new ArrayBuffer(256);
-  var view = new Uint8Array(secretBuf);
-  view[0] = 0x42; // Magic byte
-  info('Buffer criado. byteLength = ' + secretBuf.byteLength);
+  var phase = ['warmup'];
+  var payload = [0];
+  var handler = buildGadget(phase, payload);
+  var base = 'test string';
 
-  // 2. Criando o ciclo e transferindo
-  var cyclic = { buf: secretBuf, self: null };
-  cyclic.self = cyclic;
-
-  var leakedBuf = await new Promise(function(resolve) {
-    var prev = window.onmessage;
-    window.onmessage = function(e) {
-      window.onmessage = prev;
-      resolve(e.data.buf);
-    };
-    postMessage(cyclic, '*', [secretBuf]);
-  });
-
+  info('Realizando warmup JIT (' + WARMUP + ' iterações)...');
+  for (var w = 0; w < WARMUP; w++) strLen(base, handler);
+  info('Warmup concluído.');
   sep();
-  info('--- Check 1: Acesso de Leitura no Sender ---');
-  info('Sender byteLength: ' + secretBuf.byteLength);
-  try {
-    // Tenta ler o conteúdo após o transfer (neuter)
-    var testRead = new Uint8Array(secretBuf);
-    if (testRead.length === 0) {
-      ok('Sender buffer tem view length 0 (Neutered / Detached).');
-    } else {
-      alert_('FALHA: Sender ainda consegue ver tamanho > 0! Tamanho: ' + testRead.length);
-    }
-  } catch(e) {
-    ok('Sender buffer lançou exceção ao tentar criar view (Detached). Exceção: ' + e.message);
+
+  // --- Check 1: Coerção ToString (ECMAScript Spec) ---
+  info('--- Check 1: Teste de coerção ToString() vs .length ---');
+  payload[0] = {
+    toString: function() { return "ABC"; }, // length será 3 após coerção correta
+    length: 99999
+  };
+  phase[0] = 'attack';
+  var coercionResult = strLen(base, handler);
+  phase[0] = 'warmup';
+
+  info('Resultado: ' + coercionResult);
+  if (coercionResult === 3) {
+    ok('Engine respeitou ToString() ignorando a propriedade .length falsa (Spec Compliant). Não é Type Confusion.');
+  } else if (coercionResult === 99999) {
+    alert_('Atenção: Engine leu .length diretamente do objeto sem coerção prévia. (Vulnerabilidade potencial confirmada).');
+  } else {
+    warn('Resultado inesperado: ' + coercionResult);
   }
 
   sep();
-  info('--- Check 2: Comportamento Sem Ciclo (Baseline) ---');
-  var normalBuf = new ArrayBuffer(64);
-  var baselineResult = await new Promise(function(resolve) {
-    var prev = window.onmessage;
-    window.onmessage = function(e) {
-      window.onmessage = prev;
-      resolve(e.data);
-    };
-    postMessage(normalBuf, '*', [normalBuf]);
-  });
-
-  info('Baseline (Sem ciclo) Sender byteLength   = ' + normalBuf.byteLength);
-  info('Baseline (Sem ciclo) Receiver byteLength = ' + (baselineResult ? baselineResult.byteLength : 'null'));
+  // --- Check 2: Estabilidade e Deopt ---
+  info('--- Check 2: Teste de estabilidade / Deopt (100 execuções) ---');
+  payload[0] = { toString: function(){ return "X"; }, length: 777 }; 
+  phase[0] = 'attack';
+  
+  let successes = 0;
+  let deopts = 0;
+  
+  for(let i = 0; i < 100; i++) {
+    let res = strLen(base, handler);
+    if (res === 777) successes++;
+    else deopts++;
+  }
+  phase[0] = 'warmup';
+  
+  info('Retornou fake length (777): ' + successes + ' vezes');
+  info('Retornou fallback seguro    : ' + deopts + ' vezes');
+  
+  if (deopts > 0 && successes > 0) {
+    warn('A Primitiva é instável. O JIT está fazendo deopt (Bailout) intermitentemente.');
+  } else if (deopts === 100) {
+    ok('JIT fez deopt consistentemente. Falha mitigada pela engine.');
+  } else if (successes === 100) {
+    alert_('A primitiva é altamente estável. Type Confusion mantida na JIT.');
+  }
 
   sep();
-  info('--- CONCLUSÃO DO SANITY CHECK ---');
-  if (secretBuf.byteLength === 0 && normalBuf.byteLength === 0 && 
-      leakedBuf.byteLength > 0 && baselineResult.byteLength > 0) {
-    ok('O comportamento com ciclo é IDÊNTICO ao comportamento sem ciclo.');
-    ok('O "vazamento" reportado é, na verdade, a funcionalidade correta e segura do Structured Clone.');
-    ok('O sender foi corretamente invalidado (neutered) em ambos os casos.');
+  // --- Check 3: Desmascarando a Primitiva C (OOB Falso) ---
+  info('--- Check 3: Desmascarando a Primitiva C (OOB Falso) ---');
+  var f64 = new Float64Array(8);
+  for (var i = 0; i < 8; i++) f64[i] = (i + 1) * 1.1111;
+
+  info('Warmup para readViaLength...');
+  for (var w = 0; w < WARMUP; w++) readViaLength(f64, 3);
+
+  var dummyObj = { magic: 0x1234 };
+  var resultC = readViaLength(f64, dummyObj);
+  
+  info('O valor no índice 0 de f64 é: ' + f64[0]);
+  info('O retorno da função com objeto foi: ' + resultC);
+  
+  if (resultC === f64[0]) {
+    ok('Explicação: NaN >>> 0 resulta em 0.');
+    ok('O motor leu f64[0]. Isso NÃO é um vazamento OOB nem Type Confusion de ponteiro.');
+    ok('É apenas o fallback matemático de ToNumber(object) resultando em NaN e virando índice 0.');
+  } else if (resultC === undefined) {
+    ok('O retorno foi undefined (índice fora do limite natural). Comportamento seguro.');
   } else {
-    warn('Comportamento anômalo detectado. Pode haver uma vulnerabilidade real.');
+    warn('Valor lido: ' + resultC + '. Pode requerer investigação.');
   }
 }
 </script>
