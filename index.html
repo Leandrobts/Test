@@ -2,77 +2,109 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Sanity Test #1 — ArrayBuffer Transfer (NO FALSE POSITIVE)</title>
+<title>PoC #1 — Sanity Checks (ArrayBuffer Leak)</title>
 <style>
   body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
-  h2 { color: #0f0; }
-  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #0f0; white-space: pre-wrap; }
-  .ok    { color: #0f0; font-weight: bold; }
+  h2 { color: #f90; }
+  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #f90; white-space: pre-wrap; }
+  .ok    { color: #4f4; }
   .alert { color: #f44; font-weight: bold; }
   .info  { color: #aaa; }
-  button { background: #0f0; color: #000; border: none; padding: 12px 28px; font-size: 15px; font-weight: bold; cursor: pointer; }
+  .warn  { color: #fa4; }
+  button { background: #f90; color: #000; border: none; padding: 10px 24px;
+           font-size: 14px; font-weight: bold; cursor: pointer; margin: 4px; }
+  #log { margin-top: 10px; display: block; }
 </style>
 </head>
 <body>
-<h2>Sanity Test #1 — ArrayBuffer Leak via Cyclic postMessage</h2>
+
+<h2>PoC #1 — Sanity Checks (ArrayBuffer / Transfer Semantics)</h2>
 <pre>
-Objetivo: verificar se o transfer de ArrayBuffer em objeto cíclico é spec-compliant.
-✅ Modern browser (Chrome/Firefox/etc) → SANITY PASSED
-❌ PS4 FW 13.04                  → VULNERABLE
+Objetivo: Validar se o vazamento reportado não é apenas o comportamento 
+legítimo e esperado da especificação StructuredSerializeWithTransfer.
 </pre>
 
-<button onclick="runSanity()">▶ RUN SANITY TEST #1</button>
-<pre id="log">Aperte o botão...</pre>
+<button onclick="runSanityChecks()">▶ EXECUTAR SANITY CHECKS</button>
+<pre id="log">Pressione o botão para iniciar os testes de sanidade.</pre>
 
 <script>
 var log = document.getElementById('log');
-function line(cls, msg) { var s = document.createElement('span'); s.className = cls; s.textContent = msg + '\n'; log.appendChild(s); }
+function line(cls, msg) {
+  var s = document.createElement('span');
+  s.className = cls;
+  s.textContent = msg + '\n';
+  log.appendChild(s);
+}
 function info(m)  { line('info',  '[INFO]  ' + m); }
-function ok(m)    { line('ok',    '✅ ' + m); }
-function alert_(m){ line('alert', '❌ ' + m); }
-function sep()    { line('info',  '─'.repeat(70)); }
+function ok(m)    { line('ok',    '[OK]    ' + m); }
+function alert_(m){ line('alert', '[VULN]  ' + m); }
+function warn(m)  { line('warn',  '[WARN]  ' + m); }
+function sep()    { line('info',  '─'.repeat(60)); }
 
-function leakBuffer(buf) {
-  return new Promise(resolve => {
-    var cyclic = { buf: buf, self: null }; cyclic.self = cyclic;
+async function runSanityChecks() {
+  log.textContent = '';
+  info('=== INICIANDO SANITY CHECKS (ArrayBuffer) ===');
+  sep();
+
+  // 1. Criando buffer de teste
+  var secretBuf = new ArrayBuffer(256);
+  var view = new Uint8Array(secretBuf);
+  view[0] = 0x42; // Magic byte
+  info('Buffer criado. byteLength = ' + secretBuf.byteLength);
+
+  // 2. Criando o ciclo e transferindo
+  var cyclic = { buf: secretBuf, self: null };
+  cyclic.self = cyclic;
+
+  var leakedBuf = await new Promise(function(resolve) {
     var prev = window.onmessage;
-    window.onmessage = e => {
-      if (!e.data?.buf) return;
+    window.onmessage = function(e) {
       window.onmessage = prev;
       resolve(e.data.buf);
     };
-    postMessage(cyclic, '*', [buf]);
+    postMessage(cyclic, '*', [secretBuf]);
   });
-}
 
-async function runSanity() {
-  log.textContent = '';
-  info('=== Sanity Test #1 — ArrayBuffer Transfer Compliance ===');
   sep();
-
-  var secretBuf = new ArrayBuffer(256);
-  var view = new Uint32Array(secretBuf);
-  view[0] = 0xDEADC0DE; view[1] = 0xCAFEBABE; view[2] = 0x13371337; view[3] = 0xBEEFBEEF;
-
-  info('Buffer secreto criado (256 bytes)');
-  var leakedBuf = await leakBuffer(secretBuf);
-
-  info('Sender após transfer: byteLength = ' + secretBuf.byteLength);
-
-  if (leakedBuf && leakedBuf.byteLength > 0) {
-    sep();
-    alert_('VULNERABILITY CONFIRMED');
-    alert_('Receiver recebeu cópia VIVA do ArrayBuffer!');
-    alert_('→ PS4 FW 13.04 é vulnerável (CWE-668)');
-  } else {
-    sep();
-    ok('SANITY PASSED');
-    ok('Receiver recebeu buffer neutered (byteLength = 0)');
-    ok('Comportamento 100% conforme HTML Living Standard §2.7.5');
-    ok('NENHUM falso positivo neste sistema');
+  info('--- Check 1: Acesso de Leitura no Sender ---');
+  info('Sender byteLength: ' + secretBuf.byteLength);
+  try {
+    // Tenta ler o conteúdo após o transfer (neuter)
+    var testRead = new Uint8Array(secretBuf);
+    if (testRead.length === 0) {
+      ok('Sender buffer tem view length 0 (Neutered / Detached).');
+    } else {
+      alert_('FALHA: Sender ainda consegue ver tamanho > 0! Tamanho: ' + testRead.length);
+    }
+  } catch(e) {
+    ok('Sender buffer lançou exceção ao tentar criar view (Detached). Exceção: ' + e.message);
   }
+
   sep();
-  info('Teste finalizado. Rode também no Chrome/Firefox para confirmar.');
+  info('--- Check 2: Comportamento Sem Ciclo (Baseline) ---');
+  var normalBuf = new ArrayBuffer(64);
+  var baselineResult = await new Promise(function(resolve) {
+    var prev = window.onmessage;
+    window.onmessage = function(e) {
+      window.onmessage = prev;
+      resolve(e.data);
+    };
+    postMessage(normalBuf, '*', [normalBuf]);
+  });
+
+  info('Baseline (Sem ciclo) Sender byteLength   = ' + normalBuf.byteLength);
+  info('Baseline (Sem ciclo) Receiver byteLength = ' + (baselineResult ? baselineResult.byteLength : 'null'));
+
+  sep();
+  info('--- CONCLUSÃO DO SANITY CHECK ---');
+  if (secretBuf.byteLength === 0 && normalBuf.byteLength === 0 && 
+      leakedBuf.byteLength > 0 && baselineResult.byteLength > 0) {
+    ok('O comportamento com ciclo é IDÊNTICO ao comportamento sem ciclo.');
+    ok('O "vazamento" reportado é, na verdade, a funcionalidade correta e segura do Structured Clone.');
+    ok('O sender foi corretamente invalidado (neutered) em ambos os casos.');
+  } else {
+    warn('Comportamento anômalo detectado. Pode haver uma vulnerabilidade real.');
+  }
 }
 </script>
 </body>
