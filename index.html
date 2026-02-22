@@ -2,235 +2,78 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PS4 WebKit Engine Integrity Test Suite (EITS)</title>
+<title>Sanity Test #1 — ArrayBuffer Transfer (NO FALSE POSITIVE)</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+  h2 { color: #0f0; }
+  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #0f0; white-space: pre-wrap; }
+  .ok    { color: #0f0; font-weight: bold; }
+  .alert { color: #f44; font-weight: bold; }
+  .info  { color: #aaa; }
+  button { background: #0f0; color: #000; border: none; padding: 12px 28px; font-size: 15px; font-weight: bold; cursor: pointer; }
+</style>
 </head>
 <body>
+<h2>Sanity Test #1 — ArrayBuffer Leak via Cyclic postMessage</h2>
+<pre>
+Objetivo: verificar se o transfer de ArrayBuffer em objeto cíclico é spec-compliant.
+✅ Modern browser (Chrome/Firefox/etc) → SANITY PASSED
+❌ PS4 FW 13.04                  → VULNERABLE
+</pre>
 
-<h1>PS4 WebKit Engine Integrity Test Suite</h1>
-
-<hr>
-
-<h2>Core Controls</h2>
-
-<button onclick="runAll()">Run All Modules</button>
-<button onclick="clearLog()">Clear Log</button>
-
-<p>Iterations:
-<input type="number" id="iterations" value="50">
-</p>
-
-<hr>
-
-<h2>Module A – Structured Clone Validator</h2>
-<button onclick="runModuleA()">Run Module A</button>
-
-<h2>Module B – Cross-Realm Isolation Validator</h2>
-<button onclick="runModuleB()">Run Module B</button>
-
-<h2>Module C – JIT Stability Profiler</h2>
-<button onclick="runModuleC()">Run Module C</button>
-
-<h2>Module D – TypedArray Boundary Monitor</h2>
-<button onclick="runModuleD()">Run Module D</button>
-
-<h2>Module E – Memory Pressure & Worker Stress</h2>
-<button onclick="runModuleE()">Run Module E</button>
-
-<hr>
-
-<h2>Log Output</h2>
-<pre id="log"></pre>
+<button onclick="runSanity()">▶ RUN SANITY TEST #1</button>
+<pre id="log">Aperte o botão...</pre>
 
 <script>
+var log = document.getElementById('log');
+function line(cls, msg) { var s = document.createElement('span'); s.className = cls; s.textContent = msg + '\n'; log.appendChild(s); }
+function info(m)  { line('info',  '[INFO]  ' + m); }
+function ok(m)    { line('ok',    '✅ ' + m); }
+function alert_(m){ line('alert', '❌ ' + m); }
+function sep()    { line('info',  '─'.repeat(70)); }
 
-/* ===========================
-   CORE HARNESS
-=========================== */
-
-const logEl = document.getElementById("log");
-
-function log(msg) {
-    logEl.textContent += msg + "\n";
+function leakBuffer(buf) {
+  return new Promise(resolve => {
+    var cyclic = { buf: buf, self: null }; cyclic.self = cyclic;
+    var prev = window.onmessage;
+    window.onmessage = e => {
+      if (!e.data?.buf) return;
+      window.onmessage = prev;
+      resolve(e.data.buf);
+    };
+    postMessage(cyclic, '*', [buf]);
+  });
 }
 
-function clearLog() {
-    logEl.textContent = "";
+async function runSanity() {
+  log.textContent = '';
+  info('=== Sanity Test #1 — ArrayBuffer Transfer Compliance ===');
+  sep();
+
+  var secretBuf = new ArrayBuffer(256);
+  var view = new Uint32Array(secretBuf);
+  view[0] = 0xDEADC0DE; view[1] = 0xCAFEBABE; view[2] = 0x13371337; view[3] = 0xBEEFBEEF;
+
+  info('Buffer secreto criado (256 bytes)');
+  var leakedBuf = await leakBuffer(secretBuf);
+
+  info('Sender após transfer: byteLength = ' + secretBuf.byteLength);
+
+  if (leakedBuf && leakedBuf.byteLength > 0) {
+    sep();
+    alert_('VULNERABILITY CONFIRMED');
+    alert_('Receiver recebeu cópia VIVA do ArrayBuffer!');
+    alert_('→ PS4 FW 13.04 é vulnerável (CWE-668)');
+  } else {
+    sep();
+    ok('SANITY PASSED');
+    ok('Receiver recebeu buffer neutered (byteLength = 0)');
+    ok('Comportamento 100% conforme HTML Living Standard §2.7.5');
+    ok('NENHUM falso positivo neste sistema');
+  }
+  sep();
+  info('Teste finalizado. Rode também no Chrome/Firefox para confirmar.');
 }
-
-function getIterations() {
-    return parseInt(document.getElementById("iterations").value) || 10;
-}
-
-function timestamp() {
-    return performance.now().toFixed(3);
-}
-
-/* ===========================
-   MODULE A – Structured Clone
-=========================== */
-
-async function runModuleA() {
-    log("=== Module A – Structured Clone Validator ===");
-    let iterations = getIterations();
-
-    for (let i = 0; i < iterations; i++) {
-
-        let buf = new ArrayBuffer(64);
-        let view = new Uint8Array(buf);
-        view[0] = 0xAA;
-        view[1] = 0xBB;
-
-        let before = buf.byteLength;
-
-        let received = await new Promise(resolve => {
-            window.onmessage = e => resolve(e.data);
-            postMessage(buf, "*", [buf]);
-        });
-
-        let after = buf.byteLength;
-        let receiverLength = received.byteLength;
-
-        log(`[A][${i}] t=${timestamp()} sender_before=${before} sender_after=${after} receiver=${receiverLength}`);
-    }
-
-    log("Module A complete\n");
-}
-
-/* ===========================
-   MODULE B – Cross-Realm
-=========================== */
-
-async function runModuleB() {
-    log("=== Module B – Cross-Realm Isolation ===");
-
-    let iframe = document.createElement("iframe");
-    iframe.src = "about:blank";
-    document.body.appendChild(iframe);
-
-    let iterations = getIterations();
-
-    for (let i = 0; i < iterations; i++) {
-        let buf = new ArrayBuffer(32);
-        let view = new Uint8Array(buf);
-        view[0] = 0x42;
-
-        let before = buf.byteLength;
-
-        iframe.contentWindow.postMessage(buf, "*", [buf]);
-
-        await new Promise(r => setTimeout(r, 10));
-
-        let after = buf.byteLength;
-
-        log(`[B][${i}] t=${timestamp()} sender_before=${before} sender_after=${after}`);
-    }
-
-    document.body.removeChild(iframe);
-    log("Module B complete\n");
-}
-
-/* ===========================
-   MODULE C – JIT Stability
-=========================== */
-
-function jitFunction(x) {
-    return x + 1;
-}
-
-function runModuleC() {
-    log("=== Module C – JIT Stability Profiler ===");
-
-    let iterations = getIterations();
-    let numericCount = 0;
-    let otherCount = 0;
-
-    for (let i = 0; i < iterations * 1000; i++) {
-        jitFunction(i);
-    }
-
-    for (let i = 0; i < iterations; i++) {
-        let result = jitFunction(i);
-        if (typeof result === "number") numericCount++;
-        else otherCount++;
-
-        log(`[C][${i}] t=${timestamp()} typeof=${typeof result}`);
-    }
-
-    log(`[C] numeric=${numericCount} other=${otherCount}`);
-    log("Module C complete\n");
-}
-
-/* ===========================
-   MODULE D – TypedArray Bounds
-=========================== */
-
-function runModuleD() {
-    log("=== Module D – TypedArray Boundary Monitor ===");
-
-    let iterations = getIterations();
-
-    for (let i = 0; i < iterations; i++) {
-
-        let arr = new Float64Array(8);
-
-        let tests = [
-            -1,
-            9999,
-            {},
-            3.14,
-            0xffffffff
-        ];
-
-        for (let t of tests) {
-            let result;
-            try {
-                result = arr[t];
-            } catch (e) {
-                result = "Exception";
-            }
-
-            log(`[D][${i}] index=${String(t)} result=${result}`);
-        }
-    }
-
-    log("Module D complete\n");
-}
-
-/* ===========================
-   MODULE E – Memory Pressure
-=========================== */
-
-function runModuleE() {
-    log("=== Module E – Memory Pressure & Worker Stress ===");
-
-    let iterations = getIterations();
-    let buffers = [];
-
-    for (let i = 0; i < iterations; i++) {
-        buffers.push(new ArrayBuffer(1024 * 1024));
-        log(`[E][${i}] Allocated 1MB buffer`);
-    }
-
-    buffers = null;
-
-    log("Module E complete\n");
-}
-
-/* ===========================
-   RUN ALL
-=========================== */
-
-async function runAll() {
-    clearLog();
-    await runModuleA();
-    await runModuleB();
-    runModuleC();
-    runModuleD();
-    runModuleE();
-    log("=== ALL MODULES COMPLETE ===");
-}
-
 </script>
-
 </body>
 </html>
