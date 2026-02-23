@@ -1,0 +1,1872 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes12 — HTMLMediaElement / ShadowDOM / AudioContext / TreeWalker</title></head>
+<body>
+
+<p><strong>VETORES NOVOS PS4 NO-JIT (Testes12 — T276-T300):</strong><br>
+HTMLMediaElement UAF | Shadow DOM attach/detach | DocumentFragment adoptNode |<br>
+TreeWalker + DOM mutation | CSS custom props | CSSStyleSheet insertRule/deleteRule |<br>
+AudioContext GC | PerformanceObserver | Blob/File API | URLSearchParams |<br>
+HTMLCanvasElement UAF | WebStorage + navigation | :has() recalc | adoptNode type confusion | Comment/PI UAF</p>
+
+<video id="vid12" style="display:none" muted></video>
+<audio id="aud12" style="display:none"></audio>
+<div id="dom12" style="display:none"></div>
+<div id="shadow12" style="display:none"></div>
+<canvas id="canvas12" width="64" height="64" style="display:none"></canvas>
+<div id="perf12" style="display:none"></div>
+
+<button onclick="runAll()">RODAR TODOS</button><br><br>
+<button onclick="t276()">T276</button>
+<button onclick="t277()">T277</button>
+<button onclick="t278()">T278</button>
+<button onclick="t279()">T279</button>
+<button onclick="t280()">T280</button>
+<button onclick="t281()">T281</button>
+<button onclick="t282()">T282</button>
+<button onclick="t283()">T283</button>
+<button onclick="t284()">T284</button>
+<button onclick="t285()">T285</button>
+<button onclick="t286()">T286</button>
+<button onclick="t287()">T287</button>
+<button onclick="t288()">T288</button>
+<button onclick="t289()">T289</button>
+<button onclick="t290()">T290</button>
+<button onclick="t291()">T291</button>
+<button onclick="t292()">T292</button>
+<button onclick="t293()">T293</button>
+<button onclick="t294()">T294</button>
+<button onclick="t295()">T295</button>
+<button onclick="t296()">T296</button>
+<button onclick="t297()">T297</button>
+<button onclick="t298()">T298</button>
+<button onclick="t299()">T299</button>
+<button onclick="t300()">T300</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC identico ao PSFree real
+const MB = 1024 * 1024;
+function gc(){
+  for(let i = 0; i < 0x10; i++) new Uint8Array(4 * MB);
+}
+function gcHeavy(){
+  for(let i = 0; i < 0x40; i++) new ArrayBuffer(0x1000000);
+}
+
+function runAll(){
+  log('=== RODAR TODOS T276-T300: inicio ===');
+  t276(); t277(); t278(); t279(); t280();
+  t281(); t282(); t283(); t284(); t285();
+  t286(); t287(); t288(); t289(); t290();
+  t291(); t292(); t293(); t294(); t295();
+  t296(); t297(); t298(); t299(); t300();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// ─── T276 ─────────────────────────────────────────────────────────────────────
+// HTMLMediaElement: src change + load() + GC durante evento (MediaPlayer UAF)
+// O WebCore::MediaPlayer e alocado em fastMalloc; troca de src + GC durante
+// canplay/loadeddata pode liberar o MediaPlayer enquanto callbacks ainda rodam.
+function t276(){
+  log('Teste 276: inicio');
+  try {
+    const vid = document.getElementById('vid12');
+    if(!vid) throw new Error('vid12 nao encontrado');
+
+    let loadCount = 0;
+    function mediaHandler(evt){
+      loadCount++;
+      try {
+        vid.removeEventListener(evt.type, mediaHandler);
+        // Trocar src durante o evento — MediaPlayer e recriado, o antigo liberado
+        vid.src = '';
+        gc();
+        // Tentar acessar propriedades apos liberacao do MediaPlayer
+        try { vid.readyState; } catch(e){}
+        try { vid.networkState; } catch(e){}
+        try { vid.currentTime; } catch(e){}
+        try { vid.duration; } catch(e){}
+        try { vid.buffered; } catch(e){}
+        // Re-atribuir src para proxima iteracao
+        vid.src = 'data:video/mp4;base64,AAAAHG';
+      } catch(e){}
+    }
+
+    for(let evt of ['loadstart','loadedmetadata','loadeddata','canplay','error']){
+      vid.addEventListener(evt, mediaHandler);
+    }
+
+    // Disparar load com URL invalida (triggera error rapidamente)
+    for(let i = 0; i < 15; i++){
+      try {
+        vid.src = 'data:video/mp4;base64,AAAI' + i;
+        vid.load();
+        gc();
+      } catch(e){}
+    }
+
+    // Remover elemento durante evento de media
+    const vid2 = document.createElement('video');
+    vid2.muted = true;
+    document.body.appendChild(vid2);
+    vid2.addEventListener('loadstart', function(){
+      try { vid2.parentNode && vid2.parentNode.removeChild(vid2); gc(); } catch(e){}
+      try { vid2.src; vid2.networkState; } catch(e){}
+    });
+    try { vid2.src = 'data:video/mp4;base64,AAAAB'; vid2.load(); } catch(e){}
+  } catch(e){}
+  log('Teste 276: fim');
+}
+
+// ─── T277 ─────────────────────────────────────────────────────────────────────
+// Shadow DOM: attachShadow + detach implícito + GC (ShadowRoot UAF)
+// Quando um elemento com ShadowRoot é removido do DOM e o GC coleta o host,
+// o ShadowRoot (que é um Document) pode ter ponteiros stale para o host.
+function t277(){
+  log('Teste 277: inicio');
+  try {
+    const area = document.getElementById('shadow12');
+    area.style.display = 'block';
+
+    // Criar hosts com shadow roots
+    const hosts = [];
+    const shadows = [];
+    for(let i = 0; i < 30; i++){
+      const host = document.createElement('div');
+      host.id = 'shadow_host_' + i;
+      area.appendChild(host);
+      try {
+        const shadow = host.attachShadow({ mode: i % 2 === 0 ? 'open' : 'closed' });
+        // Construir arvore no shadow
+        const inner = document.createElement('div');
+        inner.innerHTML = '<span>shadow_content_' + i + '</span><slot></slot>';
+        shadow.appendChild(inner);
+        // Adicionar estilos ao shadow
+        const style = document.createElement('style');
+        style.textContent = ':host { display: block; color: red; } span { font-weight: bold; }';
+        shadow.appendChild(style);
+        hosts.push(host);
+        shadows.push(shadow);
+      } catch(e){}
+    }
+
+    // Adicionar conteudo slotted
+    for(let host of hosts){
+      const slotted = document.createElement('p');
+      slotted.textContent = 'slotted_' + host.id;
+      host.appendChild(slotted);
+    }
+
+    // Forcar layout com shadow DOM
+    let _ = area.offsetHeight;
+
+    // Remover hosts (e portanto seus ShadowRoots) + GC
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    gcHeavy(); // GC: hosts coletados; ShadowRoot tem stale ptr para host
+
+    // Acessar shadow roots pos-coleta dos hosts
+    for(let shadow of shadows){
+      try { shadow.host; }                    catch(e){}
+      try { shadow.mode; }                    catch(e){}
+      try { shadow.innerHTML; }               catch(e){}
+      try { shadow.querySelector('span'); }   catch(e){}
+      try { shadow.querySelectorAll('*'); }   catch(e){}
+      // Tentar mutar shadow pos-remocao
+      try {
+        const el = document.createElement('div');
+        shadow.appendChild(el);
+        gc();
+        shadow.removeChild(el);
+      } catch(e){}
+    }
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 277: fim');
+}
+
+// ─── T278 ─────────────────────────────────────────────────────────────────────
+// Shadow DOM: slot + slotchange event + DOM mutation + GC
+// slotchange dispara quando os slotted nodes mudam; durante o evento,
+// remover o host pode causar UAF no HTMLSlotElement interno.
+function t278(){
+  log('Teste 278: inicio');
+  try {
+    const area = document.getElementById('shadow12');
+    area.style.display = 'block';
+
+    const host = document.createElement('div');
+    area.appendChild(host);
+
+    let shadow = null;
+    try { shadow = host.attachShadow({ mode: 'open' }); } catch(e){}
+    if(!shadow) { area.style.display = 'none'; log('Teste 278: fim (sem shadow support)'); return; }
+
+    const slot = document.createElement('slot');
+    slot.name = 'content';
+    shadow.appendChild(slot);
+
+    let slotChangeN = 0;
+    slot.addEventListener('slotchange', function(evt){
+      slotChangeN++;
+      try {
+        const assigned = slot.assignedNodes({ flatten: true });
+        gc();
+        // Remover host durante slotchange — slot tem stale ptr para host
+        if(slotChangeN === 3 && host.parentNode){
+          area.removeChild(host);
+          gc();
+          area.appendChild(host); // reinserir
+        }
+        // Acessar nos assignados pos-GC
+        for(let node of assigned){
+          try { node.textContent; }   catch(e){}
+          try { node.parentNode; }    catch(e){}
+        }
+      } catch(e){}
+    });
+
+    // Adicionar/remover slotted nodes para triggerar slotchange
+    for(let i = 0; i < 15; i++){
+      try {
+        const p = document.createElement('p');
+        p.slot = 'content';
+        p.textContent = 'slotted_' + i;
+        host.appendChild(p);
+        gc();
+        host.removeChild(p);
+        gc();
+      } catch(e){}
+    }
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 278: fim');
+}
+
+// ─── T279 ─────────────────────────────────────────────────────────────────────
+// DocumentFragment: adoptNode + GC (node ownership change UAF)
+// adoptNode remove o no do documento original e o adota no novo documento;
+// GC durante a adocao pode liberar o no ainda sendo usado na operacao.
+function t279(){
+  log('Teste 279: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Criar iframe com documento proprio
+    const iframe = document.createElement('iframe');
+    iframe.src = 'about:blank';
+    area.appendChild(iframe);
+
+    let iDoc = null;
+    try { iDoc = iframe.contentDocument; } catch(e){}
+    if(!iDoc){ area.style.display = 'none'; log('Teste 279: fim (sem iDoc)'); return; }
+
+    // Criar nos no documento do iframe
+    const nodes = [];
+    for(let i = 0; i < 20; i++){
+      const div = iDoc.createElement('div');
+      div.textContent = 'adopted_node_' + i;
+      div.setAttribute('data-source', 'iframe');
+      iDoc.body.appendChild(div);
+      nodes.push(div);
+    }
+
+    // Adotar nos do iframe para o documento principal + GC
+    const adopted = [];
+    for(let node of nodes){
+      try {
+        let adoptedNode = document.adoptNode(node); // muda o ownerDocument
+        gc(); // GC durante adocao: node pode ser coletado pelo GC do iframe
+        adoptedNode.setAttribute('data-adopted', 'true');
+        area.appendChild(adoptedNode);
+        adopted.push(adoptedNode);
+      } catch(e){}
+    }
+
+    // Liberar o iframe — os nos foram adotados, mas iDoc ainda existe
+    try { area.removeChild(iframe); } catch(e){}
+    gcHeavy(); // GC: iDoc coletado; nos adotados podem ter stale ownerDocument
+
+    // Acessar nos adotados apos coleta do iDoc
+    for(let node of adopted){
+      try { node.ownerDocument; }     catch(e){}
+      try { node.textContent; }       catch(e){}
+      try { node.getAttribute('data-source'); } catch(e){}
+      try {
+        const child = document.createElement('span');
+        node.appendChild(child);
+        gc();
+        node.removeChild(child);
+      } catch(e){}
+    }
+
+    // Limpar
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 279: fim');
+}
+
+// ─── T280 ─────────────────────────────────────────────────────────────────────
+// TreeWalker: nextNode() + DOM mutation durante travessia + GC
+// TreeWalker mantém ponteiro para o currentNode; mutar o DOM durante a
+// travessia pode invalidar o currentNode causando UAF.
+function t280(){
+  log('Teste 280: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Construir arvore para travessia
+    const root = document.createElement('div');
+    for(let i = 0; i < 50; i++){
+      const el = document.createElement('div');
+      el.className = 'walker-node';
+      el.textContent = 'node_' + i;
+      // Adicionar filhos
+      for(let j = 0; j < 3; j++){
+        const child = document.createElement('span');
+        child.textContent = 'child_' + i + '_' + j;
+        el.appendChild(child);
+      }
+      root.appendChild(el);
+    }
+    area.appendChild(root);
+
+    const allNodes = Array.from(root.querySelectorAll('*'));
+
+    // TreeWalker com NodeFilter personalizado
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_ELEMENT,
+      {
+        acceptNode: function(node){
+          gc(); // GC em cada step do filtro
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      },
+      false
+    );
+
+    // Traversal com mutacao do DOM durante a caminhada
+    let walkCount = 0;
+    let currentNode = walker.nextNode();
+    while(currentNode && walkCount < 200){
+      walkCount++;
+      try {
+        currentNode.textContent; // acessar node atual
+        // A cada 10 steps, remover o next sibling do node atual
+        if(walkCount % 10 === 0){
+          const next = currentNode.nextElementSibling;
+          if(next && next.parentNode){
+            next.parentNode.removeChild(next);
+            gc(); // GC: walker pode ter currentNode -> removedNode
+          }
+        }
+      } catch(e){}
+      try { currentNode = walker.nextNode(); } catch(e){}
+    }
+
+    // NodeIterator (similar ao TreeWalker)
+    try {
+      const iter = document.createNodeIterator(
+        area,
+        NodeFilter.SHOW_ALL,
+        null,
+        false
+      );
+      let iterNode = iter.nextNode();
+      let iterCount = 0;
+      while(iterNode && iterCount < 100){
+        iterCount++;
+        try { iterNode.nodeType; } catch(e){}
+        if(iterCount === 30){
+          // Mutar durante iteracao
+          const tmp = document.createElement('div');
+          area.insertBefore(tmp, area.firstChild);
+          gc();
+          area.removeChild(tmp);
+        }
+        try { iterNode = iter.nextNode(); } catch(e){}
+      }
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 280: fim');
+}
+
+// ─── T281 ─────────────────────────────────────────────────────────────────────
+// CSS Custom Properties (CSS Variables): --var change + GC durante recalc
+// A Engine de recalculo de estilo acompanha dependencias de variaveis CSS;
+// mudar uma variavel durante o recalc (via JS no meio do estilo) pode causar
+// UAF nas estruturas de dependencia internas.
+function t281(){
+  log('Teste 281: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Injetar folha de estilos com variaveis CSS complexas
+    const style = document.createElement('style');
+    style.textContent = `
+      #dom12 { --base-color: #ff0000; --base-size: 16px; --computed: calc(var(--base-size) * 2); }
+      #dom12 .css-var-child {
+        color: var(--base-color);
+        font-size: var(--computed);
+        margin: calc(var(--base-size) + 2px);
+        padding: var(--base-size);
+        border: 1px solid var(--base-color);
+      }
+      #dom12 .css-var-child::before {
+        content: var(--label, "default");
+        color: var(--base-color);
+      }
+    `;
+    document.head.appendChild(style);
+
+    // Criar elementos que dependem das variaveis
+    const children = [];
+    for(let i = 0; i < 30; i++){
+      const el = document.createElement('div');
+      el.className = 'css-var-child';
+      el.textContent = 'var_consumer_' + i;
+      // Variaveis locais que herdam do pai
+      el.style.setProperty('--label', '"item_' + i + '"');
+      area.appendChild(el);
+      children.push(el);
+    }
+
+    // Forcar layout inicial
+    let _ = area.offsetHeight;
+
+    // Mudar variaveis em loop com GC — triggera recalculo em cascata
+    const colors = ['#ff0000','#00ff00','#0000ff','#ffff00','#ff00ff','#00ffff','#ffffff'];
+    const sizes  = ['10px','14px','16px','20px','24px','32px','48px'];
+
+    for(let i = 0; i < 40; i++){
+      try {
+        area.style.setProperty('--base-color', colors[i % colors.length]);
+        area.style.setProperty('--base-size', sizes[i % sizes.length]);
+        gc(); // GC durante recalculo em cascata
+        _ = area.offsetHeight; // forcar layout — completa o recalc
+        // Remover elemento durante a dependencia da variavel
+        if(i === 20 && children[15] && children[15].parentNode){
+          area.removeChild(children[15]);
+          gc(); // GC: estrutura de dependencia da var pode ter stale ptr
+          area.appendChild(children[15]);
+        }
+      } catch(e){}
+    }
+
+    // Mudar variavel no proprio elemento filho (override local)
+    for(let child of children){
+      try {
+        child.style.setProperty('--base-color', '#' + Math.floor(Math.random()*0xFFFFFF).toString(16).padStart(6,'0'));
+        gc();
+        child.style.removeProperty('--base-color');
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 281: fim');
+}
+
+// ─── T282 ─────────────────────────────────────────────────────────────────────
+// CSSStyleSheet: insertRule/deleteRule durante iteracao + GC
+// A CSSOM mantem uma lista de CSSRule em fastMalloc; inserir/deletar
+// durante a iteracao da lista pode causar OOB ou UAF.
+function t282(){
+  log('Teste 282: inicio');
+  try {
+    const style = document.createElement('style');
+    document.head.appendChild(style);
+    const sheet = style.sheet;
+    if(!sheet) throw new Error('sheet nao disponivel');
+
+    // Inserir muitas regras
+    const rules = [];
+    for(let i = 0; i < 100; i++){
+      try {
+        const idx = sheet.insertRule(
+          '.rule_' + i + ' { color: rgb(' + i + ',' + (100-i) + ',128); font-size: ' + (10+i%20) + 'px; }',
+          sheet.cssRules.length
+        );
+        rules.push(idx);
+      } catch(e){}
+    }
+
+    gc();
+
+    // Iterar cssRules e deletar durante a iteracao
+    let delCount = 0;
+    for(let i = sheet.cssRules.length - 1; i >= 0; i--){
+      try {
+        let rule = sheet.cssRules[i]; // referencia a CSSRule
+        sheet.deleteRule(i);          // liberar a CSSRule
+        gc();                          // GC: rule pode ser liberada
+        // Acessar rule apos deleteRule — CSSRule liberada
+        try { rule.cssText; }          catch(e){}
+        try { rule.selectorText; }     catch(e){}
+        try { rule.style; }            catch(e){}
+        delCount++;
+        if(delCount >= 50) break;
+      } catch(e){}
+    }
+
+    // Inserir regras com seletores complexos (stress no CSS parser)
+    const complexSelectors = [
+      ':is(div, span, p):not(.excluded):nth-child(2n+1) > *',
+      ':has(> div + span ~ p)',
+      '.a:is(.b:is(.c:is(.d)))',
+      '[data-complex~="value"][data-other|="prefix"]',
+      ':where(:root, :host, :scope) > :first-child ~ :last-child',
+    ];
+    for(let sel of complexSelectors){
+      try {
+        const idx = sheet.insertRule(sel + ' { opacity: 0.5; }', 0);
+        gc();
+        let rule = sheet.cssRules[0];
+        sheet.deleteRule(0);
+        gc();
+        rule.cssText; // stale ptr
+      } catch(e){}
+    }
+
+    // @media rule + deleteRule
+    try {
+      const idx = sheet.insertRule('@media (max-width: 9999px) { .media-test { display: block; } }', 0);
+      gc();
+      let mediaRule = sheet.cssRules[0];
+      sheet.deleteRule(0);
+      gc();
+      try { mediaRule.cssRules; }    catch(e){}
+      try { mediaRule.media.mediaText; } catch(e){}
+    } catch(e){}
+
+    try { document.head.removeChild(style); } catch(e){}
+  } catch(e){}
+  log('Teste 282: fim');
+}
+
+// ─── T283 ─────────────────────────────────────────────────────────────────────
+// AudioContext: createBuffer + createBufferSource + GC (WebAudio UAF)
+// WebAudio aloca AudioBuffer em fastMalloc; GC durante a reproducao
+// pode liberar o buffer enquanto o AudioContext ainda processa amostras.
+function t283(){
+  log('Teste 283: inicio');
+  try {
+    let ctx = null;
+    try { ctx = new AudioContext(); } catch(e){}
+    if(!ctx){ try { ctx = new webkitAudioContext(); } catch(e){} }
+    if(!ctx){ log('Teste 283: fim (sem AudioContext)'); return; }
+
+    // Criar buffers de audio de varios tamanhos
+    const buffers = [];
+    for(let i = 0; i < 10; i++){
+      try {
+        const buf = ctx.createBuffer(2, 44100 * (i + 1), 44100); // N segundos de audio
+        // Preencher com dados
+        const left  = buf.getChannelData(0);
+        const right = buf.getChannelData(1);
+        for(let j = 0; j < left.length; j++) left[j] = Math.sin(j * 440 / 44100);
+        buffers.push(buf);
+      } catch(e){}
+    }
+
+    gc();
+
+    // Criar sources e conectar ao destino
+    const sources = [];
+    for(let buf of buffers){
+      try {
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        sources.push({ src, buf });
+      } catch(e){}
+    }
+
+    // Liberar buffers + GC (sources ainda tem referencia ao buffer via C++)
+    buffers.length = 0;
+    gc();
+
+    // Iniciar reproducao dos sources cujos buffers podem estar liberados
+    for(let { src, buf } of sources){
+      try { src.start(0); } catch(e){}
+      gc();
+      try { src.stop(0); } catch(e){}
+      gc();
+    }
+
+    // Liberar sources e GC
+    sources.length = 0;
+    gcHeavy();
+
+    // Criar AnalyserNode + GC
+    try {
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      const timeData = new Uint8Array(analyser.frequencyBinCount);
+      const freqData = new Float32Array(analyser.frequencyBinCount);
+      analyser.connect(ctx.destination);
+      gc();
+      analyser.getByteTimeDomainData(timeData);
+      analyser.getFloatFrequencyData(freqData);
+      analyser.disconnect();
+      gc();
+    } catch(e){}
+
+    // Fechar o contexto
+    try { ctx.close(); } catch(e){}
+  } catch(e){}
+  log('Teste 283: fim');
+}
+
+// ─── T284 ─────────────────────────────────────────────────────────────────────
+// PerformanceObserver: callback + DOM mutation + GC
+// PerformanceObserver usa uma fila de PerformanceEntry alocados em fastMalloc;
+// DOM mutation durante o callback pode causar UAF nos entries.
+function t284(){
+  log('Teste 284: inicio');
+  try {
+    const area = document.getElementById('perf12');
+    area.style.display = 'block';
+
+    // Criar elementos para gerar PerformanceEntry (paint, layout)
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:' + (i*5) + 'px;height:' + (i*5) + 'px;background:hsl(' + (i*18) + ',50%,50%);';
+      el.textContent = 'perf_target_' + i;
+      area.appendChild(el);
+    }
+
+    // PerformanceObserver para varios tipos de entrada
+    let obsCallbackN = 0;
+    const allEntries = [];
+    let po = null;
+    try {
+      po = new PerformanceObserver(function(list){
+        obsCallbackN++;
+        const entries = list.getEntries();
+        for(let e of entries) allEntries.push(e);
+        gc(); // GC durante callback — PerformanceEntry pode ser liberada
+
+        // DOM mutation durante o callback
+        if(obsCallbackN % 3 === 0){
+          while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+          gc();
+          for(let i = 0; i < 5; i++){
+            const el = document.createElement('div');
+            el.style.width = i*10 + 'px';
+            area.appendChild(el);
+          }
+        }
+
+        // Acessar entries pos-GC
+        for(let entry of allEntries){
+          try { entry.name; }       catch(e){}
+          try { entry.duration; }   catch(e){}
+          try { entry.startTime; }  catch(e){}
+          try { entry.entryType; }  catch(e){}
+        }
+      });
+
+      po.observe({ entryTypes: ['paint','resource','navigation','mark','measure'] });
+    } catch(e){}
+
+    // Gerar entries via performance.mark e performance.measure
+    for(let i = 0; i < 20; i++){
+      try {
+        performance.mark('mark_' + i);
+        gc();
+        if(i > 0) performance.measure('measure_' + i, 'mark_' + (i-1), 'mark_' + i);
+        gc();
+      } catch(e){}
+    }
+
+    // Forcar layout para gerar paint entries
+    let _ = area.offsetHeight;
+
+    setTimeout(function(){
+      try { if(po) po.disconnect(); } catch(e){}
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+      // Acessar entries liberadas apos disconnect
+      for(let entry of allEntries){
+        try { entry.name; entry.duration; } catch(e){}
+      }
+    }, 500);
+  } catch(e){}
+  log('Teste 284: fim');
+}
+
+// ─── T285 ─────────────────────────────────────────────────────────────────────
+// Blob/File API: FileReader + abort + GC (FileReader UAF)
+// FileReader aloca um buffer para o resultado em fastMalloc;
+// abortar o FileReader durante a leitura + GC pode causar UAF.
+function t285(){
+  log('Teste 285: inicio');
+  try {
+    // Criar Blobs de varios tamanhos
+    const blobs = [];
+    for(let size of [1024, 65536, 1024*1024, 4*1024*1024]){
+      const data = new Uint8Array(size);
+      for(let i = 0; i < data.length; i++) data[i] = i % 256;
+      blobs.push(new Blob([data], { type: 'application/octet-stream' }));
+    }
+
+    // FileReader com abort durante onloadstart
+    for(let blob of blobs){
+      try {
+        const reader = new FileReader();
+        let readResult = null;
+        reader.onloadstart = function(){
+          gc();
+          reader.abort(); // abortar imediatamente
+          gc();
+        };
+        reader.onabort = function(){
+          readResult = reader.result; // null ou buffer parcial
+          gc();
+          // Tentar usar result apos abort
+          try { if(readResult) readResult.byteLength; } catch(e){}
+        };
+        reader.onerror = function(){ gc(); };
+        reader.onload = function(){
+          readResult = reader.result;
+          gc();
+        };
+        reader.readAsArrayBuffer(blob);
+        gc();
+      } catch(e){}
+    }
+
+    // Blob URL + revoke + acesso
+    for(let blob of blobs){
+      try {
+        const url = URL.createObjectURL(blob);
+        gc();
+        URL.revokeObjectURL(url); // revogar URL — o Blob pode ser coletado
+        gc();
+        // Tentar criar novo URL apos revoke (pode causar double-free)
+        try { URL.createObjectURL(blob); } catch(e){}
+      } catch(e){}
+    }
+
+    // Blob.slice() + GC — slices compartilham dados com o Blob original
+    const bigBlob = blobs[2]; // 1MB
+    const slices = [];
+    for(let i = 0; i < 10; i++){
+      slices.push(bigBlob.slice(i * 1024, (i+1) * 1024));
+    }
+    blobs.length = 0; // soltar blobs originais
+    gc();
+    // Acessar slices cujos dados originais podem estar liberados
+    for(let slice of slices){
+      try { slice.size; } catch(e){}
+      try { slice.type; } catch(e){}
+      const r2 = new FileReader();
+      r2.onload = function(){ gc(); r2.result && r2.result.byteLength; };
+      try { r2.readAsArrayBuffer(slice); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 285: fim');
+}
+
+// ─── T286 ─────────────────────────────────────────────────────────────────────
+// URL / URLSearchParams: mutation durante iteracao + GC
+// URLSearchParams.forEach() itera a lista de parametros em C++;
+// mutar os parametros durante a iteracao pode causar OOB.
+function t286(){
+  log('Teste 286: inicio');
+  try {
+    // Criar URLSearchParams com muitos parametros
+    const params = new URLSearchParams();
+    for(let i = 0; i < 100; i++){
+      params.append('key_' + i, 'value_' + i + '_' + 'x'.repeat(i));
+    }
+    gc();
+
+    let forEachN = 0;
+    // forEach com mutacao durante iteracao
+    try {
+      params.forEach(function(value, key, p){
+        forEachN++;
+        gc();
+        // Mutar durante iteracao
+        if(forEachN === 30) p.delete('key_50');
+        if(forEachN === 50) p.append('injected', 'during_iteration');
+        if(forEachN === 70) p.set('key_10', 'modified_during_iteration');
+      });
+    } catch(e){}
+
+    // for-of (usa Symbol.iterator do URLSearchParams)
+    let iterN = 0;
+    try {
+      for(let [k, v] of params){
+        iterN++;
+        gc();
+        if(iterN === 20) params.delete(k); // deletar durante for-of
+        if(iterN > 150) break; // limite de seguranca
+      }
+    } catch(e){}
+
+    // URL parsing com strings extremas
+    const extremeURLs = [
+      'https://example.com/' + 'a'.repeat(100000),
+      'https://user:' + 'p'.repeat(10000) + '@example.com',
+      'https://[::1]:65535/' + '?'.repeat(1000),
+      'https://example.com/?' + new Array(1000).fill('k=v').join('&'),
+      'https://example.com/#' + '%20'.repeat(10000),
+      'data:text/html;base64,' + 'A'.repeat(100000),
+    ];
+    for(let urlStr of extremeURLs){
+      try {
+        const u = new URL(urlStr);
+        gc();
+        u.searchParams.forEach(function(v, k){ gc(); });
+        gc();
+        u.hash = '#' + 'x'.repeat(1000);
+        u.pathname = '/' + 'p'.repeat(1000);
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 286: fim');
+}
+
+// ─── T287 ─────────────────────────────────────────────────────────────────────
+// HTMLCanvasElement: getContext() + GC + transferControlToOffscreen (WebGPU prep)
+// getContext('2d') aloca um CanvasRenderingContext2D em fastMalloc;
+// GC apos getContext mas antes de usar o contexto pode causar UAF.
+function t287(){
+  log('Teste 287: inicio');
+  try {
+    const canvas = document.getElementById('canvas12');
+    canvas.style.display = 'block';
+
+    // Criar multiplos contextos 2D e liberar os canvases
+    const ctxRefs = [];
+    for(let i = 0; i < 20; i++){
+      try {
+        const c = document.createElement('canvas');
+        c.width = 64 + i * 4;
+        c.height = 64 + i * 4;
+        const ctx = c.getContext('2d');
+        if(ctx) ctxRefs.push({ ctx, canvas: c });
+        // Nao adicionar canvas ao DOM — ficara apenas na memoria JS
+      } catch(e){}
+    }
+
+    gc(); // GC: canvases sem referencia DOM podem ser coletados?
+
+    // Usar os contextos apos GC
+    for(let { ctx, canvas: c } of ctxRefs){
+      try {
+        ctx.fillStyle = 'red';
+        ctx.fillRect(0, 0, c.width, c.height);
+        gc();
+        ctx.getImageData(0, 0, c.width, c.height);
+        ctx.clearRect(0, 0, c.width, c.height);
+      } catch(e){}
+    }
+
+    // Liberar ctxRefs e GC
+    ctxRefs.length = 0;
+    gcHeavy();
+
+    // Canvas principal: getContext + putImageData com dados corrompidos
+    try {
+      const ctx2 = canvas.getContext('2d');
+      if(ctx2){
+        const imgData = ctx2.createImageData(64, 64);
+        // Dados quase corretos
+        for(let i = 0; i < imgData.data.length; i++) imgData.data[i] = 0xAB;
+        ctx2.putImageData(imgData, 0, 0);
+        gc();
+        // Sobrescrever o ImageData.data com valores extremos
+        const raw = imgData.data;
+        raw[0] = 255; raw[1] = 0; raw[2] = 0; raw[3] = 255;
+        ctx2.putImageData(imgData, -1, -1); // offset negativo
+        ctx2.putImageData(imgData, 65, 65); // fora dos limites
+        gc();
+      }
+    } catch(e){}
+
+    // createImageBitmap + GC
+    try {
+      createImageBitmap(canvas).then(function(bmp){
+        gc();
+        bmp.width;
+        bmp.height;
+        bmp.close();
+        gc();
+        // Acessar bitmap fechado
+        try { bmp.width; } catch(e){}
+      });
+    } catch(e){}
+
+    canvas.style.display = 'none';
+  } catch(e){}
+  log('Teste 287: fim');
+}
+
+// ─── T288 ─────────────────────────────────────────────────────────────────────
+// CSS :has() pseudo-class: dinamica + DOM mutation + GC (style recalc UAF)
+// :has() requer que o engine monitore subarvores para mudancas;
+// modificar a subarvore durante o recalculo de estilo causado por :has()
+// pode causar UAF nas estruturas de monitoramento.
+function t288(){
+  log('Teste 288: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Injetar estilos com :has()
+    const style = document.createElement('style');
+    style.textContent = `
+      #dom12 .has-parent:has(> .has-trigger)      { background: red; }
+      #dom12 .has-parent:has(.has-deep)            { border: 2px solid blue; }
+      #dom12 .has-parent:has(+ .has-sibling)       { color: green; }
+      #dom12 .has-parent:has(> span:first-child)   { padding: 5px; }
+      #dom12:has(.has-trigger)                     { outline: 1px solid orange; }
+    `;
+    document.head.appendChild(style);
+
+    // Criar arvore para testar :has()
+    const parents = [];
+    for(let i = 0; i < 20; i++){
+      const parent = document.createElement('div');
+      parent.className = 'has-parent';
+      const child = document.createElement('span');
+      child.textContent = 'child_' + i;
+      parent.appendChild(child);
+      area.appendChild(parent);
+      parents.push({ parent, child });
+    }
+
+    // Adicionar siblings
+    for(let i = 0; i < parents.length - 1; i++){
+      parents[i + 1].parent.className += ' has-sibling';
+    }
+
+    // Forcar layout inicial
+    let _ = area.offsetHeight;
+
+    // Adicionar/remover .has-trigger em loop — triggera recalculo de :has()
+    for(let iter = 0; iter < 30; iter++){
+      for(let { parent, child } of parents){
+        try {
+          // Adicionar trigger — :has() deve recalcular
+          const trigger = document.createElement('div');
+          trigger.className = 'has-trigger';
+          parent.appendChild(trigger);
+          gc(); // GC durante recalculo de :has()
+          _ = area.offsetHeight; // completar o recalculo
+
+          // Remover trigger + adicionar elemento deep
+          parent.removeChild(trigger);
+          const deep = document.createElement('div');
+          deep.className = 'has-deep';
+          child.appendChild(deep);
+          gc();
+          _ = area.offsetHeight;
+
+          child.removeChild(deep);
+          gc();
+        } catch(e){}
+      }
+      gc();
+    }
+
+    try { document.head.removeChild(style); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 288: fim');
+}
+
+// ─── T289 ─────────────────────────────────────────────────────────────────────
+// document.adoptNode() type confusion: adotar nodes de tipos diferentes
+// adoptNode muda o ownerDocument sem mudar o tipo do node;
+// certos tipos de node (Comment, ProcessingInstruction, CDATASection) tem
+// tratamento especial na adocao que pode causar UAF.
+function t289(){
+  log('Teste 289: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Criar iframe para ter um documento separado
+    const iframe = document.createElement('iframe');
+    iframe.src = 'about:blank';
+    area.appendChild(iframe);
+    let iDoc = null;
+    try { iDoc = iframe.contentDocument; } catch(e){}
+
+    if(iDoc){
+      // Tipos especiais de node para adotar
+      const nodesToAdopt = [];
+      try { nodesToAdopt.push(iDoc.createComment('comment_to_adopt')); } catch(e){}
+      try { nodesToAdopt.push(iDoc.createTextNode('text_to_adopt')); } catch(e){}
+      try { nodesToAdopt.push(iDoc.createElement('div')); } catch(e){}
+      try { nodesToAdopt.push(iDoc.createDocumentFragment()); } catch(e){}
+      try { nodesToAdopt.push(iDoc.createProcessingInstruction('xml-stylesheet', 'href="style.css"')); } catch(e){}
+      try {
+        const pi = iDoc.createProcessingInstruction('target', 'data');
+        iDoc.body.appendChild(pi);
+        nodesToAdopt.push(pi);
+      } catch(e){}
+
+      // Adicionar nodes ao iDoc primeiro
+      for(let node of nodesToAdopt){
+        try { iDoc.body.appendChild(node); } catch(e){}
+      }
+
+      // Adotar todos para o documento principal + GC
+      const adopted = [];
+      for(let node of nodesToAdopt){
+        try {
+          const ad = document.adoptNode(node);
+          gc();
+          area.appendChild(ad);
+          adopted.push(ad);
+        } catch(e){}
+      }
+
+      // Destruir o iframe (iDoc fica invalido)
+      try { area.removeChild(iframe); } catch(e){}
+      gcHeavy();
+
+      // Usar os nodes adotados cujo iDoc foi coletado
+      for(let node of adopted){
+        try { node.nodeType; }      catch(e){}
+        try { node.ownerDocument; } catch(e){}
+        try { node.parentNode; }    catch(e){}
+        try { node.textContent; }   catch(e){}
+        try { node.cloneNode(true); gc(); } catch(e){}
+        try {
+          // Re-adotar de volta — type confusion potencial
+          let re = document.adoptNode(node);
+          gc();
+          re.nodeType;
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 289: fim');
+}
+
+// ─── T290 ─────────────────────────────────────────────────────────────────────
+// Comment / ProcessingInstruction nodes: mutation + GC (CharacterData UAF)
+// Nodes CharacterData (Comment, Text, PI) tem m_data (WTF::String) em fastMalloc;
+// mutar o dado (via appendData/deleteData) com GC pode causar UAF no m_data.
+function t290(){
+  log('Teste 290: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Criar nodes CharacterData
+    const comments = [];
+    const textNodes = [];
+    for(let i = 0; i < 50; i++){
+      const c = document.createComment('comment_data_' + i + '_' + 'x'.repeat(i * 2));
+      const t = document.createTextNode('text_data_' + i + '_' + 'y'.repeat(i * 2));
+      area.appendChild(c);
+      area.appendChild(t);
+      comments.push(c);
+      textNodes.push(t);
+    }
+
+    // Mutar CharacterData em loop com GC
+    for(let i = 0; i < 30; i++){
+      for(let c of comments){
+        try {
+          c.appendData('_appended_' + i); // realocar m_data (pode ser realloc)
+          gc();
+          c.deleteData(0, 5); // liberar inicio
+          gc();
+          c.replaceData(0, 3, 'xyz'); // replace inline
+          gc();
+          c.insertData(c.length / 2, '_inserted_'); // insert no meio
+          gc();
+        } catch(e){}
+      }
+      // Remover todos os comments + GC
+      if(i === 15){
+        for(let c of comments) try { if(c.parentNode) c.parentNode.removeChild(c); } catch(e){}
+        gcHeavy(); // GC: comments coletados; mas ainda estao em `comments[]`
+        // Tentar usar comments pos-coleta
+        for(let c of comments){
+          try { c.data; }             catch(e){}
+          try { c.length; }           catch(e){}
+          try { c.nodeValue; }        catch(e){}
+          try { c.appendData('!'); }  catch(e){}
+        }
+        // Re-adicionar
+        for(let c of comments) try { area.appendChild(c); } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 290: fim');
+}
+
+// ─── T291 ─────────────────────────────────────────────────────────────────────
+// location.replace() + popstate: navigation UAF (complemento ao PSFree)
+// location.replace() nao cria nova entrada no historico mas pode triggerar
+// comportamentos similares ao history.pushState em implementacoes antigas do WebKit.
+function t291(){
+  log('Teste 291: inicio');
+  try {
+    let navCount = 0;
+    function navHandler(evt){
+      navCount++;
+      gc();
+      try {
+        let s = evt.state;
+        if(s) s.toString();
+      } catch(e){}
+    }
+    addEventListener('popstate', navHandler);
+    addEventListener('hashchange', function(evt){
+      gc();
+      try { evt.oldURL; evt.newURL; } catch(e){}
+    });
+
+    // Sequencia de navegacoes via hash (sem criar entradas via pushState)
+    const hashes = ['#nav_a', '#nav_b', '#nav_c', '#nav_d', '#nav_e'];
+    for(let hash of hashes){
+      try {
+        location.hash = hash;
+        gc();
+      } catch(e){}
+    }
+
+    // Voltar pelo historico
+    for(let i = 0; i < hashes.length; i++){
+      setTimeout(function(){ try { history.back(); gc(); } catch(e){}; }, i * 100);
+    }
+
+    setTimeout(function(){
+      removeEventListener('popstate', navHandler);
+    }, 1500);
+  } catch(e){}
+  log('Teste 291: fim');
+}
+
+// ─── T292 ─────────────────────────────────────────────────────────────────────
+// Storage (localStorage/sessionStorage): setItem + GC + navigation
+// O WebStorage usa WTF::String para chaves e valores; acessar storage
+// apos uma navegacao que invalida o documento pode causar UAF.
+function t292(){
+  log('Teste 292: inicio');
+  try {
+    // Preencher localStorage com dados de varios tamanhos
+    for(let i = 0; i < 50; i++){
+      try {
+        localStorage.setItem('key_' + i, 'v'.repeat(i * 100));
+        gc();
+      } catch(e){}
+    }
+
+    // Iterar e mutar durante iteracao
+    let storageCount = 0;
+    for(let i = 0; i < localStorage.length; i++){
+      storageCount++;
+      try {
+        const key = localStorage.key(i);
+        const val = localStorage.getItem(key);
+        gc();
+        if(storageCount === 20){
+          localStorage.setItem('injected_during_iter', 'injected_' + storageCount);
+          gc();
+        }
+        if(storageCount === 30) localStorage.removeItem(key);
+      } catch(e){}
+    }
+
+    // sessionStorage com dados grandes
+    try {
+      for(let i = 0; i < 20; i++){
+        sessionStorage.setItem('sess_' + i, 'S'.repeat(i * 500));
+      }
+      gc();
+      // Limpar e re-acesso
+      sessionStorage.clear();
+      gc();
+      for(let i = 0; i < 20; i++){
+        try { sessionStorage.getItem('sess_' + i); } catch(e){} // pos-clear
+      }
+    } catch(e){}
+
+    // Evento storage (cross-frame)
+    try {
+      window.addEventListener('storage', function(evt){
+        gc();
+        try { evt.key; evt.oldValue; evt.newValue; evt.storageArea; } catch(e){}
+      });
+      // Triggerar via iframe
+      const iframe = document.createElement('iframe');
+      iframe.src = 'about:blank';
+      document.body.appendChild(iframe);
+      try {
+        iframe.contentWindow.localStorage.setItem('cross_frame', 'value_' + Date.now());
+        gc();
+      } catch(e){}
+      try { document.body.removeChild(iframe); } catch(e){}
+    } catch(e){}
+
+    // Limpar
+    try { localStorage.clear(); } catch(e){}
+  } catch(e){}
+  log('Teste 292: fim');
+}
+
+// ─── T293 ─────────────────────────────────────────────────────────────────────
+// document.createRange() + range.surroundContents() + GC (Range mutation UAF)
+// surroundContents() extrai o conteudo do range e insere um novo elemento;
+// GC durante essa operacao pode liberar nodes ainda referenciados pelo range.
+function t293(){
+  log('Teste 293: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Construir arvore de texto para o Range
+    const textEl = document.createElement('p');
+    textEl.textContent = 'This is a long text with many words that can be selected and wrapped.';
+    area.appendChild(textEl);
+    const textNode = textEl.firstChild;
+
+    // surroundContents com diferentes ranges
+    for(let start = 0; start < 30; start += 5){
+      try {
+        const range = document.createRange();
+        range.setStart(textNode, Math.min(start, textNode.length - 1));
+        range.setEnd(textNode, Math.min(start + 5, textNode.length));
+        gc();
+        const wrapper = document.createElement('span');
+        wrapper.style.background = 'yellow';
+        try {
+          range.surroundContents(wrapper);
+          gc();
+          // Remover o wrapper durante o uso do range
+          if(wrapper.parentNode) wrapper.parentNode.removeChild(wrapper);
+          gc();
+          // Acessar range apos remocao
+          range.toString();
+          range.cloneContents();
+        } catch(e){}
+      } catch(e){}
+    }
+
+    // range.deleteContents() + GC
+    try {
+      const el2 = document.createElement('div');
+      el2.innerHTML = 'Delete <b>this</b> content and <i>that</i> too.';
+      area.appendChild(el2);
+      const r2 = document.createRange();
+      r2.selectNodeContents(el2);
+      gc();
+      r2.deleteContents(); // deleta todos os nos dentro do range
+      gc();
+      // Acessar r2 apos deleteContents
+      try { r2.startContainer; r2.endContainer; r2.collapsed; } catch(e){}
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 293: fim');
+}
+
+// ─── T294 ─────────────────────────────────────────────────────────────────────
+// HTMLFormElement.elements + GC (FormAssociatedElement UAF)
+// form.elements retorna uma HTMLFormControlsCollection (live);
+// mutar o form durante a iteracao da collection pode causar UAF.
+function t294(){
+  log('Teste 294: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    const form = document.createElement('form');
+    const formInputs = [];
+    for(let i = 0; i < 30; i++){
+      const inp = document.createElement('input');
+      inp.type = ['text','email','number','checkbox','radio','range'][i % 6];
+      inp.name = 'field_' + i;
+      inp.id   = 'formfield_' + i;
+      if(inp.type === 'radio') inp.value = 'radio_val_' + i;
+      form.appendChild(inp);
+      formInputs.push(inp);
+    }
+    // Adicionar select e button
+    const sel = document.createElement('select');
+    sel.name = 'select_field';
+    for(let i = 0; i < 5; i++){
+      const opt = document.createElement('option');
+      opt.value = 'opt_' + i; opt.textContent = 'Option ' + i;
+      sel.appendChild(opt);
+    }
+    form.appendChild(sel);
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.textContent = 'Submit';
+    form.appendChild(btn);
+    area.appendChild(form);
+
+    // form.elements e uma HTMLFormControlsCollection live
+    const elems = form.elements;
+
+    // Iterar com mutacao
+    for(let i = 0; i < elems.length; i++){
+      try {
+        const el = elems[i]; // acessar via indice
+        gc();
+        // Remover o elemento durante a iteracao
+        if(i === 10 && formInputs[i] && formInputs[i].parentNode){
+          form.removeChild(formInputs[i]);
+          gc(); // GC: HTMLFormControlsCollection pode ter stale ptr
+          // Reinserir
+          form.insertBefore(formInputs[i], form.firstChild);
+        }
+        // Acessar via namedItem
+        try { elems.namedItem('field_' + i); } catch(e){}
+        // Propriedades do elemento
+        try { el.name; el.type; el.value; } catch(e){}
+      } catch(e){}
+    }
+
+    // Acessar form.elements[name] para nomes que existiam mas foram removidos
+    const removedInput = form.removeChild(formInputs[0]);
+    gc();
+    try { elems.namedItem('field_0'); }  catch(e){}  // deve retornar null
+    try { elems['field_0']; }             catch(e){}
+    try { removedInput.form; }            catch(e){}  // form property do input removido
+
+    try { area.removeChild(form); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 294: fim');
+}
+
+// ─── T295 ─────────────────────────────────────────────────────────────────────
+// MutationObserver: subtree + characterData + GC (MutationRecord UAF)
+// MutationRecord armazena lista de nos adicionados/removidos em fastMalloc;
+// se os nos sao coletados antes do callback ser processado, o MutationRecord tem UAF.
+function t295(){
+  log('Teste 295: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    const mutationRecords = [];
+    let moCallbackN = 0;
+
+    const mo = new MutationObserver(function(records){
+      moCallbackN++;
+      for(let r of records) mutationRecords.push(r);
+      gc(); // GC durante callback — MutationRecord pode ter stale ptrs
+
+      // Acessar records.addedNodes e removedNodes pos-GC
+      for(let r of mutationRecords){
+        try { r.type; }                               catch(e){}
+        try { r.target; }                             catch(e){}
+        try { r.addedNodes.length; }                  catch(e){}
+        try { r.removedNodes.length; }                catch(e){}
+        try { for(let n of r.addedNodes) n.nodeType; } catch(e){}
+        try { for(let n of r.removedNodes) n.textContent; } catch(e){}
+        try { r.oldValue; }                           catch(e){}
+        try { r.attributeName; }                      catch(e){}
+      }
+    });
+
+    mo.observe(area, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      characterDataOldValue: true,
+      attributes: true,
+      attributeOldValue: true
+    });
+
+    // Criar mudancas no DOM para gerar MutationRecords
+    for(let i = 0; i < 30; i++){
+      try {
+        const el = document.createElement('div');
+        el.textContent = 'mutation_target_' + i;
+        area.appendChild(el);
+        gc(); // GC antes do callback processar o record
+        // Remover imediatamente — a remocao tambem gera um record
+        area.removeChild(el);
+        gc();
+      } catch(e){}
+    }
+
+    // Mutar texto (characterData)
+    const textEl = document.createElement('p');
+    textEl.textContent = 'initial_text';
+    area.appendChild(textEl);
+    for(let i = 0; i < 20; i++){
+      try {
+        textEl.firstChild.nodeValue = 'modified_text_' + i;
+        gc();
+      } catch(e){}
+    }
+
+    // Mutar atributos
+    for(let i = 0; i < 20; i++){
+      try {
+        textEl.setAttribute('data-mut', 'value_' + i);
+        gc();
+        textEl.removeAttribute('data-mut');
+        gc();
+      } catch(e){}
+    }
+
+    mo.disconnect();
+    // Acessar records liberados apos disconnect
+    for(let r of mutationRecords){
+      try { r.type; r.target; r.addedNodes.length; } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 295: fim');
+}
+
+// ─── T296 ─────────────────────────────────────────────────────────────────────
+// Symbol.toPrimitive + valueOf em Object dentro de DOM setter + GC
+// Setters de DOM (ex: el.style.width = obj) chamam ToPrimitive do objeto;
+// ToPrimitive pode fazer GC, corrompendo o stack do setter em C++.
+function t296(){
+  log('Teste 296: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    const el = document.createElement('div');
+    area.appendChild(el);
+
+    // Objeto com Symbol.toPrimitive que faz GC
+    function makeGCConvertible(value, name){
+      return {
+        [Symbol.toPrimitive]: function(hint){
+          gc(); // GC durante conversao de tipo para o setter DOM
+          return value;
+        },
+        valueOf: function(){ gc(); return value; },
+        toString: function(){ gc(); return String(value); }
+      };
+    }
+
+    // Atribuir ao style via objeto com GC em ToPrimitive
+    const styleSetters = [
+      ['width',          '50px'],
+      ['height',         '50px'],
+      ['fontSize',       '14px'],
+      ['opacity',        '0.5'],
+      ['zIndex',         '10'],
+      ['borderWidth',    '2px'],
+      ['marginTop',      '5px'],
+      ['paddingBottom',  '3px'],
+    ];
+
+    for(let [prop, val] of styleSetters){
+      try {
+        el.style[prop] = makeGCConvertible(val, prop);
+        gc();
+      } catch(e){}
+    }
+
+    // setAttribute com objeto (usa toString)
+    const attrNames = ['data-val','class','id','tabindex','aria-label'];
+    for(let attr of attrNames){
+      try {
+        el.setAttribute(attr, makeGCConvertible('attr_value', attr));
+        gc();
+      } catch(e){}
+    }
+
+    // Setters em HTMLInputElement
+    const inp = document.createElement('input');
+    area.appendChild(inp);
+    const inputSetters = [
+      ['value',       'test_value'],
+      ['placeholder', 'placeholder_text'],
+      ['maxLength',   '100'],
+      ['min',         '0'],
+      ['max',         '100'],
+      ['step',        '1'],
+    ];
+    for(let [prop, val] of inputSetters){
+      try {
+        inp[prop] = makeGCConvertible(val, prop);
+        gc();
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 296: fim');
+}
+
+// ─── T297 ─────────────────────────────────────────────────────────────────────
+// document.getElementsByTagName (HTMLCollection live) + DOM mutation + GC
+// HTMLCollection live e atualizada automaticamente quando o DOM muda;
+// a estrutura interna pode ter UAF se o DOM for mutado agressivamente.
+function t297(){
+  log('Teste 297: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Criar elementos para a collection
+    for(let i = 0; i < 50; i++){
+      const div = document.createElement('div');
+      div.className = 'live-coll-item';
+      div.textContent = 'item_' + i;
+      area.appendChild(div);
+    }
+
+    // Obter HTMLCollection live
+    const liveCollDiv = area.getElementsByTagName('div');
+    const liveCollAll = document.getElementsByTagName('div');
+
+    // Acessar enquanto DOM e mutado
+    for(let i = 0; i < 30; i++){
+      try {
+        let len = liveCollDiv.length; // triggera update da collection
+        gc();
+        // Remover o ultimo elemento — invalida o cache da collection
+        if(area.lastChild){
+          area.removeChild(area.lastChild);
+          gc();
+        }
+        // Acessar indices que podem estar fora dos limites agora
+        try { liveCollDiv[len - 1]; }     catch(e){}
+        try { liveCollDiv[len];     }     catch(e){}
+        try { liveCollDiv[len + 1]; }     catch(e){}
+        try { liveCollAll[0]; }           catch(e){}
+        try { liveCollAll.namedItem('live-coll-item'); } catch(e){}
+      } catch(e){}
+    }
+
+    // Adicionar elementos de volta e iterar com mutacao
+    for(let i = 0; i < 20; i++){
+      const div = document.createElement('div');
+      area.appendChild(div);
+    }
+    gc();
+
+    // Iterar com for-of e remover durante iteracao
+    try {
+      for(let el of liveCollDiv){
+        if(el.parentNode === area){
+          area.removeChild(el);
+          gc();
+        }
+      }
+    } catch(e){}
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 297: fim');
+}
+
+// ─── T298 ─────────────────────────────────────────────────────────────────────
+// CSS Transitions: transitionend event + elemento removido + GC (TransitionList UAF)
+// Semelhante ao TimerBase UAF (T258) mas para transicoes CSS;
+// remover elemento durante transitionend destroi a TransitionList C++ enquanto ativa.
+function t298(){
+  log('Teste 298: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // Adicionar CSS de transicao
+    const style = document.createElement('style');
+    style.textContent = `
+      .transition-target {
+        width: 50px; height: 50px;
+        background: blue;
+        transition: width 0.05s ease, background-color 0.05s ease, opacity 0.05s ease;
+        opacity: 1;
+      }
+      .transition-target.active {
+        width: 100px;
+        background: red;
+        opacity: 0.5;
+      }
+    `;
+    document.head.appendChild(style);
+
+    const transEls = [];
+    for(let i = 0; i < 15; i++){
+      const el = document.createElement('div');
+      el.className = 'transition-target';
+      area.appendChild(el);
+      transEls.push(el);
+    }
+
+    // Forcar layout para registrar o estado inicial
+    let _ = area.offsetHeight;
+
+    function transEndHandler(evt){
+      const el = evt.target;
+      el.removeEventListener('transitionend', transEndHandler);
+      try {
+        if(el.parentNode) el.parentNode.removeChild(el); // remover durante transitionend
+        gc(); // GC: TransitionList pode ter stale ptr
+        // Re-criar elemento identico no mesmo slot do IsoHeap
+        const newEl = document.createElement('div');
+        newEl.className = 'transition-target';
+        area.appendChild(newEl);
+        gcHeavy();
+        area.removeChild(newEl);
+      } catch(e){}
+    }
+
+    // Adicionar listeners e iniciar transicoes
+    for(let el of transEls){
+      el.addEventListener('transitionend', transEndHandler);
+    }
+
+    // Iniciar as transicoes mudando a classe
+    setTimeout(function(){
+      for(let el of transEls){
+        try { el.classList.add('active'); } catch(e){}
+      }
+    }, 50);
+
+    setTimeout(function(){
+      try { document.head.removeChild(style); } catch(e){}
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 2000);
+  } catch(e){}
+  log('Teste 298: fim');
+}
+
+// ─── T299 ─────────────────────────────────────────────────────────────────────
+// Crypto API: SubtleCrypto + GC durante Promise resolve (callback UAF)
+// crypto.subtle retorna Promises; o callback da Promise pode ter UAF se
+// o objeto criptografado for coletado antes da Promise resolver.
+function t299(){
+  log('Teste 299: inicio');
+  try {
+    const crypto = window.crypto || window.msCrypto;
+    if(!crypto || !crypto.subtle){ log('Teste 299: fim (sem SubtleCrypto)'); return; }
+
+    // Gerar chaves + GC durante a operacao assincrona
+    let keyRef = null;
+    try {
+      crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 },
+        true,
+        ['encrypt', 'decrypt']
+      ).then(function(key){
+        keyRef = key;
+        gc(); // GC imediatamente apos resolve
+        // Tentar usar a chave
+        const data = new Uint8Array(64);
+        crypto.getRandomValues(data);
+        const iv = new Uint8Array(12);
+        crypto.getRandomValues(iv);
+        return crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv: iv },
+          key, data
+        );
+      }).then(function(encrypted){
+        gc();
+        keyRef = null; // liberar chave durante uso do encrypted
+        gc();
+        let buf = encrypted;
+        buf.byteLength;
+      }).catch(function(e){
+        gc();
+      });
+    } catch(e){}
+
+    // crypto.getRandomValues com TypedArrays de varios tipos
+    const randomTargets = [
+      new Uint8Array(1024),
+      new Uint16Array(512),
+      new Uint32Array(256),
+      new Int8Array(1024),
+      new Int32Array(256),
+    ];
+    for(let arr of randomTargets){
+      try {
+        crypto.getRandomValues(arr);
+        gc();
+        arr[0]; arr[arr.length - 1]; // verificar dados
+      } catch(e){}
+    }
+
+    // digest (SHA-256) com dados grandes + GC
+    try {
+      const bigData = new Uint8Array(1024 * 1024); // 1MB
+      crypto.subtle.digest('SHA-256', bigData).then(function(hash){
+        gc();
+        return new Uint8Array(hash);
+      }).then(function(hashArr){
+        gc();
+        hashArr.length;
+      }).catch(function(e){ gc(); });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 299: fim');
+}
+
+// ─── T300 ─────────────────────────────────────────────────────────────────────
+// STRESS FINAL T300: 6 vetores novos combinados (HTMLMedia + ShadowDOM + Range + LiveCollection + Transitions + AudioContext)
+function t300(){
+  log('Teste 300: inicio');
+  try {
+    const area = document.getElementById('dom12');
+    area.style.display = 'block';
+
+    // === FASE 1: Shadow DOM + GC ===
+    try {
+      const shadowHost = document.createElement('div');
+      area.appendChild(shadowHost);
+      let sh = null;
+      try { sh = shadowHost.attachShadow({ mode: 'open' }); } catch(e){}
+      if(sh){
+        for(let i = 0; i < 10; i++){
+          const el = document.createElement('div');
+          el.textContent = 'shadow_' + i;
+          sh.appendChild(el);
+        }
+        gc();
+        area.removeChild(shadowHost);
+        gcHeavy();
+        // Acessar shadow root cujo host foi removido
+        try { sh.host; sh.innerHTML; sh.querySelector('div'); } catch(e){}
+      }
+    } catch(e){}
+
+    // === FASE 2: TreeWalker + DOM mutation ===
+    try {
+      const walkerRoot = document.createElement('div');
+      for(let i = 0; i < 20; i++){
+        const el = document.createElement('span');
+        el.textContent = 'walk_' + i;
+        walkerRoot.appendChild(el);
+      }
+      area.appendChild(walkerRoot);
+      const walker = document.createTreeWalker(walkerRoot, NodeFilter.SHOW_ELEMENT, null, false);
+      let wNode = walker.nextNode();
+      let wCount = 0;
+      while(wNode && wCount < 30){
+        wCount++;
+        gc();
+        if(wCount === 10 && wNode.parentNode) wNode.parentNode.removeChild(wNode);
+        try { wNode = walker.nextNode(); } catch(e){}
+      }
+      area.removeChild(walkerRoot);
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 3: CSSStyleSheet insertRule/deleteRule rapido ===
+    try {
+      const style300 = document.createElement('style');
+      document.head.appendChild(style300);
+      const sheet300 = style300.sheet;
+      if(sheet300){
+        for(let i = 0; i < 50; i++){
+          try { sheet300.insertRule('.r' + i + '{color:red}', 0); } catch(e){}
+        }
+        gc();
+        for(let i = 49; i >= 0; i--){
+          try {
+            let r = sheet300.cssRules[0];
+            sheet300.deleteRule(0);
+            gc();
+            try { r.cssText; } catch(e){}
+          } catch(e){}
+        }
+      }
+      try { document.head.removeChild(style300); } catch(e){}
+    } catch(e){}
+
+    // === FASE 4: MutationObserver massivo ===
+    try {
+      const moRecs = [];
+      const mo300 = new MutationObserver(function(recs){
+        for(let r of recs) moRecs.push(r);
+        gc();
+        for(let r of moRecs){
+          try { r.target.nodeType; for(let n of r.addedNodes) n.textContent; } catch(e){}
+        }
+      });
+      mo300.observe(area, { childList: true, subtree: true, characterData: true });
+      for(let i = 0; i < 20; i++){
+        const el = document.createElement('div');
+        area.appendChild(el);
+        gc();
+        area.removeChild(el);
+        gc();
+      }
+      mo300.disconnect();
+    } catch(e){}
+
+    // === FASE 5: Live HTMLCollection mutation ===
+    try {
+      for(let i = 0; i < 20; i++){
+        const span = document.createElement('span');
+        area.appendChild(span);
+      }
+      const lc = area.getElementsByTagName('span');
+      for(let i = lc.length - 1; i >= 0; i--){
+        try {
+          const el = lc[i];
+          if(el && el.parentNode) el.parentNode.removeChild(el);
+          gc();
+          lc[i]; lc.length;
+        } catch(e){}
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 6: Symbol.toPrimitive + DOM setter GC ===
+    try {
+      const el300 = document.createElement('div');
+      area.appendChild(el300);
+      const gcObj = { [Symbol.toPrimitive](){ gcHeavy(); return '50px'; }, toString(){ gc(); return '50px'; } };
+      try { el300.style.width = gcObj; } catch(e){}
+      try { el300.style.height = gcObj; } catch(e){}
+      try { el300.setAttribute('data-gc', gcObj); } catch(e){}
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+    gcHeavy();
+  } catch(e){}
+  log('Teste 300: fim');
+}
+</script>
+</body>
+</html>
