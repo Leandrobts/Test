@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Testes01</title></head>
+<body>
+
+<p>Cada botao executa um teste isolado. Se o navegador travar, o ultimo teste pressionado e o responsavel.</p>
+
+<button onclick="t01()">Teste 01</button>
+<button onclick="t02()">Teste 02</button>
+<button onclick="t03()">Teste 03</button>
+<button onclick="t04()">Teste 04</button>
+<button onclick="t05()">Teste 05</button>
+<button onclick="t06()">Teste 06</button>
+<button onclick="t07()">Teste 07</button>
+<button onclick="t08()">Teste 08</button>
+<button onclick="t09()">Teste 09</button>
+<button onclick="t10()">Teste 10</button>
+<button onclick="t11()">Teste 11</button>
+<button onclick="t12()">Teste 12</button>
+<button onclick="t13()">Teste 13</button>
+<button onclick="t14()">Teste 14</button>
+<button onclick="t15()">Teste 15</button>
+<button onclick="t16()">Teste 16</button>
+<button onclick="t17()">Teste 17</button>
+<button onclick="t18()">Teste 18</button>
+<button onclick="t19()">Teste 19</button>
+<button onclick="t20()">Teste 20</button>
+<button onclick="t21()">Teste 21</button>
+<button onclick="t22()">Teste 22</button>
+<button onclick="t23()">Teste 23</button>
+<button onclick="t24()">Teste 24</button>
+<button onclick="t25()">Teste 25</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// T01 — Cadeia de prototipos profunda (Object.create loop)
+// JSC tem limite interno de profundidade de prototype chain
+function t01(){
+  log('Teste 01: inicio');
+  try {
+    var o = {};
+    for(var i = 0; i < 50000; i++) o = Object.create(o);
+    var r = ({}).isPrototypeOf.call(o, {});
+  } catch(e){}
+  log('Teste 01: fim');
+}
+
+// T02 — Proxy get recursivo com contador
+// Proxy cujo get retorna outro Proxy; acesso a propriedade dispara cadeia
+function t02(){
+  log('Teste 02: inicio');
+  try {
+    function makeProxy(depth){
+      return new Proxy({}, {
+        get: function(t, k){
+          if(depth > 10000) return 'deep';
+          return makeProxy(depth + 1)[k];
+        }
+      });
+    }
+    var p = makeProxy(0);
+    var x = p.foo;
+  } catch(e){}
+  log('Teste 02: fim');
+}
+
+// T03 — TypedArray.set com getter que reduz length durante copia
+// Spec: length deve ser lido antes de iniciar copia; bug se motor le depois
+function t03(){
+  log('Teste 03: inicio');
+  try {
+    var dst = new Uint32Array(1024);
+    var src = { length: 1024 };
+    var shrunk = false;
+    Object.defineProperty(src, 0, {
+      get: function(){
+        if(!shrunk){ shrunk = true; src.length = 0; }
+        return 0xDEAD;
+      }, configurable: true, enumerable: true
+    });
+    dst.set(src);
+  } catch(e){}
+  log('Teste 03: fim');
+}
+
+// T04 — ArrayBuffer transferido; acesso via TypedArray view ainda existente
+// View deveria ser detachada apos transfer; acesso a view detachada = crash
+function t04(){
+  log('Teste 04: inicio');
+  try {
+    var buf = new ArrayBuffer(4096);
+    var view = new Uint32Array(buf);
+    view[0] = 0xCAFE;
+    var cyclic = { buf: buf, self: null };
+    cyclic.self = cyclic;
+    postMessage(cyclic, '*', [buf]);
+    // buf agora detachado; view.buffer.byteLength === 0
+    // Acessar view em buffer detachado deve ser seguro segundo spec
+    // mas motores bugados podem acessar ponteiro invalido
+    for(var i = 0; i < 1024; i++) view[i] = i;
+  } catch(e){}
+  log('Teste 04: fim');
+}
+
+// T05 — structuredClone de objeto ciclico com TypedArray aninhado profundo
+// Motor deve detectar o ciclo; versao com aninhamento extra estressante
+function t05(){
+  log('Teste 05: inicio');
+  try {
+    var root = {};
+    var cur = root;
+    for(var i = 0; i < 5000; i++){
+      cur.child = { arr: new Uint8Array(16), next: null };
+      cur = cur.child;
+    }
+    cur.next = root; // ciclo na folha
+    var cloned = structuredClone(root);
+  } catch(e){}
+  log('Teste 05: fim');
+}
+
+// T06 — Symbol.iterator que deleta a si mesmo durante iteracao
+// Motor pode usar ponteiro para o iterator apos o delete
+function t06(){
+  log('Teste 06: inicio');
+  try {
+    var obj = {
+      count: 0,
+      [Symbol.iterator]: function(){
+        var self = this;
+        return {
+          next: function(){
+            self.count++;
+            if(self.count === 5){
+              delete obj[Symbol.iterator];
+              // forcar GC tentando realocar
+              var trash = [];
+              for(var k=0;k<10000;k++) trash.push({x:k});
+              trash = null;
+            }
+            if(self.count > 20) return {value:undefined, done:true};
+            return {value:self.count, done:false};
+          }
+        };
+      }
+    };
+    var result = [];
+    for(var v of obj) result.push(v);
+  } catch(e){}
+  log('Teste 06: fim');
+}
+
+// T07 — Reflect.construct com Proxy como new.target
+// new.target influi no prototype da instancia; Proxy intercepta get de prototype
+function t07(){
+  log('Teste 07: inicio');
+  try {
+    function Base(){ this.x = 1; }
+    Base.prototype.method = function(){ return 42; };
+
+    var protoProxy = new Proxy(Base.prototype, {
+      get: function(t, k){
+        if(k === 'constructor') return Base;
+        // retornar outro proxy ao inves da propriedade
+        return new Proxy(t[k] !== undefined ? t[k] : {}, {
+          apply: function(tf, thisA, args){ return tf.apply(thisA, args); }
+        });
+      }
+    });
+    var newTargetProxy = new Proxy(Base, {
+      get: function(t, k){
+        if(k === 'prototype') return protoProxy;
+        return t[k];
+      }
+    });
+
+    var inst = Reflect.construct(Base, [1, 2, 3], newTargetProxy);
+    var r = inst.method();
+  } catch(e){}
+  log('Teste 07: fim');
+}
+
+// T08 — Cadeia de Promise.then profunda (5000 niveis)
+// Pilha de microtask pode estourar em motores com limite baixo
+function t08(){
+  log('Teste 08: inicio');
+  var depth = 5000;
+  var p = Promise.resolve(0);
+  for(var i = 0; i < depth; i++){
+    p = p.then(function(v){ return v + 1; });
+  }
+  p.then(function(v){
+    // resultado esperado: 5000
+  }).catch(function(){});
+  log('Teste 08: fim');
+}
+
+// T09 — Array.prototype.sort com comparador que modifica o array
+// Spec permite resultado indefinido; motor pode acessar indice invalido
+function t09(){
+  log('Teste 09: inicio');
+  try {
+    var arr = [];
+    for(var i = 0; i < 512; i++) arr.push(Math.random());
+    var calls = 0;
+    arr.sort(function(a, b){
+      calls++;
+      if(calls === 50){
+        arr.length = 10; // encolher o array durante o sort
+      }
+      if(calls === 100){
+        arr.push(9999, 8888, 7777); // expandir de volta
+      }
+      return a - b;
+    });
+  } catch(e){}
+  log('Teste 09: fim');
+}
+
+// T10 — Object.defineProperty getter ciclico em propriedade de Array
+// Getter retorna o proprio array; acesso sequencial causa recursao implicita
+function t10(){
+  log('Teste 10: inicio');
+  try {
+    var arr = [1, 2, 3, 4, 5];
+    Object.defineProperty(arr, 'length', {
+      get: function(){
+        // ler .length de um subarray para evitar recursao direta
+        return [1,2,3].length + 2;
+      },
+      configurable: true
+    });
+    // Operacoes que dependem de .length
+    var s = arr.slice(0);
+    var j = arr.join(',');
+    var rev = Array.from(arr);
+  } catch(e){}
+  log('Teste 10: fim');
+}
+
+// T11 — Generator com yield* de outro generator que joga excecao
+// Interacao entre throw() e delegacao pode ter caso de borda
+function t11(){
+  log('Teste 11: inicio');
+  try {
+    function* inner(){
+      try {
+        yield 1;
+        yield 2;
+        yield 3;
+      } finally {
+        yield 'finally_inner';
+      }
+    }
+    function* outer(){
+      yield* inner();
+      yield 'after_inner';
+    }
+
+    var gen = outer();
+    gen.next();             // yield 1
+    gen.next();             // yield 2
+    gen.throw(new Error('test_throw')); // dispara finally no inner
+    gen.next();             // after_inner
+    gen.return('done');     // fechar
+  } catch(e){}
+  log('Teste 11: fim');
+}
+
+// T12 — Proxy revogado acessado dentro de seu proprio trap
+// revokedProxy.revoke() chamado dentro do get trap; acesso subsequente = crash
+function t12(){
+  log('Teste 12: inicio');
+  try {
+    var revocable = Proxy.revocable({val: 42}, {
+      get: function(t, k, receiver){
+        if(k === 'trigger'){
+          revocable.revoke(); // revogar durante o trap
+          return 'revoked_now';
+        }
+        return Reflect.get(t, k, receiver);
+      }
+    });
+    var p = revocable.proxy;
+    p.trigger;      // revoga aqui
+    p.val;          // acesso apos revogacao = TypeError esperado ou crash
+  } catch(e){}
+  log('Teste 12: fim');
+}
+
+// T13 — JSON.parse de string aninhada profunda (500 niveis)
+// Parser recursivo pode estourar stack em motores com limite baixo
+function t13(){
+  log('Teste 13: inicio');
+  try {
+    var open  = '['.repeat(500);
+    var close = ']'.repeat(500);
+    var r = JSON.parse(open + '1' + close);
+  } catch(e){}
+  log('Teste 13: fim');
+}
+
+// T14 — WeakRef + FinalizationRegistry: callback tenta criar nova WeakRef
+// Callback de finalizacao em alguns motores nao pode criar WeakRef; UAF possivel
+function t14(){
+  log('Teste 14: inicio');
+  try {
+    if(typeof FinalizationRegistry === 'undefined') throw new Error('sem FR');
+    var refs = [];
+    var fr = new FinalizationRegistry(function(token){
+      // Dentro do callback criar novo WeakRef e outro objeto
+      var newObj = { id: token, arr: new Uint32Array(64) };
+      refs.push(new WeakRef(newObj));
+      // Tentar GC novamente dentro do callback
+      var trash = [];
+      for(var i=0;i<5000;i++) trash.push({x:i});
+      trash = null;
+    });
+    // Criar e abandonar 20 objetos registrados
+    for(var i = 0; i < 20; i++){
+      (function(id){
+        var o = { id: id, data: new Float64Array(32) };
+        fr.register(o, id);
+        // nao manter referencia forte
+      })(i);
+    }
+    // Forcar GC
+    var trash2 = [];
+    for(var j=0;j<50000;j++) trash2.push({x:j, b:new Uint8Array(8)});
+    trash2 = null;
+  } catch(e){}
+  log('Teste 14: fim');
+}
+
+// T15 — Spread de objeto com getter de length que cresce
+// Motor calcula tamanho antes de iterar; getter muda o tamanho durante spread
+function t15(){
+  log('Teste 15: inicio');
+  try {
+    var fakeLen = 16;
+    var arrayLike = {
+      get length(){
+        var old = fakeLen;
+        fakeLen = fakeLen * 2; // dobrar a cada leitura
+        return old;
+      }
+    };
+    for(var i = 0; i < 64; i++) arrayLike[i] = i;
+    var result = Array.from(arrayLike);
+  } catch(e){}
+  log('Teste 15: fim');
+}
+
+// T16 — DataView sobre ArrayBuffer com byteOffset em limite exato
+// Operacoes no limite podem acessar bytes fora do buffer em motores bugados
+function t16(){
+  log('Teste 16: inicio');
+  try {
+    var buf = new ArrayBuffer(64);
+    // DataView que comeca no byte 57 (64 - 7)
+    var dv = new DataView(buf, 57);
+    // Tentar ler tipos de tamanho diferente no limite
+    dv.getUint8(6);           // offset 63: ok
+    try { dv.getUint16(6); }  // offset 63+1=64: deveria lancar RangeError
+    catch(e2){}
+    try { dv.getFloat64(0); } // precisa 8 bytes, so tem 7: deve lancar
+    catch(e3){}
+    // Escrever no limite
+    dv.setUint8(6, 0xFF);
+    try { dv.setUint32(4, 0xDEAD); } // ultrapassa
+    catch(e4){}
+  } catch(e){}
+  log('Teste 16: fim');
+}
+
+// T17 — Object.assign com getter que transfere propriedade durante assign
+// Source tem getter que modifica o proprio source; race interno no assign
+function t17(){
+  log('Teste 17: inicio');
+  try {
+    var src = { a: 1, b: 2, c: 3 };
+    Object.defineProperty(src, 'd', {
+      get: function(){
+        // modificar src durante leitura de 'd'
+        Object.defineProperty(src, 'e', {value: 99, enumerable: true});
+        delete src.c;
+        return 42;
+      },
+      enumerable: true, configurable: true
+    });
+    var dst = {};
+    Object.assign(dst, src);
+  } catch(e){}
+  log('Teste 17: fim');
+}
+
+// T18 — Recursao controlada via toString implicito em template literal
+// toString chama uma funcao que gera outro template literal; profundidade limitada
+function t18(){
+  log('Teste 18: inicio');
+  try {
+    var depth = 0;
+    var obj = {
+      toString: function(){
+        depth++;
+        if(depth > 5000) return 'max';
+        return `${obj}_${depth}`; // template literal chama toString de novo
+      }
+    };
+    // Forcar avaliacao
+    var s = '' + obj;
+  } catch(e){}
+  log('Teste 18: fim');
+}
+
+// T19 — Array destruturing com getter que lanca excecao apos N leituras
+// Motor pode ter estado inconsistente se excecao ocorre no meio do destructuring
+function t19(){
+  log('Teste 19: inicio');
+  try {
+    var reads = 0;
+    var iterable = {
+      [Symbol.iterator]: function(){
+        return {
+          next: function(){
+            reads++;
+            if(reads === 3) throw new TypeError('iterator_throw_mid_destructure');
+            return { value: reads * 10, done: reads > 6 };
+          }
+        };
+      }
+    };
+    try {
+      var [a, b, c, d, e, f] = iterable;
+    } catch(inner){}
+    // Tentar reusar o iterator apos excecao
+    reads = 0;
+    var [x, y] = iterable;
+  } catch(e){}
+  log('Teste 19: fim');
+}
+
+// T20 — Proxy com trap set que chama Reflect.set no receiver errado
+// Pode criar loop se receiver tambem for Proxy com set trap
+function t20(){
+  log('Teste 20: inicio');
+  try {
+    var store = {};
+    var pA = new Proxy(store, {
+      set: function(t, k, v, receiver){
+        // redirecionar set para pB
+        return Reflect.set(pB, k, v, pB);
+      }
+    });
+    var pB = new Proxy(store, {
+      set: function(t, k, v, receiver){
+        // redirecionar set para pA (ciclo; profundidade limitada pelo motor)
+        if(typeof v === 'number' && v > 1000) {
+          store[k] = v; // parar o ciclo apos V ficar grande
+          return true;
+        }
+        return Reflect.set(pA, k, typeof v === 'number' ? v + 1 : v, pA);
+      }
+    });
+    pA.x = 1; // dispara o ciclo pA->pB->pA->...
+  } catch(e){}
+  log('Teste 20: fim');
+}
+
+// T21 — Symbol.toPrimitive retorna objeto (violacao de spec)
+// Motor deve lancar TypeError; em alguns motores pode causar confusion interna
+function t21(){
+  log('Teste 21: inicio');
+  try {
+    var obj = {
+      [Symbol.toPrimitive]: function(hint){
+        // Retornar objeto ao inves de primitivo = violacao de spec
+        return { valueOf: function(){ return 42; } };
+      }
+    };
+    // Operacoes que forcam conversao de tipo
+    try { var r1 = obj + 1; }     catch(e){}
+    try { var r2 = obj * 2; }     catch(e){}
+    try { var r3 = `${obj}`; }    catch(e){}
+    try { var r4 = obj < 100; }   catch(e){}
+    try { var r5 = +obj; }        catch(e){}
+  } catch(e){}
+  log('Teste 21: fim');
+}
+
+// T22 — Float64Array subarray com offsets invertidos
+// subarray(begin, end) com begin > end deve retornar array vazio
+// em alguns motores pode calcular tamanho negativo
+function t22(){
+  log('Teste 22: inicio');
+  try {
+    var f64 = new Float64Array(256);
+    for(var i = 0; i < 256; i++) f64[i] = i * 0.1;
+
+    var sub1 = f64.subarray(200, 100);  // begin > end
+    var sub2 = f64.subarray(-10, -100); // negativos invertidos
+    var sub3 = f64.subarray(300, 400);  // ambos fora do range
+
+    // Tentar operar nos subarrays possivelmente corrompidos
+    sub1.fill(0);
+    sub2.fill(1);
+    sub3.fill(2);
+
+    // Tentar set com eles como source
+    f64.set(sub1, 0);
+    f64.set(sub2, 0);
+  } catch(e){}
+  log('Teste 22: fim');
+}
+
+// T23 — Getter em prototype que modifica o proprio prototype durante acesso
+// Motor pode ter ponteiro obsoleto para o objeto de prototype
+function t23(){
+  log('Teste 23: inicio');
+  try {
+    var proto = {};
+    var accessed = false;
+    Object.defineProperty(proto, 'secret', {
+      get: function(){
+        if(!accessed){
+          accessed = true;
+          // Alterar o prototype durante o acesso
+          Object.setPrototypeOf(proto, { newProp: 'injected' });
+          // Deletar a propriedade enquanto e acessada
+          delete proto.secret;
+        }
+        return 'value';
+      },
+      configurable: true, enumerable: true
+    });
+
+    var obj = Object.create(proto);
+    var r1 = obj.secret;   // dispara getter, modifica proto
+    var r2 = obj.secret;   // agora secret nao existe em proto
+    var r3 = obj.newProp;  // herdado do novo prototype
+  } catch(e){}
+  log('Teste 23: fim');
+}
+
+// T24 — Muitos ArrayBuffers transferidos via postMessage no mesmo ciclo
+// Testar limite do numero de buffers no transfer list
+function t24(){
+  log('Teste 24: inicio');
+  try {
+    var bufs = [];
+    for(var i = 0; i < 500; i++) bufs.push(new ArrayBuffer(256));
+
+    var obj = { id: 'multi', bufs: bufs, self: null };
+    obj.self = obj; // ciclo
+
+    // Passar todos os 500 buffers na lista de transfer
+    postMessage(obj, '*', bufs);
+
+    // Verificar que todos foram detachados
+    var alive = bufs.filter(function(b){ return b.byteLength > 0; });
+  } catch(e){}
+  log('Teste 24: fim');
+}
+
+// T25 — Proxy com ownKeys trap que retorna keys com Symbol duplicado
+// getOwnPropertyDescriptor chamado para cada key; Symbol duplicado pode confundir
+function t25(){
+  log('Teste 25: inicio');
+  try {
+    var sym = Symbol('dup');
+    var callCount = 0;
+    var p = new Proxy({}, {
+      ownKeys: function(){
+        // Retornar chaves com duplicatas e Symbols repetidos
+        return ['a', 'b', sym, sym, 'a', sym, 'c'];
+      },
+      getOwnPropertyDescriptor: function(t, k){
+        callCount++;
+        return { value: callCount, writable: true,
+                 enumerable: true, configurable: true };
+      },
+      has: function(t, k){ return true; }
+    });
+
+    var keys  = Object.keys(p);
+    var names = Object.getOwnPropertyNames(p);
+    var syms  = Object.getOwnPropertySymbols(p);
+    var all   = Reflect.ownKeys(p);
+
+    // Tentar iterar com for...in
+    for(var k in p) { var v = p[k]; }
+
+    // Object.assign usando o proxy como source
+    var dst = Object.assign({}, p);
+  } catch(e){}
+  log('Teste 25: fim');
+}
+</script>
+</body>
+</html>
