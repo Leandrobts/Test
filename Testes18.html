@@ -1,0 +1,2467 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<title>Testes18 — APIs PS4 Disponíveis: XHR / Worker / FileReader / Canvas2D / SVG / IndexedDB</title>
+</head>
+<body>
+
+<p><strong>TESTES18 — VETORES SOMENTE COM APIs DISPONÍVEIS NO PS4 (T426-T450):</strong><br>
+T426: XMLHttpRequest open/abort/send race + GC (XHRLoader UAF)<br>
+T427: Web Worker postMessage + terminate + GC (WorkerGlobalScope UAF)<br>
+T428: FileReader readAsArrayBuffer + abort + GC (FileReaderLoader UAF)<br>
+T429: IntersectionObserver + DOM removal durante callback + GC<br>
+T430: CSS @keyframes animation + removeChild durante animação + GC<br>
+T431: HTMLVideoElement srcObject + MediaSource.open + GC<br>
+T432: IndexedDB IDBTransaction abort + DOM mutation + GC<br>
+T433: Canvas2D createImageBitmap() + close() + GC (ImageBitmap UAF)<br>
+T434: SVG + SMIL animate + removeChild durante animação + GC<br>
+T435: CSS clip-path polygon()/path() + DOM removal + GC<br>
+T436: CSS filter blur/drop-shadow/url() + DOM removal + GC<br>
+T437: HTMLDetailsElement toggle event + removeChild + GC<br>
+T438: History pushState/replaceState + popstate + GC<br>
+T439: TextEncoder encode() + TextDecoder decode() + GC<br>
+T440: MutationObserver.disconnect() durante callback + GC<br>
+T441: Range.extractContents() / surroundContents() + DOM mutation + GC<br>
+T442: CSS will-change add/remove durante layout + GC (RenderLayer UAF)<br>
+T443: HTMLTemplateElement.cloneNode(deep) + GC<br>
+T444: CSS counter() + counter-reset mutation + GC<br>
+T445: NodeIterator + DOM mutation durante nextNode() + GC<br>
+T446: CSS @font-face + FontFace.load() + removeChild + GC<br>
+T447: fetch() streaming body + abort() + GC<br>
+T448: CSS transition + transitionend + removeChild durante transição + GC<br>
+T449: CSS animation-composition: accumulate + add + replace + GC<br>
+T450: STRESS FINAL — XHR + Worker + Canvas2D + SVG + IndexedDB</p>
+
+<canvas id="c18" width="128" height="128" style="display:none"></canvas>
+<video  id="v18" style="display:none" muted playsinline></video>
+<div id="dom18" style="display:none"></div>
+
+<button onclick="runAll()">RODAR TODOS</button><br><br>
+<button onclick="t426()">T426</button>
+<button onclick="t427()">T427</button>
+<button onclick="t428()">T428</button>
+<button onclick="t429()">T429</button>
+<button onclick="t430()">T430</button>
+<button onclick="t431()">T431</button>
+<button onclick="t432()">T432</button>
+<button onclick="t433()">T433</button>
+<button onclick="t434()">T434</button>
+<button onclick="t435()">T435</button>
+<button onclick="t436()">T436</button>
+<button onclick="t437()">T437</button>
+<button onclick="t438()">T438</button>
+<button onclick="t439()">T439</button>
+<button onclick="t440()">T440</button>
+<button onclick="t441()">T441</button>
+<button onclick="t442()">T442</button>
+<button onclick="t443()">T443</button>
+<button onclick="t444()">T444</button>
+<button onclick="t445()">T445</button>
+<button onclick="t446()">T446</button>
+<button onclick="t447()">T447</button>
+<button onclick="t448()">T448</button>
+<button onclick="t449()">T449</button>
+<button onclick="t450()">T450</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC: técnica do CVE-2023-28205 / PSFree — confirmada no PS4
+const MB = 1024 * 1024;
+function gc(){
+  for(var i = 0; i < 0x10; i++) new Uint8Array(4 * MB);
+}
+function gcHeavy(){
+  for(var i = 0; i < 0x40; i++) new ArrayBuffer(0x1000000);
+}
+
+function runAll(){
+  log('=== RODAR TODOS T426-T450: inicio ===');
+  t426(); t427(); t428(); t429(); t430();
+  t431(); t432(); t433(); t434(); t435();
+  t436(); t437(); t438(); t439(); t440();
+  t441(); t442(); t443(); t444(); t445();
+  t446(); t447(); t448(); t449(); t450();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// ─── T426 ─────────────────────────────────────────────────────────────────────
+// XMLHttpRequest: open() + abort() + send() em race + GC (XHRLoader UAF)
+// O XHRLoader é alocado em fastMalloc ao chamar send(); abort() durante o
+// carregamento libera o loader; GC antes de o abort completar cria uma janela
+// de UAF onde o XHRLoader está semi-liberado mas ainda referenciado pelo
+// thread de rede interno do PS4.
+function t426(){
+  log('Teste 426: inicio');
+  try {
+    var xhrs = [];
+
+    for(var i = 0; i < 20; i++){
+      try {
+        var xhr = new XMLHttpRequest();
+
+        // Handlers com GC
+        xhr.onreadystatechange = function(){
+          gc(); // GC em cada mudança de estado
+          try { this.readyState; this.status; this.responseText; } catch(e){}
+        };
+        xhr.onload = function(){
+          gc();
+          try { this.response; this.responseURL; } catch(e){}
+        };
+        xhr.onerror = function(){ gc(); };
+        xhr.onabort = function(){
+          gc(); // GC durante evento abort — XHRLoader pode estar em estado inconsistente
+          try { this.readyState; } catch(e){}
+        };
+        xhr.onprogress = function(evt){
+          gc();
+          try { evt.loaded; evt.total; evt.lengthComputable; } catch(e){}
+        };
+        xhr.ontimeout = function(){ gc(); };
+
+        // Abrir para URL inexistente (connection refused mas o XHRLoader é criado)
+        xhr.open('GET', 'http://127.0.0.1:19990/t426_' + i, true);
+        xhr.timeout = 100; // timeout curto
+        xhr.responseType = ['text', 'arraybuffer', 'blob', 'json'][i % 4];
+
+        gc(); // GC entre open() e send()
+
+        xhr.send();
+        gc(); // GC imediatamente após send() — XHRLoader criado
+
+        xhrs.push(xhr);
+      } catch(e){}
+    }
+
+    // Abort em loop rápido
+    for(var j = 0; j < xhrs.length; j++){
+      try {
+        xhrs[j].abort();
+        gc(); // GC após abort — XHRLoader liberado
+        // Tentar usar pós-abort
+        try { xhrs[j].readyState; }   catch(e){}
+        try { xhrs[j].responseText; } catch(e){}
+        try { xhrs[j].send(); }       catch(e){} // enviar de novo (deve lançar)
+        gc();
+      } catch(e){}
+    }
+
+    // Re-use XHR após abort (re-open)
+    for(var k = 0; k < xhrs.length; k++){
+      try {
+        xhrs[k].open('POST', 'http://127.0.0.1:19990/t426_reuse_' + k, true);
+        gc();
+        xhrs[k].send('payload_' + k + '_' + 'x'.repeat(k * 10));
+        gc();
+        xhrs[k].abort();
+        gc();
+      } catch(e){}
+    }
+
+    // XHR síncrono (mais direto — sem callback thread)
+    for(var s = 0; s < 5; s++){
+      try {
+        var xhrSync = new XMLHttpRequest();
+        xhrSync.open('GET', 'http://127.0.0.1:19989/sync_' + s, false); // síncrono
+        gc();
+        try { xhrSync.send(); } catch(e){} // vai falhar (sem servidor)
+        gc();
+        xhrSync.readyState; xhrSync.status;
+        gc();
+      } catch(e){}
+    }
+
+    xhrs.length = 0;
+    gcHeavy();
+  } catch(e){}
+  log('Teste 426: fim');
+}
+
+// ─── T427 ─────────────────────────────────────────────────────────────────────
+// Web Worker: postMessage + terminate() + GC (WorkerGlobalScope UAF)
+// Worker.terminate() destrói o WorkerGlobalScope; se o worker tiver
+// mensagens pendentes ou estiver no meio de um postMessage, o GC
+// pode liberar o WorkerGlobalScope antes de o cleanup completar.
+function t427(){
+  log('Teste 427: inicio');
+  try {
+    // Código do Worker como Blob URL
+    var workerCode = [
+      'self.onmessage = function(evt){',
+      '  var n = evt.data.n || 0;',
+      '  var result = { n: n, sum: 0, buf: new ArrayBuffer(1024) };',
+      '  for(var i = 0; i < 10000; i++) result.sum += i;',
+      '  // Tentar postar de volta — pode falhar se terminado durante isso',
+      '  try { self.postMessage(result); } catch(e){}',
+      '  // Processamento mais longo para criar janela de terminate',
+      '  var big = new Array(10000);',
+      '  for(var j = 0; j < big.length; j++) big[j] = { id: j, val: j * 1.1 };',
+      '  try { self.postMessage({ done: true, n: n }); } catch(e){}',
+      '};',
+      'self.onerror = function(evt){ evt.preventDefault(); };',
+    ].join('\n');
+
+    var blob    = new Blob([workerCode], { type: 'application/javascript' });
+    var blobURL = URL.createObjectURL(blob);
+
+    var workers = [];
+
+    for(var i = 0; i < 10; i++){
+      try {
+        var w = new Worker(blobURL);
+
+        w.onmessage = function(evt){
+          gc(); // GC no handler de mensagem do main thread
+          try { evt.data.n; evt.data.sum; } catch(e){}
+        };
+        w.onerror = function(evt){
+          gc();
+          evt.preventDefault();
+        };
+
+        // Enviar múltiplas mensagens
+        for(var m = 0; m < 5; m++){
+          try {
+            w.postMessage({ n: i * 10 + m, payload: new Array(100).fill(m) });
+            gc(); // GC entre postMessages
+          } catch(e){}
+        }
+
+        workers.push(w);
+        gc(); // GC com worker ativo e mensagens pendentes
+      } catch(e){}
+    }
+
+    // Terminate workers enquanto têm mensagens pendentes
+    for(var j = 0; j < workers.length; j++){
+      try {
+        // Enviar mais mensagens antes de terminar
+        workers[j].postMessage({ n: -1, final: true });
+        gc();
+        workers[j].terminate(); // terminate durante processamento
+        gc(); // GC: WorkerGlobalScope sendo destruído
+        // Tentar postar após terminate (deve ser silenciosamente ignorado)
+        try { workers[j].postMessage({ post_terminate: true }); } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Terminar imediatamente após criar (sem janela para processar mensagens)
+    for(var k = 0; k < 10; k++){
+      try {
+        var w2 = new Worker(blobURL);
+        gc();
+        w2.postMessage({ n: k }); // postar
+        w2.terminate();           // terminar imediatamente
+        gc(); // GC: race entre postMessage e terminate
+        try { w2.postMessage({ after: true }); } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    workers.length = 0;
+    URL.revokeObjectURL(blobURL);
+    gcHeavy();
+  } catch(e){}
+  log('Teste 427: fim');
+}
+
+// ─── T428 ─────────────────────────────────────────────────────────────────────
+// FileReader: readAsArrayBuffer/readAsText + abort() + GC (FileReaderLoader UAF)
+// FileReader.abort() durante um readAs* libera o FileReaderLoader;
+// GC durante essa janela pode causar double-free ou UAF.
+function t428(){
+  log('Teste 428: inicio');
+  try {
+    // Criar Blobs de vários tamanhos e tipos
+    var blobs = [];
+    for(var i = 0; i < 10; i++){
+      var data = new Uint8Array(1024 * (i + 1));
+      for(var j = 0; j < data.length; j++) data[j] = (i * j) % 256;
+      blobs.push(new Blob([data], { type: 'application/octet-stream' }));
+    }
+    blobs.push(new Blob(['text content '.repeat(500)], { type: 'text/plain' }));
+    blobs.push(new Blob(['{"json":true,"arr":[' + '1,'.repeat(100) + '0]}'], { type: 'application/json' }));
+
+    var readers = [];
+
+    for(var i = 0; i < blobs.length; i++){
+      try {
+        var fr = new FileReader();
+
+        fr.onloadstart = function(){ gc(); };
+        fr.onprogress  = function(evt){ gc(); try { evt.loaded; evt.total; } catch(e){} };
+        fr.onload      = function(evt){
+          gc(); // GC quando o resultado chega
+          try { this.result; this.readyState; } catch(e){}
+          gc();
+        };
+        fr.onloadend   = function(evt){
+          gc();
+          try { this.result; this.error; } catch(e){}
+        };
+        fr.onerror     = function(){ gc(); };
+        fr.onabort     = function(){
+          gc(); // GC durante abort — FileReaderLoader pode ter stale ptr
+          try { this.result; this.readyState; } catch(e){}
+          gc();
+        };
+
+        // Alternar entre os diferentes métodos de leitura
+        var methods = ['readAsArrayBuffer', 'readAsText', 'readAsDataURL', 'readAsBinaryString'];
+        try { fr[methods[i % methods.length]](blobs[i % blobs.length]); } catch(e){}
+        gc(); // GC imediatamente após iniciar a leitura
+
+        readers.push(fr);
+      } catch(e){}
+    }
+
+    // Abort durante leitura + GC
+    for(var j = 0; j < readers.length; j++){
+      try {
+        readers[j].abort();
+        gc(); // GC: FileReaderLoader liberado pelo abort
+        // Acessar resultado após abort (deve ser null)
+        try { readers[j].result; }    catch(e){}
+        try { readers[j].readyState; } catch(e){}
+        // Re-iniciar leitura do mesmo reader após abort
+        try {
+          readers[j].readAsArrayBuffer(blobs[0]);
+          gc();
+          readers[j].abort(); // abort imediato
+          gc();
+        } catch(e){}
+      } catch(e){}
+    }
+
+    // Múltiplos reads no mesmo FileReader (devem lançar InvalidStateError)
+    try {
+      var frMulti = new FileReader();
+      frMulti.onload = function(){ gc(); };
+      frMulti.readAsArrayBuffer(blobs[0]);
+      gc();
+      try { frMulti.readAsText(blobs[1]); } catch(e){} // deve lançar
+      gc();
+      try { frMulti.readAsDataURL(blobs[2]); } catch(e){} // deve lançar
+      gc();
+      frMulti.abort();
+      gc();
+    } catch(e){}
+
+    readers.length = 0;
+    blobs.length   = 0;
+    gcHeavy();
+  } catch(e){}
+  log('Teste 428: fim');
+}
+
+// ─── T429 ─────────────────────────────────────────────────────────────────────
+// IntersectionObserver: DOM removal durante callback + GC (IntersectionObserverEntry UAF)
+// O IntersectionObserverEntry mantém uma referência ao target element;
+// remover o target durante o callback + GC pode causar UAF.
+function t429(){
+  log('Teste 429: inicio');
+  try {
+    if(typeof IntersectionObserver === 'undefined'){
+      log('Teste 429: fim (sem IntersectionObserver)');
+      return;
+    }
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var ioEls = [];
+    for(var i = 0; i < 20; i++){
+      var el = document.createElement('div');
+      el.style.cssText = 'width:' + (50 + i * 5) + 'px;height:30px;' +
+                         'background:hsl(' + (i * 18) + ',60%,50%);margin:2px;';
+      el.textContent = 'io_' + i;
+      area.appendChild(el);
+      ioEls.push(el);
+    }
+
+    var entryRefs = []; // manter referências às entries
+
+    var io = new IntersectionObserver(function(entries, observer){
+      gc(); // GC no início do callback
+      for(var e = 0; e < entries.length; e++){
+        var entry = entries[e];
+        try {
+          entry.isIntersecting;
+          entry.intersectionRatio;
+          entry.boundingClientRect;
+          entry.intersectionRect;
+          entry.rootBounds;
+          entry.time;
+          var tgt = entry.target;
+          tgt.textContent;
+          entryRefs.push(entry); // guardar referência para acesso pós-remoção
+        } catch(e2){}
+        gc(); // GC com entry ainda no loop
+
+        // Remover target durante o callback
+        var tgt2 = entries[e].target;
+        if(tgt2 && tgt2.parentNode && entryRefs.length === 5){
+          try {
+            area.removeChild(tgt2);
+            gc(); // GC: IntersectionObserverEntry tem stale ptr para target removido
+            area.appendChild(tgt2); // re-inserir
+          } catch(e2){}
+        }
+      }
+      gc();
+    }, {
+      root: null,
+      rootMargin: '0px',
+      threshold: [0, 0.25, 0.5, 0.75, 1.0]
+    });
+
+    // Observar todos os elementos
+    for(var i = 0; i < ioEls.length; i++){
+      try { io.observe(ioEls[i]); } catch(e){}
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    // Mutar elementos para triggerar mudanças de interseção
+    for(var iter = 0; iter < 15; iter++){
+      try {
+        // Scroll simulado (mudar posição relativa)
+        area.style.marginTop = (iter * 20) + 'px';
+        gc();
+        var _ = area.offsetHeight;
+
+        // Remover e re-inserir elementos
+        var el = ioEls[iter % ioEls.length];
+        if(el.parentNode){ area.removeChild(el); gc(); area.appendChild(el); }
+        gc();
+
+        // Mudar o threshold
+        io.disconnect();
+        gc();
+        io = new IntersectionObserver(function(entries){ gc(); }, {
+          threshold: [iter % 2 === 0 ? 0 : 0.5]
+        });
+        for(var i = 0; i < ioEls.length; i++){
+          try { io.observe(ioEls[i]); } catch(e){}
+        }
+        gc();
+      } catch(e){}
+    }
+
+    // Remover todos + GC + tentar acessar as entryRefs gravadas
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    gcHeavy();
+    for(var r = 0; r < entryRefs.length; r++){
+      try { entryRefs[r].isIntersecting; }     catch(e){}
+      try { entryRefs[r].target.textContent; } catch(e){} // target removido
+    }
+
+    io.disconnect();
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 429: fim');
+}
+
+// ─── T430 ─────────────────────────────────────────────────────────────────────
+// CSS @keyframes animation + removeChild durante animação ativa + GC
+// CSSAnimation mantém referência ao elemento animado e ao KeyframeEffect;
+// remover o elemento durante a animação pode causar UAF no RenderObject do PS4.
+function t430(){
+  log('Teste 430: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var style430 = document.createElement('style');
+    style430.textContent = [
+      '@keyframes spin18   { from{transform:rotate(0deg)}   to{transform:rotate(360deg)} }',
+      '@keyframes pulse18  { 0%{opacity:1;transform:scale(1)} 50%{opacity:0.3;transform:scale(0.8)} 100%{opacity:1;transform:scale(1)} }',
+      '@keyframes slide18  { 0%{transform:translateX(0)}    100%{transform:translateX(100px)} }',
+      '@keyframes color18  { 0%{background:red} 33%{background:green} 66%{background:blue} 100%{background:red} }',
+      '@keyframes bounce18 { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-30px)} }',
+      '.anim-el { display:inline-block; width:40px; height:40px; margin:4px; }',
+    ].join('\n');
+    document.head.appendChild(style430);
+
+    var animEls = [];
+    var animNames = ['spin18', 'pulse18', 'slide18', 'color18', 'bounce18'];
+    var animFills = ['none', 'forwards', 'backwards', 'both'];
+    var animModes = ['normal', 'reverse', 'alternate', 'alternate-reverse'];
+
+    for(var i = 0; i < 20; i++){
+      var el = document.createElement('div');
+      el.className = 'anim-el';
+      el.style.background = 'hsl(' + (i * 18) + ',70%,50%)';
+      el.style.animationName           = animNames[i % animNames.length];
+      el.style.animationDuration       = (0.3 + i * 0.1) + 's';
+      el.style.animationTimingFunction = 'linear';
+      el.style.animationIterationCount = 'infinite';
+      el.style.animationFillMode       = animFills[i % animFills.length];
+      el.style.animationDirection      = animModes[i % animModes.length];
+      el.style.animationDelay          = (i * 0.05) + 's';
+      area.appendChild(el);
+      animEls.push(el);
+    }
+
+    var _ = area.offsetHeight; // iniciar animações
+    gc();
+
+    // Remover e re-inserir durante animações ativas + GC
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < animEls.length; i++){
+        var el = animEls[i];
+        try {
+          // Remover durante animação
+          if(el.parentNode){ area.removeChild(el); gc(); }
+
+          // Mudar propriedades enquanto fora do DOM
+          el.style.animationName     = animNames[(iter + i) % animNames.length];
+          el.style.animationDuration = (0.1 + iter * 0.05) + 's';
+          gc();
+
+          // Re-inserir (reinicia a animação com novo estado)
+          area.appendChild(el);
+          gc(); // GC logo após re-inserção — KeyframeEffect sendo re-criado
+
+          // Pausar/retomar
+          el.style.animationPlayState = iter % 2 === 0 ? 'paused' : 'running';
+          gc();
+        } catch(e){}
+      }
+      _ = area.offsetHeight;
+      gc();
+    }
+
+    // Usar Web Animations API para acessar as animações
+    if(typeof el.getAnimations === 'function'){
+      for(var i = 0; i < animEls.length; i++){
+        try {
+          var anims = animEls[i].getAnimations();
+          gc();
+          for(var a = 0; a < anims.length; a++){
+            try { anims[a].currentTime; anims[a].playState; anims[a].effect; } catch(e){}
+          }
+          // Remover durante getAnimations
+          if(animEls[i].parentNode){ area.removeChild(animEls[i]); gc(); }
+          for(var a = 0; a < anims.length; a++){
+            try { anims[a].cancel(); gc(); } catch(e){}
+          }
+          area.appendChild(animEls[i]);
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style430); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 430: fim');
+}
+
+// ─── T431 ─────────────────────────────────────────────────────────────────────
+// HTMLVideoElement srcObject + MediaSource + GC (MediaSourcePrivate UAF)
+// MediaSource é criado e atribuído ao video via srcObject ou src (blob URL);
+// GC durante o processamento do MSE pode causar UAF no MediaSourcePrivate.
+function t431(){
+  log('Teste 431: inicio');
+  try {
+    if(typeof MediaSource === 'undefined'){
+      log('Teste 431: fim (sem MediaSource)');
+      return;
+    }
+    var vid = document.getElementById('v18');
+    vid.style.display = 'block';
+
+    var msList = [];
+
+    for(var i = 0; i < 10; i++){
+      try {
+        var ms = new MediaSource();
+        msList.push(ms);
+
+        ms.addEventListener('sourceopen', function(evt){
+          gc(); // GC quando MediaSource abre
+          try {
+            var ms2 = evt.target;
+            ms2.duration = 10.0;
+            gc();
+            // Adicionar SourceBuffer (pode falhar se codec não suportado)
+            var mimeTypes = [
+              'video/mp4; codecs="avc1.42E01E"',
+              'video/webm; codecs="vp8"',
+              'video/webm; codecs="vp9"',
+              'audio/mp4; codecs="mp4a.40.2"',
+            ];
+            for(var m = 0; m < mimeTypes.length; m++){
+              try {
+                if(MediaSource.isTypeSupported(mimeTypes[m])){
+                  var sb = ms2.addSourceBuffer(mimeTypes[m]);
+                  gc();
+                  sb.addEventListener('updateend', function(){ gc(); });
+                  sb.addEventListener('error',     function(){ gc(); });
+                  // Tentar remover SourceBuffer + GC
+                  try { ms2.removeSourceBuffer(sb); gc(); } catch(e){}
+                  break;
+                }
+              } catch(e){}
+            }
+            // Fechar MediaSource + GC
+            try { ms2.endOfStream(); gc(); } catch(e){}
+          } catch(e){}
+        });
+
+        ms.addEventListener('sourceclose', function(){ gc(); });
+        ms.addEventListener('sourceended', function(){ gc(); });
+
+        // Atribuir ao video via blob URL
+        var url = URL.createObjectURL(ms);
+        vid.src = url;
+        gc(); // GC com srcObject/src definido mas MediaSource ainda não aberto
+        vid.load();
+        gc();
+        // Limpar
+        vid.pause();
+        try { vid.src = ''; } catch(e){}
+        URL.revokeObjectURL(url);
+        gc();
+      } catch(e){}
+    }
+
+    // GC pesado com MediaSource objects ativos
+    gcHeavy();
+
+    // Acessar MediaSource pós-revokeObjectURL
+    for(var j = 0; j < msList.length; j++){
+      try { msList[j].readyState; }   catch(e){}
+      try { msList[j].duration; }     catch(e){}
+      try { msList[j].activeSourceBuffers; } catch(e){}
+    }
+
+    msList.length = 0;
+    vid.style.display = 'none';
+  } catch(e){}
+  log('Teste 431: fim');
+}
+
+// ─── T432 ─────────────────────────────────────────────────────────────────────
+// IndexedDB: IDBTransaction abort() + DOM mutation + GC (IDBDatabase UAF)
+// Transações do IndexedDB são async; abort() durante uma operação de write
+// + GC pode causar UAF no IDBDatabase ou IDBTransaction.
+function t432(){
+  log('Teste 432: inicio');
+  try {
+    if(typeof indexedDB === 'undefined'){
+      log('Teste 432: fim (sem IndexedDB)');
+      return;
+    }
+
+    var dbName = 'ps4_test18_' + Date.now();
+    var req = indexedDB.open(dbName, 1);
+
+    req.onupgradeneeded = function(evt){
+      gc(); // GC durante upgrade
+      try {
+        var db = evt.target.result;
+        if(!db.objectStoreNames.contains('store18')){
+          var store = db.createObjectStore('store18', { keyPath: 'id', autoIncrement: true });
+          store.createIndex('val', 'val', { unique: false });
+          gc();
+        }
+      } catch(e){}
+    };
+
+    req.onerror   = function(){ gc(); };
+    req.onblocked = function(){ gc(); };
+
+    req.onsuccess = function(evt){
+      gc(); // GC quando DB abre
+      var db = evt.target.result;
+
+      db.onerror           = function(){ gc(); };
+      db.onversionchange   = function(){ gc(); db.close(); };
+      db.onclose           = function(){ gc(); };
+
+      // Várias transações com abort
+      for(var i = 0; i < 15; i++){
+        try {
+          var tx = db.transaction(['store18'], 'readwrite');
+          gc(); // GC com transação criada
+
+          tx.oncomplete = function(){ gc(); };
+          tx.onerror    = function(){ gc(); };
+          tx.onabort    = function(){
+            gc(); // GC durante abort da transação
+            try { this.db; this.mode; this.objectStoreNames; } catch(e){}
+          };
+
+          var store = tx.objectStore('store18');
+
+          // Fazer múltiplas operações
+          for(var j = 0; j < 5; j++){
+            try {
+              var putReq = store.put({ val: i * 10 + j, data: new Array(50).fill(j) });
+              putReq.onsuccess = function(){ gc(); };
+              putReq.onerror   = function(){ gc(); };
+              gc(); // GC entre operações
+            } catch(e){}
+          }
+
+          // Abort a transação a cada 3 iterações
+          if(i % 3 === 0){
+            try { tx.abort(); gc(); } catch(e){}
+          }
+
+          gc();
+        } catch(e){}
+      }
+
+      // Transação de leitura após writes/aborts
+      try {
+        var txRead = db.transaction(['store18'], 'readonly');
+        gc();
+        var storeRead = txRead.objectStore('store18');
+        var getAllReq = storeRead.getAll();
+        getAllReq.onsuccess = function(evt2){
+          gc();
+          var results = evt2.target.result;
+          results && results.length;
+          gcHeavy();
+          // Fechar DB + GC
+          db.close();
+          gc();
+          // Deletar o database de teste
+          try { indexedDB.deleteDatabase(dbName); } catch(e){}
+        };
+        getAllReq.onerror = function(){ gc(); };
+      } catch(e){}
+    };
+  } catch(e){}
+  log('Teste 432: fim');
+}
+
+// ─── T433 ─────────────────────────────────────────────────────────────────────
+// Canvas 2D: createImageBitmap() + close() + GC (ImageBitmap UAF — sem OffscreenCanvas)
+// createImageBitmap() cria um ImageBitmap de uma fonte (canvas, blob, etc.);
+// close() libera os recursos; acesso após close + GC pode causar UAF.
+function t433(){
+  log('Teste 433: inicio');
+  try {
+    if(typeof createImageBitmap === 'undefined'){
+      log('Teste 433: fim (sem createImageBitmap)');
+      return;
+    }
+    var canvas = document.getElementById('c18');
+    canvas.style.display = 'block';
+    var ctx = canvas.getContext('2d');
+    if(!ctx){ log('Teste 433: fim (sem ctx)'); return; }
+
+    // Desenhar conteúdo no canvas
+    for(var i = 0; i < 5; i++){
+      ctx.fillStyle = 'hsl(' + (i * 72) + ',70%,50%)';
+      ctx.fillRect(i * 25, 0, 25, 128);
+    }
+
+    var bitmaps = [];
+    var promises = [];
+
+    // Criar ImageBitmaps de várias fontes e opções
+    var sources = [
+      canvas,
+      new ImageData(64, 64),
+    ];
+
+    // Blobs de imagem
+    try {
+      var imgBlob = new Blob(
+        ['\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'],
+        { type: 'image/png' }
+      );
+      sources.push(imgBlob);
+    } catch(e){}
+
+    // Opções de recorte e resize
+    var optionsList = [
+      {},
+      { resizeWidth: 32, resizeHeight: 32 },
+      { imageOrientation: 'flipY' },
+      { premultiplyAlpha: 'premultiply' },
+      { colorSpaceConversion: 'none', resizeWidth: 64, resizeHeight: 64 },
+    ];
+
+    for(var si = 0; si < sources.length; si++){
+      for(var oi = 0; oi < optionsList.length; oi++){
+        try {
+          var p = createImageBitmap(sources[si], optionsList[oi]).then(function(bmp){
+            gc(); // GC quando bitmap é criado
+            bitmaps.push(bmp);
+            try { bmp.width; bmp.height; } catch(e){}
+
+            // Desenhar no canvas + GC
+            try { ctx.drawImage(bmp, 0, 0); gc(); } catch(e){}
+
+            // Fechar bitmap + GC + acesso pós-close (UAF)
+            if(bitmaps.length > 5){
+              var old = bitmaps.shift();
+              try { old.close(); gc(); old.width; old.height; old.close(); } catch(e){}
+            }
+          }).catch(function(){ gc(); });
+          promises.push(p);
+          gc(); // GC com promise pendente
+        } catch(e){}
+      }
+    }
+
+    // Esperar e GC
+    Promise.all(promises).then(function(){
+      gc();
+      // Fechar todos + GC + tentar criar novo bitmap com fonte modificada
+      for(var i = 0; i < bitmaps.length; i++){
+        try { bitmaps[i].close(); gc(); bitmaps[i].width; } catch(e){}
+      }
+      // Criar bitmap de canvas pós-GC
+      return createImageBitmap(canvas);
+    }).then(function(bmp){
+      gc();
+      try { ctx.drawImage(bmp, 64, 0); gc(); bmp.close(); gc(); } catch(e){}
+    }).catch(function(){ gc(); });
+
+    canvas.style.display = 'none';
+  } catch(e){}
+  log('Teste 433: fim');
+}
+
+// ─── T434 ─────────────────────────────────────────────────────────────────────
+// SVG + SMIL animate element + removeChild durante animação + GC
+// SMIL animate elements referenciam o target SVG element;
+// remover o target ou o animate durante a animação pode causar UAF.
+function t434(){
+  log('Teste 434: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    // Criar SVG com animações SMIL
+    var svgNS = 'http://www.w3.org/2000/svg';
+
+    var svgs = [];
+    for(var s = 0; s < 8; s++){
+      var svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('width', '100');
+      svg.setAttribute('height', '100');
+      svg.setAttribute('viewBox', '0 0 100 100');
+
+      // Elementos animados
+      var elements = [];
+
+      // Círculo com animação de cx/cy/r/fill
+      var circle = document.createElementNS(svgNS, 'circle');
+      circle.setAttribute('cx', '50'); circle.setAttribute('cy', '50');
+      circle.setAttribute('r', '20');
+      circle.setAttribute('fill', 'hsl(' + (s * 45) + ',70%,50%)');
+
+      var animCx = document.createElementNS(svgNS, 'animate');
+      animCx.setAttribute('attributeName', 'cx');
+      animCx.setAttribute('from', '10'); animCx.setAttribute('to', '90');
+      animCx.setAttribute('dur', (0.5 + s * 0.1) + 's');
+      animCx.setAttribute('repeatCount', 'indefinite');
+      circle.appendChild(animCx);
+
+      var animFill = document.createElementNS(svgNS, 'animate');
+      animFill.setAttribute('attributeName', 'fill');
+      animFill.setAttribute('values', 'red;green;blue;red');
+      animFill.setAttribute('dur', '1s');
+      animFill.setAttribute('repeatCount', 'indefinite');
+      circle.appendChild(animFill);
+
+      svg.appendChild(circle);
+      elements.push({ el: circle, anims: [animCx, animFill] });
+
+      // Retângulo com animateTransform
+      var rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('x', '10'); rect.setAttribute('y', '10');
+      rect.setAttribute('width', '30'); rect.setAttribute('height', '30');
+      rect.setAttribute('fill', 'blue');
+
+      var animT = document.createElementNS(svgNS, 'animateTransform');
+      animT.setAttribute('attributeName', 'transform');
+      animT.setAttribute('type', 'rotate');
+      animT.setAttribute('from', '0 50 50'); animT.setAttribute('to', '360 50 50');
+      animT.setAttribute('dur', '0.8s');
+      animT.setAttribute('repeatCount', 'indefinite');
+      rect.appendChild(animT);
+
+      svg.appendChild(rect);
+      elements.push({ el: rect, anims: [animT] });
+
+      // Path com animateMotion
+      var path = document.createElementNS(svgNS, 'path');
+      path.setAttribute('d', 'M10,50 Q50,10 90,50');
+      path.setAttribute('fill', 'none'); path.setAttribute('stroke', 'green');
+      path.setAttribute('stroke-width', '2');
+
+      var animMo = document.createElementNS(svgNS, 'animateMotion');
+      animMo.setAttribute('dur', '1s'); animMo.setAttribute('repeatCount', 'indefinite');
+      animMo.setAttribute('path', 'M0,0 Q50,-30 100,0');
+      path.appendChild(animMo);
+
+      svg.appendChild(path);
+      elements.push({ el: path, anims: [animMo] });
+
+      area.appendChild(svg);
+      svgs.push({ svg: svg, elements: elements });
+    }
+
+    var _ = area.offsetHeight; // iniciar animações SMIL
+    gc();
+
+    // Remover elementos SVG durante animações + GC
+    for(var iter = 0; iter < 20; iter++){
+      for(var si = 0; si < svgs.length; si++){
+        var svgObj = svgs[si];
+        try {
+          // Remover um elemento animado
+          var elemObj = svgObj.elements[iter % svgObj.elements.length];
+          if(elemObj.el.parentNode){
+            svgObj.svg.removeChild(elemObj.el);
+            gc(); // GC: SMIL animate ainda referencia o elemento removido
+            svgObj.svg.appendChild(elemObj.el);
+          }
+          gc();
+
+          // Remover um animate element (sem remover o target)
+          var anim = elemObj.anims[0];
+          if(anim.parentNode){
+            elemObj.el.removeChild(anim);
+            gc(); // GC: SMILAnimationElement desconectado durante animação
+            elemObj.el.appendChild(anim);
+          }
+          gc();
+
+          // Remover o SVG inteiro + GC
+          if(iter === 10 && svgObj.svg.parentNode){
+            area.removeChild(svgObj.svg);
+            gc();
+            area.appendChild(svgObj.svg);
+          }
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 434: fim');
+}
+
+// ─── T435 ─────────────────────────────────────────────────────────────────────
+// CSS clip-path: polygon() / path() / circle() + DOM removal + GC
+// clip-path cria um ClipPathOperation associado ao RenderObject;
+// remover o elemento durante o layout do clip pode causar UAF.
+function t435(){
+  log('Teste 435: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var style435 = document.createElement('style');
+    style435.textContent = [
+      '.cp-el {',
+      '  width:80px; height:80px;',
+      '  background:hsl(200,70%,50%);',
+      '  display:inline-block; margin:3px;',
+      '  will-change:transform;',
+      '}',
+    ].join('\n');
+    document.head.appendChild(style435);
+
+    var clipPaths = [
+      'polygon(50% 0%, 100% 100%, 0% 100%)',
+      'polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)',
+      'circle(40% at 50% 50%)',
+      'ellipse(40% 30% at 50% 50%)',
+      'inset(10% 20% 10% 20% round 15px)',
+      'path("M 0 0 L 100 0 L 50 100 Z")',
+      'path("M 10,30 A 20,20,0,0,1,50,30 A 20,20,0,0,1,90,30 Q 90,60,50,90 Q 10,60,10,30 Z")',
+    ];
+
+    var clipEls = [];
+    for(var i = 0; i < 20; i++){
+      var el = document.createElement('div');
+      el.className = 'cp-el';
+      el.style.clipPath = clipPaths[i % clipPaths.length];
+      el.style.background = 'hsl(' + (i * 18) + ',70%,50%)';
+      el.textContent = 'clip_' + i;
+      area.appendChild(el);
+      clipEls.push(el);
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    // Mutar clip-path + remoção + GC
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < clipEls.length; i++){
+        var el = clipEls[i];
+        try {
+          // Mudar clip-path
+          el.style.clipPath = clipPaths[(iter + i) % clipPaths.length];
+          gc();
+          _ = area.offsetHeight;
+          // Remover durante layout do clip-path
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: ClipPathOperation tem stale ptr
+            area.appendChild(el);
+          }
+          // Mudar para 'none' e de volta (destrói/cria ClipPathOperation)
+          el.style.clipPath = 'none';
+          gc();
+          el.style.clipPath = clipPaths[iter % clipPaths.length];
+          gc();
+        } catch(e){}
+      }
+    }
+
+    // CSS clip-path referenciando SVG <clipPath>
+    try {
+      var svgNS = 'http://www.w3.org/2000/svg';
+      var svg = document.createElementNS(svgNS, 'svg');
+      svg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden;';
+      var defs = document.createElementNS(svgNS, 'defs');
+      var clipEl = document.createElementNS(svgNS, 'clipPath');
+      clipEl.id = 'svgclip18';
+      var poly = document.createElementNS(svgNS, 'polygon');
+      poly.setAttribute('points', '50,0 100,100 0,100');
+      clipEl.appendChild(poly);
+      defs.appendChild(clipEl);
+      svg.appendChild(defs);
+      area.appendChild(svg);
+
+      for(var el of clipEls.slice(0, 5)){
+        el.style.clipPath = 'url(#svgclip18)';
+      }
+      gc();
+      _ = area.offsetHeight;
+
+      // Remover o SVG clipPath enquanto elementos o referenciam
+      area.removeChild(svg);
+      gc(); // GC: clip-path referencia SVG removido
+      _ = area.offsetHeight;
+      gc();
+    } catch(e){}
+
+    try { document.head.removeChild(style435); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 435: fim');
+}
+
+// ─── T436 ─────────────────────────────────────────────────────────────────────
+// CSS filter: blur/drop-shadow/url(svg) + backdrop-filter + DOM removal + GC
+// filter cria um FilterEffect associado ao RenderLayer;
+// remover durante o rendering do filter pode causar UAF.
+function t436(){
+  log('Teste 436: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var svgNS = 'http://www.w3.org/2000/svg';
+    var svgFilter = document.createElementNS(svgNS, 'svg');
+    svgFilter.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden;';
+    var defs = document.createElementNS(svgNS, 'defs');
+    var filter = document.createElementNS(svgNS, 'filter');
+    filter.id = 'flt18';
+    var feTurb = document.createElementNS(svgNS, 'feTurbulence');
+    feTurb.setAttribute('baseFrequency', '0.05');
+    feTurb.setAttribute('numOctaves', '3');
+    var feDisp = document.createElementNS(svgNS, 'feDisplacementMap');
+    feDisp.setAttribute('in', 'SourceGraphic'); feDisp.setAttribute('in2', 'turbulence');
+    feDisp.setAttribute('scale', '30');
+    filter.appendChild(feTurb); filter.appendChild(feDisp);
+    defs.appendChild(filter);
+    svgFilter.appendChild(defs);
+    area.appendChild(svgFilter);
+
+    var filters = [
+      'blur(3px)',
+      'blur(5px) brightness(1.2)',
+      'drop-shadow(4px 4px 8px rgba(0,0,0,0.5))',
+      'contrast(150%) saturate(200%)',
+      'hue-rotate(90deg) invert(20%)',
+      'grayscale(80%) blur(2px)',
+      'sepia(60%) contrast(120%)',
+      'url(#flt18)',
+      'blur(2px) drop-shadow(2px 2px 4px red)',
+    ];
+
+    var filterEls = [];
+    for(var i = 0; i < 20; i++){
+      var el = document.createElement('div');
+      el.style.cssText = [
+        'width:70px', 'height:50px',
+        'background:hsl(' + (i * 18) + ',70%,50%)',
+        'display:inline-block', 'margin:2px',
+        'filter:' + filters[i % filters.length],
+      ].join(';');
+      el.textContent = 'filter_' + i;
+      area.appendChild(el);
+      filterEls.push(el);
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < filterEls.length; i++){
+        var el = filterEls[i];
+        try {
+          el.style.filter = filters[(iter + i) % filters.length];
+          gc();
+          _ = area.offsetHeight;
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: FilterEffect tem stale ptr
+            area.appendChild(el);
+          }
+          // Mudar para none e de volta
+          el.style.filter = 'none';
+          gc();
+          el.style.filter = filters[iter % filters.length];
+          gc();
+        } catch(e){}
+      }
+    }
+
+    // Remover SVG filter enquanto elementos o referenciam
+    area.removeChild(svgFilter);
+    gc(); // GC: url(#flt18) agora é inválido — FilterEffect tem stale ptr
+    _ = area.offsetHeight;
+    gc();
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 436: fim');
+}
+
+// ─── T437 ─────────────────────────────────────────────────────────────────────
+// HTMLDetailsElement: toggle event + removeChild durante evento + GC
+// O evento 'toggle' do <details> é disparado ao abrir/fechar;
+// remover o <details> ou o <summary> durante o evento pode causar UAF.
+function t437(){
+  log('Teste 437: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var detailsEls = [];
+    for(var i = 0; i < 15; i++){
+      var details = document.createElement('details');
+      if(i % 2 === 0) details.open = true;
+
+      var summary = document.createElement('summary');
+      summary.textContent = 'Summary ' + i;
+      details.appendChild(summary);
+
+      for(var j = 0; j < 5; j++){
+        var p = document.createElement('p');
+        p.textContent = 'Content ' + i + '_' + j;
+        details.appendChild(p);
+      }
+
+      var n = i; // capturar para closure
+      details.addEventListener('toggle', function(evt){
+        gc(); // GC durante toggle event
+        try { this.open; evt.newState; evt.oldState; } catch(e){}
+        // Remover summary durante toggle
+        var sum = this.querySelector('summary');
+        if(sum && sum.parentNode && n === 3){
+          this.removeChild(sum);
+          gc(); // GC: <details> sem <summary> mas ainda sendo processado
+          this.insertBefore(sum, this.firstChild);
+        }
+        // Remover o próprio details durante toggle
+        if(n === 7 && this.parentNode){
+          var self = this;
+          setTimeout(function(){
+            if(self.parentNode){ area.removeChild(self); gc(); area.appendChild(self); }
+          }, 0);
+        }
+      });
+
+      area.appendChild(details);
+      detailsEls.push(details);
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    // Toggle open/closed em loop + GC
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < detailsEls.length; i++){
+        var d = detailsEls[i];
+        try {
+          d.open = !d.open; // dispara o evento toggle
+          gc();
+          // Remover e re-inserir durante ciclo de toggle
+          if(iter === 10 && d.parentNode){
+            area.removeChild(d);
+            gc();
+            area.appendChild(d);
+          }
+          // Clicar no summary programaticamente
+          var sum = d.querySelector('summary');
+          if(sum) try { sum.click(); gc(); } catch(e){}
+        } catch(e){}
+      }
+      _ = area.offsetHeight;
+      gc();
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 437: fim');
+}
+
+// ─── T438 ─────────────────────────────────────────────────────────────────────
+// History API: pushState/replaceState + popstate + GC (HistoryItem UAF)
+// Cada pushState cria um HistoryItem; GC durante a navegação (popstate)
+// pode liberar um HistoryItem antes de ser processado.
+function t438(){
+  log('Teste 438: inicio');
+  try {
+    window.addEventListener('popstate', function(evt){
+      gc(); // GC durante popstate
+      try { evt.state; history.state; history.length; } catch(e){}
+      gc();
+    });
+
+    // Criar estados de histórico variados
+    for(var i = 0; i < 20; i++){
+      try {
+        var state = {
+          id: i,
+          data: new Array(50).fill(i * 1.1),
+          str: 'state_' + i + '_' + 'x'.repeat(i),
+          nested: { a: i, b: { c: i * 2, d: new Array(10).fill(i) } }
+        };
+        if(i % 2 === 0){
+          history.pushState(state, 'title_' + i, location.pathname + '#state' + i);
+        } else {
+          history.replaceState(state, 'title_' + i, location.pathname + '#replaced' + i);
+        }
+        gc(); // GC após pushState/replaceState — HistoryItem criado
+      } catch(e){}
+    }
+
+    // Navegar para trás e frente
+    for(var j = 0; j < 10; j++){
+      try {
+        history.go(-1);
+        gc(); // GC durante a navegação
+        history.go(1);
+        gc();
+        history.back();
+        gc();
+        history.forward();
+        gc();
+      } catch(e){}
+    }
+
+    // Estado com objetos complexos (pode causar problemas no clone do state)
+    try {
+      var complexState = {
+        buf: new ArrayBuffer(1024),
+        arr: new Uint8Array(512),
+        date: new Date(),
+        re: /complex_regex/gi,
+        map: new Map([[1, 'one'], [2, 'two']]),
+        set: new Set([1, 2, 3]),
+      };
+      history.pushState(complexState, 'complex', location.pathname + '#complex');
+      gc();
+      history.state;
+      gc();
+    } catch(e){}
+
+    // Limpar o hash para não poluir outros testes
+    try { history.replaceState(null, '', location.pathname); } catch(e){}
+    gcHeavy();
+  } catch(e){}
+  log('Teste 438: fim');
+}
+
+// ─── T439 ─────────────────────────────────────────────────────────────────────
+// TextEncoder.encode() + TextDecoder.decode() + GC (ICU BreakIterator UAF)
+// TextEncoder/TextDecoder usam ICU internamente para conversão de charset;
+// GC durante a conversão pode causar UAF no TextCodecICU.
+function t439(){
+  log('Teste 439: inicio');
+  try {
+    var encodings = [
+      'utf-8', 'utf-16le', 'utf-16be',
+      'iso-8859-1', 'windows-1252', 'latin1',
+      'ascii', 'us-ascii',
+      'shift_jis', 'euc-jp', 'euc-kr',
+      'gbk', 'gb18030', 'big5',
+    ];
+
+    var texts = [
+      'Hello, World! ASCII text. 0123456789',
+      'Unicode: \u00E9\u00E0\u00FC\u00F1\u00E7\u00E5\u00E6\u00F8\u00E4\u00F6',
+      'CJK: \u4E2D\u6587\u65E5\u672C\u8A9E\uD55C\uAD6D\uC5B4',
+      'Emoji: \uD83D\uDE00\uD83D\uDE01\uD83D\uDE02\uD83D\uDC4D\uD83D\uDC4E',
+      'Arabic: \u0627\u0644\u0639\u0631\u0628\u064A\u0629 \u0646\u0635',
+      'Math: \u03B1\u03B2\u03B3 \u03B4\u03B5\u03B6 \u221A\u221E\u03C0',
+      'Long: ' + 'A'.repeat(10000),
+      '\x00\x01\x02\x03\xFF\xFE\xFD\xFC', // bytes especiais
+    ];
+
+    // Encoder (sempre utf-8)
+    var encoder = new TextEncoder();
+
+    for(var t = 0; t < texts.length; t++){
+      try {
+        gc(); // GC antes da codificação
+        var encoded = encoder.encode(texts[t]);
+        gc(); // GC após encode — Uint8Array criado
+        encoded.length; encoded[0];
+
+        // encodeInto (se disponível)
+        if(typeof encoder.encodeInto === 'function'){
+          var dest = new Uint8Array(texts[t].length * 4);
+          var result = encoder.encodeInto(texts[t], dest);
+          gc();
+          result.read; result.written;
+        }
+      } catch(e){}
+    }
+
+    // Decoders com vários encodings
+    for(var enc of encodings){
+      try {
+        var decoder = new TextDecoder(enc, { fatal: false, ignoreBOM: false });
+        gc();
+
+        for(var t = 0; t < texts.length; t++){
+          try {
+            var data = encoder.encode(texts[t]);
+            gc();
+            var decoded = decoder.decode(data, { stream: false });
+            gc();
+            decoded.length;
+
+            // Decodificar em streaming (múltiplos chunks)
+            if(data.length > 4){
+              var half = Math.floor(data.length / 2);
+              var chunk1 = decoder.decode(data.slice(0, half), { stream: true });
+              gc(); // GC no meio do streaming
+              var chunk2 = decoder.decode(data.slice(half));
+              gc();
+              (chunk1 + chunk2).length;
+            }
+          } catch(e){}
+        }
+
+        // Dados inválidos para o encoding
+        try {
+          var bad = new Uint8Array([0xFF, 0xFE, 0x80, 0x81, 0x00, 0x01]);
+          decoder.decode(bad);
+          gc();
+        } catch(e){}
+      } catch(e){}
+    }
+
+    gcHeavy();
+  } catch(e){}
+  log('Teste 439: fim');
+}
+
+// ─── T440 ─────────────────────────────────────────────────────────────────────
+// MutationObserver.disconnect() durante callback + GC (MutationObserver UAF)
+// O callback do MutationObserver é chamado com uma lista de MutationRecord;
+// chamar disconnect() dentro do próprio callback pode causar UAF
+// no MutationObserver que está sendo iterado pelo browser.
+function t440(){
+  log('Teste 440: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var target = document.createElement('div');
+    target.textContent = 'mutation_target';
+    area.appendChild(target);
+
+    var recordRefs = []; // guardar records para acesso pós-GC
+    var callbackCount = 0;
+    var observer;
+
+    function moCallback(mutations, obs){
+      callbackCount++;
+      gc(); // GC no início do callback
+
+      for(var i = 0; i < mutations.length; i++){
+        var mut = mutations[i];
+        try {
+          mut.type; mut.target; mut.addedNodes; mut.removedNodes;
+          mut.previousSibling; mut.nextSibling;
+          mut.attributeName; mut.attributeNamespace;
+          mut.oldValue;
+          recordRefs.push(mut); // guardar referência
+        } catch(e){}
+        gc(); // GC durante iteração dos records
+      }
+
+      // disconnect() durante o próprio callback
+      if(callbackCount % 3 === 0){
+        try { obs.disconnect(); gc(); } catch(e){}
+        // Re-conectar para próximos callbacks
+        try {
+          obs.observe(target, {
+            childList: true, attributes: true, subtree: true,
+            attributeOldValue: true, characterData: true, characterDataOldValue: true
+          });
+          gc();
+        } catch(e){}
+      }
+
+      // takeRecords() dentro do callback
+      try { obs.takeRecords(); gc(); } catch(e){}
+
+      gc(); // GC no fim do callback
+    }
+
+    observer = new MutationObserver(moCallback);
+    observer.observe(target, {
+      childList: true, attributes: true, subtree: true,
+      attributeOldValue: true, characterData: true, characterDataOldValue: true
+    });
+
+    // Fazer mutações em loop
+    for(var iter = 0; iter < 20; iter++){
+      try {
+        // childList mutations
+        var child = document.createElement('span');
+        child.textContent = 'child_' + iter;
+        target.appendChild(child);
+        gc();
+        target.removeChild(child);
+        gc();
+
+        // attribute mutations
+        target.setAttribute('data-iter', iter);
+        gc();
+        target.removeAttribute('data-iter');
+        gc();
+
+        // characterData mutations
+        target.textContent = 'mutation_target_' + iter;
+        gc();
+
+        // subtree mutations
+        var deep = document.createElement('div');
+        target.appendChild(deep);
+        for(var j = 0; j < 5; j++){
+          var node = document.createElement('p');
+          node.textContent = 'deep_' + j;
+          deep.appendChild(node);
+          gc();
+        }
+        target.removeChild(deep);
+        gc();
+      } catch(e){}
+    }
+
+    // GC com records acumulados
+    gcHeavy();
+
+    // Acessar records pós-disconnect
+    observer.disconnect();
+    gc();
+    for(var r = 0; r < recordRefs.length; r++){
+      try { recordRefs[r].type; recordRefs[r].target; } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 440: fim');
+}
+
+// ─── T441 ─────────────────────────────────────────────────────────────────────
+// Range.extractContents() / surroundContents() / cloneContents() + DOM mutation + GC
+// Essas operações do Range criam DocumentFragments e mudam a árvore DOM;
+// GC durante essas operações pode causar UAF no Range interno.
+function t441(){
+  log('Teste 441: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    // Criar conteúdo para operar com Ranges
+    var container = document.createElement('div');
+    container.style.cssText = 'font-size:14px;line-height:1.5;';
+    var paragraphs = [];
+    for(var i = 0; i < 10; i++){
+      var p = document.createElement('p');
+      p.textContent = 'Paragraph ' + i + ': The quick brown fox jumps over the lazy dog. ' +
+                      'Extra content for range operations. Item ' + i + '.';
+      container.appendChild(p);
+      paragraphs.push(p);
+    }
+    area.appendChild(container);
+
+    var _ = area.offsetHeight;
+    gc();
+
+    for(var iter = 0; iter < 20; iter++){
+      try {
+        var range = document.createRange();
+        var pA = paragraphs[iter % paragraphs.length];
+        var pB = paragraphs[(iter + 1) % paragraphs.length];
+        var txtA = pA.firstChild;
+        var txtB = pB && pB.firstChild;
+
+        if(!txtA) continue;
+
+        // Definir range entre parágrafos
+        try {
+          range.setStart(txtA, 5);
+          range.setEnd(txtA, Math.min(20, txtA.length));
+          gc();
+        } catch(e){}
+
+        // cloneContents + GC
+        try {
+          var cloned = range.cloneContents();
+          gc(); // GC com DocumentFragment clonado
+          cloned.childNodes.length;
+          gc();
+        } catch(e){}
+
+        // extractContents (remove o conteúdo do DOM) + GC
+        if(iter % 3 === 0){
+          try {
+            var extracted = range.extractContents();
+            gc(); // GC após extract — range aponta para posição modificada
+            extracted.childNodes.length;
+            // Re-inserir o conteúdo extraído
+            try { pA.appendChild(extracted); gc(); } catch(e){}
+          } catch(e){}
+        }
+
+        // surroundContents + GC
+        if(iter % 3 === 1 && txtA.length > 10){
+          try {
+            range.setStart(txtA, 0);
+            range.setEnd(txtA, 5);
+            var wrapper = document.createElement('em');
+            range.surroundContents(wrapper);
+            gc(); // GC após surroundContents
+            // Remover o wrapper + GC (pA agora tem estrutura diferente)
+            if(wrapper.parentNode) wrapper.parentNode.replaceChild(
+              document.createTextNode(wrapper.textContent), wrapper
+            );
+            gc();
+          } catch(e){}
+        }
+
+        // Range multi-parágrafo
+        if(iter % 3 === 2 && pB && txtB){
+          try {
+            range.setStart(txtA, 0);
+            range.setEnd(txtB, Math.min(10, txtB.length));
+            gc();
+            var multiClone = range.cloneContents();
+            gc();
+            multiClone.childNodes.length;
+            // Inserir em outro lugar
+            range.insertNode(document.createTextNode(' [INSERT_' + iter + '] '));
+            gc();
+          } catch(e){}
+        }
+
+        // Remover parágrafo durante range ativo
+        if(iter === 10 && pA.parentNode){
+          container.removeChild(pA);
+          gc(); // GC: range aponta para pA removido
+          try { range.collapsed; range.startOffset; range.endOffset; } catch(e){}
+          container.appendChild(pA);
+          gc();
+        }
+
+        range.detach && range.detach();
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 441: fim');
+}
+
+// ─── T442 ─────────────────────────────────────────────────────────────────────
+// CSS will-change: add/remove durante layout + GC (RenderLayer promotion UAF)
+// will-change: transform/opacity promove o elemento para uma RenderLayer;
+// adicionar/remover will-change dinamicamente + GC pode causar UAF
+// na RenderLayer sendo criada/destruída durante o layout.
+function t442(){
+  log('Teste 442: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var wcEls = [];
+    for(var i = 0; i < 20; i++){
+      var el = document.createElement('div');
+      el.style.cssText = [
+        'width:60px', 'height:40px',
+        'background:hsl(' + (i * 18) + ',60%,50%)',
+        'display:inline-block', 'margin:2px',
+        'transform:translateZ(0)', // forçar compositing
+      ].join(';');
+      el.textContent = 'wc_' + i;
+      area.appendChild(el);
+      wcEls.push(el);
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    var willChangeValues = [
+      'transform',
+      'opacity',
+      'transform, opacity',
+      'scroll-position',
+      'contents',
+      'auto',
+      'will-change', // valor inválido — ignorado
+    ];
+
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < wcEls.length; i++){
+        var el = wcEls[i];
+        try {
+          // Adicionar will-change (cria RenderLayer)
+          el.style.willChange = willChangeValues[iter % willChangeValues.length];
+          gc(); // GC durante promoção de layer
+          _ = area.offsetHeight;
+
+          // Remover will-change (destrói RenderLayer)
+          el.style.willChange = 'auto';
+          gc(); // GC: RenderLayer sendo destruída
+          _ = area.offsetHeight;
+
+          // Remover elemento + GC durante promoção de layer
+          el.style.willChange = 'transform';
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: RenderLayer promovida mas elemento removido
+            area.appendChild(el);
+          }
+          gc();
+
+          // Animar transform + will-change (maximiza a pressão na RenderLayer)
+          el.style.transform = 'translateX(' + (iter * 3) + 'px) rotate(' + (iter * 5) + 'deg)';
+          gc();
+          el.style.opacity = 0.5 + (iter % 5) * 0.1;
+          gc();
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 442: fim');
+}
+
+// ─── T443 ─────────────────────────────────────────────────────────────────────
+// HTMLTemplateElement.cloneNode(deep) + GC (TemplateContent UAF)
+// <template> tem um DocumentFragment como content;
+// cloneNode(deep) clona o content; GC durante o clone pode causar UAF
+// no TemplateContent que é um DocumentFragment especial.
+function t443(){
+  log('Teste 443: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    // Criar templates com conteúdo complexo
+    var templates = [];
+    for(var i = 0; i < 10; i++){
+      var tmpl = document.createElement('template');
+      tmpl.innerHTML = [
+        '<div class="tpl-root-' + i + '">',
+        '<style>.tpl-inner-' + i + ' { color: hsl(' + (i * 36) + ',70%,40%); }</style>',
+        '<h3>Template ' + i + '</h3>',
+        '<ul>',
+        Array.from({length: 10}, function(_, j){
+          return '<li class="tpl-inner-' + i + '">Item ' + i + '_' + j + '</li>';
+        }).join(''),
+        '</ul>',
+        '<slot name="content_' + i + '"></slot>',
+        '<script>/* template script ' + i + ' */<\/script>',
+        '<template id="nested_tmpl_' + i + '">',
+        '<span>nested_content_' + i + '</span>',
+        '</template>',
+        '</div>',
+      ].join('');
+      area.appendChild(tmpl);
+      templates.push(tmpl);
+    }
+
+    gc();
+
+    // Clonar templates em loop + GC
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < templates.length; i++){
+        var tmpl = templates[i];
+        try {
+          // shallow clone (não clona o content)
+          var shallowClone = tmpl.cloneNode(false);
+          gc();
+          shallowClone.content; // vazio no shallow clone
+          gc();
+
+          // deep clone (clona o content do template)
+          var deepClone = tmpl.cloneNode(true);
+          gc(); // GC após clone profundo do DocumentFragment
+          try { deepClone.content.childNodes.length; } catch(e){}
+          try { deepClone.content.querySelector('.tpl-root-' + i); } catch(e){}
+          gc();
+
+          // Instanciar o template (importNode)
+          var instance = document.importNode(tmpl.content, true);
+          gc(); // GC com o clone do DocumentFragment
+          area.appendChild(instance);
+          gc(); // GC após inserção do clone
+          var _ = area.offsetHeight;
+
+          // Remover a instância + GC
+          if(instance.parentNode){ area.removeChild(instance); gc(); }
+
+          // Remover o template + GC + tentar instanciar o template removido
+          if(iter === 10 && tmpl.parentNode){
+            area.removeChild(tmpl);
+            gc(); // GC: template removido mas templates[] ainda referencia
+            var postRemove = document.importNode(tmpl.content, true);
+            gc();
+            postRemove.childNodes.length;
+            area.appendChild(tmpl); // re-inserir
+          }
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 443: fim');
+}
+
+// ─── T444 ─────────────────────────────────────────────────────────────────────
+// CSS counter() + counter-reset/counter-increment mutation + GC
+// Counters CSS são gerenciados por um CounterNode tree;
+// mutar counter-reset durante o layout pode causar UAF no CounterNode.
+function t444(){
+  log('Teste 444: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var style444 = document.createElement('style');
+    style444.textContent = [
+      '.cnt-root { counter-reset: chapter18 section18 item18; }',
+      '.cnt-chapter { counter-increment: chapter18; }',
+      '.cnt-chapter::before { content: "Ch " counter(chapter18) ": "; font-weight:bold; }',
+      '.cnt-section { counter-increment: section18; }',
+      '.cnt-section::before { content: counter(chapter18) "." counter(section18) " "; }',
+      '.cnt-item { counter-increment: item18; }',
+      '.cnt-item::before { content: "(" counter(item18, lower-roman) ") "; }',
+      '.cnt-combo::before { content: counter(chapter18) "/" counter(section18) "/" counter(item18); }',
+      '.cnt-none { counter-reset: none; }',
+    ].join('\n');
+    document.head.appendChild(style444);
+
+    // Criar hierarquia com counters
+    var root = document.createElement('div');
+    root.className = 'cnt-root';
+    area.appendChild(root);
+
+    var chapters = [];
+    for(var ch = 0; ch < 5; ch++){
+      var chapter = document.createElement('div');
+      chapter.className = 'cnt-chapter';
+      chapter.textContent = 'Chapter content ' + ch;
+
+      var sections = [];
+      for(var sc = 0; sc < 4; sc++){
+        var section = document.createElement('div');
+        section.className = 'cnt-section';
+        section.textContent = 'Section ' + ch + '.' + sc;
+
+        for(var it = 0; it < 3; it++){
+          var item = document.createElement('div');
+          item.className = 'cnt-item cnt-combo';
+          item.textContent = 'Item ' + ch + '.' + sc + '.' + it;
+          section.appendChild(item);
+        }
+        chapter.appendChild(section);
+        sections.push(section);
+      }
+      root.appendChild(chapter);
+      chapters.push({ chapter: chapter, sections: sections });
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    // Mutar counter-reset durante layout + GC
+    for(var iter = 0; iter < 20; iter++){
+      try {
+        // Mudar counter-reset do root (invalida todos os counters)
+        root.style.counterReset = 'chapter18 ' + iter + ' section18 0 item18 0';
+        gc();
+        _ = area.offsetHeight;
+
+        // Remover capítulo + GC (invalida o CounterNode tree)
+        var ch = chapters[iter % chapters.length];
+        if(ch.chapter.parentNode){
+          root.removeChild(ch.chapter);
+          gc(); // GC: CounterNode tree está desconectado mas pode ter stale ptrs
+          _ = area.offsetHeight;
+          root.appendChild(ch.chapter);
+          gc();
+        }
+
+        // Adicionar elemento no meio (re-numera todos os counters)
+        var newCh = document.createElement('div');
+        newCh.className = 'cnt-chapter';
+        newCh.textContent = 'New Chapter ' + iter;
+        root.insertBefore(newCh, root.firstChild);
+        gc();
+        _ = area.offsetHeight;
+        root.removeChild(newCh);
+        gc();
+
+        // Mudar counter-increment de elementos individuais
+        for(var s = 0; s < ch.sections.length; s++){
+          ch.sections[s].style.counterIncrement = 'section18 ' + (iter % 3 + 1);
+          gc();
+        }
+        _ = area.offsetHeight;
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style444); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 444: fim');
+}
+
+// ─── T445 ─────────────────────────────────────────────────────────────────────
+// NodeIterator: DOM mutation durante nextNode()/previousNode() + GC
+// NodeIterator tem um "referenceNode" interno; mutar o DOM durante a
+// iteração (especialmente removendo o referenceNode) pode causar UAF.
+function t445(){
+  log('Teste 445: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    // Criar árvore complexa para iterar
+    var root445 = document.createElement('div');
+    for(var i = 0; i < 30; i++){
+      var el = document.createElement(i % 3 === 0 ? 'p' : i % 3 === 1 ? 'span' : 'div');
+      el.textContent = 'node_' + i;
+      el.setAttribute('data-idx', i);
+      if(i % 5 === 0){
+        var child = document.createElement('em');
+        child.textContent = 'child_' + i;
+        el.appendChild(child);
+      }
+      root445.appendChild(el);
+    }
+    area.appendChild(root445);
+
+    var _ = area.offsetHeight;
+    gc();
+
+    // NodeIterator com whatToShow variados
+    var whatToShows = [
+      NodeFilter.SHOW_ALL,
+      NodeFilter.SHOW_ELEMENT,
+      NodeFilter.SHOW_TEXT,
+      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+    ];
+
+    for(var iter = 0; iter < 15; iter++){
+      try {
+        // Criar NodeIterator com filtro
+        var ni = document.createNodeIterator(
+          root445,
+          whatToShows[iter % whatToShows.length],
+          {
+            acceptNode: function(node){
+              gc(); // GC no filtro — NodeIterator pode ter stale ptr
+              try {
+                // Retornar FILTER_ACCEPT para a maioria, FILTER_REJECT para alguns
+                if(node.textContent && node.textContent.indexOf('15') !== -1){
+                  return NodeFilter.FILTER_REJECT;
+                }
+              } catch(e){}
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          }
+        );
+        gc();
+
+        // Iterar e mutar durante a iteração
+        var nodeCount = 0;
+        var currentNode = ni.nextNode();
+        while(currentNode){
+          nodeCount++;
+          gc(); // GC em cada iteração
+
+          // Remover o nó atual durante a iteração
+          if(nodeCount === 5 && currentNode.parentNode){
+            currentNode.parentNode.removeChild(currentNode);
+            gc(); // GC: NodeIterator.referenceNode aponta para nó removido
+            currentNode.parentNode; // accesso pós-remoção
+          }
+
+          // Inserir nó durante iteração
+          if(nodeCount === 10){
+            var newNode = document.createElement('span');
+            newNode.textContent = 'inserted_during_iter_' + iter;
+            root445.appendChild(newNode);
+            gc();
+          }
+
+          try { currentNode = ni.nextNode(); } catch(e){ break; }
+          if(nodeCount > 100) break;
+        }
+
+        // previousNode após iteração completa
+        try {
+          for(var b = 0; b < 5; b++){
+            var prev = ni.previousNode();
+            gc();
+            if(!prev) break;
+            prev.textContent;
+          }
+        } catch(e){}
+
+        // Detach o iterator
+        try { ni.detach && ni.detach(); gc(); } catch(e){}
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 445: fim');
+}
+
+// ─── T446 ─────────────────────────────────────────────────────────────────────
+// CSS @font-face + FontFace.load() + removeChild durante load + GC
+// @font-face dispara o carregamento de fontes; remover o elemento que
+// usa a fonte durante o carregamento pode causar UAF no CachedFont.
+function t446(){
+  log('Teste 446: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    // Fontes com data URIs inválidos (falharão rapidamente, mas os objetos são criados)
+    var fakeDataURI = 'data:font/woff2;base64,AAABBAABAAAA' + 'A'.repeat(100);
+
+    var style446 = document.createElement('style');
+    style446.textContent = [
+      '@font-face { font-family: "TestFont18A"; src: url("' + fakeDataURI + '"); }',
+      '@font-face { font-family: "TestFont18B"; src: local("Arial"), url("' + fakeDataURI + '"); }',
+      '@font-face { font-family: "TestFont18C"; src: local("Helvetica"); font-weight: bold; }',
+      '.ff-el-a { font-family: "TestFont18A", sans-serif; }',
+      '.ff-el-b { font-family: "TestFont18B", sans-serif; }',
+      '.ff-el-c { font-family: "TestFont18C", sans-serif; font-weight: bold; }',
+    ].join('\n');
+    document.head.appendChild(style446);
+
+    var ffEls = [];
+    for(var i = 0; i < 15; i++){
+      var el = document.createElement('p');
+      el.className = ['ff-el-a', 'ff-el-b', 'ff-el-c'][i % 3];
+      el.textContent = 'Font face test ' + i + ': The quick brown fox.';
+      area.appendChild(el);
+      ffEls.push(el);
+    }
+
+    var _ = area.offsetHeight; // triggerar o load das fontes
+    gc();
+
+    // FontFace API (se disponível)
+    if(typeof FontFace !== 'undefined'){
+      for(var i = 0; i < 10; i++){
+        try {
+          var ff = new FontFace('DynamicFont18_' + i, 'url("' + fakeDataURI + '")', {
+            weight: ['100','400','700','900'][i % 4],
+            style: i % 2 === 0 ? 'normal' : 'italic',
+          });
+          gc(); // GC antes do load
+
+          ff.load().then(function(loadedFf){
+            gc(); // GC quando a fonte carrega (ou falha silenciosamente)
+            try { document.fonts.add(loadedFf); gc(); } catch(e){}
+          }).catch(function(err){
+            gc(); // GC no erro de carregamento
+          });
+
+          gc(); // GC com promise de load pendente
+        } catch(e){}
+      }
+    }
+
+    // Remover elementos durante o load das fontes + GC
+    for(var iter = 0; iter < 15; iter++){
+      var el = ffEls[iter % ffEls.length];
+      try {
+        if(el.parentNode){ area.removeChild(el); gc(); }
+        // GC: CachedFont pode estar carregando para este elemento
+        el.className = ['ff-el-a', 'ff-el-b', 'ff-el-c'][(iter + 1) % 3];
+        area.appendChild(el);
+        gc();
+        _ = area.offsetHeight;
+      } catch(e){}
+    }
+
+    // Deletar regras @font-face + GC + verificar se elementos ainda renderizam
+    if(style446.sheet){
+      for(var r = style446.sheet.cssRules.length - 1; r >= 0; r--){
+        try {
+          style446.sheet.deleteRule(r);
+          gc(); // GC: CachedFont pode ter stale ptr para a regra deletada
+          _ = area.offsetHeight;
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style446); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 446: fim');
+}
+
+// ─── T447 ─────────────────────────────────────────────────────────────────────
+// fetch() + streaming body via ReadableStream + AbortController abort + GC
+// fetch com streaming usa um ResponseBodyLoader; abort() durante o streaming
+// + GC pode causar UAF no ResourceLoader interno do PS4 WebKit.
+function t447(){
+  log('Teste 447: inicio');
+  try {
+    if(typeof AbortController === 'undefined'){
+      log('Teste 447: fim (sem AbortController)');
+      return;
+    }
+
+    var controllers = [];
+
+    for(var i = 0; i < 15; i++){
+      try {
+        var ctrl = new AbortController();
+        controllers.push(ctrl);
+        var signal = ctrl.signal;
+
+        signal.addEventListener('abort', function(){
+          gc(); // GC no evento abort
+          try { this.aborted; this.reason; } catch(e){}
+        });
+
+        // fetch para URL inexistente (connection refused rápido)
+        var url = 'http://127.0.0.1:19988/fetch_' + i;
+        fetch(url, {
+          signal: signal,
+          method: i % 3 === 0 ? 'POST' : 'GET',
+          body: i % 3 === 0 ? new Blob(['body_' + i]) : undefined,
+          headers: { 'X-Test': 'ps4_t447_' + i },
+        }).then(function(resp){
+          gc(); // GC quando a resposta chega
+          try { resp.status; resp.ok; resp.headers; } catch(e){}
+          // Consumir body como stream
+          if(resp.body){
+            var reader = resp.body.getReader();
+            function pump(){
+              reader.read().then(function(result){
+                gc(); // GC em cada chunk
+                if(!result.done) pump();
+                else { gc(); reader.releaseLock(); }
+              }).catch(function(){ gc(); });
+            }
+            pump();
+          }
+          return resp.text();
+        }).then(function(text){
+          gc();
+          text && text.length;
+        }).catch(function(err){
+          gc(); // GC no erro (abort ou connection refused)
+          try { err.name; err.message; } catch(e){}
+        });
+
+        gc(); // GC com fetch pendente
+      } catch(e){}
+    }
+
+    // Abortar todos os fetches + GC
+    for(var j = 0; j < controllers.length; j++){
+      try {
+        controllers[j].abort(new DOMException('AbortError_' + j, 'AbortError'));
+        gc(); // GC após abort — ResourceLoader sendo destruído
+      } catch(e){}
+    }
+
+    gcHeavy(); // GC pesado com vários fetches abortados
+    controllers.length = 0;
+    gc();
+  } catch(e){}
+  log('Teste 447: fim');
+}
+
+// ─── T448 ─────────────────────────────────────────────────────────────────────
+// CSS transition + transitionend + removeChild durante transição + GC
+// CSSTransition mantém referência ao elemento durante toda a transição;
+// remover o elemento no meio da transição + GC pode causar UAF no CSSTransition.
+function t448(){
+  log('Teste 448: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var style448 = document.createElement('style');
+    style448.textContent = [
+      '.tr-el {',
+      '  width: 80px; height: 50px; background: steelblue;',
+      '  display: inline-block; margin: 3px;',
+      '  transition: all 0.4s ease-in-out;',
+      '  transform: translateX(0);',
+      '  opacity: 1;',
+      '}',
+      '.tr-el.active {',
+      '  transform: translateX(50px) rotate(45deg);',
+      '  opacity: 0.3;',
+      '  background: coral;',
+      '  width: 120px;',
+      '}',
+    ].join('\n');
+    document.head.appendChild(style448);
+
+    var trEls = [];
+    for(var i = 0; i < 20; i++){
+      var el = document.createElement('div');
+      el.className = 'tr-el';
+      el.textContent = 'tr_' + i;
+      var n = i;
+
+      el.addEventListener('transitionstart', function(){
+        gc(); // GC no início da transição
+        try { this.style.transition; } catch(e){}
+      });
+      el.addEventListener('transitionrun', function(){ gc(); });
+      el.addEventListener('transitioncancel', function(){
+        gc(); // GC quando transição é cancelada (ex: elemento removido)
+      });
+      el.addEventListener('transitionend', function(evt){
+        gc(); // GC quando transição termina
+        try { evt.propertyName; evt.elapsedTime; evt.pseudoElement; } catch(e){}
+        // Remover no transitionend
+        if(n === 3 && this.parentNode){
+          area.removeChild(this);
+          gc(); // GC: CSSTransition processando evento mas elemento removido
+          area.appendChild(this);
+        }
+      });
+
+      area.appendChild(el);
+      trEls.push(el);
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    // Alternar classe 'active' para triggerar transições + remoção durante transição + GC
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < trEls.length; i++){
+        var el = trEls[i];
+        try {
+          // Iniciar transição
+          el.classList.add('active');
+          gc(); // GC com transição em progresso
+
+          // Remover durante transição (antes de terminar)
+          if(iter % 4 === 0 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: CSSTransition tem stale ptr para o elemento
+            // Verificar que as transições foram canceladas
+            if(typeof el.getAnimations === 'function'){
+              try { el.getAnimations().length; } catch(e){}
+            }
+            area.appendChild(el);
+            gc();
+          }
+
+          // Reverter antes de completar (transição cancelada → transitioncancel)
+          el.classList.remove('active');
+          gc();
+
+          // Mudar transition durante a transição (nova transição)
+          el.style.transitionDuration = (0.1 + iter * 0.05) + 's';
+          gc();
+          _ = area.offsetHeight;
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style448); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 448: fim');
+}
+
+// ─── T449 ─────────────────────────────────────────────────────────────────────
+// CSS animation-composition: accumulate/add + animações sobrepostas + GC
+// animation-composition controla como múltiplas animações se combinam;
+// GC durante o recalculo das animações compostas pode causar UAF.
+function t449(){
+  log('Teste 449: inicio');
+  try {
+    var area = document.getElementById('dom18');
+    area.style.display = 'block';
+
+    var style449 = document.createElement('style');
+    style449.textContent = [
+      '@keyframes move18   { from{transform:translateX(0)} to{transform:translateX(60px)} }',
+      '@keyframes rotate18 { from{transform:rotate(0deg)} to{transform:rotate(180deg)} }',
+      '@keyframes scale18  { from{transform:scale(1)} to{transform:scale(1.5)} }',
+      '.comp-el {',
+      '  display:inline-block; width:40px; height:40px; margin:4px;',
+      '  background:hsl(220,70%,50%);',
+      '}',
+      '.comp-accumulate {',
+      '  animation: move18 0.5s infinite, rotate18 0.7s infinite;',
+      '  animation-composition: accumulate;',
+      '}',
+      '.comp-add {',
+      '  animation: move18 0.4s infinite, scale18 0.6s infinite, rotate18 0.8s infinite;',
+      '  animation-composition: add;',
+      '}',
+      '.comp-replace {',
+      '  animation: rotate18 0.3s infinite, move18 0.5s infinite;',
+      '  animation-composition: replace;',
+      '}',
+    ].join('\n');
+    document.head.appendChild(style449);
+
+    var compEls = [];
+    var compClasses = ['comp-accumulate', 'comp-add', 'comp-replace'];
+    for(var i = 0; i < 15; i++){
+      var el = document.createElement('div');
+      el.className = 'comp-el ' + compClasses[i % compClasses.length];
+      el.style.background = 'hsl(' + (i * 24) + ',70%,50%)';
+      el.textContent = 'comp_' + i;
+      area.appendChild(el);
+      compEls.push(el);
+    }
+
+    var _ = area.offsetHeight;
+    gc();
+
+    // Mutar animation-composition durante animações + GC
+    for(var iter = 0; iter < 20; iter++){
+      for(var i = 0; i < compEls.length; i++){
+        var el = compEls[i];
+        try {
+          // Mudar animation-composition (invalida o compositor)
+          el.style.animationComposition = ['accumulate','add','replace'][iter % 3];
+          gc();
+          _ = area.offsetHeight;
+
+          // Adicionar nova animação durante composição
+          el.style.animationName += ',scale18';
+          gc();
+          el.style.animationDuration += ',0.3s';
+          gc();
+
+          // Remover durante composição
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: AnimationCompositor tem stale ptr
+            area.appendChild(el);
+          }
+
+          // Pausar/retomar animações compostas
+          el.style.animationPlayState = iter % 2 === 0 ? 'paused' : 'running';
+          gc();
+
+          // Usar Web Animations API para manipular
+          if(typeof el.getAnimations === 'function'){
+            try {
+              var anims = el.getAnimations();
+              gc();
+              for(var a = 0; a < anims.length; a++){
+                // Mudar composite via Web Animations API
+                if(anims[a].effect && anims[a].effect.composite !== undefined){
+                  anims[a].effect.composite = ['accumulate','add','replace'][a % 3];
+                  gc();
+                }
+              }
+            } catch(e){}
+          }
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style449); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 449: fim');
+}
+
+// ─── T450 ─────────────────────────────────────────────────────────────────────
+// STRESS FINAL T450: XHR + Worker + Canvas2D + SVG + IndexedDB
+// Cinco vetores confirmados no PS4 em sequência com gcHeavy() entre fases
+function t450(){
+  log('Teste 450: inicio');
+  try {
+    // === FASE 1: XHR abort race ===
+    try {
+      var xhrs450 = [];
+      for(var i = 0; i < 10; i++){
+        try {
+          var xhr = new XMLHttpRequest();
+          xhr.onabort = function(){ gc(); };
+          xhr.onerror = function(){ gc(); };
+          xhr.open('GET', 'http://127.0.0.1:19987/stress_' + i, true);
+          gc();
+          xhr.send();
+          gc();
+          xhrs450.push(xhr);
+        } catch(e){}
+      }
+      for(var j = 0; j < xhrs450.length; j++){
+        try { xhrs450[j].abort(); gc(); xhrs450[j].readyState; } catch(e){}
+      }
+      xhrs450.length = 0;
+      gcHeavy();
+    } catch(e){}
+
+    // === FASE 2: Worker terminate ===
+    try {
+      var wCode = 'self.onmessage=function(e){var s=0;for(var i=0;i<1e5;i++)s+=i;self.postMessage(s);};';
+      var wBlob = new Blob([wCode], { type: 'application/javascript' });
+      var wUrl  = URL.createObjectURL(wBlob);
+      var workers450 = [];
+      for(var i = 0; i < 5; i++){
+        try {
+          var w = new Worker(wUrl);
+          w.onmessage = function(){ gc(); };
+          w.onerror   = function(){ gc(); };
+          w.postMessage(i);
+          gc();
+          workers450.push(w);
+        } catch(e){}
+      }
+      for(var j = 0; j < workers450.length; j++){
+        try { workers450[j].postMessage(-1); workers450[j].terminate(); gc(); } catch(e){}
+      }
+      workers450.length = 0;
+      URL.revokeObjectURL(wUrl);
+      gcHeavy();
+    } catch(e){}
+
+    // === FASE 3: Canvas2D + createImageBitmap ===
+    try {
+      if(typeof createImageBitmap !== 'undefined'){
+        var c = document.getElementById('c18');
+        c.style.display = 'block';
+        var ctx = c.getContext('2d');
+        if(ctx){
+          ctx.fillStyle = 'red'; ctx.fillRect(0,0,128,128);
+          for(var i = 0; i < 5; i++){
+            try {
+              createImageBitmap(c).then(function(bmp){
+                gc();
+                try { bmp.close(); gc(); bmp.width; } catch(e){}
+              }).catch(function(){ gc(); });
+              gc();
+            } catch(e){}
+          }
+        }
+        c.style.display = 'none';
+        gcHeavy();
+      }
+    } catch(e){}
+
+    // === FASE 4: SVG SMIL ===
+    try {
+      var svgNS = 'http://www.w3.org/2000/svg';
+      var svg450 = document.createElementNS(svgNS, 'svg');
+      svg450.setAttribute('width','50'); svg450.setAttribute('height','50');
+      var circle450 = document.createElementNS(svgNS, 'circle');
+      circle450.setAttribute('cx','25'); circle450.setAttribute('cy','25'); circle450.setAttribute('r','20');
+      var anim450 = document.createElementNS(svgNS, 'animate');
+      anim450.setAttribute('attributeName','r'); anim450.setAttribute('from','5');
+      anim450.setAttribute('to','20'); anim450.setAttribute('dur','0.5s');
+      anim450.setAttribute('repeatCount','indefinite');
+      circle450.appendChild(anim450);
+      svg450.appendChild(circle450);
+      document.body.appendChild(svg450);
+      gc();
+      svg450.removeChild(circle450); gc(); // SMIL UAF
+      svg450.appendChild(circle450); gc();
+      circle450.removeChild(anim450); gc(); // SMIL animate UAF
+      circle450.appendChild(anim450); gc();
+      document.body.removeChild(svg450);
+      gcHeavy();
+    } catch(e){}
+
+    // === FASE 5: IndexedDB quick open/abort ===
+    try {
+      if(typeof indexedDB !== 'undefined'){
+        var dbReq = indexedDB.open('ps4_stress450_' + Date.now(), 1);
+        dbReq.onupgradeneeded = function(e){ gc(); };
+        dbReq.onsuccess = function(e){
+          gc();
+          var db = e.target.result;
+          if(db.objectStoreNames.length === 0){
+            db.close(); gc(); return;
+          }
+          try {
+            var tx = db.transaction(Array.from(db.objectStoreNames), 'readwrite');
+            gc();
+            tx.onabort = function(){ gc(); };
+            tx.abort(); gc();
+          } catch(e2){}
+          db.close(); gc();
+        };
+        dbReq.onerror = function(){ gc(); };
+        gc();
+        gcHeavy();
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 450: fim');
+}
+</script>
+</body>
+</html>
