@@ -1,881 +1,326 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Testes03</title></head>
+<head>
+    <meta charset="UTF-8">
+    <title>PS4 Binary Suite</title>      
+</head>
 <body>
 
-<p>Cada botao executa um teste isolado. Se o navegador travar, o ultimo teste pressionado e o responsavel.</p>
+    <div class="section">
+        <h2>TESTES NAO REPORTADOS</h2>   
+       
+        
+      
 
-<button onclick="runAll()">RODAR TODOS</button>
-<br><br>
-<button onclick="t51()">Teste 51</button>
-<button onclick="t52()">Teste 52</button>
-<button onclick="t53()">Teste 53</button>
-<button onclick="t54()">Teste 54</button>
-<button onclick="t55()">Teste 55</button>
-<button onclick="t56()">Teste 56</button>
-<button onclick="t57()">Teste 57</button>
-<button onclick="t58()">Teste 58</button>
-<button onclick="t59()">Teste 59</button>
-<button onclick="t60()">Teste 60</button>
-<button onclick="t61()">Teste 61</button>
-<button onclick="t62()">Teste 62</button>
-<button onclick="t63()">Teste 63</button>
-<button onclick="t64()">Teste 64</button>
-<button onclick="t65()">Teste 65</button>
-<button onclick="t66()">Teste 66</button>
-<button onclick="t67()">Teste 67</button>
-<button onclick="t68()">Teste 68</button>
-<button onclick="t69()">Teste 69</button>
-<button onclick="t70()">Teste 70</button>
-<button onclick="t71()">Teste 71</button>
-<button onclick="t72()">Teste 72</button>
-<button onclick="t73()">Teste 73</button>
-<button onclick="t74()">Teste 74</button>
-<button onclick="t75()">Teste 75</button>
+        <button onclick="runSharedProxyDestruct()">SharedWorkerProxy Destructor Race  KERNEL PANIC</button> 
+        <button onclick="runSharedProxyRace()">SharedWorkerThreadProxy C++ Race KERNEL PANIC</button>
+        <button onclick="runRedZoneBypass()">Stack Red Zone Bypass KERNEL PANIC</button>
 
-<pre id="o"></pre>
+        <button onclick="runThreadTCB()">Pthread TCB Corruption (_tcb_set)KERNEL PANIC</button>        
+        <button onclick="runSignalStress()">Worker Signal Stack Corruption KERNEL PANIC</button>
+       
+        
+        <button onclick="runPthreadInternal()">Pthread Internal Memory Error Trigger KERNEL PANIC</button>      
+        <button onclick="runIDWrap()">SharedWorker ID Wraparound KERNEL PANIC </button>
 
-<script>
-function log(m){ document.getElementById('o').textContent += m + '\n'; }
+        <button onclick="runSignalRace()">Worker Termination Signal Race(CRASH WEBKIT)</button>
 
-function runAll(){
-  log('=== RODAR TODOS: inicio ===');
-  t51(); t52(); t53(); t54(); t55();
-  t56(); t57(); t58(); t59(); t60();
-  t61(); t62(); t63(); t64(); t65();
-  t66(); t67(); t68(); t69(); t70();
-  t71(); t72(); t73(); t74(); t75();
-  log('=== RODAR TODOS: fim ===');
-}
+       
+                  
+     
+        
+    </div>
 
-// T51 — Map com chave que e um Proxy revogado
-// Map usa identidade de referencia; chave Proxy revogado pode crashar lookup
-function t51(){
-  log('Teste 51: inicio');
-  try {
-    var m = new Map();
-    var revocable = Proxy.revocable({id: 1}, {});
-    var p = revocable.proxy;
-    m.set(p, 'valor');
-    m.set({id: 2}, 'outro');
-    var before = m.get(p);
-    revocable.revoke();
-    // Tentar usar proxy revogado como chave de Map
-    try { var after = m.get(p); }    catch(e1){}
-    try { m.set(p, 'novo'); }        catch(e2){}
-    try { var has = m.has(p); }      catch(e3){}
-    try { m.delete(p); }             catch(e4){}
-  } catch(e){}
-  log('Teste 51: fim');
-}
+    <div id="log"></div>
+    <div id="dummy"></div>
+    <div id="sandbox"></div>
 
-// T52 — Set com valores que mudam igualdade durante iteracao
-// Set usa SameValueZero; NaN === NaN no Set mas nao em JS
-function t52(){
-  log('Teste 52: inicio');
-  try {
-    var s = new Set();
-    s.add(NaN);
-    s.add(NaN);        // deve ser ignorado (NaN ja esta)
-    s.add(-0);
-    s.add(+0);         // deve ser ignorado (-0 === +0 no Set)
-    s.add(Infinity);
-    s.add(-Infinity);
-
-    // Iterar enquanto modifica
-    var count = 0;
-    s.forEach(function(v){
-      count++;
-      if(count === 2){
-        s.add(count * 100); // adicionar durante forEach
-        s.delete(Infinity);  // deletar durante forEach
-      }
-    });
-
-    // Verificar comportamento com objeto como valor
-    var obj = {};
-    s.add(obj);
-    s.add(obj); // duplicado
-    var size = s.size;
-  } catch(e){}
-  log('Teste 52: fim');
-}
-
-// T53 — Closure capturando variavel de bloco em loop com let
-// Cada iteracao cria novo binding; 10000 closures ativas
-function t53(){
-  log('Teste 53: inicio');
-  try {
-    var closures = [];
-    for(let i = 0; i < 10000; i++){
-      closures.push(function(){ return i; });
-    }
-    // Invocar todas as closures
-    var sum = 0;
-    for(var j = 0; j < closures.length; j++){
-      sum += closures[j]();
-    }
-    closures = null;
-  } catch(e){}
-  log('Teste 53: fim');
-}
-
-// T54 — try/catch/finally aninhados com return em finally
-// return em finally sobrescreve o valor de retorno do try e catch
-// Aninhamento profundo pode ter bugs na resolucao do valor de retorno
-function t54(){
-  log('Teste 54: inicio');
-  try {
-    function deep(n){
-      if(n <= 0) return 'base';
-      try {
-        try {
-          var r = deep(n - 1);
-          throw new Error('force_catch_' + n);
-        } catch(e){
-          return 'catch_' + n;
-        } finally {
-          // finally com return sobrescreve o catch return
-          if(n % 3 === 0) return 'finally_' + n;
+    <script>
+        function log(msg) { 
+            const el = document.getElementById('log');
+            el.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+            el.scrollTop = el.scrollHeight;
         }
-      } finally {
-        if(n % 5 === 0) return 'outer_finally_' + n;
-      }
-    }
-    var r = deep(300);
-  } catch(e){}
-  log('Teste 54: fim');
-}
 
-// T55 — Symbol como chave em JSON.stringify com replacer
-// JSON.stringify ignora Symbol keys normalmente;
-// replacer recebe chaves como string; Symbol nao aparece
-function t55(){
-  log('Teste 55: inicio');
-  try {
-    var sym1 = Symbol('key1');
-    var sym2 = Symbol.for('key2');
-    var obj = {
-      normal: 1,
-      [sym1]: 'sym1_value',
-      [sym2]: 'sym2_value',
-      [Symbol.iterator]: function(){}
-    };
-
-    // replacer que tenta incluir Symbol keys
-    var replacer = function(key, value){
-      if(key === '') return value; // raiz
-      // Tentar retornar um Symbol como valor (violacao de spec)
-      if(key === 'normal') return sym1;
-      return value;
-    };
-
-    try { var j1 = JSON.stringify(obj); }             catch(e1){}
-    try { var j2 = JSON.stringify(obj, replacer); }   catch(e2){}
-    try { var j3 = JSON.stringify(obj, [sym1]); }     catch(e3){}
-
-    // toJSON que retorna Symbol
-    var obj2 = {
-      toJSON: function(){ return sym2; }
-    };
-    try { var j4 = JSON.stringify(obj2); }            catch(e4){}
-  } catch(e){}
-  log('Teste 55: fim');
-}
-
-// T56 — Proxy com construct trap que retorna primitivo
-// Spec: construct trap deve retornar objeto; primitivo = TypeError
-function t56(){
-  log('Teste 56: inicio');
-  try {
-    function Ctor(){}
-    var primitives = [42, 'string', true, null, undefined, Symbol('s')];
-    primitives.forEach(function(prim){
-      var p = new Proxy(Ctor, {
-        construct: function(t, args, newTarget){
-          return prim; // violacao de spec: retornar primitivo
+         // --- 2. TypedArray.sort Buffer Detach ---
+        function runSortDetach() {
+            log("[WebKit] Iniciando Sort Detach...");
+            
+            try {
+                const buffer = new ArrayBuffer(1024 * 1024); // 1MB
+                const array = new Uint8Array(buffer);
+                
+                // Preenche
+                for(let i=0; i<array.length; i++) array[i] = Math.random() * 255;
+                
+                const w = new Worker(URL.createObjectURL(new Blob([""], {type:"text/javascript"})));
+                
+                let detached = false;
+                
+                // O GOLPE: Função de comparação transfere o buffer
+                array.sort((a, b) => {
+                    if (!detached) {
+                        log("Comparador ativo. Transferindo buffer...");
+                        w.postMessage(buffer, [buffer]);
+                        detached = true;
+                    }
+                    return a - b;
+                });
+                
+                log("Sort finalizado (Seguro se não crashou).");
+                w.terminate();
+                
+            } catch(e) {
+                // TypeError é esperado em browsers corrigidos
+                log("Resultado: " + e.message);
+            }
         }
-      });
-      try { var inst = new p(); } catch(e1){}
-    });
 
-    // Proxy de Proxy com construct
-    var inner = new Proxy(Ctor, {
-      construct: function(t, args){ return new Ctor(); }
-    });
-    var outer = new Proxy(inner, {
-      construct: function(t, args, newTarget){
-        return Reflect.construct(t, args, newTarget);
-      }
-    });
-    try { var inst2 = new outer(); } catch(e2){}
-  } catch(e){}
-  log('Teste 56: fim');
-}
 
-// T57 — Array.prototype.reduce em array com buracos (holes)
-// reduce pula buracos; mas se getter e definido no buraco...
-function t57(){
-  log('Teste 57: inicio');
-  try {
-    var arr = [1,,3,,5,,7,,9]; // array com buracos nos indices pares
-    // Adicionar getter nos indices pares (onde estao os buracos)
-    [0, 2, 4, 6, 8].forEach(function(idx){
-      Object.defineProperty(arr, idx, {
-        get: function(){ return idx * 10; },
-        enumerable: true, configurable: true
-      });
-    });
 
-    var sum1 = arr.reduce(function(acc, v){ return acc + v; }, 0);
-    var sum2 = arr.reduceRight(function(acc, v){ return acc + v; }, 0);
-    var flat  = arr.flat();
-    var mapped = arr.map(function(v){ return v * 2; });
-    var filtered = arr.filter(function(v){ return v > 10; });
-  } catch(e){}
-  log('Teste 57: fim');
-}
-
-// T58 — new.target em funcao chamada normalmente vs com new
-// Comportamento de new.target em diferentes contextos
-function t58(){
-  log('Teste 58: inicio');
-  try {
-    function checkNewTarget(){
-      return new.target;
-    }
-
-    // Passar new.target para outra funcao via Reflect.construct
-    function Derived(){
-      // new.target aqui e Derived; chamar Base com new.target = Derived
-      return Reflect.construct(Base, arguments, new.target);
-    }
-    function Base(){
-      this.nt = new.target;
-      this.val = 42;
-    }
-
-    var inst = new Derived();
-
-    // Arrow function: new.target herdado do escopo externo
-    function Outer(){
-      var inner = () => new.target;
-      return inner();
-    }
-    var nt = new Outer();
-
-    // Proxy interceptando construct com new.target incorreto
-    var p = new Proxy(Base, {
-      construct: function(t, args, newTarget){
-        // Passar um novo.target diferente
-        return Reflect.construct(t, args, Derived);
-      }
-    });
-    try { var inst2 = new p(); } catch(e1){}
-  } catch(e){}
-  log('Teste 58: fim');
-}
-
-// T59 — Iterator protocol: next() retorna nao-objeto
-// Spec: next() deve retornar objeto com {value, done}
-// Se retornar primitivo, motor deve lancar TypeError
-function t59(){
-  log('Teste 59: inicio');
-  try {
-    var primitiveIters = [
-      { [Symbol.iterator]: function(){ return { next: function(){ return 42; } }; } },
-      { [Symbol.iterator]: function(){ return { next: function(){ return 'str'; } }; } },
-      { [Symbol.iterator]: function(){ return { next: function(){ return null; } }; } },
-      { [Symbol.iterator]: function(){ return { next: function(){ return true; } }; } }
-    ];
-
-    primitiveIters.forEach(function(iter){
-      try {
-        var r = [];
-        for(var v of iter) r.push(v);
-      } catch(e1){}
-      try { var a = [...iter]; }         catch(e2){}
-      try { var [x, y] = iter; }         catch(e3){}
-      try { Array.from(iter); }          catch(e4){}
-    });
-  } catch(e){}
-  log('Teste 59: fim');
-}
-
-// T60 — Intl.Collator com locale invalido e opcoes extremas
-// Motor pode ter crash ao processar locale malformado
-function t60(){
-  log('Teste 60: inicio');
-  try {
-    if(typeof Intl === 'undefined') throw new Error('sem Intl');
-
-    var locales = [
-      'x-invalid-locale-string-that-is-very-long-xxxxxxxxxxxxxxxxxx',
-      'a'.repeat(200),
-      '\x00\x01\x02',
-      'und-Latn-x-' + 'a'.repeat(100),
-      ['en', 'INVALID', 'fr']
-    ];
-
-    locales.forEach(function(loc){
-      try {
-        var c = new Intl.Collator(loc, {
-          sensitivity: 'base',
-          usage: 'sort',
-          collation: 'phonebk'
-        });
-        c.compare('hello', 'world');
-      } catch(e1){}
-    });
-
-    // Opcoes extremas validas
-    try {
-      var c2 = new Intl.Collator('en', {
-        ignorePunctuation: true,
-        numeric: true,
-        caseFirst: 'upper',
-        sensitivity: 'variant'
-      });
-      var arr = ['Z', 'a', '10', '9', 'B', 'z', '100'];
-      arr.sort(c2.compare.bind(c2));
-    } catch(e2){}
-  } catch(e){}
-  log('Teste 60: fim');
-}
-
-// T61 — getter em Object.prototype que afeta todas as leituras de propriedade
-// Definir getter em Object.prototype para propriedade comum
-// Limpar depois para nao afetar outros testes
-function t61(){
-  log('Teste 61: inicio');
-  try {
-    var fired = 0;
-    Object.defineProperty(Object.prototype, '__test61__', {
-      get: function(){ fired++; return undefined; },
-      configurable: true, enumerable: false
-    });
-
-    // Acessar em varios contextos
-    var o1 = {}; var r1 = o1.__test61__;
-    var o2 = Object.create(null); // nao tem Object.prototype
-    var r2 = '__test61__' in o2;
-    var arr = [1,2,3]; var r3 = arr.__test61__;
-    function fn(){} var r4 = fn.__test61__;
-
-    // JSON.parse cria objetos que herdam Object.prototype
-    var parsed = JSON.parse('{"a":1,"b":2}');
-    var r5 = parsed.__test61__;
-  } catch(e){
-  } finally {
-    // Limpar SEMPRE
-    try { delete Object.prototype.__test61__; } catch(e2){}
-  }
-  log('Teste 61: fim');
-}
-
-// T62 — String.prototype.matchAll com regex global e exec modificado
-// matchAll usa o regex internamente chamando exec em loop
-function t62(){
-  log('Teste 62: inicio');
-  try {
-    var re = /(\w+)/g;
-    var execCount = 0;
-    var origExec = RegExp.prototype.exec;
-
-    // Substituir exec temporariamente
-    RegExp.prototype.exec = function(str){
-      execCount++;
-      if(execCount === 3){
-        // Retornar resultado malformado
-        return { 0: 'fake', index: 0, input: str, length: 1,
-                 indices: null }; // sem done
-      }
-      if(execCount > 20) return null; // parar
-      return origExec.call(this, str);
-    };
-
-    try {
-      var matches = [...'hello world foo bar'.matchAll(re)];
-    } catch(e1){}
-
-    // Restaurar
-    RegExp.prototype.exec = origExec;
-
-    // matchAll com regex nao-global deve lancar
-    try {
-      var re2 = /\w+/; // sem flag g
-      var m2 = [...'hello'.matchAll(re2)];
-    } catch(e2){}
-  } catch(e){
-    try { RegExp.prototype.exec = origExec; } catch(e3){}
-  }
-  log('Teste 62: fim');
-}
-
-// T63 — Promise.allSettled com thenable que chama resolve/reject multiplas vezes
-// Spec: apenas a primeira chamada e valida; multiplas chamadas devem ser ignoradas
-function t63(){
-  log('Teste 63: inicio');
-  try {
-    var resolvers = [];
-    var promises = [];
-
-    // Criar promises com controle manual
-    for(var i = 0; i < 50; i++){
-      (function(idx){
-        var res, rej;
-        var p = new Promise(function(resolve, reject){
-          res = resolve;
-          rej = reject;
-        });
-        resolvers.push({ res: res, rej: rej, idx: idx });
-        promises.push(p);
-      })(i);
-    }
-
-    Promise.allSettled(promises).then(function(results){
-      // Verificar que todas tem status
-    }).catch(function(){});
-
-    // Chamar resolve e reject multiplas vezes em cada promise
-    resolvers.forEach(function(r){
-      r.res('first_' + r.idx);
-      r.res('second_' + r.idx);  // deve ser ignorado
-      r.rej(new Error('rej_' + r.idx)); // deve ser ignorado
-      r.res('third_' + r.idx);   // deve ser ignorado
-    });
-  } catch(e){}
-  log('Teste 63: fim');
-}
-
-// T64 — Getter em Array.prototype que conflita com indice numerico
-// Array.prototype[0] como getter; arrays proprios tem proprio [0]
-function t64(){
-  log('Teste 64: inicio');
-  try {
-    Object.defineProperty(Array.prototype, '0', {
-      get: function(){
-        return 'from_proto';
-      },
-      configurable: true, enumerable: false
-    });
-
-    try {
-      // Array com elemento proprio no indice 0 deve usar o proprio
-      var a = [42, 43, 44];
-      var r1 = a[0]; // deve ser 42, nao 'from_proto'
-
-      // Array vazio: indice 0 nao existe; deve pegar do proto
-      var b = [];
-      var r2 = b[0];
-
-      // Array com buraco no indice 0
-      var c = [,2,3];
-      var r3 = c[0];
-
-      // TypedArray nao herda de Array.prototype da mesma forma
-      var ta = new Uint32Array([10, 20, 30]);
-      var r4 = ta[0];
-
-      // sort em array com getter no proto
-      var d = [3, 1, 2];
-      d.sort();
-    } catch(e1){}
-  } catch(e){
-  } finally {
-    try { delete Array.prototype[0]; } catch(e2){}
-  }
-  log('Teste 64: fim');
-}
-
-// T65 — class com static e instance fields com mesmo nome
-// Resolucao de campo pode confundir motor em casos de borda
-function t65(){
-  log('Teste 65: inicio');
-  try {
-    class Conflict {
-      x = 'instance';        // campo de instancia
-      static x = 'static';  // campo estatico com mesmo nome
-
-      constructor(){
-        this.y = this.x;         // deve ser 'instance'
-        this.z = Conflict.x;     // deve ser 'static'
-      }
-
-      get x(){ return 'getter'; }  // getter com mesmo nome que campo
-    }
-
-    try { var inst = new Conflict(); } catch(e1){}
-
-    // Subclasse que sobrescreve campo
-    class Sub extends Conflict {
-      x = 'sub_instance';
-      static x = 'sub_static';
-      constructor(){
-        super();
-        this.w = this.x;
-      }
-    }
-
-    try { var sub = new Sub(); }   catch(e2){}
-    try { var sx = Sub.x; }        catch(e3){}
-    try { var cx = Conflict.x; }   catch(e4){}
-  } catch(e){}
-  log('Teste 65: fim');
-}
-
-// T66 — Array.from com ArrayBuffer como source
-// ArrayBuffer nao e iteravel por padrao; Array.from deve retornar []
-// Alguns motores podem ter comportamento diferente
-function t66(){
-  log('Teste 66: inicio');
-  try {
-    var buf = new ArrayBuffer(32);
-    var view = new Uint8Array(buf);
-    for(var i = 0; i < 32; i++) view[i] = i;
-
-    try { var r1 = Array.from(buf); }          catch(e1){}
-    try { var r2 = [...buf]; }                  catch(e2){}
-    try { var r3 = Array.from(view); }          catch(e3){} // deve funcionar
-    try { var r4 = [...view]; }                 catch(e4){} // deve funcionar
-
-    // Tentar criar TypedArray de outro TypedArray diferente
-    var f64 = new Float64Array(8);
-    for(var i = 0; i < 8; i++) f64[i] = i * 1.5;
-
-    try { var u8  = new Uint8Array(f64.buffer); }   catch(e5){}
-    try { var u32 = new Uint32Array(f64.buffer); }  catch(e6){}
-    // Offset que causa desalinhamento
-    try { var dv = new DataView(f64.buffer, 1); }   catch(e7){}
-    try { var f32 = new Float32Array(f64.buffer, 4); } catch(e8){}
-  } catch(e){}
-  log('Teste 66: fim');
-}
-
-// T67 — String.raw com template object malformado
-// String.raw recebe {raw: [...]}; passar objeto estranho como template
-function t67(){
-  log('Teste 67: inicio');
-  try {
-    // Objeto template normal
-    var r1 = String.raw`hello\nworld`;
-
-    // Chamar String.raw diretamente com template object falso
-    try { var r2 = String.raw({ raw: ['a', 'b', 'c'] }, 1, 2); } catch(e1){}
-
-    // raw com getter que lanca
-    var fakeTemplate = {
-      raw: {
-        length: 3,
-        0: 'x',
-        get 1(){ throw new TypeError('raw_getter_throws'); },
-        2: 'z'
-      }
-    };
-    try { var r3 = String.raw(fakeTemplate, 'A', 'B'); } catch(e2){}
-
-    // raw com length como getter
-    var fakeTemplate2 = {
-      raw: {
-        get length(){ return { valueOf: function(){ return 2; } }; },
-        0: 'first', 1: 'second'
-      }
-    };
-    try { var r4 = String.raw(fakeTemplate2, 'X'); } catch(e3){}
-
-    // raw com Symbol.iterator customizado
-    var fakeTemplate3 = {
-      raw: ['\u0000', '\uFFFF', '\uD800\uDC00']
-    };
-    try { var r5 = String.raw(fakeTemplate3, 'mid1', 'mid2'); } catch(e4){}
-  } catch(e){}
-  log('Teste 67: fim');
-}
-
-// T68 — Proxy com set trap que retorna false em modo strict
-// Em strict mode, set retornando false deve lancar TypeError
-function t68(){
-  log('Teste 68: inicio');
-  try {
-    var p = new Proxy({}, {
-      set: function(t, k, v, receiver){
-        if(typeof v === 'number' && v > 100) return false; // rejeitar valores > 100
-        t[k] = v;
-        return true;
-      }
-    });
-
-    // Modo nao-strict: false silencioso
-    try { p.a = 50; }    catch(e1){}  // ok
-    try { p.b = 200; }   catch(e2){}  // false, silencioso em non-strict
-
-    // Forcar strict mode via Function constructor
-    try {
-      (new Function('"use strict"; arguments[0].c = 999;'))(p);
-    } catch(e3){}  // deve lancar TypeError em strict
-
-    // Reflect.set com o mesmo proxy
-    try { Reflect.set(p, 'd', 50); }   catch(e4){}
-    try { Reflect.set(p, 'e', 999); }  catch(e5){} // retorna false
-  } catch(e){}
-  log('Teste 68: fim');
-}
-
-// T69 — Math.min/max com muitos argumentos via apply
-// apply converte array em lista de argumentos; limite interno do motor
-function t69(){
-  log('Teste 69: inicio');
-  try {
-    var arr = [];
-    for(var i = 0; i < 100000; i++) arr.push(Math.random());
-
-    try { var mn = Math.min.apply(null, arr); } catch(e1){}
-    try { var mx = Math.max.apply(null, arr); } catch(e2){}
-
-    // Spread tambem converte para argumentos
-    // Usar tamanho menor para o spread (mais seguro)
-    var small = arr.slice(0, 10000);
-    try { var mn2 = Math.min(...small); } catch(e3){}
-    try { var mx2 = Math.max(...small); } catch(e4){}
-
-    // Function.prototype.apply com argumentos exoticos
-    try {
-      var typed = new Float64Array(1000);
-      for(var i=0;i<1000;i++) typed[i] = i;
-      var mn3 = Math.min.apply(null, typed);
-    } catch(e5){}
-  } catch(e){}
-  log('Teste 69: fim');
-}
-
-// T70 — class fields privados (#field) acessados via Proxy
-// Proxy nao pode interceptar acesso a campos privados; in check (#field in obj)
-function t70(){
-  log('Teste 70: inicio');
-  try {
-    class Secret {
-      #value = 42;
-      #data = new Uint32Array([0xDEAD, 0xBEEF]);
-
-      getValue(){ return this.#value; }
-      hasValue(obj){ return #value in obj; }
-
-      static extract(obj){
-        try { return obj.#value; } catch(e){ return 'no_access'; }
-      }
-    }
-
-    var inst = new Secret();
-
-    // Proxy em torno da instancia
-    var p = new Proxy(inst, {
-      get: function(t, k){
-        return Reflect.get(t, k, t); // redirecionar com receiver correto
-      }
-    });
-
-    try { var r1 = p.getValue(); }                    catch(e1){}
-    try { var r2 = inst.hasValue(inst); }             catch(e2){} // true
-    try { var r3 = inst.hasValue(p); }                catch(e3){} // false (proxy nao tem #value)
-    try { var r4 = Secret.extract(inst); }            catch(e4){} // 42
-    try { var r5 = Secret.extract(p); }               catch(e5){} // erro
-
-    // Tentar acessar campo privado de fora da classe
-    try { var r6 = inst['#value']; }                  catch(e6){}
-    try { var r7 = inst[Symbol('value')]; }           catch(e7){}
-  } catch(e){}
-  log('Teste 70: fim');
-}
-
-// T71 — Uint8Array criado com offset sobre buffer pequeno
-// Varios offsets e tamanhos no limite exato do buffer
-function t71(){
-  log('Teste 71: inicio');
-  try {
-    var buf = new ArrayBuffer(16);
-
-    // Combinacoes de offset e length no limite
-    var combos = [
-      [0, 16], [0, 17], [1, 15], [1, 16],
-      [8, 8],  [8, 9],  [15, 1], [15, 2],
-      [16, 0], [16, 1], [7, 9],  [7, 10]
-    ];
-
-    combos.forEach(function(c){
-      try {
-        var v = new Uint8Array(buf, c[0], c[1]);
-        // Acessar primeiro e ultimo elemento
-        var first = v[0];
-        var last  = v[v.length - 1];
-        // Tentar escrever
-        v[0]           = 0xFF;
-        v[v.length - 1] = 0xAA;
-      } catch(e1){}
-    });
-
-    // DataView com os mesmos combos
-    combos.forEach(function(c){
-      try {
-        var dv = new DataView(buf, c[0], c[1]);
-        dv.getUint8(0);
-      } catch(e2){}
-    });
-  } catch(e){}
-  log('Teste 71: fim');
-}
-
-// T72 — Recursao em valueOf/toString com troca de tipo
-// valueOf retorna objeto que tem valueOf que retorna primitivo
-// Motor deve iterar ate obter primitivo (no maximo 2 vezes por spec)
-function t72(){
-  log('Teste 72: inicio');
-  try {
-    var depth = 0;
-    function makeNested(n){
-      if(n <= 0) return 99;
-      return {
-        valueOf: function(){
-          depth++;
-          return makeNested(n - 1);
-        },
-        toString: function(){
-          return 'str_' + n;
+        
+
+
+
+
+        // --- 7. SharedWorkerThreadProxy C++ Race ---
+        function runSharedProxyRace() {
+            log("[WebKit] Atacando SharedWorkerThreadProxy...");
+            
+            const workerCode = `
+                onmessage = (e) => {
+                    // Mantém o proxy ocupado serializando
+                    postMessage({data: new Array(10000).fill(1.1)});
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            let i = 0;
+            const interval = setInterval(() => {
+                const sw = new SharedWorker(url, "race_" + i);
+                sw.port.start();
+                sw.port.postMessage("ping");
+                
+                // O WebKit não tem sw.terminate(), mas podemos garbage collect a referência
+                // ou navegar o iframe que o contém. Aqui simulamos carga rápida.
+                
+                // Força atividade no proxy
+                sw.port.postMessage({buffer: new ArrayBuffer(1024)});
+                
+                i++;
+                if(i % 100 === 0) log(`Workers Proxy Ciclados: ${i}`);
+                if(i > 1000) clearInterval(interval);
+            }, 10);
         }
-      };
-    }
 
-    var obj = makeNested(10);
 
-    // Operacoes que forcam conversao de tipo
-    try { var r1 = obj + 1; }      catch(e1){}
-    try { var r2 = obj - 0; }      catch(e2){}
-    try { var r3 = obj * 2; }      catch(e3){}
-    try { var r4 = +obj; }         catch(e4){}
-    try { var r5 = obj > 0; }      catch(e5){}
-    try { var r6 = String(obj); }  catch(e6){}
-    try { var r7 = Number(obj); }  catch(e7){}
-    try { var r8 = `${obj}`; }     catch(e8){}
-  } catch(e){}
-  log('Teste 72: fim');
-}
-
-// T73 — Proxy de Function com apply e construct e get todos definidos
-// Motor usa diferentes caminhos para chamada direta vs new vs method
-function t73(){
-  log('Teste 73: inicio');
-  try {
-    var log73 = [];
-    function Base(x){ this.x = x || 0; }
-    Base.prototype.method = function(){ return this.x * 2; };
-
-    var p = new Proxy(Base, {
-      apply: function(t, thisA, args){
-        log73.push('apply');
-        return Reflect.apply(t, thisA, args);
-      },
-      construct: function(t, args, newT){
-        log73.push('construct');
-        return Reflect.construct(t, args, newT);
-      },
-      get: function(t, k){
-        log73.push('get:' + String(k));
-        return Reflect.get(t, k);
-      }
-    });
-
-    try { var r1 = p(5); }                         catch(e1){} // apply sem new
-    try { var r2 = new p(10); }                    catch(e2){} // construct
-    try { var r3 = p.prototype; }                  catch(e3){} // get
-    try { var r4 = p.call(null, 7); }              catch(e4){} // get:call + apply
-    try { var r5 = p.apply(null, [8]); }           catch(e5){} // get:apply + apply
-    try { var r6 = Reflect.construct(p, [9]); }    catch(e6){} // construct direto
-    try { var r7 = new p.prototype.constructor(3);} catch(e7){} // get:prototype + get:constructor
-  } catch(e){}
-  log('Teste 73: fim');
-}
-
-// T74 — for...of com objeto que tem tanto Symbol.iterator quanto Symbol.asyncIterator
-// for...of usa Symbol.iterator (sync); for-await-of usa asyncIterator
-// Definir ambos e testar confusao entre eles
-function t74(){
-  log('Teste 74: inicio');
-  try {
-    var syncCount = 0, asyncCount = 0;
-
-    var dualIter = {
-      [Symbol.iterator]: function(){
-        return {
-          next: function(){
-            syncCount++;
-            if(syncCount > 5) return { value: undefined, done: true };
-            return { value: 'sync_' + syncCount, done: false };
-          },
-          return: function(){ return { value: undefined, done: true }; }
-        };
-      },
-      [Symbol.asyncIterator]: function(){
-        return {
-          next: async function(){
-            asyncCount++;
-            if(asyncCount > 5) return { value: undefined, done: true };
-            return { value: 'async_' + asyncCount, done: false };
-          }
-        };
-      }
-    };
-
-    // for...of deve usar Symbol.iterator
-    var syncResults = [];
-    try {
-      for(var v of dualIter) syncResults.push(v);
-    } catch(e1){}
-
-    // Spread tambem usa Symbol.iterator
-    try { var spread = [...dualIter]; } catch(e2){}
-
-    // Array.from usa Symbol.iterator
-    try { var fromArr = Array.from(dualIter); } catch(e3){}
-
-    // for-await-of usa Symbol.asyncIterator
-    async function runAsync(){
-      var asyncResults = [];
-      try {
-        for await(var v of dualIter) asyncResults.push(v);
-      } catch(e4){}
-    }
-    runAsync().catch(function(){});
-  } catch(e){}
-  log('Teste 74: fim');
-}
-
-// T75 — Object.keys/values/entries em Proxy com ownKeys que retorna nao-string/Symbol
-// Spec: ownKeys so pode retornar string ou Symbol; outros tipos = TypeError
-function t75(){
-  log('Teste 75: inicio');
-  try {
-    var invalidKeys = [42, true, null, undefined, {}, [], 3.14];
-
-    invalidKeys.forEach(function(badKey){
-      var p = new Proxy({}, {
-        ownKeys: function(){
-          return [badKey]; // chave invalida
-        },
-        getOwnPropertyDescriptor: function(t, k){
-          return { value: 1, writable: true, enumerable: true, configurable: true };
+        // --- 9. SharedWorker ID Wraparound ---
+        function runIDWrap() {
+            log("[WebKit] Iniciando ID Wraparound...");
+            
+            const blob = new Blob([""], {type: "text/javascript"});
+            const url = URL.createObjectURL(blob);
+            
+            let count = 0;
+            const interval = setInterval(() => {
+                // Cria e "esquece" workers rapidamente
+                // O WebKit incrementa um contador estático para cada novo Worker
+                // Se for um uint32, demora, mas se for uint16 ou tabela hash, colide rápido.
+                for(let i=0; i<50; i++) {
+                    new SharedWorker(url, "id_" + count + "_" + i);
+                }
+                
+                count += 50;
+                if(count % 1000 === 0) log(`IDs gerados: ${count}`);
+                
+                // Em um exploit real, tentaríamos reutilizar um ID antigo
+            }, 10);
         }
-      });
 
-      try { Object.keys(p); }                    catch(e1){}
-      try { Object.values(p); }                  catch(e2){}
-      try { Object.entries(p); }                 catch(e3){}
-      try { Reflect.ownKeys(p); }                catch(e4){}
-      try { Object.getOwnPropertyNames(p); }     catch(e5){}
-      try { JSON.stringify(p); }                 catch(e6){}
-      try { Object.assign({}, p); }              catch(e7){}
-    });
-  } catch(e){}
-  log('Teste 75: fim');
-}
-</script>
+        // --- 10. SharedWorkerProxy Destructor Race ---
+        function runSharedProxyDestruct() {
+            log("[WebKit] Iniciando Proxy Destructor Race...");
+            
+            const workerCode = `
+                onmessage = (e) => {
+                    const port = e.ports[0];
+                    // Bombardeia a porta de volta
+                    setInterval(() => port.postMessage(new ArrayBuffer(100)), 0);
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            let i = 0;
+            const interval = setInterval(() => {
+                const mc = new MessageChannel();
+                const sw = new SharedWorker(url, "race_" + i);
+                sw.port.postMessage("init", [mc.port2]);
+                
+                // Fecha a porta local imediatamente (lado do proxy)
+                // enquanto o worker bombardeia o outro lado
+                setTimeout(() => {
+                    sw.port.close(); // Tenta invalidar o proxy
+                    mc.port1.close();
+                }, Math.random() * 10);
+                
+                i++;
+                if (i % 50 === 0) log(`Proxies destruídos: ${i}`);
+                if (i > 500) clearInterval(interval);
+            }, 20);
+        }
+
+       
+
+        // --- 13. Worker Termination Signal Race ---
+        function runSignalRace() {
+            log("[KERNEL] Iniciando Signal Race...");
+            
+            const workerCode = `
+                onmessage = () => {
+                    // Loop infinito (bloqueia thread)
+                    while(true) {}
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            const workers = [];
+            
+            // Lança 10 workers bloqueados
+            for(let i=0; i<10; i++) {
+                const w = new Worker(url);
+                w.postMessage("start"); // Bloqueia o worker
+                workers.push(w);
+            }
+            
+            log("Workers bloqueados. Terminando e enviando mensagens...");
+            
+            // Race: Terminar vs Enviar Mensagem
+            // O Kernel está a enviar SIGKILL. Nós tentamos escrever no pipe do socket.
+            workers.forEach(w => {
+                setTimeout(() => {
+                    w.terminate(); // Envia sinal
+                    // Tenta escrever no pipe de uma thread morta/morrendo
+                    try { w.postMessage("race"); } catch(e){}
+                }, 100);
+            });
+            
+            setTimeout(() => log("Race executada."), 2000);
+        }
+
+        // --- 14. Pthread Internal Memory Error Trigger ---
+        function runPthreadInternal() {
+            log("[KERNEL] Triggering Pthread Internal Error...");
+            
+            // Worker que cria e destroi SABs e usa Atomics
+            // O objetivo é corromper a estrutura interna da thread no Kernel
+            const workerCode = `
+                onmessage = (e) => {
+                    const sab = new SharedArrayBuffer(1024);
+                    const view = new Int32Array(sab);
+                    
+                    // Espera fantasma
+                    Atomics.wait(view, 0, 0, 1);
+                    
+                    // Suicídio rápido
+                    close();
+                }
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            let count = 0;
+            // Criação/Destruição de threads em velocidade máxima
+            const interval = setInterval(() => {
+                for(let i=0; i<10; i++) {
+                    const w = new Worker(url);
+                    w.postMessage("die");
+                    // Não terminamos explicitamente, deixamos o 'close()' interno e o GC agirem
+                    // Isso força o Kernel a limpar a thread naturalmente (ou falhar)
+                }
+                count += 10;
+                if (count % 1000 === 0) log(`Threads recicladas: ${count}`);
+                
+                if (count > 20000) {
+                    clearInterval(interval);
+                    log("Pthread stress finalizado.");
+                }
+            }, 10);
+        }
+
+        // --- 16. Stack Red Zone Bypass ---
+        function runRedZoneBypass() {
+            log("[KERNEL] Bypass Red Zone...");
+            
+            const workerCode = `
+                function deep(n) {
+                    const v = new Float64Array(128); // Usa stack
+                    if (n > 0) deep(n-1);
+                }
+                // Assim que nasce, consome stack
+                deep(500); 
+                postMessage("Done");
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type:"text/javascript"}));
+            
+            // Spawn flood
+            let count = 0;
+            const interval = setInterval(() => {
+                for(let i=0; i<20; i++) {
+                    new Worker(url).onmessage = () => {};
+                }
+                count += 20;
+                if(count > 2000) {
+                    clearInterval(interval);
+                    log("Red Zone Stress finalizado.");
+                }
+            }, 10);
+        }
+
+        
+        // TEST K2: Pthread TCB Corruption
+        // Alvo: "_tcb_set() failed" e "Pthread Internal Memory Error".
+        function runThreadTCB() {
+            log("[KERNEL] Attacking Thread Control Block...", "info");
+            
+            // Worker que usa muito TLS (Thread Local Storage)
+            const blob = new Blob([`
+                onmessage = () => {
+                    const x = new Intl.DateTimeFormat(); // Aloca TLS
+                    close(); // Mata thread
+                }
+            `], {type: 'application/javascript'});
+            const url = URL.createObjectURL(blob);
+            
+            let i = 0;
+            const interval = setInterval(() => {
+                // Cria e mata threads para estressar o alocador de TCB do kernel
+                for(let j=0; j<10; j++) new Worker(url).postMessage("");
+                i += 10;
+                if(i > 1000) { clearInterval(interval); log("TCB Stress finished.", "info"); }
+            }, 10);
+        }
+
+
+// TEST K2: Worker Signal Stack Corruption
+        // Alvo: Gestão de sinais (SigAction) em threads.
+        function runSignalStress() {
+            log("[KERNEL] Estressando Sinais de Thread...", "warn");
+            
+            // Script que gera erros (sinais) propositalmente
+            const blob = new Blob(["throw new Error('Boom')"], {type:'text/javascript'});
+            const url = URL.createObjectURL(blob);
+            
+            // Spamma criação de workers que morrem instantaneamente (SIGTRAP/SIGABRT interno)
+            let count = 0;
+            function spam() {
+                for(let i=0; i<10; i++) new Worker(url);
+                count += 10;
+                if(count < 500) setTimeout(spam, 10);
+                else log("Signal Stress test concluído.", "safe");
+            }
+            spam();
+        }
+ 
+
+    </script>
 </body>
 </html>
