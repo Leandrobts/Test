@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>PS4 WebKit Fuzzing - Vetores Core DOM</title>
+    <title>PS4 WebKit Fuzzing - Vetores Avancados</title>
 </head>
 <body>
-    <h1>Testes de Corrupção WebCore - Lote 3</h1>
+    <h1>Testes de Corrupção WebCore - Lote 2</h1>
     <div id="log-container"></div>
 
     <script>
@@ -16,101 +16,114 @@
             document.getElementById("log-container").appendChild(p);
         }
 
-        // Teste 11: MutationObserver e Destruição Síncrona
-        // Os MutationObservers acionam microtasks no motor JSC. Alterar a árvore 
-        
-
-        // Teste 12: Ciclo de Vida de Objetos Embutidos (<object>)
-        // Elementos <object> possuem rotinas pesadas de inicialização no C++ para checar plugins.
-        // Interromper esse processo pode vazar a estrutura ou causar Use-After-Free.
-        function test12() {
-            logMsg("Iniciando Teste 12 (Object Tag Lifecycle UAF)...");
-            try {
-                let obj = document.createElement("object");
-                document.body.appendChild(obj);
-                
-                // Define um tipo/dados e imediatamente corta a referência da árvore DOM
-                obj.type = "text/html";
-                obj.data = "about:blank";
-                
-                // Spray básico no FastMalloc
-                let spray = new Array(2000).fill(new ArrayBuffer(512));
-                
-                obj.remove(); 
-            } catch(e) {}
-            logMsg("Fim do Teste 12.");
-        }
-
-        // Teste 13: Canvas 2D com ArrayBuffer Desanexado (Detached Buffer)
-        // Usa a API tradicional do Canvas (sem WebGL) acoplada a um ArrayBuffer.
-        // O buffer é transferido (desanexado) via MessageChannel antes da renderização.
-        function test13() {
-            logMsg("Iniciando Teste 13 (Canvas 2D Detached Buffer)...");
+        // Teste 6: WebGL OOB (Out-of-Bounds)
+        // Força a alocação de buffers gráficos anômalos para estressar a camada ANGLE/Metal do navegador[cite: 91, 94].
+        function test6() {
+            logMsg("Iniciando Teste 6 (WebGL OOB)...");
             try {
                 let canvas = document.createElement("canvas");
-                let ctx = canvas.getContext("2d");
-                let imgData = ctx.createImageData(100, 100);
-                
+                let gl = canvas.getContext("webgl");
+                if (gl) {
+                    let buffer = gl.createBuffer();
+                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+                    // Tenta alocar um tamanho anômalo para desestabilizar o mapeamento de memória em C++
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(1024), gl.STATIC_DRAW);
+                    gl.deleteBuffer(buffer);
+                    // Tenta forçar o uso do buffer recém-liberado no backend gráfico
+                    gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(10)); 
+                }
+            } catch(e) {}
+            logMsg("Fim do Teste 6.");
+        }
+
+        // Teste 7: MessageChannel Race Condition
+        // Explora a transferência de portas de comunicação assíncronas enquanto a memória é limpa.
+        function test7() {
+            logMsg("Iniciando Teste 7 (MessageChannel Race)...");
+            try {
                 let channel = new MessageChannel();
-                // Transfere a propriedade do buffer, invalidando-o no contexto atual
-                channel.port1.postMessage(imgData.data.buffer, [imgData.data.buffer]);
+                let port1 = channel.port1;
                 
-                // O WebCore tentará ler os dados de imagem de um ponteiro que não lhe pertence mais
-                ctx.putImageData(imgData, 0, 0);
+                port1.onmessage = function(e) {
+                    // Tenta acessar a porta durante o processamento da mensagem
+                    port1.close();
+                };
+                
+                // Transfere a porta e imediatamente tenta invalidá-la
+                window.postMessage("trigger", "*", [channel.port2]);
+                channel = null; 
             } catch(e) {}
-            logMsg("Fim do Teste 13.");
+            logMsg("Fim do Teste 7.");
         }
 
-        // Teste 14: Race Condition em Rede Local (Blob e XHR)
-        // Cria um recurso em memória, inicia uma requisição assíncrona para ele,
-        // e destrói o recurso imediatamente.
-        function test14() {
-            logMsg("Iniciando Teste 14 (Blob Revoke Race)...");
+        // Teste 8: Custom Elements & Shadow DOM UAF
+        // Brinca com o ciclo de vida (callbacks) de elementos customizados ao serem desconectados abruptamente.
+        function test8() {
+            logMsg("Iniciando Teste 8 (Shadow DOM UAF)...");
             try {
-                let blob = new Blob(["A".repeat(1024 * 1024)], {type: "text/plain"});
-                let url = URL.createObjectURL(blob);
+                class FuzzElement extends HTMLElement {
+                    disconnectedCallback() {
+                        // O elemento foi removido, mas tentamos reanexá-lo ou modificar seu Shadow Root a partir do limbo
+                        this.attachShadow({mode: 'open'}).innerHTML = "dangling root";
+                    }
+                }
+                customElements.define('fuzz-el', FuzzElement);
                 
-                let xhr = new XMLHttpRequest();
-                xhr.open("GET", url, true);
-                xhr.send();
-                
-                // Revoga o ponteiro do Blob enquanto a thread de rede do WebKit tenta acessá-lo
-                URL.revokeObjectURL(url);
-                blob = null;
+                let el = document.createElement('fuzz-el');
+                document.body.appendChild(el);
+                el.remove(); // Dispara o disconnectedCallback assincronamente no WebCore
             } catch(e) {}
-            logMsg("Fim do Teste 14.");
+            logMsg("Fim do Teste 8.");
         }
 
-        // Teste 15: Corrupção da API de Seleção (Selection & Range)
-        // A API de seleção no WebCore frequentemente sofre bugs de limites (OOB) quando
-        // os nós selecionados são removidos dinamicamente da árvore DOM.
-        function test15() {
-            logMsg("Iniciando Teste 15 (Selection API OOB)...");
+        // Teste 9: WeakMap e Anomalia de Garbage Collection (GC)
+        // Oculta a referência de um nó DOM em um WeakMap e força um spray no Heap para confundir o coletor.
+        function test9() {
+            logMsg("Iniciando Teste 9 (WeakMap GC)...");
             try {
-                let p = document.createElement("p");
-                p.innerText = "Fuzzing";
-                document.body.appendChild(p);
+                let map = new WeakMap();
+                let node = document.createElement("span");
+                map.set(node, new ArrayBuffer(1024 * 1024)); // Aloca 1MB atrelado ao nó
                 
-                let selection = window.getSelection();
+                node.remove(); // Remove do DOM
+                node = null;   // Remove a referência principal
+                
+                // Spray forçado para acionar o fastMalloc e o GC simultaneamente [cite: 73]
+                let spray = [];
+                for(let i = 0; i < 10000; i++) {
+                    spray.push(new String("spray").repeat(100));
+                }
+            } catch(e) {}
+            logMsg("Fim do Teste 9.");
+        }
+
+        // Teste 10: Range API e Deleção de Texto Síncrona
+        // O objeto Range do WebKit é notoriamente sensível quando os nós subjacentes são deletados sob ele.
+        function test10() {
+            logMsg("Iniciando Teste 10 (Range API OOB/UAF)...");
+            try {
+                let textNode = document.createTextNode("Vulnerabilidade WebCore");
+                document.body.appendChild(textNode);
+                
                 let range = document.createRange();
-                range.selectNodeContents(p);
-                selection.addRange(range);
+                range.setStart(textNode, 5);
+                range.setEnd(textNode, 15);
                 
-                // Remove o nó selecionado
-                p.remove();
+                // Deleta o nó que serve de fundação para o Range
+                textNode.remove();
                 
-                // Tenta interagir com a seleção que aponta para o nó órfão
-                selection.collapseToEnd();
+                // Tenta extrair o conteúdo de uma região de memória que não pertence mais ao DOM ativo
+                let fragment = range.extractContents(); 
             } catch(e) {}
-            logMsg("Fim do Teste 15.");
+            logMsg("Fim do Teste 10.");
         }
 
-        // Execução Sequencial
-        setTimeout(() => { test11(); }, 500);
-        setTimeout(() => { test12(); }, 1500);
-        setTimeout(() => { test13(); }, 2500);
-        setTimeout(() => { test14(); }, 3500);
-        setTimeout(() => { test15(); }, 4500);
+        // Execução Sequencial com espaçamento para evitar acúmulo no loop de eventos
+        setTimeout(() => { test6(); }, 500);
+        setTimeout(() => { test7(); }, 1500);
+        setTimeout(() => { test8(); }, 2500);
+        setTimeout(() => { test9(); }, 3500);
+        setTimeout(() => { test10(); }, 4500);
 
     </script>
 </body>
