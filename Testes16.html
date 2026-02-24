@@ -1,0 +1,2251 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<title>Testes16 — Popover API UAF / CSS Anchor / @starting-style / Navigation / Custom Highlight</title>
+</head>
+<body>
+
+<p><strong>TESTES16 — VETORES NOVOS NO-JIT (T376-T400):</strong><br>
+T376-377: Popover API showPopover/hidePopover + DOM removal + GC (PopoverData UAF)<br>
+T378: CSS Anchor Positioning anchor() + elemento âncora removido + GC<br>
+T379: CSS @starting-style + transição + remoção + GC<br>
+T380: Navigation API navigate() + intercept + abort + GC<br>
+T381: CSS Custom Highlight API + Range mutation + GC<br>
+T382: requestIdleCallback + DOM mutation + GC (IdleDeadline UAF)<br>
+T383: Web Locks API + GC durante lock hold<br>
+T384: CSS view-transition + document.startViewTransition() + GC<br>
+T385: WebRTC RTCPeerConnection + createOffer + GC<br>
+T386: HTMLVideoElement.requestVideoFrameCallback() + GC<br>
+T387: CSS color-mix() + remoção de elemento + GC<br>
+T388: CSS @layer + @scope combinados + GC<br>
+T389: CSS contain: style layout + mutation + GC<br>
+T390: HTMLSlotElement.assignedElements() + Shadow DOM mutation + GC<br>
+T391: Trusted Types + DOM insertion + GC<br>
+T392: HTMLSelectElement.showPicker() + GC<br>
+T393: scheduler.postTask() + DOM mutation + GC<br>
+T394: CSS Custom State pseudo-class (:state()) + customElements + GC<br>
+T395: Element.moveBefore() + GC (nova API Chrome/WebKit)<br>
+T396: PerformanceObserver LargestContentfulPaint + DOM removal + GC<br>
+T397: CSS if() inline condição + mutation + GC<br>
+T398: Speculation Rules (prerender/prefetch) + GC<br>
+T399: DocumentPictureInPicture + GC<br>
+T400: STRESS FINAL — Popover + CSSAnchor + CustomHighlight + ViewTransition + WebRTC</p>
+
+<div id="dom16" style="display:none"></div>
+<div id="anchor16" style="position:absolute;top:10px;left:10px;width:50px;height:20px;background:blue;anchor-name:--anc16;">anchor</div>
+
+<button onclick="runAll()">RODAR TODOS</button><br><br>
+<button onclick="t376()">T376</button>
+<button onclick="t377()">T377</button>
+<button onclick="t378()">T378</button>
+<button onclick="t379()">T379</button>
+<button onclick="t380()">T380</button>
+<button onclick="t381()">T381</button>
+<button onclick="t382()">T382</button>
+<button onclick="t383()">T383</button>
+<button onclick="t384()">T384</button>
+<button onclick="t385()">T385</button>
+<button onclick="t386()">T386</button>
+<button onclick="t387()">T387</button>
+<button onclick="t388()">T388</button>
+<button onclick="t389()">T389</button>
+<button onclick="t390()">T390</button>
+<button onclick="t391()">T391</button>
+<button onclick="t392()">T392</button>
+<button onclick="t393()">T393</button>
+<button onclick="t394()">T394</button>
+<button onclick="t395()">T395</button>
+<button onclick="t396()">T396</button>
+<button onclick="t397()">T397</button>
+<button onclick="t398()">T398</button>
+<button onclick="t399()">T399</button>
+<button onclick="t400()">T400</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC idêntico ao PSFree / CVE-2023-28205 seregonwar PoC
+const MB = 1024 * 1024;
+function gc(){
+  for(let i = 0; i < 0x10; i++) new Uint8Array(4 * MB);
+}
+function gcHeavy(){
+  for(let i = 0; i < 0x40; i++) new ArrayBuffer(0x1000000);
+}
+
+function runAll(){
+  log('=== RODAR TODOS T376-T400: inicio ===');
+  t376(); t377(); t378(); t379(); t380();
+  t381(); t382(); t383(); t384(); t385();
+  t386(); t387(); t388(); t389(); t390();
+  t391(); t392(); t393(); t394(); t395();
+  t396(); t397(); t398(); t399(); t400();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// ─── T376 ─────────────────────────────────────────────────────────────────────
+// Popover API: showPopover() + hidePopover() + DOM removal + GC (PopoverData UAF)
+// PopoverData é alocado em fastMalloc e mantido no elemento;
+// remover o elemento enquanto o popover está aberto (top layer) + GC
+// pode causar UAF no PopoverData — o top layer ainda tem referência ao elemento.
+// CVE-2025-43529 é um UAF em WebKit ao processar web content — Popover API
+// é uma das superfícies de ataque mais novas e menos auditadas.
+function t376(){
+  log('Teste 376: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Verificar suporte à Popover API
+    const testEl = document.createElement('div');
+    if(typeof testEl.showPopover !== 'function'){
+      log('Teste 376: fim (sem Popover API)');
+      area.style.display = 'none';
+      return;
+    }
+
+    // Criar múltiplos popovers (auto e manual)
+    const popovers = [];
+    for(let i = 0; i < 10; i++){
+      const pop = document.createElement('div');
+      pop.popover = i % 2 === 0 ? 'auto' : 'manual';
+      pop.id = 'pop16_' + i;
+      pop.style.cssText = 'padding:10px;background:white;border:1px solid black;';
+      pop.textContent = 'popover_' + i;
+      area.appendChild(pop);
+      popovers.push(pop);
+    }
+
+    // Botões que controlam os popovers
+    const buttons = [];
+    for(let i = 0; i < popovers.length; i++){
+      const btn = document.createElement('button');
+      btn.setAttribute('popovertarget', 'pop16_' + i);
+      btn.setAttribute('popovertargetaction', 'toggle');
+      btn.textContent = 'Toggle ' + i;
+      area.appendChild(btn);
+      buttons.push(btn);
+    }
+
+    // beforetoggle e toggle event handlers com GC
+    for(let pop of popovers){
+      pop.addEventListener('beforetoggle', function(evt){
+        gc(); // GC durante beforetoggle — PopoverData pode ter stale ptr
+        try { evt.newState; evt.oldState; } catch(e){}
+        // Remover o popover DURANTE o beforetoggle
+        if(pop.id === 'pop16_3' && pop.parentNode){
+          area.removeChild(pop);
+          gc(); // GC: top layer ainda tem referência ao popover removido
+          area.appendChild(pop);
+        }
+      });
+      pop.addEventListener('toggle', function(evt){
+        gc();
+        try { evt.newState; evt.oldState; pop.matches(':popover-open'); } catch(e){}
+      });
+    }
+
+    // Ciclo showPopover/hidePopover com GC
+    for(let iter = 0; iter < 15; iter++){
+      for(let pop of popovers){
+        try {
+          pop.showPopover();
+          gc(); // GC com popover no top layer
+          // Remover do DOM enquanto no top layer
+          if(iter === 7 && pop.parentNode){
+            area.removeChild(pop);
+            gc(); // UAF: top layer tem stale ptr
+            area.appendChild(pop);
+          }
+          pop.hidePopover();
+          gc();
+        } catch(e){}
+      }
+    }
+
+    // togglePopover em loop rápido
+    for(let i = 0; i < 20; i++){
+      try {
+        const pop = popovers[i % popovers.length];
+        pop.togglePopover();
+        gc();
+        pop.togglePopover();
+        gc();
+        // Mudar o tipo de popover enquanto aberto
+        pop.showPopover();
+        pop.popover = pop.popover === 'auto' ? 'manual' : 'auto';
+        gc(); // GC: PopoverData tipo mudou enquanto no top layer
+        try { pop.hidePopover(); } catch(e){}
+      } catch(e){}
+    }
+
+    // Remover popovers abertos + GC + tentar usar pós-remoção
+    for(let pop of popovers){
+      try { pop.showPopover(); } catch(e){}
+    }
+    gcHeavy();
+    for(let pop of popovers){
+      try {
+        if(pop.parentNode) area.removeChild(pop);
+        gc();
+        pop.hidePopover(); // UAF: popover foi removido do DOM mas ainda no top layer
+        pop.matches(':popover-open');
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 376: fim');
+}
+
+// ─── T377 ─────────────────────────────────────────────────────────────────────
+// Popover API: popovers aninhados (nested auto) + remoção do popover pai + GC
+// Nested auto popovers: pop-A abre pop-B; fechar pop-A deve fechar pop-B também.
+// Se pop-A for removido antes do fechamento, pop-B pode ficar órfão no top layer.
+function t377(){
+  log('Teste 377: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    const testEl = document.createElement('div');
+    if(typeof testEl.showPopover !== 'function'){
+      log('Teste 377: fim (sem Popover API)');
+      area.style.display = 'none';
+      return;
+    }
+
+    // Criar cadeia de popovers aninhados (A→B→C→D)
+    const chain = [];
+    for(let i = 0; i < 6; i++){
+      const pop = document.createElement('div');
+      pop.popover = 'auto';
+      pop.id = 'nested_pop16_' + i;
+      pop.style.cssText = 'padding:10px;background:rgba(255,255,255,0.9);border:2px solid hsl(' + (i*60) + ',70%,50%);';
+
+      // Botão dentro do popover que abre o próximo
+      if(i < 5){
+        const nextBtn = document.createElement('button');
+        nextBtn.setAttribute('popovertarget', 'nested_pop16_' + (i + 1));
+        nextBtn.textContent = 'Open ' + (i + 1);
+        pop.appendChild(nextBtn);
+      }
+      pop.appendChild(document.createTextNode('nested_pop_' + i));
+      area.appendChild(pop);
+      chain.push(pop);
+    }
+
+    // Abrir cadeia inteira programaticamente
+    for(let i = 0; i < chain.length; i++){
+      try { chain[i].showPopover(); gc(); } catch(e){}
+    }
+    gc();
+
+    // Remover pop intermediário (pop-B enquanto pop-A e pop-C estão abertos)
+    for(let i = 1; i < chain.length - 1; i++){
+      try {
+        const pop = chain[i];
+        if(pop.parentNode){ area.removeChild(pop); gc(); }
+        // O top layer ainda tem pop-A e pop-C abertos; pop-B foi removido
+        // Isso pode causar corrupção da lista de popovers no top layer
+        chain[0].hidePopover(); // tenta fechar tudo — stack corrompida
+        gc();
+        area.appendChild(pop); // re-inserir
+        chain[0].showPopover(); gc(); // re-abrir
+      } catch(e){}
+    }
+
+    // Fechar todos + GC
+    for(let pop of chain){
+      try { pop.hidePopover(); gc(); } catch(e){}
+    }
+    gcHeavy();
+
+    // Popovers com invoker (showPopover com source option)
+    for(let i = 0; i < 5; i++){
+      try {
+        const pop2 = document.createElement('div');
+        pop2.popover = 'auto';
+        area.appendChild(pop2);
+        const invoker = document.createElement('button');
+        area.appendChild(invoker);
+        // showPopover com source = invoker
+        try { pop2.showPopover({ source: invoker }); gc(); } catch(e){}
+        // Remover invoker enquanto popover está aberto via invoker
+        if(invoker.parentNode){ area.removeChild(invoker); gc(); }
+        try { pop2.hidePopover(); gc(); } catch(e){}
+        // Remover pop2
+        if(pop2.parentNode){ area.removeChild(pop2); gc(); }
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 377: fim');
+}
+
+// ─── T378 ─────────────────────────────────────────────────────────────────────
+// CSS Anchor Positioning: anchor() + remoção do elemento âncora + GC
+// anchor() cria uma dependência entre o positioned element e o anchor element;
+// remover o anchor enquanto o positioned element usa anchor() pode causar
+// UAF no AnchorPositionEvaluator (WebKit 2024).
+function t378(){
+  log('Teste 378: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    const style378 = document.createElement('style');
+    style378.textContent = `
+      .anchor16 {
+        anchor-name: --anc16-dyn;
+        position: absolute;
+        width: 60px; height: 30px;
+        background: blue;
+      }
+      .anchored16 {
+        position: absolute;
+        top:  anchor(--anc16-dyn bottom, 0px);
+        left: anchor(--anc16-dyn left,   0px);
+        width: 80px; height: 40px;
+        background: rgba(255,0,0,0.5);
+      }
+      .anchored-auto16 {
+        position: absolute;
+        position-anchor: --anc16-dyn;
+        top:  anchor(bottom);
+        left: anchor(left);
+        width: 60px; height: 30px;
+        background: rgba(0,255,0,0.5);
+      }
+    `;
+    document.head.appendChild(style378);
+
+    // Pares âncora → ancorado
+    const pairs = [];
+    for(let i = 0; i < 8; i++){
+      const anchor = document.createElement('div');
+      anchor.className = 'anchor16';
+      anchor.style.top  = (i * 50) + 'px';
+      anchor.style.left = (i * 40) + 'px';
+      anchor.style.anchorName = '--anc16_' + i;
+
+      const anchored = document.createElement('div');
+      anchored.className = 'anchored16';
+      // Usar anchor-name específico deste par
+      anchored.style.cssText += '; top: anchor(--anc16_' + i + ' bottom, 0px); left: anchor(--anc16_' + i + ' left, 0px);';
+
+      const anchoredAuto = document.createElement('div');
+      anchoredAuto.className = 'anchored-auto16';
+      anchoredAuto.style.positionAnchor = '--anc16_' + i;
+
+      area.appendChild(anchor);
+      area.appendChild(anchored);
+      area.appendChild(anchoredAuto);
+      pairs.push({ anchor, anchored, anchoredAuto });
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Remover o âncora + GC → AnchorPositionEvaluator tem stale ptr
+    for(let iter = 0; iter < 15; iter++){
+      for(let { anchor, anchored, anchoredAuto } of pairs){
+        try {
+          // Forçar layout com anchor() ativo
+          _ = area.offsetHeight;
+          // Remover o âncora — os elementos ancorados ficam sem âncora
+          if(anchor.parentNode){ area.removeChild(anchor); gc(); }
+          _ = area.offsetHeight; // re-layout sem âncora
+          gc();
+          // Acessar getBoundingClientRect dos elementos ancorados
+          try { anchored.getBoundingClientRect(); }     catch(e){}
+          try { anchoredAuto.getBoundingClientRect(); } catch(e){}
+          // Re-inserir âncora
+          area.appendChild(anchor);
+          gc();
+          // Mudar anchor-name durante uso
+          anchor.style.anchorName = '--anc16_changed_' + iter;
+          gc();
+          _ = area.offsetHeight;
+          anchor.style.anchorName = '--anc16_' + pairs.indexOf({ anchor, anchored, anchoredAuto });
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style378); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 378: fim');
+}
+
+// ─── T379 ─────────────────────────────────────────────────────────────────────
+// CSS @starting-style + transição de entrada + remoção durante transição + GC
+// @starting-style define o estado inicial de uma transição CSS de entrada;
+// remover o elemento durante a transição de entrada pode causar UAF
+// no CSSTransition objeto que referencia o elemento.
+function t379(){
+  log('Teste 379: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    const style379 = document.createElement('style');
+    style379.textContent = `
+      .trans-enter {
+        opacity: 1;
+        transform: translateY(0px);
+        width: 100px; height: 40px;
+        background: green;
+        transition: opacity 0.5s, transform 0.5s;
+        display: block;
+      }
+      @starting-style {
+        .trans-enter {
+          opacity: 0;
+          transform: translateY(-30px);
+        }
+      }
+      .trans-exit {
+        opacity: 0;
+        transform: scale(0);
+        transition: opacity 0.5s, transform 0.5s;
+      }
+    `;
+    document.head.appendChild(style379);
+
+    // Inserir elementos com @starting-style (transição de entrada)
+    for(let iter = 0; iter < 20; iter++){
+      try {
+        const el = document.createElement('div');
+        el.className = 'trans-enter';
+        el.textContent = 'entering_' + iter;
+        area.appendChild(el);
+        // Forçar recalc para iniciar a transição
+        let _ = el.offsetHeight; // trigger reflow
+        gc(); // GC durante a transição de entrada
+
+        // Remover durante a transição de entrada (transição incompleta)
+        if(iter % 3 === 0 && el.parentNode){
+          area.removeChild(el);
+          gc(); // GC: CSSTransition tem stale ptr para o elemento
+          // Tentar acessar el.getAnimations() pós-remoção
+          try {
+            if(typeof el.getAnimations === 'function'){
+              const anims = el.getAnimations();
+              for(let a of anims){ try { a.currentTime; a.cancel(); } catch(e){} }
+              gc();
+            }
+          } catch(e){}
+          area.appendChild(el); // re-inserir → nova transição de entrada
+          gc();
+        }
+
+        // Adicionar classe de saída enquanto a entrada ainda está em andamento
+        if(iter % 5 === 1){
+          setTimeout(function(){
+            try {
+              el.classList.add('trans-exit');
+              gc();
+              setTimeout(function(){
+                try { if(el.parentNode) area.removeChild(el); gc(); } catch(e){}
+              }, 100);
+            } catch(e){}
+          }, 50);
+        }
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style379); } catch(e){}
+    setTimeout(function(){
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 1500);
+  } catch(e){}
+  log('Teste 379: fim');
+}
+
+// ─── T380 ─────────────────────────────────────────────────────────────────────
+// Navigation API: navigate() + intercept + abort + GC (NavigationActivation UAF)
+// A Navigation API substitui o History API; navigate() com intercept() cria
+// um NavigationActivation; GC durante o intercept pode causar UAF.
+function t380(){
+  log('Teste 380: inicio');
+  try {
+    if(typeof navigation === 'undefined' || typeof navigation.navigate !== 'function'){
+      log('Teste 380: fim (sem Navigation API)');
+      return;
+    }
+
+    let interceptN = 0;
+
+    // Interceptar todas as navegações
+    navigation.addEventListener('navigate', function(evt){
+      interceptN++;
+      gc(); // GC durante o evento navigate
+
+      // Interceptar a navegação com um handler assíncrono
+      try {
+        evt.intercept({
+          handler: async function(){
+            gc(); // GC dentro do handler assíncrono
+            // Simular trabalho assíncrono
+            await new Promise(function(resolve){
+              setTimeout(function(){
+                gc(); // GC durante o setTimeout
+                resolve();
+              }, 10);
+            });
+            gc(); // GC após resolução
+          },
+          focusReset: 'manual',
+          scroll: 'manual'
+        });
+      } catch(e){}
+
+      gc();
+      try { evt.signal.aborted; }         catch(e){}
+      try { evt.destination.url; }        catch(e){}
+      try { evt.destination.key; }        catch(e){}
+      try { evt.destination.index; }      catch(e){}
+      try { evt.navigationType; }         catch(e){}
+      try { evt.hashChange; }             catch(e){}
+    }, { once: false });
+
+    // Navegar para hashes (não causa page load)
+    const hashes = ['#nav16_a', '#nav16_b', '#nav16_c', '#nav16_d', '#nav16_e'];
+    for(let hash of hashes){
+      try {
+        navigation.navigate(location.pathname + hash);
+        gc();
+      } catch(e){}
+    }
+
+    // navigation.back() e forward() com GC
+    for(let i = 0; i < 5; i++){
+      try {
+        const result = navigation.back();
+        if(result && result.committed) result.committed.then(function(){ gc(); }).catch(function(){ gc(); });
+        if(result && result.finished)  result.finished.then(function(){ gc(); }).catch(function(){ gc(); });
+        gc();
+      } catch(e){}
+      try {
+        const result = navigation.forward();
+        if(result && result.committed) result.committed.then(function(){ gc(); }).catch(function(){ gc(); });
+        gc();
+      } catch(e){}
+    }
+
+    // navigation.reload() com GC
+    try {
+      const result = navigation.reload({ state: { test: 'reload_state_' + Date.now() } });
+      if(result && result.committed) result.committed.then(function(){ gc(); }).catch(function(){ gc(); });
+      gc();
+    } catch(e){}
+
+    // navigation.entries() + navigate para entry específica
+    try {
+      const entries = navigation.entries();
+      gc();
+      if(entries.length > 1){
+        const entry = entries[0];
+        navigation.traverseTo(entry.key).committed.then(function(){ gc(); }).catch(function(){ gc(); });
+        gc();
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 380: fim');
+}
+
+// ─── T381 ─────────────────────────────────────────────────────────────────────
+// CSS Custom Highlight API: Highlight + Range mutation + GC
+// CSS.highlights.set() registra intervalos de texto para estilo;
+// mutar o Range enquanto o Highlight o usa pode causar UAF.
+function t381(){
+  log('Teste 381: inicio');
+  try {
+    if(typeof CSS.highlights === 'undefined' || typeof Highlight === 'undefined'){
+      log('Teste 381: fim (sem Custom Highlight API)');
+      return;
+    }
+
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar texto para destacar
+    const textNode = document.createTextNode('The quick brown fox jumps over the lazy dog. '.repeat(20));
+    const container = document.createElement('p');
+    container.appendChild(textNode);
+    area.appendChild(container);
+
+    // Injetar ::highlight() CSS
+    const style381 = document.createElement('style');
+    style381.textContent = `
+      ::highlight(hl-search-16) { background-color: yellow; color: black; }
+      ::highlight(hl-mark-16)   { background-color: lightblue; }
+      ::highlight(hl-error-16)  { background-color: pink; text-decoration: line-through; }
+    `;
+    document.head.appendChild(style381);
+
+    // Criar Highlights com múltiplos Ranges
+    const ranges = [];
+    const highlights = {};
+
+    for(let i = 0; i < 30; i++){
+      try {
+        const r = document.createRange();
+        const offset = i * 10;
+        r.setStart(textNode, Math.min(offset, textNode.length - 1));
+        r.setEnd(textNode, Math.min(offset + 8, textNode.length));
+        ranges.push(r);
+      } catch(e){}
+    }
+
+    // Criar Highlight com os ranges e registrar
+    try {
+      highlights.search = new Highlight(...ranges.slice(0, 10));
+      highlights.mark   = new Highlight(...ranges.slice(10, 20));
+      highlights.error  = new Highlight(...ranges.slice(20, 30));
+      CSS.highlights.set('hl-search-16', highlights.search);
+      CSS.highlights.set('hl-mark-16',   highlights.mark);
+      CSS.highlights.set('hl-error-16',  highlights.error);
+    } catch(e){}
+
+    gc(); // GC com Highlights registrados
+
+    // Mutar os Ranges enquanto os Highlights os referenciam
+    for(let iter = 0; iter < 20; iter++){
+      try {
+        const r = ranges[iter % ranges.length];
+        // Expandir/contrair o Range
+        try {
+          r.setStart(textNode, Math.min(iter * 5, textNode.length - 1));
+          r.setEnd(textNode, Math.min(iter * 5 + 15, textNode.length));
+          gc(); // GC: Highlight tem referência ao Range mutado
+        } catch(e){}
+
+        // Colapsar o Range (torna-o vazio)
+        if(iter % 5 === 0){
+          try { r.collapse(true); gc(); } catch(e){}
+        }
+
+        // Remover o textNode que os Ranges apontam
+        if(iter === 10 && textNode.parentNode){
+          container.removeChild(textNode);
+          gc(); // GC: Ranges têm stale ptr para o textNode removido
+          container.appendChild(textNode); // re-inserir
+          gc();
+        }
+
+        let _ = container.offsetHeight; // forçar re-renderização dos highlights
+        gc();
+      } catch(e){}
+    }
+
+    // Adicionar/remover Ranges dos Highlights em loop
+    for(let iter = 0; iter < 15; iter++){
+      try {
+        const r = ranges[iter % ranges.length];
+        highlights.search.add(r);
+        gc();
+        highlights.search.delete(r);
+        gc();
+        highlights.mark.has(r);
+      } catch(e){}
+    }
+
+    // Limpar Highlights + GC + tentar usar os Highlight objects
+    try { CSS.highlights.delete('hl-search-16'); gc(); } catch(e){}
+    try { CSS.highlights.clear(); gc(); } catch(e){}
+    try { highlights.search.add(ranges[0]); }   catch(e){} // Highlight sem registro
+    try { highlights.mark.priority; }            catch(e){}
+
+    try { document.head.removeChild(style381); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 381: fim');
+}
+
+// ─── T382 ─────────────────────────────────────────────────────────────────────
+// requestIdleCallback + DOM mutation + GC (IdleDeadline UAF)
+// requestIdleCallback é chamado quando o browser está idle; durante o callback
+// o DOM pode ser mutado; GC pode liberar o IdleDeadline antes do callback terminar.
+function t382(){
+  log('Teste 382: inicio');
+  try {
+    if(typeof requestIdleCallback !== 'function'){
+      log('Teste 382: fim (sem requestIdleCallback)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar elementos para manipular no idle callback
+    const idleEls = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:' + (i * 5) + 'px;height:20px;background:hsl(' + (i * 18) + ',50%,50%);';
+      area.appendChild(el);
+      idleEls.push(el);
+    }
+
+    let idleN = 0;
+    let idleIds = [];
+
+    // Registrar múltiplos idle callbacks
+    for(let i = 0; i < 10; i++){
+      try {
+        const id = requestIdleCallback(function(deadline){
+          idleN++;
+          gc(); // GC durante idle callback — IdleDeadline tem stale ptr?
+
+          // Usar o deadline object
+          try {
+            while(deadline.timeRemaining() > 0){
+              gc(); // GC durante timeRemaining check
+              const el = idleEls[idleN % idleEls.length];
+              if(el && el.parentNode){
+                area.removeChild(el); // mutar DOM durante idle
+                gc();
+                area.appendChild(el);
+              }
+              if(idleN > 200) break;
+            }
+          } catch(e){}
+
+          // Acessar deadline após timeRemaining == 0
+          try { deadline.timeRemaining(); }   catch(e){}
+          try { deadline.didTimeout; }        catch(e){}
+
+          // Registrar novo idle callback dentro do callback atual
+          if(idleN < 5){
+            try {
+              requestIdleCallback(function(d2){
+                gc();
+                d2.timeRemaining();
+                d2.didTimeout;
+              }, { timeout: 100 });
+            } catch(e){}
+          }
+        }, { timeout: 50 + i * 10 });
+        idleIds.push(id);
+      } catch(e){}
+    }
+
+    // Cancelar alguns idle callbacks antes de executarem
+    for(let i = 0; i < 5; i++){
+      try { cancelIdleCallback(idleIds[i]); gc(); } catch(e){}
+    }
+
+    // Idle callback com timeout que remove área
+    try {
+      requestIdleCallback(function(deadline){
+        gc();
+        while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+        gc();
+        area.style.display = 'none';
+      }, { timeout: 2000 });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 382: fim');
+}
+
+// ─── T383 ─────────────────────────────────────────────────────────────────────
+// Web Locks API: lock hold + GC + operações concorrentes (LockManager UAF)
+// navigator.locks.request() obtém um lock exclusivo; GC durante o hold
+// pode liberar o Lock object enquanto o callback ainda está executando.
+function t383(){
+  log('Teste 383: inicio');
+  try {
+    if(typeof navigator.locks === 'undefined'){
+      log('Teste 383: fim (sem Web Locks API)');
+      return;
+    }
+
+    // Múltiplos requests concorrentes para o mesmo lock
+    for(let i = 0; i < 10; i++){
+      try {
+        navigator.locks.request('lock16_shared', { mode: 'exclusive' }, async function(lock){
+          gc(); // GC durante o hold do lock
+          await new Promise(function(resolve){ setTimeout(function(){ gc(); resolve(); }, i * 5); });
+          gc(); // GC após espera
+          try { lock.name; lock.mode; }    catch(e){} // acessar lock no callback
+          return 'result_' + i;
+        }).then(function(result){
+          gc();
+        }).catch(function(e){ gc(); });
+      } catch(e){}
+    }
+
+    // Shared locks concorrentes
+    for(let i = 0; i < 5; i++){
+      try {
+        navigator.locks.request('lock16_shared2', { mode: 'shared' }, async function(lock){
+          gc();
+          await new Promise(function(r){ setTimeout(r, 20); });
+          gc();
+        });
+      } catch(e){}
+    }
+
+    // Lock com signal de abort (abortar antes de obter o lock)
+    for(let i = 0; i < 5; i++){
+      try {
+        const ctrl = new AbortController();
+        navigator.locks.request('lock16_aborted', { signal: ctrl.signal }, async function(lock){
+          gc();
+          return 'never_reached';
+        }).catch(function(e){ gc(); });
+        // Abortar imediatamente
+        ctrl.abort('abort_lock_' + i);
+        gc();
+      } catch(e){}
+    }
+
+    // ifAvailable: true (não espera, retorna null se lock não disponível)
+    try {
+      navigator.locks.request('lock16_shared', { ifAvailable: true }, async function(lock){
+        gc();
+        if(lock){ try { lock.name; lock.mode; } catch(e){} }
+        // lock pode ser null se não disponível imediatamente
+      });
+    } catch(e){}
+
+    // navigator.locks.query() com GC
+    try {
+      navigator.locks.query().then(function(state){
+        gc();
+        try { state.held; state.pending; }           catch(e){}
+        try { for(let l of state.held){ l.name; l.mode; } } catch(e){}
+      });
+    } catch(e){}
+  } catch(e){}
+  log('Teste 383: fim');
+}
+
+// ─── T384 ─────────────────────────────────────────────────────────────────────
+// CSS View Transitions: document.startViewTransition() + DOM mutation + GC
+// startViewTransition() captura o estado atual e anima para o novo estado;
+// GC durante a captura ou a animação pode causar UAF nos snapshots.
+function t384(){
+  log('Teste 384: inicio');
+  try {
+    if(typeof document.startViewTransition !== 'function'){
+      log('Teste 384: fim (sem View Transitions API)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar elementos com view-transition-name
+    const vtEls = [];
+    for(let i = 0; i < 8; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'width:' + (50 + i * 10) + 'px',
+        'height:40px',
+        'background:hsl(' + (i * 45) + ',70%,50%)',
+        'view-transition-name: vt-el-16-' + i,
+        'contain: layout',
+      ].join(';');
+      el.textContent = 'vt_' + i;
+      area.appendChild(el);
+      vtEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+
+    // startViewTransition() em loop com mutações DOM
+    for(let iter = 0; iter < 10; iter++){
+      try {
+        const vt = document.startViewTransition(function(){
+          gc(); // GC durante a callback de atualização
+          // Mutar o DOM durante a transição (novo estado)
+          for(let el of vtEls){
+            el.style.background = 'hsl(' + ((iter * 50 + el.id) % 360) + ',70%,50%)';
+            el.style.width = (30 + iter * 5) + 'px';
+          }
+          gc();
+          // Remover e re-inserir um elemento
+          if(vtEls[0].parentNode){ area.removeChild(vtEls[0]); gc(); area.appendChild(vtEls[0]); }
+          return Promise.resolve();
+        });
+
+        gc(); // GC com ViewTransition ativo
+
+        // Acessar ViewTransition promises
+        try { vt.ready.then(function(){ gc(); }).catch(function(){ gc(); }); }   catch(e){}
+        try { vt.finished.then(function(){ gc(); }).catch(function(){ gc(); }); } catch(e){}
+
+        // Pular a transição (cancela a animação)
+        if(iter % 3 === 0){
+          try { vt.skipTransition(); gc(); } catch(e){}
+        }
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 384: fim');
+}
+
+// ─── T385 ─────────────────────────────────────────────────────────────────────
+// WebRTC: RTCPeerConnection + createOffer/createAnswer + GC (RTCSession UAF)
+// RTCPeerConnection usa ICE/DTLS internamente; GC durante a negociação
+// pode liberar objetos de sessão antes do ICE resolver.
+function t385(){
+  log('Teste 385: inicio');
+  try {
+    if(typeof RTCPeerConnection === 'undefined'){
+      log('Teste 385: fim (sem WebRTC)');
+      return;
+    }
+
+    // Criar pares de RTCPeerConnection (caller + callee)
+    const pcs = [];
+    for(let i = 0; i < 5; i++){
+      try {
+        const pc1 = new RTCPeerConnection({ iceServers: [] });
+        const pc2 = new RTCPeerConnection({ iceServers: [] });
+        pcs.push({ pc1, pc2 });
+
+        // Handlers com GC
+        pc1.onicecandidate = function(evt){
+          gc();
+          if(evt.candidate){
+            try { pc2.addIceCandidate(evt.candidate).then(function(){ gc(); }).catch(function(){ gc(); }); } catch(e){}
+          }
+        };
+        pc2.onicecandidate = function(evt){
+          gc();
+          if(evt.candidate){
+            try { pc1.addIceCandidate(evt.candidate).then(function(){ gc(); }).catch(function(){ gc(); }); } catch(e){}
+          }
+        };
+
+        pc1.onconnectionstatechange = function(){ gc(); try { pc1.connectionState; } catch(e){} };
+        pc2.onconnectionstatechange = function(){ gc(); try { pc2.connectionState; } catch(e){} };
+
+        // Adicionar data channel (triggera negociação)
+        const dc1 = pc1.createDataChannel('chan_' + i);
+        dc1.onopen    = function(){ gc(); dc1.send('hello_' + i); };
+        dc1.onmessage = function(evt){ gc(); };
+        dc1.onerror   = function(){ gc(); };
+        dc1.onclose   = function(){ gc(); };
+        gc();
+
+        // Negociação offer/answer com GC
+        pc1.createOffer().then(function(offer){
+          gc();
+          return pc1.setLocalDescription(offer);
+        }).then(function(){
+          gc();
+          return pc2.setRemoteDescription(pc1.localDescription);
+        }).then(function(){
+          gc();
+          return pc2.createAnswer();
+        }).then(function(answer){
+          gc();
+          return pc2.setLocalDescription(answer);
+        }).then(function(){
+          gc();
+          return pc1.setRemoteDescription(pc2.localDescription);
+        }).then(function(){
+          gc();
+          // Fechar as conexões após negociação
+          pc1.close(); gc();
+          pc2.close(); gc();
+          // Acessar pós-close
+          try { pc1.connectionState; pc1.iceConnectionState; } catch(e){}
+        }).catch(function(e){ gc(); });
+
+        gc();
+      } catch(e){}
+    }
+
+    // GC com todos os PeerConnections ativos
+    gcHeavy();
+
+    // Fechar todos + GC + acessar pós-close
+    for(let { pc1, pc2 } of pcs){
+      try { pc1.close(); gc(); } catch(e){}
+      try { pc2.close(); gc(); } catch(e){}
+      try { pc1.signalingState; pc1.iceGatheringState; } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 385: fim');
+}
+
+// ─── T386 ─────────────────────────────────────────────────────────────────────
+// HTMLVideoElement.requestVideoFrameCallback() + GC (VideoFrameCallback UAF)
+// requestVideoFrameCallback() é similar ao requestAnimationFrame mas para video;
+// GC durante o callback pode liberar o VideoFrame antes de ser processado.
+function t386(){
+  log('Teste 386: inicio');
+  try {
+    if(typeof HTMLVideoElement.prototype.requestVideoFrameCallback !== 'function'){
+      log('Teste 386: fim (sem requestVideoFrameCallback)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar video elements
+    const videos = [];
+    for(let i = 0; i < 5; i++){
+      const vid = document.createElement('video');
+      vid.muted = true;
+      vid.playsInline = true;
+      vid.loop = true;
+      // Usar data URI de um video mínimo (1x1 pixel, 1 frame)
+      vid.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAr9tZGF0';
+      area.appendChild(vid);
+      videos.push(vid);
+    }
+
+    let vfcIds = [];
+
+    // requestVideoFrameCallback em loop
+    for(let vid of videos){
+      let vfcN = 0;
+      function vfcCallback(now, metadata){
+        vfcN++;
+        gc(); // GC durante VideoFrameCallback
+        try {
+          metadata.presentationTime;
+          metadata.expectedDisplayTime;
+          metadata.width;
+          metadata.height;
+          metadata.mediaTime;
+          metadata.presentedFrames;
+        } catch(e){}
+
+        // Remover video durante callback
+        if(vfcN === 3 && vid.parentNode){
+          area.removeChild(vid);
+          gc();
+          area.appendChild(vid);
+        }
+
+        if(vfcN < 10){
+          try { vid.requestVideoFrameCallback(vfcCallback); } catch(e){}
+        }
+      }
+      try {
+        const id = vid.requestVideoFrameCallback(vfcCallback);
+        vfcIds.push({ vid, id });
+      } catch(e){}
+      try { vid.play().catch(function(){ gc(); }); } catch(e){}
+      gc();
+    }
+
+    // Cancelar callbacks + GC
+    setTimeout(function(){
+      for(let { vid, id } of vfcIds){
+        try { vid.cancelVideoFrameCallback(id); gc(); } catch(e){}
+      }
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+      gc();
+    }, 1000);
+  } catch(e){}
+  log('Teste 386: fim');
+}
+
+// ─── T387 ─────────────────────────────────────────────────────────────────────
+// CSS color-mix() + remoção de elemento + GC (CSSColorMixValue UAF)
+// color-mix() é avaliado durante o cálculo de estilo; remover o elemento
+// enquanto o CSSColorMixValue está sendo calculado pode causar UAF.
+function t387(){
+  log('Teste 387: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    const style387 = document.createElement('style');
+    style387.textContent = `
+      .colormix-el {
+        width: 80px; height: 40px;
+        --c1: red; --c2: blue; --mix-pct: 50%;
+        background: color-mix(in srgb, var(--c1) var(--mix-pct), var(--c2));
+        border: 2px solid color-mix(in oklch, green 30%, yellow);
+        color: color-mix(in hsl longer hue, hsl(0,100%,50%), hsl(240,100%,50%));
+      }
+    `;
+    document.head.appendChild(style387);
+
+    const cmEls = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.className = 'colormix-el';
+      el.style.setProperty('--c1', 'hsl(' + (i * 18) + ',70%,50%)');
+      el.style.setProperty('--c2', 'hsl(' + (i * 18 + 180) % 360 + ',70%,50%)');
+      el.style.setProperty('--mix-pct', (i * 5) + '%');
+      el.textContent = 'mix_' + i;
+      area.appendChild(el);
+      cmEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mudar percentagem do mix em loop + remoção + GC
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of cmEls){
+        try {
+          el.style.setProperty('--mix-pct', (iter * 5 % 100) + '%');
+          el.style.setProperty('--c1', 'hsl(' + (iter * 20) + ',80%,40%)');
+          gc();
+          _ = area.offsetHeight;
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: CSSColorMixValue tem stale ptr para o RenderStyle
+            area.appendChild(el);
+          }
+        } catch(e){}
+      }
+    }
+
+    // Remover todos + GC + acessar estilos computados
+    for(let el of cmEls){
+      try {
+        const cs = window.getComputedStyle(el);
+        cs.backgroundColor; // força resolução do color-mix()
+        area.removeChild(el);
+        gc();
+        cs.backgroundColor; // pós-remoção
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style387); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 387: fim');
+}
+
+// ─── T388 ─────────────────────────────────────────────────────────────────────
+// CSS @layer + @scope combinados + GC (LayerOrderedScopeRule UAF)
+// Usar @layer dentro de @scope (ou vice-versa) cria uma interação complexa
+// no StyleResolver; mutar o DOM em elementos que dependem de ambas pode crashar.
+function t388(){
+  log('Teste 388: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    const style388 = document.createElement('style');
+    style388.textContent = `
+      @layer base388, theme388, overrides388;
+      @layer base388 {
+        @scope (#dom16) {
+          .ls-target { color: black; background: white; padding: 4px; }
+          :scope { border: 1px solid gray; }
+        }
+      }
+      @layer theme388 {
+        @scope (.ls-scope-root) to (.ls-limit) {
+          .ls-target { color: navy; background: lightyellow; }
+          .ls-scope-root { outline: 2px solid blue; }
+        }
+      }
+      @layer overrides388 {
+        @scope (.ls-override) {
+          * { font-weight: bold !important; }
+        }
+      }
+    `;
+    document.head.appendChild(style388);
+
+    // Estrutura que usa @layer + @scope juntos
+    const roots = [];
+    for(let i = 0; i < 8; i++){
+      const root = document.createElement('div');
+      root.className = 'ls-scope-root';
+      root.id = 'ls_root_' + i;
+
+      for(let j = 0; j < 4; j++){
+        const el = document.createElement('div');
+        el.className = j === 3 ? 'ls-target ls-limit' : 'ls-target';
+        el.textContent = 'ls_' + i + '_' + j;
+        root.appendChild(el);
+      }
+      area.appendChild(root);
+      roots.push(root);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mutar estrutura que depende de @layer + @scope combinados
+    const sheet388 = style388.sheet;
+    for(let iter = 0; iter < 15; iter++){
+      try {
+        // Mudar ordem das layers (invalida todo o StyleResolver)
+        if(sheet388 && sheet388.cssRules.length > 0){
+          const firstRule = sheet388.cssRules[0];
+          // Inserir nova declaração de layer (muda a ordem)
+          try {
+            sheet388.insertRule('@layer overrides388, base388, theme388;', 0);
+            gc();
+            _ = area.offsetHeight;
+            sheet388.deleteRule(0);
+            gc();
+          } catch(e){}
+        }
+
+        // Remover elementos dentro do escopo
+        for(let root of roots.slice(0, 3)){
+          try {
+            const targets = Array.from(root.querySelectorAll('.ls-target'));
+            if(targets.length > 0 && targets[0].parentNode){
+              root.removeChild(targets[0]);
+              gc(); // GC: LayerOrderedScopeRule tem stale ptr
+              _ = area.offsetHeight;
+              root.appendChild(targets[0]);
+            }
+            // Adicionar/remover classe ls-override (muda qual @layer/@scope se aplica)
+            root.classList.toggle('ls-override');
+            gc();
+            _ = area.offsetHeight;
+          } catch(e){}
+        }
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style388); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 388: fim');
+}
+
+// ─── T389 ─────────────────────────────────────────────────────────────────────
+// CSS contain: style layout paint + mutation + GC (ContainmentData UAF)
+// CSS contain cria uma contenção de layout/estilo/paint que isola o subtree;
+// remover o elemento contido enquanto o layout está em progresso pode
+// causar UAF no ContainmentData.
+function t389(){
+  log('Teste 389: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    const containTypes = [
+      'layout',
+      'style',
+      'paint',
+      'size',
+      'inline-size',
+      'content',
+      'strict',
+      'style layout paint',
+      'style layout',
+      'layout paint',
+    ];
+
+    const containEls = [];
+    for(let i = 0; i < containTypes.length; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'contain: ' + containTypes[i],
+        'width: 100px',
+        'height: 60px',
+        'background: hsl(' + (i * 36) + ',50%,70%)',
+        'overflow: hidden',
+        'position: relative',
+      ].join(';');
+      // Conteúdo interno
+      for(let j = 0; j < 5; j++){
+        const child = document.createElement('div');
+        child.style.cssText = 'width: 80px; height: 10px; background: rgba(0,0,0,0.1);';
+        child.textContent = 'inner_' + i + '_' + j;
+        el.appendChild(child);
+      }
+      area.appendChild(el);
+      containEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mutar elementos contidos + GC
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of containEls){
+        try {
+          // Mudar o tipo de contain
+          el.style.contain = containTypes[iter % containTypes.length];
+          gc();
+          _ = area.offsetHeight;
+
+          // Mutar conteúdo interno (dentro da contenção)
+          const children = Array.from(el.children);
+          if(children.length > 0 && children[0].parentNode){
+            el.removeChild(children[0]);
+            gc(); // GC: ContainmentData pode ter stale ptr
+            _ = area.offsetHeight;
+            el.appendChild(children[0]);
+          }
+
+          // Remover o próprio elemento contido + GC
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc();
+            area.appendChild(el);
+          }
+          gc();
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 389: fim');
+}
+
+// ─── T390 ─────────────────────────────────────────────────────────────────────
+// HTMLSlotElement.assignedElements() + Shadow DOM mutation + GC
+// assignedElements() retorna os elementos distribuídos para o slot;
+// mutar o shadow DOM ou remover os slotted elements durante a distribuição
+// pode causar UAF na SlotAssignment.
+function t390(){
+  log('Teste 390: inicio');
+  try {
+    if(typeof HTMLElement.prototype.attachShadow !== 'function'){
+      log('Teste 390: fim (sem Shadow DOM)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar hosts com shadow roots e slots
+    const hosts = [];
+    for(let i = 0; i < 8; i++){
+      try {
+        const host = document.createElement('div');
+        host.style.cssText = 'display:inline-block;width:100px;height:60px;border:1px solid gray;';
+
+        // Attach shadow root
+        const shadow = host.attachShadow({ mode: 'open' });
+        shadow.innerHTML = `
+          <style>:host { display: block; }</style>
+          <div class="wrapper">
+            <slot name="header_${i}"></slot>
+            <slot></slot>
+            <slot name="footer_${i}"></slot>
+          </div>
+        `;
+
+        // Slotted content
+        const header = document.createElement('div');
+        header.slot = 'header_' + i;
+        header.textContent = 'Header_' + i;
+        host.appendChild(header);
+
+        for(let j = 0; j < 3; j++){
+          const el = document.createElement('p');
+          el.textContent = 'Content_' + i + '_' + j;
+          host.appendChild(el);
+        }
+
+        const footer = document.createElement('div');
+        footer.slot = 'footer_' + i;
+        footer.textContent = 'Footer_' + i;
+        host.appendChild(footer);
+
+        area.appendChild(host);
+        hosts.push({ host, shadow });
+      } catch(e){}
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mutar slot assignments + GC
+    for(let iter = 0; iter < 15; iter++){
+      for(let { host, shadow } of hosts){
+        try {
+          // Obter slots do shadow DOM
+          const slots = Array.from(shadow.querySelectorAll('slot'));
+          for(let slot of slots){
+            try {
+              const assigned = slot.assignedElements();
+              gc(); // GC com lista de assigned elements
+
+              // Remover um assigned element do host
+              if(assigned.length > 0 && assigned[0].parentNode === host){
+                host.removeChild(assigned[0]);
+                gc(); // GC: SlotAssignment tem stale ptr
+                // Tentar acessar slot.assignedElements() pós-remoção
+                try { slot.assignedElements(); } catch(e){}
+                host.appendChild(assigned[0]); // re-inserir
+              }
+
+              // Mudar o slot attribute de um elemento
+              const slotted = host.children[0];
+              if(slotted){
+                slotted.slot = 'footer_0';
+                gc();
+                slotted.slot = '';
+                gc();
+              }
+
+              // assignedNodes (inclui text nodes)
+              try { slot.assignedNodes({ flatten: true }); gc(); } catch(e){}
+            } catch(e){}
+          }
+        } catch(e){}
+      }
+    }
+
+    // Remover hosts + GC + acessar slots pós-remoção
+    for(let { host, shadow } of hosts){
+      try {
+        const slots = Array.from(shadow.querySelectorAll('slot'));
+        if(host.parentNode){ area.removeChild(host); gc(); }
+        for(let slot of slots){
+          try { slot.assignedElements(); } catch(e){} // stale ptr
+          try { slot.assignedNodes(); }    catch(e){}
+        }
+      } catch(e){}
+    }
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 390: fim');
+}
+
+// ─── T391 ─────────────────────────────────────────────────────────────────────
+// Trusted Types: createPolicy + DOM insertion + GC (TrustedTypePolicy UAF)
+// Trusted Types previne XSS criando objetos TrustedHTML/TrustedScript;
+// GC do policy object enquanto TrustedHTML ainda é usado pode causar UAF.
+function t391(){
+  log('Teste 391: inicio');
+  try {
+    if(typeof trustedTypes === 'undefined'){
+      log('Teste 391: fim (sem Trusted Types)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar múltiplas políticas
+    const policies = [];
+    for(let i = 0; i < 5; i++){
+      try {
+        const policy = trustedTypes.createPolicy('policy16_' + i, {
+          createHTML: function(input){
+            gc(); // GC durante createHTML
+            return input.replace(/<script>/gi, '');
+          },
+          createScript: function(input){
+            gc();
+            return input;
+          },
+          createScriptURL: function(input){
+            gc();
+            return input;
+          }
+        });
+        policies.push(policy);
+      } catch(e){}
+    }
+
+    gc();
+
+    // Criar TrustedHTML e inserir no DOM
+    for(let i = 0; i < 20; i++){
+      try {
+        const policy = policies[i % policies.length];
+        const html = policy.createHTML(
+          '<div class="trusted-el"><span>trusted_content_' + i + '</span></div>'
+        );
+        gc(); // GC com TrustedHTML criado mas não inserido
+
+        // Inserir TrustedHTML
+        const el = document.createElement('div');
+        area.appendChild(el);
+        el.innerHTML = html;
+        gc();
+
+        // Remover elemento + GC + usar TrustedHTML novamente
+        if(el.parentNode){ area.removeChild(el); gc(); }
+        try { el.innerHTML = html; area.appendChild(el); gc(); } catch(e){}
+
+        // Soltar referência ao TrustedHTML + GC
+        let staleHtml = html;
+        gc();
+        // Tentar usar html após GC
+        try { el.innerHTML = staleHtml; } catch(e){}
+      } catch(e){}
+    }
+
+    // Soltar referências às políticas + GC
+    policies.length = 0;
+    gcHeavy();
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 391: fim');
+}
+
+// ─── T392 ─────────────────────────────────────────────────────────────────────
+// HTMLSelectElement.showPicker() + DOM removal + GC (PickerController UAF)
+// showPicker() abre o picker nativo do browser; GC durante a exibição
+// pode liberar o PickerController antes de ser fechado.
+function t392(){
+  log('Teste 392: inicio');
+  try {
+    if(typeof HTMLSelectElement.prototype.showPicker !== 'function'){
+      log('Teste 392: fim (sem showPicker)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    for(let i = 0; i < 5; i++){
+      try {
+        const sel = document.createElement('select');
+        for(let j = 0; j < 10; j++){
+          const opt = new Option('Option_' + j, 'val_' + j);
+          sel.add(opt);
+        }
+        area.appendChild(sel);
+
+        // Focar + showPicker + GC
+        try { sel.focus(); } catch(e){}
+        try {
+          sel.showPicker();
+          gc(); // GC com picker aberto — PickerController pode ser UAF
+          // Remover o select enquanto o picker está aberto
+          if(sel.parentNode){ area.removeChild(sel); gc(); }
+          // Tentar esconder o picker do elemento removido
+          try { sel.blur(); }       catch(e){}
+          try { sel.size = 5; }     catch(e){}
+        } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Input[type=date].showPicker()
+    if(typeof HTMLInputElement.prototype.showPicker === 'function'){
+      for(let type of ['date', 'time', 'datetime-local', 'color', 'month', 'week']){
+        try {
+          const inp = document.createElement('input');
+          inp.type = type;
+          area.appendChild(inp);
+          try { inp.focus(); inp.showPicker(); gc(); } catch(e){}
+          if(inp.parentNode){ area.removeChild(inp); gc(); }
+          try { inp.showPicker(); } catch(e){} // pós-remoção
+          gc();
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 392: fim');
+}
+
+// ─── T393 ─────────────────────────────────────────────────────────────────────
+// scheduler.postTask() + DOM mutation + GC (TaskController UAF)
+// scheduler.postTask() é uma nova API de agendamento de tarefas (Prioritized Task Scheduling);
+// GC durante a tarefa pode liberar o TaskController.
+function t393(){
+  log('Teste 393: inicio');
+  try {
+    if(typeof scheduler === 'undefined' || typeof scheduler.postTask !== 'function'){
+      log('Teste 393: fim (sem scheduler.postTask)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    const priorities = ['user-blocking', 'user-visible', 'background'];
+
+    for(let i = 0; i < 15; i++){
+      try {
+        const ctrl = new TaskController({ priority: priorities[i % priorities.length] });
+        const signal = ctrl.signal;
+
+        scheduler.postTask(function(){
+          gc(); // GC durante a tarefa
+          // Mutar DOM durante a tarefa
+          const el = document.createElement('div');
+          el.textContent = 'task_result_' + i;
+          area.appendChild(el);
+          gc();
+          if(el.parentNode){ area.removeChild(el); }
+          gc();
+          return 'task_value_' + i;
+        }, { signal, priority: priorities[i % priorities.length], delay: i * 2 })
+        .then(function(result){
+          gc();
+          result; // usar resultado pós-GC
+        })
+        .catch(function(e){
+          gc(); // GC durante AbortError
+        });
+
+        // Abortar algumas tarefas antes de executarem
+        if(i % 3 === 0){
+          setTimeout(function(){
+            try { ctrl.abort(); gc(); } catch(e){}
+          }, 0);
+        }
+
+        // Mudar prioridade durante agendamento
+        try { ctrl.setPriority(priorities[(i + 1) % priorities.length]); gc(); } catch(e){}
+
+        gc();
+      } catch(e){}
+    }
+
+    // Tarefas encadeadas
+    try {
+      async function chainedTasks(){
+        for(let i = 0; i < 5; i++){
+          gc();
+          await scheduler.postTask(function(){
+            gc();
+            return i * 2;
+          }, { priority: 'background' });
+          gc();
+        }
+      }
+      chainedTasks().catch(function(){ gc(); });
+    } catch(e){}
+
+    setTimeout(function(){
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 1000);
+  } catch(e){}
+  log('Teste 393: fim');
+}
+
+// ─── T394 ─────────────────────────────────────────────────────────────────────
+// CSS Custom State pseudo-class (:state()) + customElements internals + GC
+// ElementInternals.states (CustomStateSet) permite custom elements declarar estado;
+// :state() no CSS reage a esse estado; GC durante a mudança de estado pode
+// causar UAF no CustomStateSet.
+function t394(){
+  log('Teste 394: inicio');
+  try {
+    if(typeof ElementInternals === 'undefined'){
+      log('Teste 394: fim (sem ElementInternals)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Definir custom element com CustomStateSet
+    try {
+      customElements.define('stateful-el-16', class extends HTMLElement {
+        static get formAssociated(){ return true; }
+        constructor(){
+          super();
+          try { this._int = this.attachInternals(); } catch(e){}
+          this._states = [];
+        }
+        connectedCallback(){
+          gc();
+          // Adicionar estado inicial
+          try { this._int.states.add('--connected'); gc(); } catch(e){}
+        }
+        disconnectedCallback(){
+          gc();
+          try { this._int.states.delete('--connected'); gc(); } catch(e){}
+        }
+        toggleState(state){
+          try {
+            if(this._int.states.has(state)){
+              this._int.states.delete(state);
+            } else {
+              this._int.states.add(state);
+            }
+            gc();
+          } catch(e){}
+        }
+      });
+    } catch(e){}
+
+    // CSS que reage aos estados customizados
+    const style394 = document.createElement('style');
+    style394.textContent = `
+      stateful-el-16 { display: inline-block; width: 60px; height: 30px; background: gray; }
+      stateful-el-16:state(--connected) { background: green; }
+      stateful-el-16:state(--active)    { background: red; }
+      stateful-el-16:state(--loading)   { background: yellow; }
+    `;
+    document.head.appendChild(style394);
+
+    // Criar instâncias
+    const statefulEls = [];
+    for(let i = 0; i < 10; i++){
+      try {
+        const el = document.createElement('stateful-el-16');
+        area.appendChild(el);
+        statefulEls.push(el);
+      } catch(e){ statefulEls.push(null); }
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Alternar estados + GC
+    const states = ['--active', '--loading', '--error', '--selected', '--checked'];
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of statefulEls){
+        if(!el) continue;
+        try {
+          el.toggleState(states[iter % states.length]);
+          gc();
+          _ = area.offsetHeight; // forçar re-resolução do :state()
+
+          // Remover elemento + GC + mudar estado do removido
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc();
+            el.toggleState('--connected'); // estado mudado pós-remoção
+            gc();
+            area.appendChild(el);
+          }
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style394); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 394: fim');
+}
+
+// ─── T395 ─────────────────────────────────────────────────────────────────────
+// Element.moveBefore() + GC (nova API 2024/2025 — preserve state on move)
+// moveBefore() move um elemento dentro do DOM preservando seu estado (focus, iframes);
+// GC durante a operação pode causar UAF pois o elemento tem dois "owners" temporários.
+function t395(){
+  log('Teste 395: inicio');
+  try {
+    if(typeof Element.prototype.moveBefore !== 'function'){
+      log('Teste 395: fim (sem Element.moveBefore)');
+      return;
+    }
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar estrutura para moveBefore
+    const container1 = document.createElement('div');
+    container1.id = 'mb_c1';
+    const container2 = document.createElement('div');
+    container2.id = 'mb_c2';
+    area.appendChild(container1);
+    area.appendChild(container2);
+
+    const moveEls = [];
+    for(let i = 0; i < 10; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:40px;height:40px;background:hsl(' + (i*36) + ',60%,50%);display:inline-block;';
+      el.textContent = 'mv_' + i;
+      container1.appendChild(el);
+      moveEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mover elementos entre containers com moveBefore + GC
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of moveEls){
+        try {
+          // Mover de container1 para container2
+          if(el.parentNode === container1){
+            container2.moveBefore(el, null); // mover para o final do container2
+          } else {
+            container1.moveBefore(el, container1.firstChild); // mover para o início do container1
+          }
+          gc(); // GC durante/após moveBefore
+
+          // Mover passo a passo (um por um)
+          const nextEl = moveEls[(moveEls.indexOf(el) + 1) % moveEls.length];
+          if(nextEl && nextEl.parentNode){
+            nextEl.parentNode.moveBefore(el, nextEl);
+            gc();
+          }
+        } catch(e){}
+      }
+
+      // Remover container durante moveBefore
+      if(iter === 10){
+        try {
+          const el = moveEls[0];
+          area.removeChild(container2);
+          gc(); // GC: el pode estar em transição entre containers
+          area.appendChild(container2);
+          gc();
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 395: fim');
+}
+
+// ─── T396 ─────────────────────────────────────────────────────────────────────
+// PerformanceObserver: largest-contentful-paint + DOM removal + GC
+// LCPEntry referencia o elemento candidato ao LCP; remover o elemento
+// enquanto o PerformanceObserver está processando pode causar UAF.
+function t396(){
+  log('Teste 396: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // Criar elementos grandes que serão candidatos ao LCP
+    const lcpEls = [];
+    for(let i = 0; i < 5; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'width:' + (200 + i * 50) + 'px',
+        'height:' + (100 + i * 30) + 'px',
+        'background:hsl(' + (i * 72) + ',60%,50%)',
+      ].join(';');
+      el.textContent = 'LCP_candidate_' + i + ' ' + 'x'.repeat(50);
+      area.appendChild(el);
+      lcpEls.push(el);
+    }
+
+    // Registrar observers para vários tipos de PerformanceEntry
+    const entryTypes = [
+      'largest-contentful-paint',
+      'layout-shift',
+      'long-task',
+      'navigation',
+      'paint',
+      'resource',
+      'element',
+      'event',
+      'user-timing',
+      'longtask',
+    ];
+
+    const observers = [];
+    for(let type of entryTypes){
+      try {
+        const obs = new PerformanceObserver(function(list, observer){
+          gc(); // GC no início do callback
+          const entries = list.getEntries();
+          for(let entry of entries){
+            try { entry.entryType; }          catch(e){}
+            try { entry.startTime; }          catch(e){}
+            try { entry.duration; }           catch(e){}
+            // Propriedades específicas do LCP
+            try { entry.element; }            catch(e){} // referência ao elemento
+            try { entry.loadingAttr; }        catch(e){}
+            try { entry.renderTime; }         catch(e){}
+            try { entry.size; }               catch(e){}
+            // Tentar remover o elemento referenciado
+            if(entry.element && entry.element.parentNode){
+              try { area.removeChild(entry.element); gc(); area.appendChild(entry.element); } catch(e){}
+            }
+            gc();
+          }
+          gc();
+        });
+
+        try {
+          obs.observe({ type, buffered: true });
+          observers.push(obs);
+        } catch(e){}
+      } catch(e){}
+    }
+
+    let _ = area.offsetHeight; // forçar paint + LCP candidate detection
+    gc();
+
+    // Remover candidatos LCP + GC (PerformanceObserver tem stale ptr)
+    for(let el of lcpEls){
+      try {
+        area.removeChild(el);
+        gc();
+        // Performance entries do LCP podem ainda referenciar o elemento removido
+        const entries = performance.getEntriesByType('largest-contentful-paint');
+        for(let e of entries){
+          try { e.element; e.size; e.renderTime; } catch(e_){}
+        }
+        area.appendChild(el);
+      } catch(e){}
+    }
+
+    // Desconectar observers + GC
+    for(let obs of observers){
+      try { obs.disconnect(); gc(); } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 396: fim');
+}
+
+// ─── T397 ─────────────────────────────────────────────────────────────────────
+// CSS inline if() function + mutation + GC
+// A função CSS if() (proposta 2024/2025) é avaliada inline nos valores de propriedade;
+// tentar triggerar o parser de if() em versões que não a suportam pode causar
+// comportamento indefinido; em versões que suportam, pode ter UAF durante recalc.
+function t397(){
+  log('Teste 397: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // CSS if() sintaxe (pode não ser suportada no PS4)
+    // Testar tanto a sintaxe antiga (não existe) quanto a nova
+    const style397 = document.createElement('style');
+    style397.textContent = `
+      .if-test-16 {
+        /* CSS if() tentativa — será ignorada em browsers não suportados */
+        width: if(style(--active: true): 200px; else: 100px);
+        height: if(media(min-width: 100px): 80px; else: 40px);
+        background: if(supports(display: grid): green; else: blue);
+        color: if(style(--dark-mode: 1): white; else: black);
+      }
+      .if-custom {
+        --active: true;
+        --dark-mode: 0;
+        width: 100px;
+        height: 50px;
+        background: hsl(200,60%,50%);
+      }
+    `;
+    document.head.appendChild(style397);
+
+    const ifEls = [];
+    for(let i = 0; i < 15; i++){
+      const el = document.createElement('div');
+      el.className = 'if-test-16 if-custom';
+      el.style.setProperty('--active', i % 2 === 0 ? 'true' : 'false');
+      el.textContent = 'if_test_' + i;
+      area.appendChild(el);
+      ifEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mudar custom properties que afetam o if() + GC
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of ifEls){
+        try {
+          el.style.setProperty('--active', iter % 2 === 0 ? 'true' : 'false');
+          el.style.setProperty('--dark-mode', (iter % 3).toString());
+          gc();
+          _ = area.offsetHeight;
+          // Remover durante avaliação do if()
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc();
+            area.appendChild(el);
+          }
+        } catch(e){}
+      }
+    }
+
+    // Tentar inserir regras CSS if() dinamicamente
+    if(style397.sheet){
+      for(let iter = 0; iter < 5; iter++){
+        try {
+          style397.sheet.insertRule(`.dynamic-if-${iter} { width: if(style(--x: ${iter}): ${iter * 10}px; else: 5px); }`, 0);
+          gc();
+          style397.sheet.deleteRule(0);
+          gc();
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style397); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 397: fim');
+}
+
+// ─── T398 ─────────────────────────────────────────────────────────────────────
+// Speculation Rules: prerender/prefetch + GC (SpeculationRuleSet UAF)
+// Speculation Rules API permite declarar prerender/prefetch de URLs;
+// GC durante a análise das regras pode causar UAF no SpeculationRuleSet.
+function t398(){
+  log('Teste 398: inicio');
+  try {
+    // Speculation Rules via <script type="speculationrules">
+    for(let i = 0; i < 10; i++){
+      try {
+        const script = document.createElement('script');
+        script.type = 'speculationrules';
+        script.textContent = JSON.stringify({
+          prefetch: [
+            {
+              source: 'list',
+              urls: ['about:blank#prefetch_' + i, 'about:blank#prefetch2_' + i],
+              eagerness: i % 2 === 0 ? 'moderate' : 'conservative'
+            }
+          ],
+          prerender: [
+            {
+              source: 'list',
+              urls: ['about:blank#prerender_' + i],
+              eagerness: 'conservative'
+            }
+          ]
+        });
+        document.head.appendChild(script);
+        gc(); // GC após adicionar regras — SpeculationRuleSet sendo criado
+
+        // Remover o script imediatamente (antes das regras serem processadas)
+        document.head.removeChild(script);
+        gc(); // GC: SpeculationRuleSet pode ter stale ptr para o script
+      } catch(e){}
+    }
+
+    // Speculation Rules com document rules (match href)
+    try {
+      const docScript = document.createElement('script');
+      docScript.type = 'speculationrules';
+      docScript.textContent = JSON.stringify({
+        prefetch: [
+          {
+            source: 'document',
+            where: {
+              href_matches: 'about:blank*'
+            }
+          }
+        ]
+      });
+      document.head.appendChild(docScript);
+      gc();
+      // Adicionar links que matcham as regras
+      for(let i = 0; i < 5; i++){
+        const a = document.createElement('a');
+        a.href = 'about:blank#speculation_' + i;
+        a.textContent = 'speculation_link_' + i;
+        document.body.appendChild(a);
+        gc(); // GC: SpeculationRuleSet pode analisar o novo link
+        document.body.removeChild(a);
+        gc();
+      }
+      document.head.removeChild(docScript);
+      gc();
+    } catch(e){}
+  } catch(e){}
+  log('Teste 398: fim');
+}
+
+// ─── T399 ─────────────────────────────────────────────────────────────────────
+// DocumentPictureInPicture: requestWindow() + GC (PiP window lifecycle UAF)
+// Document Picture-in-Picture API cria uma janela flutuante separada;
+// GC durante o uso da janela pip pode causar UAF no PiPWindow.
+function t399(){
+  log('Teste 399: inicio');
+  try {
+    if(typeof documentPictureInPicture === 'undefined' ||
+       typeof documentPictureInPicture.requestWindow !== 'function'){
+      log('Teste 399: fim (sem DocumentPictureInPicture)');
+      return;
+    }
+
+    // Solicitar janela PiP
+    documentPictureInPicture.requestWindow({
+      width: 200, height: 150
+    }).then(function(pipWindow){
+      gc(); // GC com pipWindow aberta
+
+      // Adicionar conteúdo à janela PiP
+      const el = document.createElement('div');
+      el.textContent = 'PiP Content';
+      el.style.cssText = 'width:100%;height:100%;background:red;color:white;';
+      try { pipWindow.document.body.appendChild(el); } catch(e){}
+      gc();
+
+      // Mover elemento para a janela PiP
+      const moveEl = document.createElement('div');
+      moveEl.textContent = 'moved_to_pip';
+      document.body.appendChild(moveEl);
+      try { pipWindow.document.body.appendChild(moveEl); } catch(e){}
+      gc(); // GC: o elemento mudou de documento
+
+      // Fechar a janela PiP + GC
+      setTimeout(function(){
+        try { pipWindow.close(); gc(); } catch(e){}
+        // Tentar usar pipWindow após fechar
+        try { pipWindow.document; pipWindow.closed; } catch(e){}
+        // Tentar usar elementos que estavam na janela PiP
+        try { el.textContent; el.parentNode; } catch(e){}
+        gc();
+      }, 500);
+    }).catch(function(e){
+      gc(); // PiP pode ser bloqueado sem gesto do usuário
+    });
+  } catch(e){}
+  log('Teste 399: fim');
+}
+
+// ─── T400 ─────────────────────────────────────────────────────────────────────
+// STRESS FINAL T400: Popover + CSSAnchor + Custom Highlight + View Transition + WebRTC
+// 5 vetores mais específicos desta rodada em sequência com gcHeavy() entre fases
+function t400(){
+  log('Teste 400: inicio');
+  try {
+    const area = document.getElementById('dom16');
+    area.style.display = 'block';
+
+    // === FASE 1: Popover API UAF ===
+    try {
+      const testEl = document.createElement('div');
+      if(typeof testEl.showPopover === 'function'){
+        const pops = [];
+        for(let i = 0; i < 5; i++){
+          const p = document.createElement('div');
+          p.popover = 'auto';
+          area.appendChild(p);
+          pops.push(p);
+        }
+        for(let iter = 0; iter < 10; iter++){
+          for(let p of pops){
+            try { p.showPopover(); gc(); } catch(e){}
+          }
+          // Remover durante top layer
+          if(pops[0].parentNode){ area.removeChild(pops[0]); gc(); area.appendChild(pops[0]); }
+          for(let p of pops){
+            try { p.hidePopover(); gc(); } catch(e){}
+          }
+        }
+        for(let p of pops) try { if(p.parentNode) area.removeChild(p); } catch(e){}
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 2: CSS Anchor Positioning ===
+    try {
+      const anchor400 = document.createElement('div');
+      anchor400.style.cssText = 'position:absolute;width:40px;height:20px;anchor-name:--stress400;';
+      area.appendChild(anchor400);
+      const anchored400 = document.createElement('div');
+      anchored400.style.cssText = 'position:absolute;top:anchor(--stress400 bottom,0px);left:anchor(--stress400 left,0px);width:40px;height:20px;background:red;';
+      area.appendChild(anchored400);
+      let _ = area.offsetHeight;
+      for(let i = 0; i < 10; i++){
+        try {
+          area.removeChild(anchor400); gc();
+          _ = area.offsetHeight;
+          anchored400.getBoundingClientRect();
+          area.appendChild(anchor400); gc();
+          anchor400.style.anchorName = '--stress400_' + i; gc();
+          anchor400.style.anchorName = '--stress400'; gc();
+        } catch(e){}
+      }
+      try { area.removeChild(anchor400); area.removeChild(anchored400); } catch(e){}
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 3: Custom Highlight API ===
+    try {
+      if(typeof CSS.highlights !== 'undefined' && typeof Highlight !== 'undefined'){
+        const txt400 = document.createTextNode('The quick brown fox ' .repeat(10));
+        const p400 = document.createElement('p');
+        p400.appendChild(txt400);
+        area.appendChild(p400);
+        const ranges400 = [];
+        for(let i = 0; i < 10; i++){
+          const r = document.createRange();
+          try { r.setStart(txt400, i * 5); r.setEnd(txt400, i * 5 + 4); ranges400.push(r); } catch(e){}
+        }
+        const hl400 = new Highlight(...ranges400);
+        CSS.highlights.set('stress400', hl400);
+        gc();
+        // Remover textNode
+        p400.removeChild(txt400); gc();
+        for(let r of ranges400) try { r.startOffset; } catch(e){}
+        CSS.highlights.delete('stress400'); gc();
+        if(p400.parentNode) area.removeChild(p400);
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 4: View Transition ===
+    try {
+      if(typeof document.startViewTransition === 'function'){
+        const vt400El = document.createElement('div');
+        vt400El.style.cssText = 'width:60px;height:40px;background:blue;view-transition-name:stress400vt;contain:layout;';
+        area.appendChild(vt400El);
+        for(let i = 0; i < 5; i++){
+          try {
+            const vt = document.startViewTransition(function(){
+              gc();
+              vt400El.style.background = 'hsl(' + (i * 72) + ',70%,50%)';
+              if(vt400El.parentNode){ area.removeChild(vt400El); gc(); area.appendChild(vt400El); }
+              return Promise.resolve();
+            });
+            gc();
+            try { vt.ready.catch(function(){ gc(); }); } catch(e){}
+            try { vt.finished.catch(function(){ gc(); }); } catch(e){}
+            try { vt.skipTransition(); gc(); } catch(e){}
+          } catch(e){}
+        }
+        if(vt400El.parentNode) try { area.removeChild(vt400El); } catch(e){}
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 5: WebRTC ===
+    try {
+      if(typeof RTCPeerConnection !== 'undefined'){
+        const pc400a = new RTCPeerConnection({ iceServers: [] });
+        const pc400b = new RTCPeerConnection({ iceServers: [] });
+        pc400a.onicecandidate = function(e){
+          gc();
+          if(e.candidate) try { pc400b.addIceCandidate(e.candidate); } catch(e){}
+        };
+        pc400b.onicecandidate = function(e){
+          gc();
+          if(e.candidate) try { pc400a.addIceCandidate(e.candidate); } catch(e){}
+        };
+        const dc400 = pc400a.createDataChannel('stress400');
+        dc400.onopen = function(){ gc(); try { dc400.send('stress400_data'); } catch(e){} };
+        gc();
+        pc400a.createOffer().then(function(o){ gc(); return pc400a.setLocalDescription(o); })
+          .then(function(){ gc(); return pc400b.setRemoteDescription(pc400a.localDescription); })
+          .then(function(){ gc(); return pc400b.createAnswer(); })
+          .then(function(a){ gc(); return pc400b.setLocalDescription(a); })
+          .then(function(){ gc(); return pc400a.setRemoteDescription(pc400b.localDescription); })
+          .then(function(){ gc(); pc400a.close(); pc400b.close(); gc(); })
+          .catch(function(){ gc(); pc400a.close(); pc400b.close(); gc(); });
+        gcHeavy();
+      }
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+    gcHeavy();
+  } catch(e){}
+  log('Teste 400: fim');
+}
+</script>
+</body>
+</html>

