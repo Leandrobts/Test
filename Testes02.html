@@ -1,736 +1,126 @@
 <!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><title>Testes02</title></head>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Test 11 - MutationObserver Race (Instrumented)</title>
+<style>
+  body { font-family: monospace; background:#111; color:#0f0; }
+  .warn { color: yellow; }
+  .err { color: red; }
+</style>
+</head>
 <body>
 
-<p>Cada botao executa um teste isolado. Se o navegador travar, o ultimo teste pressionado e o responsavel.</p>
-
-<button onclick="t26()">Teste 26</button>
-<button onclick="t27()">Teste 27</button>
-<button onclick="t28()">Teste 28</button>
-<button onclick="t29()">Teste 29</button>
-<button onclick="t30()">Teste 30</button>
-<button onclick="t31()">Teste 31</button>
-<button onclick="t32()">Teste 32</button>
-<button onclick="t33()">Teste 33</button>
-<button onclick="t34()">Teste 34</button>
-<button onclick="t35()">Teste 35</button>
-<button onclick="t36()">Teste 36</button>
-<button onclick="t37()">Teste 37</button>
-<button onclick="t38()">Teste 38</button>
-<button onclick="t39()">Teste 39</button>
-<button onclick="t40()">Teste 40</button>
-<button onclick="t41()">Teste 41</button>
-<button onclick="t42()">Teste 42</button>
-<button onclick="t43()">Teste 43</button>
-<button onclick="t44()">Teste 44</button>
-<button onclick="t45()">Teste 45</button>
-<button onclick="t46()">Teste 46</button>
-<button onclick="t47()">Teste 47</button>
-<button onclick="t48()">Teste 48</button>
-<button onclick="t49()">Teste 49</button>
-<button onclick="t50()">Teste 50</button>
-
-<pre id="o"></pre>
+<h2>MutationObserver Race – Instrumented</h2>
+<pre id="log"></pre>
 
 <script>
-function log(m){ document.getElementById('o').textContent += m + '\n'; }
-
-// T26 — RegExp com backtracking nao-catastrofico mas profundo
-// Pattern que forca muitos estados internos sem loop infinito
-function t26(){
-  log('Teste 26: inicio');
-  try {
-    var re = /^(a+)+b$/;
-    // String que forca backtracking extenso mas termina
-    var s = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaac';
-    var r = re.test(s);
-  } catch(e){}
-  log('Teste 26: fim');
+function log(msg, cls="") {
+    const el = document.getElementById("log");
+    const span = document.createElement("div");
+    if (cls) span.className = cls;
+    span.textContent = "[" + performance.now().toFixed(2) + "] " + msg;
+    el.appendChild(span);
 }
 
-// T27 — Function.prototype.toString em funcao dentro de Proxy
-// Motor pode tentar acessar source text via Proxy; trap pode retornar objeto invalido
-function t27(){
-  log('Teste 27: inicio');
-  try {
-    function original(){ return 42; }
-    var p = new Proxy(original, {
-      get: function(t, k){
-        if(k === 'toString'){
-          return function(){
-            // Retornar objeto em vez de string
-            return { valueOf: function(){ return 'function(){}'; } };
-          };
+function runTest() {
+    log("Iniciando Teste 11 Instrumentado...");
+
+    let div = document.createElement("div");
+    div.id = "target";
+    document.body.appendChild(div);
+
+    let callbackCount = 0;
+    let maxDepth = 0;
+    let inCallback = false;
+    let mutationRecordsTotal = 0;
+    let detachedAccessDetected = false;
+
+    let observer = new MutationObserver((records) => {
+
+        callbackCount++;
+        mutationRecordsTotal += records.length;
+
+        if (inCallback) {
+            log("REENTRÂNCIA detectada!", "warn");
         }
-        return Reflect.get(t, k);
-      }
-    });
-    var s1 = p.toString();
-    var s2 = '' + p;
-    var s3 = Function.prototype.toString.call(p);
-    var s4 = `${p}`;
-  } catch(e){}
-  log('Teste 27: fim');
-}
 
-// T28 — Object.freeze depois configurable:true em defineProperty
-// Motor pode ter estado de "frozen" inconsistente com descriptor
-function t28(){
-  log('Teste 28: inicio');
-  try {
-    var obj = { x: 1, y: 2 };
-    Object.defineProperty(obj, 'z', {
-      get: function(){ return this.x + this.y; },
-      configurable: true, enumerable: true
-    });
-    Object.freeze(obj);
-    // Tentar reconfigurar apos freeze (deve lancar)
-    try {
-      Object.defineProperty(obj, 'z', {
-        get: function(){ return 999; },
-        configurable: false
-      });
-    } catch(e1){}
-    // Tentar deletar propriedade frozen
-    try { delete obj.z; } catch(e2){}
-    try { delete obj.x; } catch(e3){}
-    // Tentar adicionar nova propriedade
-    try { obj.w = 5; } catch(e4){}
-    // Acessar getter apos tentativas de modificacao
-    var r = obj.z;
-  } catch(e){}
-  log('Teste 28: fim');
-}
+        inCallback = true;
+        maxDepth++;
 
-// T29 — eval com declaracoes de funcao aninhadas (600 niveis)
-// Parser/compilador pode ter limite de aninhamento de escopo
-function t29(){
-  log('Teste 29: inicio');
-  try {
-    var depth = 600;
-    var open  = '';
-    var close = '';
-    for(var i = 0; i < depth; i++){
-      open  += 'function f' + i + '(){ ';
-      close += ' return f' + i + '; }';
-    }
-    var code = open + 'return 1;' + close;
-    // Envolver em funcao anonima para execucao
-    try { (new Function(code))(); } catch(e1){}
-  } catch(e){}
-  log('Teste 29: fim');
-}
+        log("Callback #" + callbackCount + 
+            " | records=" + records.length + 
+            " | totalRecords=" + mutationRecordsTotal);
 
-// T30 — Optional chaining (?.) em cadeia sobre Proxy profundo
-// Proxy com get que retorna outro Proxy; ?. deve curto-circuitar em null/undefined
-function t30(){
-  log('Teste 30: inicio');
-  try {
-    var depth = 0;
-    function makeDeepProxy(d){
-      return new Proxy({}, {
-        get: function(t, k){
-          depth++;
-          if(k === 'value') return depth;
-          if(d > 5000) return undefined;
-          return makeDeepProxy(d + 1);
-        }
-      });
-    }
-    var root = makeDeepProxy(0);
-    // Optional chaining profundo
-    var r1 = root?.a?.b?.c?.d?.e?.value;
-    var r2 = root?.x?.y?.z?.value;
-    // Cadeia com null no meio
-    var nullObj = null;
-    var r3 = nullObj?.a?.b?.c;
-  } catch(e){}
-  log('Teste 30: fim');
-}
-
-// T31 — Tagged template literal com tag que tem Symbol.toPrimitive
-// Tag function e chamada com strings e values; tag retorna objeto com toPrimitive
-function t31(){
-  log('Teste 31: inicio');
-  try {
-    var callCount = 0;
-    function tag(strings){
-      callCount++;
-      var values = Array.prototype.slice.call(arguments, 1);
-      // Retornar objeto que tem Symbol.toPrimitive
-      return {
-        [Symbol.toPrimitive]: function(hint){
-          return 'tagged_' + callCount + '_' + hint;
-        },
-        toString: function(){ return 'str_' + callCount; },
-        valueOf:  function(){ return callCount; }
-      };
-    }
-    var a = 1, b = 2, c = 'x';
-    var r1 = tag`hello ${a} world ${b} end`;
-    // Usar o resultado em operacoes que forcam conversao
-    var r2 = r1 + '_suffix';
-    var r3 = r1 * 2;
-    var r4 = `nested ${r1} template`;
-    // Tag aninhado
-    var r5 = tag`outer ${tag`inner ${a}`} middle`;
-  } catch(e){}
-  log('Teste 31: fim');
-}
-
-// T32 — Promise com then que lanca excecao sincrona dentro de microtask
-// Excecao dentro de then deve resultar em rejected; cadeia de rejeicao profunda
-function t32(){
-  log('Teste 32: inicio');
-  try {
-    var depth = 0;
-    function chainReject(p, maxDepth){
-      return p.catch(function(err){
-        depth++;
-        if(depth >= maxDepth) return Promise.resolve('stopped');
-        throw new Error('rethrow_' + depth);
-      });
-    }
-    var initial = Promise.reject(new Error('start'));
-    var chained = chainReject(initial, 3000);
-    chained.then(function(){}).catch(function(){});
-  } catch(e){}
-  log('Teste 32: fim');
-}
-
-// T33 — Array.prototype.splice com getter em length que muda durante splice
-// splice le length, calcula indices, depois getter muda o tamanho
-function t33(){
-  log('Teste 33: inicio');
-  try {
-    var realLen = 256;
-    var arr = [];
-    for(var i = 0; i < realLen; i++) arr[i] = i;
-
-    var spliceCount = 0;
-    Object.defineProperty(arr, 'length', {
-      get: function(){
-        spliceCount++;
-        if(spliceCount === 2) return realLen * 2; // mentir na segunda leitura
-        if(spliceCount === 3) return 0;           // zero na terceira
-        return realLen;
-      },
-      set: function(v){ realLen = v; },
-      configurable: true
-    });
-
-    try { arr.splice(10, 5, 'a', 'b', 'c'); } catch(e1){}
-    try { arr.splice(0, 1); }                 catch(e2){}
-    try { arr.splice(-1, 1); }                catch(e3){}
-  } catch(e){}
-  log('Teste 33: fim');
-}
-
-// T34 — String replace com regex global e funcao de substituicao
-// que modifica a propria string (via closure) durante execucao
-function t34(){
-  log('Teste 34: inicio');
-  try {
-    var s = 'aababcabcdabcde';
-    var callN = 0;
-    var result = s.replace(/a+/g, function(match, offset, str){
-      callN++;
-      if(callN === 2){
-        // Modificar variavel de closure (nao afeta str original que e imutavel)
-        s = s.split('').reverse().join('');
-      }
-      return '[' + match + '_' + callN + ']';
-    });
-  } catch(e){}
-  log('Teste 34: fim');
-}
-
-// T35 — for...in em Proxy com has trap que lanca excecao em chaves especificas
-// for...in chama [[OwnPropertyKeys]] e [[HasProperty]]; excecao no meio do loop
-function t35(){
-  log('Teste 35: inicio');
-  try {
-    var p = new Proxy({ a:1, b:2, c:3, d:4, e:5 }, {
-      has: function(t, k){
-        if(k === 'c') throw new TypeError('has_trap_throws_on_c');
-        return k in t;
-      },
-      ownKeys: function(){ return ['a','b','c','d','e']; },
-      getOwnPropertyDescriptor: function(t, k){
-        return { value: t[k], writable: true,
-                 enumerable: true, configurable: true };
-      }
-    });
-    try {
-      for(var k in p){ var v = p[k]; }
-    } catch(inner){}
-    // Tentar novamente apos excecao
-    try {
-      var keys = Object.keys(p);
-    } catch(e2){}
-  } catch(e){}
-  log('Teste 35: fim');
-}
-
-// T36 — TypedArray construido de iteravel cujo Symbol.iterator e Proxy
-// Proxy intercepta next(); retorna valores com type confusion
-function t36(){
-  log('Teste 36: inicio');
-  try {
-    var count = 0;
-    var iterProxy = new Proxy({}, {
-      get: function(t, k){
-        if(k === Symbol.iterator){
-          return function(){
-            return new Proxy({}, {
-              get: function(t2, k2){
-                if(k2 === 'next'){
-                  return function(){
-                    count++;
-                    if(count > 20) return { value: undefined, done: true };
-                    // Retornar value como objeto em vez de numero
-                    return { value: { valueOf: function(){ return count; } }, done: false };
-                  };
-                }
-                return t2[k2];
-              }
-            });
-          };
-        }
-        return t[k];
-      }
-    });
-    var u8  = new Uint8Array(iterProxy);
-    var f64 = new Float64Array(iterProxy);
-    var u32 = new Uint32Array(iterProxy);
-  } catch(e){}
-  log('Teste 36: fim');
-}
-
-// T37 — delete em Proxy onde deleteProperty trap retorna false
-// Strict mode: lancar TypeError; non-strict: silencioso
-// Motor pode ter estado inconsistente se delete e reaplicado
-function t37(){
-  log('Teste 37: inicio');
-  try {
-    var store = { a:1, b:2, c:3 };
-    var deleteCount = 0;
-    var p = new Proxy(store, {
-      deleteProperty: function(t, k){
-        deleteCount++;
-        if(deleteCount % 2 === 0) return false; // falhar em deletes pares
-        return Reflect.deleteProperty(t, k);
-      }
-    });
-    for(var i = 0; i < 10; i++){
-      try { delete p.a; } catch(e1){}
-      try { delete p.b; } catch(e2){}
-      try { delete p.c; } catch(e3){}
-      // Recriar propriedades para proximo round
-      p.a = i; p.b = i+1; p.c = i+2;
-    }
-  } catch(e){}
-  log('Teste 37: fim');
-}
-
-// T38 — Object.getOwnPropertyDescriptor em Proxy retornando descriptor invalido
-// Spec: descriptor retornado deve ser compativel com target; invariant violation
-function t38(){
-  log('Teste 38: inicio');
-  try {
-    var target = Object.freeze({ x: 42 });
-    var p = new Proxy(target, {
-      getOwnPropertyDescriptor: function(t, k){
-        if(k === 'x'){
-          // Retornar descriptor que viola invariante (configurable:true em objeto frozen)
-          return { value: 999, writable: true,
-                   enumerable: true, configurable: true };
-        }
-        return Reflect.getOwnPropertyDescriptor(t, k);
-      }
-    });
-    try { var d = Object.getOwnPropertyDescriptor(p, 'x'); } catch(e1){}
-    try { var keys = Object.keys(p); }                      catch(e2){}
-    try { var r = p.x; }                                    catch(e3){}
-    try { Object.assign({}, p); }                           catch(e4){}
-  } catch(e){}
-  log('Teste 38: fim');
-}
-
-// T39 — Proxy apply trap que chama a si mesmo via Reflect.apply
-// Profundidade controlada; motor pode ter limite de reentrada em traps
-function t39(){
-  log('Teste 39: inicio');
-  try {
-    var applyCount = 0;
-    var p = new Proxy(function base(n){ return n; }, {
-      apply: function(t, thisA, args){
-        applyCount++;
-        if(applyCount >= 200) return args[0]; // parar recursao
-        // Chamar o proprio proxy recursivamente
-        return Reflect.apply(p, thisA, [args[0] + 1]);
-      }
-    });
-    var r = p(0);
-  } catch(e){}
-  log('Teste 39: fim');
-}
-
-// T40 — async generator com throw dentro de for-await-of
-// for-await-of deve chamar return() no iterador ao receber excecao
-function t40(){
-  log('Teste 40: inicio');
-  async function run(){
-    try {
-      async function* gen(){
         try {
-          yield 1;
-          yield 2;
-          yield 3;
-          yield 4;
-          yield 5;
-        } finally {
-          yield 'finally_value'; // yield no finally de async gen
+
+            // Sanity check 1: acessar nó após possível remoção
+            if (!div.isConnected) {
+                log("Nó já desconectado do DOM", "warn");
+            }
+
+            // Força mutação interna
+            div.innerHTML = "trigger_" + callbackCount;
+
+            // Remove nó (potencial ponto crítico)
+            div.remove();
+
+            // Sanity check 2: tentar acessar após remoção
+            try {
+                let x = div.innerHTML;
+                if (div.isConnected === false) {
+                    detachedAccessDetected = true;
+                    log("Acesso a nó removido realizado", "warn");
+                }
+            } catch(e) {
+                log("Erro ao acessar nó removido: " + e, "err");
+            }
+
+        } catch(e) {
+            log("Erro interno no callback: " + e, "err");
         }
-      }
 
-      var results = [];
-      try {
-        for await(var v of gen()){
-          results.push(v);
-          if(v === 3) throw new Error('break_loop');
+        inCallback = false;
+
+        // Limite de segurança
+        if (callbackCount > 50) {
+            log("Loop excessivo detectado. Desconectando observer.", "err");
+            observer.disconnect();
         }
-      } catch(inner){}
-
-      // Reusar o mesmo generator factory
-      for await(var v2 of gen()){
-        results.push(v2);
-      }
-    } catch(e){}
-  }
-  run().catch(function(){});
-  log('Teste 40: fim');
-}
-
-// T41 — Multiplos WeakRef ao mesmo objeto; GC forcado entre derefs
-// Motor pode coletar entre as leituras de deref()
-function t41(){
-  log('Teste 41: inicio');
-  try {
-    if(typeof WeakRef === 'undefined') throw new Error('sem WeakRef');
-    var refs = [];
-    // Criar 100 WeakRefs ao mesmo objeto
-    var shared = { data: new Uint32Array(64), magic: 0xDEAD };
-    for(var i = 0; i < 100; i++) refs.push(new WeakRef(shared));
-
-    // Soltar a referencia forte
-    shared = null;
-
-    // Forcar GC
-    var trash = [];
-    for(var j = 0; j < 30000; j++) trash.push({ x: j, b: new Uint8Array(4) });
-    trash = null;
-
-    // Tentar deref em todos simultaneamente
-    var alive = refs.map(function(r){ return r.deref(); });
-    // Operacoes nos objetos que podem ou nao estar vivos
-    alive.forEach(function(o){
-      if(o) o.data[0] = 0xFF;
-    });
-  } catch(e){}
-  log('Teste 41: fim');
-}
-
-// T42 — Array esparso grande com Object.keys e for...in
-// Array com 100000 slots mas apenas alguns preenchidos
-// Motor pode alocar estrutura densa ao converter para keys
-function t42(){
-  log('Teste 42: inicio');
-  try {
-    var sparse = [];
-    sparse[0]     = 'first';
-    sparse[999]   = 'mid1';
-    sparse[9999]  = 'mid2';
-    sparse[49999] = 'mid3';
-    sparse[99999] = 'last';
-
-    var keys  = Object.keys(sparse);
-    var names = Object.getOwnPropertyNames(sparse);
-
-    var count = 0;
-    for(var k in sparse){
-      count++;
-      var v = sparse[k];
-    }
-
-    // JSON de array esparso grande
-    var j = JSON.stringify(sparse);
-    var p = JSON.parse(j);
-  } catch(e){}
-  log('Teste 42: fim');
-}
-
-// T43 — Error.stack em chamadas aninhadas profundas (500 niveis)
-// Gerar um stack trace real; alguns motores limitam a coleta do stack
-function t43(){
-  log('Teste 43: inicio');
-  try {
-    function recurse(n){
-      if(n <= 0){
-        var e = new Error('deep_error');
-        var stack = e.stack; // forcar coleta do stack
-        return stack ? stack.length : 0;
-      }
-      return recurse(n - 1);
-    }
-    var len = recurse(500);
-  } catch(e){}
-  log('Teste 43: fim');
-}
-
-// T44 — Symbol.species em subclasse de Array
-// Operacoes como map/filter usam Symbol.species para criar resultado
-// Retornar classe que lanca no constructor pode causar confusao
-function t44(){
-  log('Teste 44: inicio');
-  try {
-    class SpecialArray extends Array {
-      static get [Symbol.species](){
-        // Retornar uma classe que lanca no constructor na segunda instancia
-        var callN = 0;
-        return class SpeciesClass {
-          constructor(n){
-            callN++;
-            if(callN > 1) throw new TypeError('species_ctor_throws');
-            return new Array(n);
-          }
-        };
-      }
-    }
-    var sa = new SpecialArray(1, 2, 3, 4, 5);
-    sa.push(6);
-    try { var mapped  = sa.map(function(v){ return v * 2; }); }  catch(e1){}
-    try { var filtered = sa.filter(function(v){ return v > 2; }); } catch(e2){}
-    try { var sliced  = sa.slice(1, 3); }                          catch(e3){}
-    try { var flatted = sa.flat(); }                               catch(e4){}
-  } catch(e){}
-  log('Teste 44: fim');
-}
-
-// T45 — Atomics em TypedArray sobre ArrayBuffer normal (nao Shared)
-// Deve lancar TypeError; verificar que o motor trata o erro sem crash
-function t45(){
-  log('Teste 45: inicio');
-  try {
-    if(typeof Atomics === 'undefined') throw new Error('sem Atomics');
-    var buf = new ArrayBuffer(64);
-    var i32 = new Int32Array(buf);
-
-    // Todas estas operacoes devem lancar TypeError
-    try { Atomics.load(i32, 0); }          catch(e1){}
-    try { Atomics.store(i32, 0, 1); }      catch(e2){}
-    try { Atomics.add(i32, 0, 1); }        catch(e3){}
-    try { Atomics.sub(i32, 0, 1); }        catch(e4){}
-    try { Atomics.and(i32, 0, 0xFF); }     catch(e5){}
-    try { Atomics.or(i32, 0, 0x01); }      catch(e6){}
-    try { Atomics.xor(i32, 0, 0xFF); }     catch(e7){}
-    try { Atomics.exchange(i32, 0, 99); }  catch(e8){}
-    try { Atomics.compareExchange(i32, 0, 0, 1); } catch(e9){}
-    try { Atomics.wait(i32, 0, 0, 0); }    catch(e10){}
-    try { Atomics.notify(i32, 0, 1); }     catch(e11){}
-  } catch(e){}
-  log('Teste 45: fim');
-}
-
-// T46 — RegExp sticky com lastIndex modificado durante exec via getter
-// exec em modo sticky usa lastIndex; getter de lastIndex pode retornar objeto
-function t46(){
-  log('Teste 46: inicio');
-  try {
-    var re = /\w+/y; // sticky
-    var s = 'hello world foo bar';
-    var execCount = 0;
-
-    // Substituir lastIndex por getter/setter
-    var storedIndex = 0;
-    Object.defineProperty(re, 'lastIndex', {
-      get: function(){
-        execCount++;
-        if(execCount === 3) return { valueOf: function(){ return 6; } }; // objeto
-        if(execCount === 5) return -1; // negativo
-        return storedIndex;
-      },
-      set: function(v){ storedIndex = v; },
-      configurable: true
     });
 
-    for(var i = 0; i < 10; i++){
-      try { var m = re.exec(s); } catch(e1){}
-    }
-  } catch(e){}
-  log('Teste 46: fim');
-}
+    observer.observe(div, {
+        attributes: true,
+        childList: true,
+        subtree: true
+    });
 
-// T47 — Funcao com parametros default que referenciam parametros anteriores
-// e cujos valores sao objetos com getters interdependentes
-function t47(){
-  log('Teste 47: inicio');
-  try {
-    var sideEffects = [];
+    // Disparo inicial
+    div.setAttribute("data-test", "start");
 
-    function makeParam(id, dep){
-      return {
-        get value(){
-          sideEffects.push(id);
-          return dep ? dep.value + 1 : 0;
+    // Watchdog para detectar travamento
+    setTimeout(() => {
+        log("Watchdog 2s executado.");
+        log("Resumo:");
+        log("Total callbacks: " + callbackCount);
+        log("Total mutation records: " + mutationRecordsTotal);
+        log("Max depth: " + maxDepth);
+        log("Detached access detected: " + detachedAccessDetected);
+
+        if (callbackCount === 0) {
+            log("Observer não disparou.", "warn");
         }
-      };
-    }
 
-    // Parametros com defaults que sao objetos com getters
-    function fn(
-      a = makeParam('a', null),
-      b = makeParam('b', a),
-      c = makeParam('c', b),
-      d = makeParam('d', c),
-      e = makeParam('e', d)
-    ){
-      // Acessar .value em cada parametro
-      return [a.value, b.value, c.value, d.value, e.value];
-    }
+        if (callbackCount > 20) {
+            log("Possível microtask loop.", "warn");
+        }
 
-    // Chamar sem argumentos (todos defaults ativados)
-    var r1 = fn();
-    // Chamar com alguns argumentos
-    var r2 = fn(makeParam('x', null));
-    // Chamar com undefined explicitamente (deve usar default)
-    var r3 = fn(undefined, undefined, makeParam('y', null));
-  } catch(e){}
-  log('Teste 47: fim');
+        log("Fim do Teste.");
+    }, 2000);
 }
 
-// T48 — Destructuring com valor default que lanca excecao
-// {a = throwingExpr()} so avalia throwingExpr se a === undefined
-// Intercalar valores presentes e ausentes para estressar o compilador
-function t48(){
-  log('Teste 48: inicio');
-  try {
-    function throwOn(n, threshold){
-      return function(){
-        if(n >= threshold) throw new TypeError('default_throws_' + n);
-        return n * 10;
-      };
-    }
-
-    var obj = { a: 1, c: 3, e: 5 }; // b, d, f ausentes
-
-    try {
-      var {
-        a = throwOn(0, 5)(),
-        b = throwOn(1, 2)(), // vai lancar (1 >= 2? nao; retorna 10)
-        c = throwOn(2, 5)(),
-        d = throwOn(3, 2)(), // vai lancar (3 >= 2)
-        e = throwOn(4, 5)(),
-        f = throwOn(5, 2)()  // vai lancar (5 >= 2)
-      } = obj;
-    } catch(inner){}
-
-    // Array destructuring com defaults que lancam
-    try {
-      var [p = 1, q = (function(){ throw new Error('q_throws'); })(), r = 3] = [10];
-    } catch(inner2){}
-
-    // Nested destructuring com defaults
-    try {
-      var { x: { y = throwOn(6, 3)() } = {} } = {};
-    } catch(inner3){}
-  } catch(e){}
-  log('Teste 48: fim');
-}
-
-// T49 — Objeto arguments com defineProperty em indice numerico
-// arguments e um objeto exotico; defineProperty em seus indices tem semantica especial
-function t49(){
-  log('Teste 49: inicio');
-  try {
-    function exotic(a, b, c){
-      // arguments[0] mapeia para parametro a; defineProperty quebra o mapeamento?
-      Object.defineProperty(arguments, '0', {
-        get: function(){ return a * 2; },
-        set: function(v){ a = v / 2; },
-        configurable: true, enumerable: true
-      });
-
-      // Modificar via parametro; getter deve refletir?
-      a = 99;
-      var r1 = arguments[0]; // via getter: 99*2 = 198?
-
-      // Modificar via arguments[0] = ... (via setter)
-      arguments[0] = 50; // setter: a = 25
-      var r2 = a;
-
-      // Adicionar propriedade nao-mapeada
-      Object.defineProperty(arguments, '5', {
-        value: 'extra', writable: true, enumerable: true, configurable: true
-      });
-      var r3 = arguments[5];
-
-      // Verificar length apos defineProperty
-      var r4 = arguments.length;
-
-      return [r1, r2, r3, r4];
-    }
-    var res = exotic(1, 2, 3);
-  } catch(e){}
-  log('Teste 49: fim');
-}
-
-// T50 — Object spread com getter que lanca excecao na metade
-// {...obj} onde obj tem getters; excecao no terceiro getter
-// Motor pode ter copiado parcialmente as propriedades
-function t50(){
-  log('Teste 50: inicio');
-  try {
-    var propCount = 0;
-    var src = {};
-    Object.defineProperty(src, 'a', {
-      get: function(){ propCount++; return 1; },
-      enumerable: true, configurable: true
-    });
-    Object.defineProperty(src, 'b', {
-      get: function(){ propCount++; return 2; },
-      enumerable: true, configurable: true
-    });
-    Object.defineProperty(src, 'c', {
-      get: function(){
-        propCount++;
-        throw new TypeError('getter_c_throws_during_spread');
-      },
-      enumerable: true, configurable: true
-    });
-    Object.defineProperty(src, 'd', {
-      get: function(){ propCount++; return 4; },
-      enumerable: true, configurable: true
-    });
-
-    var dst;
-    try { dst = { prefix: 0, ...src, suffix: 99 }; } catch(e1){}
-
-    // Verificar estado de dst apos excecao
-    var hasA = dst && 'a' in dst;
-    var hasB = dst && 'b' in dst;
-    var hasC = dst && 'c' in dst;
-    var hasD = dst && 'd' in dst;
-
-    // Tentar o spread novamente (getter lanca de novo)
-    try { dst = { ...src }; } catch(e2){}
-
-    // Object.assign tem mesmo comportamento?
-    try { Object.assign({}, src); } catch(e3){}
-  } catch(e){}
-  log('Teste 50: fim');
-}
+window.onload = runTest;
 </script>
+
 </body>
 </html>
