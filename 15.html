@@ -1,37 +1,98 @@
 
-<!DOCTYPE html>
+<!doctype html>
 <html>
+<head>
+  <title>Dangling Markup in target</title>
+  <meta name="timeout" content="long">
+  <script src="resources/testharness.js"></script>
+  <script src="resources/testharnessreport.js"></script>
+  <script src="common/utils.js"></script>
+</head>
 <body>
-<iframe id="frame_a" loading="lazy"></iframe>
-<iframe id="frame_b" srcdoc="b"></iframe>
-<div id="container" tabindex="0" autofocus></div>
-<div id="log"></div>
-<script>
-const logEl = document.getElementById("log");
-let visit = localStorage.getItem("visit") || "0";
-localStorage.setItem("visit", String(parseInt(visit) + 1));
+  <script>
+    function anchorClick(target, id) {
+      const hyperlink = document.body.appendChild(document.createElement('a'));
+      if (target) {
+        hyperlink.target = target;
+      }
+      hyperlink.href = `resources/window-name.sub.html?report=${id}|close`;
+      hyperlink.click();
+    }
 
-const PAD = "A".repeat(64);
-const op = () => {
-    logEl.textContent += PAD;
-    logEl.scrollTop = logEl.scrollHeight;
-};
+    async function pollResultAndCheck(t, id, expected) {
+      const stashURL = new URL('resources/window-name-stash.py', location);
+      stashURL.searchParams.set('id', id);
 
-let frame = document.getElementById("frame_a");
-op(); op();
+      let res = 'NONE';
+      while (res == 'NONE') {
+        await new Promise(resolve => { t.step_timeout(resolve, 100); });
 
-addEventListener("load", () => {
-    op();
-    frame.srcdoc = "A".repeat(1000); // ← força mais alocações no parser
-    op();
-    frame.contentWindow?.addEventListener("blur", () => {});
-    frame.focus();
-    op();
-});
+        const response = await fetch(stashURL);
+        res = await response.text();
+      }
+      if (res !== expected) {
+        assert_unreached('Stash result does not equal expected result.')
+      }
+    }
 
-container.onfocusin = () => {
-    document.body.innerHTML = "";
-};
-</script>
+    promise_test(async t => {
+      const id = token();
+      const value = '\n<' + id;
+
+      window.open(`resources/window-name.sub.html?report=${id}|close`, value);
+      await pollResultAndCheck(t, id, value);
+    }, 'Dangling Markup in target is not reset when set by window.open');
+
+    promise_test(async t => {
+      const id = token();
+      const value = '\n<' + id;
+
+      anchorClick(value, id)
+      await pollResultAndCheck(t, id, '');
+    }, 'Dangling Markup with "\\n" in target is reset when set by <a> tag');
+
+    promise_test(async t => {
+      const id = token();
+      const value = '\r<' + id;
+
+      anchorClick(value, id)
+      await pollResultAndCheck(t, id, '');
+    }, 'Dangling Markup with "\\r" in target is reset when set by <a> tag');
+
+    promise_test(async t => {
+      const id = token();
+      const value = '\t<' + id;
+
+      anchorClick(value, id)
+      await pollResultAndCheck(t, id, '');
+    }, 'Dangling Markup with "\\t" in target is reset when set by <a> tag');
+
+    promise_test(async t => {
+      const id = token();
+      const value = '\n<' + id;
+
+      const form = document.body.appendChild(document.createElement('form'));
+      form.target = value;
+      form.method = 'GET';
+      form.action = 'resources/window-name.sub.html';
+      const input = form.appendChild(document.createElement('input'));
+      input.type = 'hidden';
+      input.name = 'report';
+      input.value = `${id}|close`;
+      form.submit();
+
+      await pollResultAndCheck(t, id, '');
+    }, 'Dangling Markup in target is reset when set by <form> tag');
+
+    promise_test(async t => {
+      const id = token();
+      const value = '\n<' + id;
+      const base = document.head.appendChild(document.createElement('base'));
+      base.target = value;
+
+      anchorClick(null, id)
+      await pollResultAndCheck(t, id, '');
+    }, 'Dangling Markup in target is reset when set by <base> tag');
+  </script>
 </body>
 </html>
