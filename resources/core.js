@@ -1,3 +1,4 @@
+
 const DRAIN_COUNT = 512;
 const AUTO_RETRY_DELAY_MS = 50;
 
@@ -242,7 +243,7 @@ function plausibleCell(value) {
 }
 
 function plausibleAddress(value) {
-    return value > 0x100000000
+    return value > 0
         && value <= 0xffffffffffff
         && value <= 9007199254740991
         && Math.floor(value) === value;
