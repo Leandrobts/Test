@@ -234,7 +234,7 @@ function pointerFromWords(words, offset) {
 }
 
 function plausibleCell(value) {
-    return value > 0x100000000
+    return value > 0
         && value <= 0xffffffffffff
         && value <= 9007199254740991
         && Math.floor(value) === value
