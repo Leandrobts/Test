@@ -1,19 +1,20 @@
-if (!navigator.userAgent.includes('PlayStation 4')) {
-    alert(`This is a PlayStation 4 Exploit. => ${navigator.userAgent}`);
-    throw new Error("");
-}
+// === CHECAGEM DE USER-AGENT (desabilitada para testes) ===
+// if (!navigator.userAgent.includes('PlayStation 4')) {
+//     alert(`This is a PlayStation 4 Exploit. => ${navigator.userAgent}`);
+//     throw new Error("");
+// }
 
 const supportedFirmwares = [
     "13.52"
 ];
 const fw_match = /PlayStation 4\/(\d+\.\d+)/.exec(navigator.userAgent);
-window.fw_str = fw_match ? fw_match[1] : "";
+window.fw_str = fw_match ? fw_match[1] : "13.52";  // fallback para testes
 window.fw_float = parseFloat(window.fw_str);
 
 if (!supportedFirmwares.includes(fw_str)) {
-
-    alert(`Firmware ${fw_str} is unsupported.\n\nSupported: ${supportedFirmwares.join(", ")}`);
-    throw new Error("no offsets for fw " + fw_str);
+    // alert(`Firmware ${fw_str} is unsupported...`);
+    // throw new Error("no offsets for fw " + fw_str);
+    console.warn("Firmware check bypassed for testing. fw_str=" + fw_str);
 }
 
 let nogc = [];
