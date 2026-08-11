@@ -1185,4 +1185,4 @@ async function main(userlandRW, wkOnly = false) {
 let fwScript = document.createElement('script');
 document.body.appendChild(fwScript);
 
-fwScript.setAttribute('src', `./13.52.js?v=1`);
+fwScript.setAttribute('src', `./13.52.js`);
