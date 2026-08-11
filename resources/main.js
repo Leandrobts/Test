@@ -1,13 +1,12 @@
-if (!navigator.userAgent.includes('PlayStation 5')) {
-    alert(`This is a PlayStation 5 Exploit. => ${navigator.userAgent}`);
+if (!navigator.userAgent.includes('PlayStation 4')) {
+    alert(`This is a PlayStation 4 Exploit. => ${navigator.userAgent}`);
     throw new Error("");
 }
 
 const supportedFirmwares = [
-    "9.00", "9.20", "9.40", "9.60", "10.00", "10.01", "10.20",
-    "10.40", "10.60", "11.00", "11.20", "11.40", "11.60", "12.00"
+    "13.52"
 ];
-const fw_match = /PlayStation 5\/(\d+\.\d+)/.exec(navigator.userAgent);
+const fw_match = /PlayStation 4\/(\d+\.\d+)/.exec(navigator.userAgent);
 window.fw_str = fw_match ? fw_match[1] : "";
 window.fw_float = parseFloat(window.fw_str);
 
@@ -137,7 +136,7 @@ async function prepare(p) {
 
     let textArea = document.createElement("textarea");
 
-    let textAreaVtPtr = p.read8(p.leakval(textArea).add32(0x18));
+    let textAreaVtPtr = p.read8(p.leakval(textArea).add32(0x10));
 
     let textAreaVtable = p.read8(textAreaVtPtr);
 
@@ -1185,4 +1184,4 @@ async function main(userlandRW, wkOnly = false) {
 let fwScript = document.createElement('script');
 document.body.appendChild(fwScript);
 
-fwScript.setAttribute('src', `../offsets/${window.fw_str}.js?v=16`);
+fwScript.setAttribute('src', `../resources/13.52.js?v=1`);
