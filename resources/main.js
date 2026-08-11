@@ -289,7 +289,7 @@ async function prepare(p) {
 
     }
 
-    let worker = new Worker("rop_slave.js");
+    let worker = new Worker("./resources/rop_slave.js");
 
     jbmark("PREP-PRE-WORKER-AWAIT", "next=await-wait_for_worker()-first-yield");
     await wait_for_worker();
