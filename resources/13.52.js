@@ -1,4 +1,4 @@
-// 12.00 -- generated from libSceNKWebKit / libkernel_web /
+// 13.52 -- generated from libSceNKWebKit / libkernel_web /
 // libSceLibcInternal. file offset = rva + 0x4000
 
 // host-constructor candidates: webkitBase = nativeCtorAddr - hc
