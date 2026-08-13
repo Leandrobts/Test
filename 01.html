@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -70,7 +71,7 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 </div>
 
 <div id="cbox">
-  <div class="ct">// ═══════ PS4 FW 13.52 — GOT Inspector ═══════</div>
+  <div class="ct">// ═══════ PS4 FW 13.52 — Page Scan ═══════</div>
   <div id="c-out"></div>
 </div>
 
@@ -104,167 +105,197 @@ function setCard(id, v) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// ABORDAGEM DEFENSIVA: Ler apenas a GOT, sem varredura de memória
-// Offset 0x8518 confirmado na foto 2
-// ═════════════════════════════════════════════════════════════════════════════
-
-const DT_PLTGOT_OFF = 0x8518;   // offset da entrada DT_PLTGOT (confirmado)
-const GOT_MAX_ENTRIES = 32;     // ler apenas 32 entradas
-
-// Tenta ler um ponteiro 64-bit de forma segura
-function safeRead64(p, addr) {
-  try {
-    return p.read8(addr);
-  } catch(e) {
-    return null;
-  }
-}
-
-// Tenta ler 32 bits de forma segura
 function safeRead32(p, addr) {
-  try {
-    return p.read32(addr);
-  } catch(e) {
-    return null;
-  }
+  try { return p.read32(addr); } catch(e) { return null; }
 }
 
-async function inspectGOT(p, webkitBase) {
-  logH('INSPECIONANDO TABELA GOT');
+function safeRead64(p, addr) {
+  try { return p.read8(addr); } catch(e) { return null; }
+}
 
-  // ─── Passo 1: Verificar se 0x8518 é o offset da entrada DT_PLTGOT ───
-  // Uma entrada dynamic tem 16 bytes: [tag:8][valor:8]
-  // Se tag == 3 (DT_PLTGOT), valor = endereço da GOT
+// ═════════════════════════════════════════════════════════════════════════════
+// ABORDAGEM 1: Varredura de import table do WebKit (offsets típicos)
+// No PS4, imports ficam em offsets conhecidos dentro do binário WebKit
+// ═════════════════════════════════════════════════════════════════════════════
 
-  let entryAddr = webkitBase.add32(DT_PLTGOT_OFF);
-  let tag = safeRead64(p, entryAddr);
-  let val = safeRead64(p, entryAddr.add32(8));
+async function findViaWebKitImports(p, webkitBase) {
+  logH('PROCURANDO IMPORTS NO WEBKIT');
 
-  let gotAddr = null;
+  // Offsets típicos de import table no WebKit PS4 (próximos a 0x3D00000)
+  // Vamos tentar uma grade espaçada de offsets
+  const testOffsets = [
+    0x3D00000, 0x3D01000, 0x3D02000, 0x3D03000, 0x3D04000,
+    0x3D05000, 0x3D06000, 0x3D07000, 0x3D08000, 0x3D09000,
+    0x3D0A000, 0x3D0B000, 0x3D0C000, 0x3D0D000, 0x3D0E000, 0x3D0F000,
+    0x3D10000, 0x3D20000, 0x3D30000, 0x3D40000
+  ];
 
-  if (tag && tag.low === 3) {
-    log('[+] DT_PLTGOT entry confirmada (tag=3)');
-    gotAddr = val;
-    log('[+] GOT addr from dynamic entry: 0x' + gotAddr.toString(16));
-  } else {
-    log('[!] Tag != 3 (got 0x' + (tag ? tag.toString(16) : 'null') + '), tentando 0x8518 como offset direto');
-    // Tentar usar 0x8518 como offset direto da GOT
-    gotAddr = webkitBase.add32(DT_PLTGOT_OFF);
-  }
+  let lkCands = [];
+  let lcCands = [];
 
-  if (!gotAddr) {
-    log('[-] Não foi possível determinar endereço da GOT', 'e');
-    return null;
-  }
-
-  // ─── Passo 2: Ler entradas da GOT ───
-  let entries = [];
-  for (let i = 0; i < GOT_MAX_ENTRIES; i++) {
-    await sleep(5); // respirar entre leituras
-    let ptr = safeRead64(p, gotAddr.add32(i * 8));
+  for (let off of testOffsets) {
+    await sleep(5);
+    let ptr = safeRead64(p, webkitBase.add32(off));
     if (!ptr) continue;
 
     let hi = ptr.hi;
     let lo = ptr.low;
 
-    // Pular nulos
+    // Pular nulos e não-alinhados
     if (lo === 0 && hi === 0) continue;
+    if ((lo & 0x7) !== 0) continue;
 
-    entries.push({idx: i, ptr, hi, lo});
-
-    // Logar todas as entradas para debug
-    let type = (hi === 0x80) ? ' [LK]' : (hi >= 0x90 && hi <= 0x98) ? ' [LC]' : '';
-    log('GOT[' + i + '] = 0x' + ptr.toString(16) + type, 'd');
-  }
-
-  log('[+] ' + entries.length + ' entradas não-nulas lidas');
-
-  // ─── Passo 3: Classificar candidatos ───
-  let lkCands = entries.filter(e => e.hi === 0x80);
-  let lcCands = entries.filter(e => e.hi >= 0x90 && e.hi <= 0x98);
-
-  log('[+] Candidatos libkernel (hi=0x80): ' + lkCands.length);
-  log('[+] Candidatos libc (hi=0x90-0x98): ' + lcCands.length);
-
-  // ─── Passo 4: Resolver bases com leituras PONTUAIS ───
-  // Em vez de varrer para trás, vamos fazer apenas 5 tentativas
-  // em endereços alinhados a 0x1000
-
-  let libkernelBase = null;
-  for (let cand of lkCands) {
-    let base = tryFindElfBase(p, cand.ptr);
-    if (base) {
-      libkernelBase = base;
-      log('[+] libkernel base: 0x' + base.toString(16) + ' (from GOT[' + cand.idx + '])', 'ok');
-      break;
+    // libkernel: hi=0x08 (ex: 0x00000008045c7400)
+    if (hi === 0x08) {
+      try { p.read8(ptr); lkCands.push({off, ptr}); } catch(e) {}
     }
-  }
-
-  let libcBase = null;
-  for (let cand of lcCands) {
-    let base = tryFindElfBase(p, cand.ptr);
-    if (base) {
-      libcBase = base;
-      log('[+] libc base: 0x' + base.toString(16) + ' (from GOT[' + cand.idx + '])', 'ok');
-      break;
+    // libc: hi=0x09 (ex: 0x000000093840fc00)
+    else if (hi === 0x09) {
+      try { p.read8(ptr); lcCands.push({off, ptr}); } catch(e) {}
     }
+
+    if (lkCands.length > 0 || lcCands.length > 0) {
+      log('  off=0x' + off.toString(16) + ' ptr=0x' + ptr.toString(16) + (hi===0x08?' [LK]':hi===0x09?' [LC]':''), 'd');
+    }
+
+    if (lkCands.length >= 3 && lcCands.length >= 3) break;
   }
 
-  return { libkernelBase, libcBase, entries, lkCands, lcCands, gotAddr };
+  log('[+] lk-cands: ' + lkCands.length + ' | lc-cands: ' + lcCands.length);
+  return { lkCands, lcCands };
 }
 
-// Tenta achar base ELF fazendo apenas 5 leituras pontuais
-function tryFindElfBase(p, ptr) {
-  // Arredondar para baixo para múltiplo de 0x1000
-  let aligned = ptr.low & ~0xFFF;
-  let baseCandidate = new int64(aligned, ptr.hi);
+// ═════════════════════════════════════════════════════════════════════════════
+// ABORDAGEM 2: Varredura de página no espaço de endereços
+// Procurar ELF magic em endereços típicos de bibliotecas do PS4
+// ═════════════════════════════════════════════════════════════════════════════
 
-  // Tentar baseCandidate, baseCandidate - 0x1000, - 0x2000, ... até 5 tentativas
-  for (let i = 0; i < 5; i++) {
-    let test = baseCandidate.sub32(i * 0x1000);
-    let magic = safeRead32(p, test);
+async function findViaPageScan(p) {
+  logH('VARREDURA DE PÁGINA NO ESPAÇO DE ENDEREÇOS');
+
+  // No PS4, bibliotecas .sprx são carregadas em endereços alinhados a 0x1000
+  // libkernel_web.sprx geralmente está na região 0x800000000 - 0x8040000000
+  // libSceLibcInternal.sprx geralmente está na região 0x900000000 - 0x9400000000
+
+  let libkernelBase = null;
+  let libcBase = null;
+
+  // Tentar encontrar libkernel: hi=0x08, variação no low
+  // Estratégia: tentar endereços espaçados em 0x100000 (1MB)
+  log('[+] Procurando libkernel (hi=0x08)...');
+  for (let lo = 0x00400000; lo < 0x01000000; lo += 0x100000) {
+    await sleep(10);
+    let addr = new int64(lo, 0x08);
+    let magic = safeRead32(p, addr);
     if (magic === 0x464C457F) {
-      // Verificar se é ELF64 x86_64
-      let cls = safeRead32(p, test.add32(4));
-      let mach = safeRead32(p, test.add32(0x12));
-      if ((cls & 0xFF) === 2 && (mach & 0xFFFF) === 0x3E) {
-        return test;
+      log('[+] libkernel ELF magic em 0x' + addr.toString(16), 'ok');
+      libkernelBase = addr;
+      break;
+    }
+  }
+
+  // Se não achou, tentar com hi=0x80 (caso o endereçamento seja diferente)
+  if (!libkernelBase) {
+    log('[!] Tentando hi=0x80...');
+    for (let lo = 0x00400000; lo < 0x01000000; lo += 0x100000) {
+      await sleep(10);
+      let addr = new int64(lo, 0x80);
+      let magic = safeRead32(p, addr);
+      if (magic === 0x464C457F) {
+        log('[+] libkernel ELF magic em 0x' + addr.toString(16) + ' (hi=0x80)', 'ok');
+        libkernelBase = addr;
+        break;
       }
+    }
+  }
+
+  // Tentar encontrar libc: hi=0x09
+  log('[+] Procurando libc (hi=0x09)...');
+  for (let lo = 0x00400000; lo < 0x01000000; lo += 0x100000) {
+    await sleep(10);
+    let addr = new int64(lo, 0x09);
+    let magic = safeRead32(p, addr);
+    if (magic === 0x464C457F) {
+      log('[+] libc ELF magic em 0x' + addr.toString(16), 'ok');
+      libcBase = addr;
+      break;
+    }
+  }
+
+  // Se não achou, tentar com hi=0x90
+  if (!libcBase) {
+    log('[!] Tentando hi=0x90...');
+    for (let lo = 0x00400000; lo < 0x01000000; lo += 0x100000) {
+      await sleep(10);
+      let addr = new int64(lo, 0x90);
+      let magic = safeRead32(p, addr);
+      if (magic === 0x464C457F) {
+        log('[+] libc ELF magic em 0x' + addr.toString(16) + ' (hi=0x90)', 'ok');
+        libcBase = addr;
+        break;
+      }
+    }
+  }
+
+  return { libkernelBase, libcBase };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ABORDAGEM 3: Usar __stack_chk_guard via offset fixo no WebKit
+// No PS4 9.00, __stack_chk_guard estava em offset ~0x3DXXXXX do WebKit
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function findViaStackChkGuard(p, webkitBase) {
+  logH('PROCURANDO __stack_chk_guard');
+
+  // __stack_chk_guard é uma variável global na libkernel.
+  // O WebKit a referencia em múltiplos lugares do seu código.
+  // Vamos procurar por ponteiros com hi=0x08 que apontam para um valor
+  // que parece um canary (geralmente com byte 0x00 no final).
+
+  const testOffsets = [
+    0x3C00000, 0x3C10000, 0x3C20000, 0x3C30000, 0x3C40000,
+    0x3C50000, 0x3C60000, 0x3C70000, 0x3C80000, 0x3C90000,
+    0x3CA0000, 0x3CB0000, 0x3CC0000, 0x3CD0000, 0x3CE0000, 0x3CF0000,
+    0x3D00000, 0x3D10000, 0x3D20000, 0x3D30000
+  ];
+
+  for (let off of testOffsets) {
+    await sleep(5);
+    let ptr = safeRead64(p, webkitBase.add32(off));
+    if (!ptr) continue;
+    if (ptr.hi === 0x08 && ptr.low > 0 && (ptr.low & 0x7) === 0) {
+      try {
+        let val = p.read8(ptr);
+        // Canary geralmente tem byte 0x00 no final (para evitar string leak)
+        if ((val.low & 0xFF) === 0x00) {
+          log('[+] __stack_chk_guard candidato em off=0x' + off.toString(16) + ' ptr=0x' + ptr.toString(16), 'ok');
+          // A base da libkernel = ptr - offset_da_variável
+          // __stack_chk_guard geralmente está em offset ~0x45000 da libkernel
+          let estimatedBase = ptr.sub32(0x45000);
+          log('[+] libkernel base estimada: 0x' + estimatedBase.toString(16), 'ok');
+          return estimatedBase;
+        }
+      } catch(e) {}
     }
   }
   return null;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// VALIDAÇÃO ULTRA-LIGHT
+// VALIDAÇÃO
 // ═════════════════════════════════════════════════════════════════════════════
 
-async function validateBases(p, libkernelBase, libcBase) {
-  logH('VALIDANDO BASES');
-  let valid = { libkernel: false, libc: false };
-
-  if (libkernelBase) {
-    let magic = safeRead32(p, libkernelBase);
-    if (magic === 0x464C457F) {
-      log('[✓] libkernel: ELF magic OK', 'ok');
-      valid.libkernel = true;
-    } else {
-      log('[✗] libkernel: magic inválido', 'e');
-    }
+async function validateBase(p, base, name) {
+  if (!base) return false;
+  let magic = safeRead32(p, base);
+  if (magic === 0x464C457F) {
+    log('[✓] ' + name + ': ELF magic OK', 'ok');
+    return true;
+  } else {
+    log('[✗] ' + name + ': magic=0x' + (magic ? magic.toString(16) : 'null'), 'e');
+    return false;
   }
-
-  if (libcBase) {
-    let magic = safeRead32(p, libcBase);
-    if (magic === 0x464C457F) {
-      log('[✓] libc: ELF magic OK', 'ok');
-      valid.libc = true;
-    } else {
-      log('[✗] libc: magic inválido', 'e');
-    }
-  }
-
-  return valid;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -341,40 +372,59 @@ async function main() {
   setCard('c-wk', '0x' + webkitBase.toString(16));
 
   setTimeout(async () => {
-    const result = await inspectGOT(p, webkitBase);
-    if (!result) {
-      setStatus('Falha na inspeção GOT', 'e');
-      return;
+    let libkernelBase = null;
+    let libcBase = null;
+
+    // ─── Tentativa 1: Imports do WebKit ───
+    let impResult = await findViaWebKitImports(p, webkitBase);
+    if (impResult.lkCands.length > 0) {
+      for (let c of impResult.lkCands) {
+        let base = new int64(c.ptr.low & ~0xFFF, c.ptr.hi);
+        if (await validateBase(p, base, 'libkernel')) { libkernelBase = base; break; }
+      }
+    }
+    if (impResult.lcCands.length > 0) {
+      for (let c of impResult.lcCands) {
+        let base = new int64(c.ptr.low & ~0xFFF, c.ptr.hi);
+        if (await validateBase(p, base, 'libc')) { libcBase = base; break; }
+      }
     }
 
-    const libKernelBase = result.libkernelBase;
-    const libcBase = result.libcBase;
+    // ─── Tentativa 2: Page scan ───
+    if (!libkernelBase || !libcBase) {
+      let pageResult = await findViaPageScan(p);
+      if (!libkernelBase && pageResult.libkernelBase) libkernelBase = pageResult.libkernelBase;
+      if (!libcBase && pageResult.libcBase) libcBase = pageResult.libcBase;
+    }
 
-    if (libKernelBase) setCard('c-lk', '0x' + libKernelBase.toString(16));
+    // ─── Tentativa 3: __stack_chk_guard ───
+    if (!libkernelBase) {
+      let stkResult = await findViaStackChkGuard(p, webkitBase);
+      if (stkResult && await validateBase(p, stkResult, 'libkernel (via stk)')) {
+        libkernelBase = stkResult;
+      }
+    }
+
+    // ─── Resultado ───
+    if (libkernelBase) setCard('c-lk', '0x' + libkernelBase.toString(16));
     if (libcBase) setCard('c-lc', '0x' + libcBase.toString(16));
 
-    const valid = await validateBases(p, libKernelBase, libcBase);
-
-    if (valid.libkernel || valid.libc) {
-      log('[+] Bases parciais ou completas encontradas', 'ok');
-      setStatus('Inspeção GOT concluída', 'ok');
+    if (libkernelBase && libcBase) {
+      log('[✓] Ambas as bases encontradas!', 'ok');
+      setStatus('Bases mapeadas!', 'ok');
       setCard('c-g', 'Pronto');
 
       document.getElementById('cbox').style.display = 'block';
-      let out = '__ps5NativeCtor  = 0x' + ctorInt64.toString(16) + '\n' +
-                'WebKit Base      = 0x' + webkitBase.toString(16) + '\n' +
-                'GOT Address      = 0x' + result.gotAddr.toString(16) + '\n';
-      if (libKernelBase) out += 'libkernel Base   = 0x' + libKernelBase.toString(16) + '\n';
-      if (libcBase) out += 'libSceLibc Base  = 0x' + libcBase.toString(16) + '\n';
-      out += 'Status           = Inspeção GOT executada com sucesso.';
-      document.getElementById('c-out').textContent = out;
+      document.getElementById('c-out').textContent =
+          '__ps5NativeCtor  = 0x' + ctorInt64.toString(16) + '\n' +
+          'WebKit Base      = 0x' + webkitBase.toString(16) + '\n' +
+          'libkernel Base   = 0x' + libkernelBase.toString(16) + '\n' +
+          'libSceLibc Base  = 0x' + libcBase.toString(16) + '\n' +
+          'Status           = Mapeamento concluído.';
     } else {
-      setStatus('Validação falhou', 'e');
-      setCard('c-g', 'Falha');
-      logH('DEBUG: Todas as entradas GOT');
-      for (let e of result.entries) {
-        log('  GOT[' + e.idx + '] = 0x' + e.ptr.toString(16), 'd');
-      }
+      setStatus('Mapeamento parcial', 'w');
+      setCard('c-g', libkernelBase ? 'libc faltando' : 'Falha');
+      log('[!] libkernel=' + (libkernelBase ? 'OK' : 'FALHA') + ' libc=' + (libcBase ? 'OK' : 'FALHA'), 'w');
     }
   }, 500);
 }
