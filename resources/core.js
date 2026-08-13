@@ -1,4 +1,3 @@
-
 const DRAIN_COUNT = 512;
 const AUTO_RETRY_DELAY_MS = 50;
 
