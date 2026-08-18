@@ -1,83 +1,83 @@
 <!DOCTYPE html>
-<html>
 <body>
-<input id="outer">
-<iframe id="frame" tabindex="0" srcdoc="<input tabindex='0'><script>parent.innerInput = document.querySelector('input');</script>"></iframe>
-
 <script>
-// Fallback de GC (baseado no gc.js que você mandou)
-if (!window.gc) {
-    window.gc = function() {
-        if (window.GCController)
-            return GCController.collect();
+// Configuração do test runner para testes sem layout
+if (window.testRunner)
+    testRunner.dumpAsText();
 
-        // Fallback lento para browsers sem GC manual
-        function gcRec(n) {
-            if (n < 1)
-                return {};
-            var temp = {i: "ab" + i + (i / 100000)};
-            temp += "foo";
-            gcRec(n - 1);
+// Função de coleta de lixo
+function gc() {
+    if (window.GCController)
+        GCController.collect();
+    else {
+        // Fallback para ambientes sem GCController
+        for (var i = 0; i < 1000; i++) {
+            var temp = {};
+            temp.data = new Array(1000);
+            temp.data.fill(i);
         }
-        for (var i = 0; i < 10000; i++)
-            gcRec(10);
-    };
+    }
 }
 
-var iframe = document.getElementById('frame');
-var outerInput = document.getElementById('outer');
-var innerInput = null;
-
-function runTest() {
-    // Pega a referência que o iframe colocou no parent
-    innerInput = window.innerInput;
-    window.innerInput = null;
-
-    outerInput.addEventListener('blur', function onBlur() {
-        // Remove o listener (equivalente ao { once: true })
-        outerInput.removeEventListener('blur', onBlur);
-
-        // Mesma sequência crítica do teste original
-        document.adoptNode(innerInput);
-        innerInput = null;
-        iframe.remove();
-        iframe = null;
-
-        // Força GC
-        gc();
-
-        // Feedback visual
-        document.body.innerHTML = '<p style="color:green;font-weight:bold">This test passes if PASS (no crash)</p>';
-    });
-
-    // Foca o input externo
-    outerInput.focus();
-
-    // Dispara o mesmo KeyboardEvent sintético (Tab + Alt)
-    // que o teste original usava para forçar a mudança de foco / blur
-    outerInput.dispatchEvent(new KeyboardEvent('keydown', {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        detail: 0,
-        key: 'Tab',
-        code: 'Tab',
-        keyIdentifier: 'U+0009',
-        location: 222,
-        ctrlKey: false,
-        altKey: true,
-        shiftKey: false,
-        metaKey: false
-    }));
+// Configura cada caso de teste
+function setup(ghosts, pumps) {
+    const host = document.body.appendChild(document.createElement('div'));
+    const shadowRoot = host.attachShadow({ mode: 'open', slotAssignment: 'manual' });
+    const targetSlot = shadowRoot.appendChild(document.createElement('slot'));
+    const otherSlot = shadowRoot.appendChild(document.createElement('slot'));
+    const childA = host.appendChild(document.createElement('span'));
+    const childB = host.appendChild(document.createElement('span'));
+    
+    targetSlot.assign(childA);
+    otherSlot.assign(childB);
+    
+    // Insere e remove slots fantasmas para acumular entradas com WeakPtrs que ficam nulos após GC
+    for (let i = 0; i < ghosts; ++i) {
+        const ghostSlot = shadowRoot.appendChild(document.createElement('slot'));
+        ghostSlot.remove();
+    }
+    
+    return { host, targetSlot, pumps };
 }
 
-// Espera o iframe carregar (mesmo padrão do original)
-if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
-    setTimeout(runTest, 0);
-} else {
-    iframe.onload = function() {
-        setTimeout(runTest, 0);
-    };
+// Dispara o cenário que causava o crash
+function trigger({ host, targetSlot, pumps }) {
+    // Avança o contador de operações do WeakHashMap em direção ao limite de limpeza
+    for (let i = 0; i < pumps; ++i) {
+        targetSlot.assignedNodes();
+    }
+    
+    // Reatribuir targetSlot derruba renderizadores; o iterador da árvore composta visita otherSlot,
+    // reentra assignedNodesForSlot, e pode disparar um rehash que libera o array de buckets
+    const newChild = host.appendChild(document.createElement('span'));
+    targetSlot.assign(newChild);
+    
+    host.remove();
+}
+
+// Gera vários casos de teste
+const cases = [];
+for (let ghosts = 20; ghosts <= 100; ghosts += 10) {
+    for (let pumps = ghosts; pumps <= ghosts * 3; ++pumps) {
+        cases.push(setup(ghosts, pumps));
+    }
+}
+
+// Coleta lixo para invalidar WeakPtrs dos slots fantasmas
+gc();
+
+// Uma passagem de layout dá a cada host um renderizador para que tearDownRenderersAfterSlotChange
+// traverse a árvore composta
+document.body.offsetHeight;
+
+// Executa todos os casos de teste
+try {
+    for (const testCase of cases) {
+        trigger(testCase);
+    }
+    document.body.textContent = 'PASS: This test passes if it does not crash.';
+} catch (e) {
+    document.body.textContent = 'FAIL: Test crashed or threw exception: ' + e;
 }
 </script>
 </body>

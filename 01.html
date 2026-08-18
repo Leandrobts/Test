@@ -1,63 +1,32 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<style>
-input {
-    width: 300px;
-    height: 50px;
-    font-size: 18px;
-}
-</style>
+<script src="resources/js-test.js"></script>
 </head>
 <body>
-<input id="input" type="text" list="list">
-<datalist id="list">
-    <option value="a">
-    <option value="b">
-</datalist>
-
 <script>
-(function() {
-    const input = document.getElementById('input');
+description("An observed node must stay alive for as long as MutationObserver::deliver() keeps its registration alive.");
+jsTestIsAsync = true;
 
-    // Tenta forçar GC da forma mais agressiva possível no browser
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
+function callback(records, observer)
+{
+    // deliver() dropped the transient registration that kept div alive, but still holds the
+    // registration. disconnect() and gc() both dereference its reference to div.
+    observer.disconnect();
+    gc();
+    testPassed("did not crash");
+    finishJSTest();
 }
 
-    input.addEventListener('click', function handler(e) {
-        // Remove o listener para rodar só uma vez (equivalente ao {once: true})
-        input.removeEventListener('click', handler);
+let observer = new MutationObserver(callback);
 
-        // Muda o tipo enquanto a interação ainda está acontecendo
-        input.type = 'button';
-
-        // Força GC
-        gc();
-
-        // Pequeno delay para dar tempo do GC / destruição de objetos
-        setTimeout(() => {
-            document.body.insertAdjacentHTML('beforeend',
-                '<p style="color:green;font-weight:bold">PASS if no crash</p>');
-        }, 50);
-    });
-
-    // Dispara o clique programaticamente (mais confiável no PS4 do que esperar clique do usuário)
-    // Se preferir clique manual, comente as duas linhas abaixo.
-    setTimeout(() => {
-        input.focus();
-        input.click();
-    }, 100);
-})();
+let div = document.createElement("div");
+let span = div.appendChild(document.createElement("span"));
+observer.observe(div, {attributes: true, subtree: true});
+div.removeChild(span); // Creates a transient registration for span, which keeps div alive.
+div = null;
+gc(); // Collects div's wrapper, leaving the registration as div's only owner.
+span.setAttribute("foo", "bar"); // Enqueues a record targeting span, not div.
 </script>
 </body>
 </html>
