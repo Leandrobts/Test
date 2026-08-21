@@ -1,41 +1,89 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<style>
-  @font-face {
-    font-family: 'TestFont';
-    src: url('data:font/woff;base64,d09GRgABAAAAAA==');
-  }
-  iframe {
-    content: url();
-    zoom: 0.01;
-    font-family: 'TestFont';
-  }
-</style>
+<meta charset="UTF-8">
+<title>TypedArray.from OOB Test - WebKit 316137</title>
 </head>
 <body>
-
-<iframe id="i0"></iframe>
-
+<h1>WebKit Bug 312513 - TypedArray.from() OOB via Resizable ArrayBuffer</h1>
+<pre id="log"></pre>
 <script>
-  window.addEventListener('load', () => {
-    const i0 = document.getElementById('i0');
+function log(msg) {
+    document.getElementById('log').textContent += msg + '\n';
+}
 
-    // Injeta frameset
-    document.documentElement.append(document.createElement('frameset'));
+function testResize(ctor, bytesPerElement, initialBytes, shrinkBytes, resizeAt) {
+    const newCount = shrinkBytes / bytesPerElement;
+    const resizableArrayBuffer = new ArrayBuffer(initialBytes, { maxByteLength: initialBytes * 4 });
+    const source = new ctor(resizableArrayBuffer);
+    source[Symbol.iterator] = null;
+    let callbacks = 0;
+    ctor.from(source, (val, index) => {
+        if (index === resizeAt)
+            resizableArrayBuffer.resize(shrinkBytes);
+        callbacks++;
+        return val;
+    });
+    const expected = Math.max(resizeAt + 1, newCount);
+    if (callbacks > expected)
+        throw new Error(ctor.name + ": " + callbacks + " callbacks (expected <= " + expected + ")");
+}
 
-    // Força resolução de fontes assíncronas para disparar relayout em cascata
-    if (document.fonts) {
-      document.fonts.load('12px "TestFont"').then(() => {
-        i0.focus();
-        i0.style.zoom = '1.0';
-        void i0.offsetHeight;
-        i0.remove();
-      });
+function testDetach(detachAt) {
+    const arrayBuffer = new ArrayBuffer(256);
+    const source = new Int32Array(arrayBuffer);
+    source[Symbol.iterator] = null;
+    let callbacks = 0;
+    try {
+        Int32Array.from(source, (val, index) => {
+            if (index === detachAt)
+                arrayBuffer.transfer();
+            callbacks++;
+            return val;
+        });
+    } catch (e) {
+        return;
     }
-  });
+    if (callbacks > detachAt + 1)
+        throw new Error("detach: " + callbacks + " callbacks (expected <= " + (detachAt + 1) + ")");
+}
+
+try {
+    testResize(Int32Array,   4, 4096, 16, 4);
+    log("PASS: testResize(Int32Array, 4, 4096, 16, 4)");
+} catch (e) { log("FAIL: " + e.message); }
+
+try {
+    testResize(Int32Array,   4, 4096,  8, 8);
+    log("PASS: testResize(Int32Array, 4, 4096, 8, 8)");
+} catch (e) { log("FAIL: " + e.message); }
+
+try {
+    testResize(Float64Array, 8, 8192, 32, 8);
+    log("PASS: testResize(Float64Array, 8, 8192, 32, 8)");
+} catch (e) { log("FAIL: " + e.message); }
+
+try {
+    testResize(Uint8Array,   1, 1024,  4, 8);
+    log("PASS: testResize(Uint8Array, 1, 1024, 4, 8)");
+} catch (e) { log("FAIL: " + e.message); }
+
+try {
+    testResize(Int32Array,   4, 4096,  8, 0);
+    log("PASS: testResize(Int32Array, 4, 4096, 8, 0)");
+} catch (e) { log("FAIL: " + e.message); }
+
+try {
+    testDetach(4);
+    log("PASS: testDetach(4)");
+} catch (e) { log("FAIL: " + e.message); }
+
+try {
+    testDetach(0);
+    log("PASS: testDetach(0)");
+} catch (e) { log("FAIL: " + e.message); }
+
+log("\n=== All tests completed ===");
 </script>
 </body>
 </html>
-
