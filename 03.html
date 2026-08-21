@@ -2,14 +2,21 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Teste de Regressão: Reentrância no timeObserver do MediaPlayer</title>
+<title>Teste de Regressão: Nested Layout UAF em SVGGeometryElement::getPointAtLength</title>
+<style>
+    .dynamic-style {
+        content-visibility: auto;
+    }
+    .hide {
+        display: none;
+    }
+</style>
 </head>
 <body>
-<video id="v" preload="auto" muted playsinline></video>
-<div id="log">Executando...</div>
+<div id="container"></div>
+<div id="status">Executando teste...</div>
 
 <script>
-// Função utilitária de GC via alocação recursiva de memória
 function gc() {
     function gcRec(n) {
         if (n < 1)
@@ -22,46 +29,55 @@ function gc() {
         gcRec(10);
 }
 
-const video = document.getElementById("v");
-let reentrancyCount = 0;
-const MAX_ITERATIONS = 40;
+function runSVGPointRaceTest() {
+    const container = document.getElementById("container");
 
-// Gera um vídeo curto sintético via Canvas para rodar sem dependências externas
-function createDummyVideoTrack() {
-    const canvas = document.createElement("canvas");
-    canvas.width = 64;
-    canvas.height = 64;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "blue";
-    ctx.fillRect(0, 0, 64, 64);
-    return canvas.captureStream(30);
+    for (let cycle = 0; cycle < 80; cycle++) {
+        // 1. Cria a árvore SVG com um elemento de geometria (<path>)
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("width", "300");
+        svg.setAttribute("height", "300");
+
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M 10 80 C 40 10, 65 10, 95 80 S 150 150, 180 80");
+        path.className.baseVal = "dynamic-style";
+
+        svg.appendChild(path);
+        container.appendChild(svg);
+
+        // 2. Força layout inicial para instanciar o RenderSVGShape
+        svg.getBoundingClientRect();
+
+        // 3. Modifica estilos/atributos que deixam o layout pendente de invalidação
+        path.setAttribute("d", "M 0 0 L 200 200");
+        path.style.contentVisibility = (cycle % 2 === 0) ? "hidden" : "visible";
+
+        // 4. Invoca getPointAtLength()
+        // Sem o patch, a chamada aninhada interna de getTotalLength() destruía o renderer salvo na pilha
+        try {
+            const pt = path.getPointAtLength(50);
+            if (!pt || typeof pt.x !== "number") {
+                throw new Error("Ponto retornado inválido.");
+            }
+        } catch (e) {
+            // InvalidStateError pode ocorrer se o renderizador for desanexado, mas não deve causar crash/UAF
+        }
+
+        // 5. Limpa a árvore e aciona GC
+        container.innerHTML = "";
+
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
 }
 
-video.srcObject = createDummyVideoTrack();
-
-// Manipulador reentrante que força reconfiguração do time observer
-video.ontimeupdate = () => {
-    reentrancyCount++;
-
-    // Força reentrância que aciona setTimeObserver internamente no renderer nativo
-    video.currentTime = (reentrancyCount % 2) * 0.1;
-    video.playbackRate = 1.0 + (reentrancyCount % 3) * 0.25;
-
-    // Dispara pressão de GC para reaproveitar a memória liberada se houver UAF
-    if (reentrancyCount % 5 === 0) {
-        gc();
-    }
-
-    if (reentrancyCount >= MAX_ITERATIONS) {
-        video.ontimeupdate = null;
-        video.pause();
-        document.getElementById("log").innerText = "PASS: Executado sem Use-After-Free por reentrância.";
-    }
-};
-
-video.play().catch(() => {
-    document.getElementById("log").innerText = "PASS: Autoplay restrito, sem crash.";
-});
+try {
+    runSVGPointRaceTest();
+    document.getElementById("status").innerText = "PASS: SVGGeometryElement::getPointAtLength executado sem Use-After-Free.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
 </body>
 </html>

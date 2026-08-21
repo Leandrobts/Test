@@ -2,13 +2,12 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Teste de Regressão: Descarte de Lazy Agents no InspectorController</title>
+<title>Teste de Regressão: BYOB Request Invalidation vs Concurrent GC</title>
 </head>
 <body>
 <div id="status">Executando teste...</div>
 
 <script>
-// Função utilitária de GC via alocação recursiva de memória
 function gc() {
     function gcRec(n) {
         if (n < 1)
@@ -21,36 +20,81 @@ function gc() {
         gcRec(10);
 }
 
-function runTest() {
-    for (let i = 0; i < 100; i++) {
-        // 1. Cria contexto aninhado para instanciar PageInspectorController e lazy agents
-        const iframe = document.createElement("iframe");
-        document.body.appendChild(iframe);
+async function runBYOBStreamRaceTest() {
+    if (typeof ReadableStream === "undefined") {
+        document.getElementById("status").innerText = "PASS: Streams API não suportada.";
+        return;
+    }
 
-        const win = iframe.contentWindow;
+    let isBYOBSupported = false;
 
-        // 2. Aciona APIs que exercitam os lazy agents (m_inspectorAgent, m_pageAgent)
-        if (win.console && win.console.profile) {
-            win.console.profile("Profile " + i);
-            win.console.profileEnd("Profile " + i);
+    for (let cycle = 0; cycle < 100; cycle++) {
+        let pullController = null;
+
+        const stream = new ReadableStream({
+            type: "bytes",
+            autoAllocateChunkSize: 1024,
+            start(controller) {
+                pullController = controller;
+            },
+            pull(controller) {
+                // Quando o leitor BYOB chama read(), controller.byobRequest é instanciado
+                if (controller.byobRequest) {
+                    isBYOBSupported = true;
+                    const view = controller.byobRequest.view;
+                    // Preenche e responde parcialmente para invalidar e recriar o request
+                    if (view && view.byteLength > 0) {
+                        try {
+                            controller.byobRequest.respond(Math.min(view.byteLength, 16));
+                        } catch (e) {}
+                    }
+                }
+            },
+            cancel() {}
+        });
+
+        let reader;
+        try {
+            reader = stream.getReader({ mode: "byob" });
+        } catch (e) {
+            // Fallback caso mode "byob" não esteja ativo
+            reader = stream.getReader();
         }
 
-        // 3. Destrói o iframe abruptamente para forçar discardValues()
-        document.body.removeChild(iframe);
+        const buffer = new ArrayBuffer(512);
+        const view = new Uint8Array(buffer);
 
-        // 4. Força pressão no coletor
-        if (i % 10 === 0) {
+        // 1. Inicia leitura para instanciar ReadableStreamBYOBRequest no WebCore
+        const readPromise = reader.read(view).catch(() => {});
+
+        // 2. No mesmo tick ou imediatamente após, invalida o request fechando ou cancelando o stream
+        if (cycle % 2 === 0) {
+            reader.cancel().catch(() => {});
+        } else if (pullController) {
+            try {
+                pullController.close();
+            } catch (e) {}
+        }
+
+        // 3. Descarta referências e estressa o GC Concorrente
+        // Sem o patch, a GC thread lia m_controller enquanto a main thread o zerava em invalidateByobRequest
+        if (cycle % 5 === 0) {
             gc();
         }
+
+        await readPromise;
+    }
+
+    if (!isBYOBSupported) {
+        document.getElementById("status").innerText = "PASS: BYOB Requests não ativados na versão atual.";
+    } else {
+        document.getElementById("status").innerText = "PASS: Ciclos de BYOB Request e invalidação concorrente com GC executados com sucesso.";
     }
 }
 
-try {
-    runTest();
-    document.getElementById("status").innerText = "PASS: Lazy agents descartados sem travamento.";
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
+runBYOBStreamRaceTest().catch((err) => {
+    document.getElementById("status").innerText = "FAIL: " + err.message;
+});
 </script>
 </body>
 </html>

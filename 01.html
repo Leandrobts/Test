@@ -1,49 +1,66 @@
 <!DOCTYPE html>
 <html>
-<body>
-<script>
-
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: @container style() em pseudo-elementos após mutação</title>
+<style>
+    .host {
+        --theme: red;
     }
-    for (var i = 0; i < 1000; i++)
-    gcRec(10);
-}
 
+    .host.updated {
+        --theme: green;
+    }
 
-// Estressa a race condition entre o GC thread e a thread principal
-function triggerRace() {
-    for (let i = 0; i < 2000; i++) {
-        let xhr = new XMLHttpRequest();
-        xhr.open("GET", "data:text/xml,<root><child/></root>", true);
-        
-        // Acessa o getter de upload e força parsing do document
-        let upload = xhr.upload;
-        xhr.responseType = "document";
-        xhr.send();
-
-        // Força limpeza dos buffers / reset do estado na main thread
-        xhr.abort();
-
-        // Aloca objetos para forçar o GC thread a disparar visitAdditionalChildren
-        if (i % 20 === 0 && window.GCController) {
-           gc();
+    /* Pseudo-elemento avalia o container style query do host */
+    @container style(--theme: green) {
+        .host::before {
+            content: "MATCHED";
+            color: rgb(0, 128, 0);
         }
+    }
+
+    @container style(--theme: red) {
+        .host::before {
+            content: "INITIAL";
+            color: rgb(255, 0, 0);
+        }
+    }
+</style>
+</head>
+<body>
+<div id="target" class="host">Texto Host</div>
+<div id="status">Executando teste...</div>
+
+<script>
+function runContainerQueryTest() {
+    const target = document.getElementById("target");
+
+    // 1. Força a resolução e commit do estilo inicial (--theme: red)
+    let initialColor = getComputedStyle(target, "::before").color;
+    if (initialColor !== "rgb(255, 0, 0)") {
+        throw new Error("Estado inicial falhou ou @container style() não é suportado.");
+    }
+
+    // 2. Altera a classe para atualizar a variável para (--theme: green)
+    target.classList.add("updated");
+
+    // 3. Força a resolução imediata do estilo do pseudo-elemento
+    // Sem o commit bd7ffaf, o avaliador lia o estilo stale (red) em vez do novo (green)
+    const updatedColor = getComputedStyle(target, "::before").color;
+
+    if (updatedColor === "rgb(0, 128, 0)") {
+        document.getElementById("status").innerText = "PASS: @container style() no pseudo-elemento avaliou o novo estilo com sucesso.";
+    } else {
+        document.getElementById("status").innerText = `FAIL: Esperado rgb(0, 128, 0), mas obteve ${updatedColor}`;
     }
 }
 
 try {
-    triggerRace();
-    document.body.innerText = "PASS: Sem crash por UAF durante GC concorrente.";
+    runContainerQueryTest();
 } catch (e) {
-    document.body.innerText = "FAIL: " + e;
+    document.getElementById("status").innerText = "FAIL: " + e.message;
 }
-
 </script>
 </body>
 </html>

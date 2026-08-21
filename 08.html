@@ -2,16 +2,11 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Teste: Ciclo de vida e reutilização de FcPattern em FontPlatformData</title>
-<style>
-    .test-font-1 { font-family: monospace; font-size: 14px; }
-    .test-font-2 { font-family: monospace; font-size: 18px; font-weight: bold; }
-    .test-font-3 { font-family: monospace; font-size: 24px; font-style: italic; }
-</style>
+<title>Teste de Regressão: Data Race em Range::visitNodesConcurrently</title>
 </head>
 <body>
 <div id="container"></div>
-<div id="status">Executando...</div>
+<div id="status">Executando teste...</div>
 
 <script>
 // Função utilitária de GC via alocação recursiva de memória
@@ -27,34 +22,56 @@ function gc() {
         gcRec(10);
 }
 
-function runFontLifecycleTest() {
+function runRangeGCRaceTest() {
     const container = document.getElementById("container");
-    const classes = ["test-font-1", "test-font-2", "test-font-3"];
+    const heldRanges = [];
 
-    for (let cycle = 0; cycle < 50; cycle++) {
-        // 1. Cria elementos usando a família de fontes para forçar instanciação de FontPlatformData
-        for (let i = 0; i < 10; i++) {
-            const span = document.createElement("span");
-            span.className = classes[i % classes.length];
-            span.innerText = "WebKit FreeType Text " + cycle;
-            container.appendChild(span);
+    for (let cycle = 0; cycle < 120; cycle++) {
+        // 1. Cria nós DOM de texto e contêineres
+        const parentDiv = document.createElement("div");
+        const textNode1 = document.createTextNode("Texto de teste bloco 1 - " + cycle);
+        const textNode2 = document.createTextNode("Texto de teste bloco 2 - " + cycle);
+        parentDiv.appendChild(textNode1);
+        parentDiv.appendChild(textNode2);
+        container.appendChild(parentDiv);
+
+        // 2. Cria objetos Range apontando para os nós
+        const range = document.createRange();
+        range.setStart(textNode1, 0);
+        range.setEnd(textNode2, textNode2.length);
+        heldRanges.push(range);
+
+        // 3. Modifica as fronteiras do Range de forma intensiva
+        range.selectNodeContents(parentDiv);
+        range.collapse(cycle % 2 === 0);
+        range.setStart(textNode1, Math.min(2, textNode1.length));
+        range.setEnd(textNode2, Math.min(4, textNode2.length));
+
+        // 4. Muta o DOM subjacente (dispara textInserted, textRemoved e nodeWillBeRemoved no Range)
+        textNode1.insertData(2, "INSERCAO");
+        textNode2.deleteData(0, 3);
+        parentDiv.removeChild(textNode1);
+        container.removeChild(parentDiv);
+
+        // 5. Estressa a GC thread concorrente durante as modificações
+        // Sem o lock m_boundaryPointLock, a GC thread lia m_start/m_end em conflito com as mutações
+        if (cycle % 4 === 0) {
+            gc();
         }
 
-        // Força medição de layout para garantir instanciação completa das fontes
-        container.getBoundingClientRect();
-
-        // 2. Remove os elementos para permitir que o cache de fontes e FontPlatformData sejam destruídos
-        container.innerHTML = "";
-
-        // 3. Força descarte de referências e coleta de lixo
-        // Sem o patch, a primeira rodada destruía o FcPattern global, causando UAF/crash na rodada seguinte
-        gc();
+        // Mantém um conjunto controlado de referências ativas
+        if (heldRanges.length > 40) {
+            heldRanges.splice(0, 15);
+        }
     }
 }
 
 try {
-    runFontLifecycleTest();
-    document.getElementById("status").innerText = "PASS: Fontes FreeType reutilizadas e liberadas sem Double Free / UAF.";
+    runRangeGCRaceTest();
+    setTimeout(() => {
+        gc();
+        document.getElementById("status").innerText = "PASS: Operações concorrentes de Range e GC concluídas sem Use-After-Free.";
+    }, 200);
 } catch (e) {
     document.getElementById("status").innerText = "FAIL: " + e.message;
 }

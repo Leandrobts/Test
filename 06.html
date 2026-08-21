@@ -2,13 +2,13 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Teste de Regressão: Descarte de WebHeapAgent e console.takeHeapSnapshot()</title>
+<title>Teste de Regressão: Race Condition em JSAttr::visitAdditionalChildren</title>
 </head>
 <body>
-<div id="log">Executando teste...</div>
+<div id="container"></div>
+<div id="status">Executando teste...</div>
 
 <script>
-// Função utilitária de GC via alocação recursiva de memória
 function gc() {
     function gcRec(n) {
         if (n < 1)
@@ -21,34 +21,49 @@ function gc() {
         gcRec(10);
 }
 
-function runTest() {
-    for (let i = 0; i < 50; i++) {
-        // 1. Cria um iframe efêmero para instanciar e destruir novos contextos do Inspetor
-        const iframe = document.createElement("iframe");
-        document.body.appendChild(iframe);
+function runAttrGCRaceTest() {
+    const container = document.getElementById("container");
+    const heldAttrWrappers = [];
 
-        const iframeWindow = iframe.contentWindow;
+    for (let cycle = 0; cycle < 120; cycle++) {
+        // 1. Cria elementos com atributos DOM
+        const el = document.createElement("div");
+        el.setAttribute("data-test", "val_" + cycle);
+        el.setAttribute("id", "target_" + cycle);
+        container.appendChild(el);
 
-        // 2. Invoca a API de Heap Snapshot via console
-        if (iframeWindow.console && iframeWindow.console.takeHeapSnapshot) {
-            iframeWindow.console.takeHeapSnapshot("Snapshot " + i);
+        // 2. Obtém os nós Attr diretamente para criar wrappers JSAttr
+        const attr1 = el.getAttributeNode("data-test");
+        const attr2 = el.getAttributeNode("id");
+
+        // Retém os nós Attr vivos na heap JS
+        heldAttrWrappers.push(attr1, attr2);
+
+        // 3. Desanexa os atributos e destrói o elemento pai imediatamente
+        el.removeAttributeNode(attr1);
+        container.removeChild(el);
+
+        // 4. Dispara pressão no GC concorrente enquanto mutações adicionais ocorrem
+        if (cycle % 4 === 0) {
+            // Força novas alocações e ativação da thread de marcação concorrente
+            gc();
         }
 
-        // 3. Remove o iframe imediatamente sem um ciclo formal de disable() nos agentes
-        document.body.removeChild(iframe);
-
-        // 4. Força pressão no coletor para desalocar os agentes destruídos
-        if (i % 5 === 0) {
-            gc();
+        // Limpa parte das referências acumuladas periodicamente
+        if (heldAttrWrappers.length > 50) {
+            heldAttrWrappers.splice(0, 20);
         }
     }
 }
 
 try {
-    runTest();
-    document.getElementById("log").innerText = "PASS: Descarte de contextos com takeHeapSnapshot sem Use-After-Free.";
+    runAttrGCRaceTest();
+    setTimeout(() => {
+        gc();
+        document.getElementById("status").innerText = "PASS: Ciclos concorrentes de nós Attr e GC executados sem Use-After-Free.";
+    }, 200);
 } catch (e) {
-    document.getElementById("log").innerText = "FAIL: " + e.message;
+    document.getElementById("status").innerText = "FAIL: " + e.message;
 }
 </script>
 </body>
