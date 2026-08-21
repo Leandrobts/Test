@@ -14,47 +14,110 @@
 </head>
 <body>
 
+<div id="x" contenteditable="true">X</div>
+<div id="y" contenteditable="true">Y</div>
 <iframe id="i0"></iframe>
+<div id="log" style="font-family: monospace;"></div>
 
 <script>
-  window.addEventListener('load', () => {
-    const i0 = document.getElementById('i0');
+let iteration = 0;
+const MAX_ITERATIONS = 500;
 
-    // 1. Dispara o frameset no documento raiz
-    document.documentElement.append(document.createElement('frameset'));
+function log(msg) {
+  document.getElementById('log').textContent = msg;
+}
 
-    // 2. Manipula o evento de foco com forçamento imediato de layout
-    i0.onfocus = () => {
-      location.hash = 'y';
-
-      // Força a engine a recalcular estilo e layout no meio do dispatch de eventos
-      try {
-        void document.body.offsetHeight;
-        void i0.contentWindow.document.body.offsetHeight;
-      } catch (e) {}
-
-      // Tenta desanexar/remover o nó do iframe durante o processamento do widget
-      try {
-        i0.remove();
-      } catch (e) {}
-    };
-
+// Estratégias de mutação que serão testadas no loop
+const mutators = [
+  // 1. Alternância de hash rápida com foco
+  (frame) => {
     location.hash = 'x';
-
-    // 3. Timing de microrotas assíncronas
-    if (window.caches) {
-      caches.has('a').then(() => {
-        i0.focus();
-        // Layout thrashing síncrono logo após o foco
-        void document.documentElement.offsetHeight;
-      });
-    } else {
-      setTimeout(() => {
-        i0.focus();
-        void document.documentElement.offsetHeight;
-      }, 0);
+    frame.focus();
+    location.hash = 'y';
+  },
+  // 2. Manipulação de Seleção / Range (Caret) durante a troca de hash
+  (frame) => {
+    location.hash = 'x';
+    const sel = window.getSelection();
+    const target = document.getElementById(iteration % 2 === 0 ? 'x' : 'y');
+    if (target) {
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      sel.removeAllRanges();
+      sel.addRange(range);
     }
-  });
+    frame.focus();
+    location.hash = 'y';
+  },
+  // 3. Forçar Layout Thrashing no meio da mudança de estado
+  (frame) => {
+    location.hash = 'x';
+    void frame.offsetHeight;
+    void document.documentElement.offsetHeight;
+    frame.focus();
+    location.hash = 'y';
+  },
+  // 4. Mutação dinâmica do estilo zoom e content
+  (frame) => {
+    frame.style.zoom = (iteration % 2 === 0) ? '0.01' : '1.0';
+    frame.focus();
+    location.hash = (iteration % 2 === 0) ? 'x' : 'y';
+  },
+  // 5. Inserção/Remoção repetida de framesets na raiz
+  (frame) => {
+    const fs = document.createElement('frameset');
+    document.documentElement.append(fs);
+    frame.focus();
+    location.hash = 'y';
+    setTimeout(() => fs.remove(), 0);
+  }
+];
+
+function runFuzzStep() {
+  if (iteration >= MAX_ITERATIONS) {
+    log(`[+] Concluído ${MAX_ITERATIONS} iterações sem crash.`);
+    return;
+  }
+
+  iteration++;
+  log(`[+] Executando iteração: ${iteration}`);
+
+  let frame = document.getElementById('i0');
+  if (!frame) {
+    frame = document.createElement('iframe');
+    frame.id = 'i0';
+    document.body.appendChild(frame);
+  }
+
+  // Configura o listener original de foco
+  frame.onfocus = () => {
+    location.hash = 'y';
+  };
+
+  // Escolhe uma estratégia de mutação
+  const mutator = mutators[iteration % mutators.length];
+  mutator(frame);
+
+  // Varia o método de disparo assíncrono (Microtask vs Macrotask vs Cache API)
+  if (window.caches && (iteration % 3 === 0)) {
+    caches.has('a').then(() => {
+      runFuzzStep();
+    });
+  } else if (iteration % 3 === 1) {
+    Promise.resolve().then(() => {
+      runFuzzStep();
+    });
+  } else {
+    setTimeout(runFuzzStep, 0);
+  }
+}
+
+window.addEventListener('load', () => {
+  // Injeta o frameset inicial conforme o original
+  document.documentElement.append(document.createElement('frameset'));
+  runFuzzStep();
+});
 </script>
+
 </body>
 </html>
