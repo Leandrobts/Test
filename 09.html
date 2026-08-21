@@ -1,18 +1,60 @@
 <!DOCTYPE html>
-<script>
-onload = function() {    
-    document.designMode = 'on';
-    document.execCommand('SelectAll');
-    document.execCommand('FormatBlock', false, '<pre>');
-    document.write('Pass if test does not crash.\nPASS.');
-};
-</script>
-Text
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Leitura de document.cookie com domCookiesForHost (SOUP)</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
 
-<style>
-   div {
-        height: 100px;
+<script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
-</style>
-<div></div>
-<div></div>
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runCookieTest() {
+    // 1. Define múltiplos cookies para o host atual
+    for (let i = 0; i < 20; i++) {
+        document.cookie = `test_cookie_${i}=val_${i}; path=/; SameSite=Lax`;
+    }
+
+    // 2. Itera leituras contínuas de document.cookie intercaladas com GC
+    // para tentar reutilizar a memória temporária do CString destruído
+    for (let cycle = 0; cycle < 100; cycle++) {
+        // Dispara a chamada nativa a NetworkStorageSession::domCookiesForHost()
+        const rawCookies = document.cookie;
+
+        if (!rawCookies || !rawCookies.includes("test_cookie_0")) {
+            throw new Error("Falha ao recuperar cookies casados com o domínio.");
+        }
+
+        // Força pressão na heap para corromper a memória do ponteiro dangling se não houver o patch
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
+
+    // 3. Limpa os cookies de teste
+    for (let i = 0; i < 20; i++) {
+        document.cookie = `test_cookie_${i}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+    }
+}
+
+try {
+    runCookieTest();
+    document.getElementById("status").innerText = "PASS: Leitura de document.cookie executada sem Use-After-Free.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
+</script>
+</body>
+</html>

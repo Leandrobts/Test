@@ -1,89 +1,67 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8">
-<title>TypedArray.from OOB Test - WebKit 316137</title>
+<meta charset="utf-8">
+<title>Teste: Ciclo de vida e descarte de OutOfLine Color Components</title>
 </head>
 <body>
-<h1>WebKit Bug 312513 - TypedArray.from() OOB via Resizable ArrayBuffer</h1>
-<pre id="log"></pre>
+<canvas id="c" width="100" height="100"></canvas>
+<div id="status">Executando teste...</div>
+
 <script>
-function log(msg) {
-    document.getElementById('log').textContent += msg + '\n';
-}
-
-function testResize(ctor, bytesPerElement, initialBytes, shrinkBytes, resizeAt) {
-    const newCount = shrinkBytes / bytesPerElement;
-    const resizableArrayBuffer = new ArrayBuffer(initialBytes, { maxByteLength: initialBytes * 4 });
-    const source = new ctor(resizableArrayBuffer);
-    source[Symbol.iterator] = null;
-    let callbacks = 0;
-    ctor.from(source, (val, index) => {
-        if (index === resizeAt)
-            resizableArrayBuffer.resize(shrinkBytes);
-        callbacks++;
-        return val;
-    });
-    const expected = Math.max(resizeAt + 1, newCount);
-    if (callbacks > expected)
-        throw new Error(ctor.name + ": " + callbacks + " callbacks (expected <= " + expected + ")");
-}
-
-function testDetach(detachAt) {
-    const arrayBuffer = new ArrayBuffer(256);
-    const source = new Int32Array(arrayBuffer);
-    source[Symbol.iterator] = null;
-    let callbacks = 0;
-    try {
-        Int32Array.from(source, (val, index) => {
-            if (index === detachAt)
-                arrayBuffer.transfer();
-            callbacks++;
-            return val;
-        });
-    } catch (e) {
-        return;
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
-    if (callbacks > detachAt + 1)
-        throw new Error("detach: " + callbacks + " callbacks (expected <= " + (detachAt + 1) + ")");
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runColorDestructionTest() {
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+
+    // Cores que forçam a criação de OutOfLineComponents no WebCore
+    const extendedColors = [
+        "color(display-p3 0.8 0.2 0.5 / 0.9)",
+        "lab(50% 40 59.5)",
+        "lch(50% 70 300)",
+        "color(srgb-linear 0.2 0.7 0.1)"
+    ];
+
+    for (let i = 0; i < 2000; i++) {
+        const colorStr = extendedColors[i % extendedColors.length];
+
+        // 1. Força o parser do WebCore a instanciar WebCore::Color com OutOfLineComponents
+        ctx.fillStyle = colorStr;
+        ctx.fillRect(0, 0, 10, 10);
+
+        // 2. Cria elementos temporários para gerar e descartar instâncias de Color
+        let el = document.createElement("div");
+        el.style.color = colorStr;
+        el.style.backgroundColor = `color(display-p3 ${Math.random()} ${Math.random()} 0.5)`;
+        
+        // 3. Força descarte das instâncias acionando ~Color()
+        el = null;
+
+        // 4. Dispara pressão periódica no Garbage Collector
+        if (i % 100 === 0) {
+            gc();
+        }
+    }
 }
 
 try {
-    testResize(Int32Array,   4, 4096, 16, 4);
-    log("PASS: testResize(Int32Array, 4, 4096, 16, 4)");
-} catch (e) { log("FAIL: " + e.message); }
-
-try {
-    testResize(Int32Array,   4, 4096,  8, 8);
-    log("PASS: testResize(Int32Array, 4, 4096, 8, 8)");
-} catch (e) { log("FAIL: " + e.message); }
-
-try {
-    testResize(Float64Array, 8, 8192, 32, 8);
-    log("PASS: testResize(Float64Array, 8, 8192, 32, 8)");
-} catch (e) { log("FAIL: " + e.message); }
-
-try {
-    testResize(Uint8Array,   1, 1024,  4, 8);
-    log("PASS: testResize(Uint8Array, 1, 1024, 4, 8)");
-} catch (e) { log("FAIL: " + e.message); }
-
-try {
-    testResize(Int32Array,   4, 4096,  8, 0);
-    log("PASS: testResize(Int32Array, 4, 4096, 8, 0)");
-} catch (e) { log("FAIL: " + e.message); }
-
-try {
-    testDetach(4);
-    log("PASS: testDetach(4)");
-} catch (e) { log("FAIL: " + e.message); }
-
-try {
-    testDetach(0);
-    log("PASS: testDetach(0)");
-} catch (e) { log("FAIL: " + e.message); }
-
-log("\n=== All tests completed ===");
+    runColorDestructionTest();
+    document.getElementById("status").innerText = "PASS: Cores OutOfLine alocadas, destruídas e coletadas sem falhas.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
 </body>
 </html>

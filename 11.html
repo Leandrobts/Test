@@ -1,18 +1,75 @@
 <!DOCTYPE html>
-</html>
 <html>
 <head>
-<script>
-onload = () => {
+<meta charset="utf-8">
+<title>Teste de Regressão: Descarte de nós inline antes do layout (LineLayout UAF)</title>
+<style>
+    .container {
+        width: 100px;
+        font-family: monospace;
+        word-break: break-word;
+        white-space: normal;
+    }
+</style>
+</head>
+<body>
+<div id="container" class="container"></div>
+<div id="status">Executando teste...</div>
 
-    const br = document.querySelector('br');
-    br.innerHTML = '<div style="text-indent: -1em;"><span>foo</span></div>';
-    getSelection().setBaseAndExtent(document.querySelector('span').firstChild, 0, br, 1);
-    document.execCommand("insertImage", "#foo");
+<script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runInlineLayoutTest() {
+    const container = document.getElementById("container");
+
+    for (let cycle = 0; cycle < 100; cycle++) {
+        // 1. Cria nós de texto e elementos inline dentro do contêiner
+        const span1 = document.createElement("span");
+        span1.textContent = "palavra1 palavra2 ";
+
+        const span2 = document.createElement("span");
+        span2.textContent = "texto_para_quebra_de_linha_longo ";
+
+        const span3 = document.createElement("span");
+        span3.textContent = "conteudo extra";
+
+        container.appendChild(span1);
+        container.appendChild(span2);
+        container.appendChild(span3);
+
+        // 2. Remove um nó inline recém-inserido sem acionar layout prévio (!everHadLayout())
+        container.removeChild(span2);
+
+        // 3. Força o cálculo de layout/quebra de linha imediato (LayoutIntegration)
+        // Isso aciona InlineItemsBuilder::populateBreakingPositionCache()
+        const height = container.offsetHeight;
+
+        // 4. Limpa o restante e força descarte
+        container.innerHTML = "";
+
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
+}
+
+try {
+    runInlineLayoutTest();
+    document.getElementById("status").innerText = "PASS: Layout inline executado sem Heap Use-After-Free.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
 }
 </script>
-</head>
-<body contenteditable>
-Test passes if it does not crash.
-<br style="content: ''"><span style="display: none">
 </body>
+</html>

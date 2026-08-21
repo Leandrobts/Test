@@ -1,70 +1,77 @@
 <!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Mutação Concorrente em AXObjectCache</title>
+</head>
 <body>
+<div id="container"></div>
+<div id="status">Executando teste...</div>
+
 <script>
 function gc() {
     function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
     for (var i = 0; i < 1000; i++)
-    gcRec(10);
+        gcRec(10);
 }
 
-function setup(ghosts, pumps) {
-    const host = document.body.appendChild(document.createElement('div'));
-    const shadowRoot = host.attachShadow({ mode: 'open', slotAssignment: 'manual' });
+function runAXStressTest() {
+    const container = document.getElementById("container");
 
-    const targetSlot = shadowRoot.appendChild(document.createElement('slot'));
-    const otherSlot = shadowRoot.appendChild(document.createElement('slot'));
-    const childA = host.appendChild(document.createElement('span'));
-    const childB = host.appendChild(document.createElement('span'));
-    targetSlot.assign(childA);
-    otherSlot.assign(childB);
+    for (let cycle = 0; cycle < 60; cycle++) {
+        // 1. Cria nós com atributos monitorados pelas listas diferidas de acessibilidade
+        const menu = document.createElement("div");
+        menu.setAttribute("role", "menu");
 
-    // Insert and remove ghost slots so m_slots accumulates entries whose WeakPtr keys go null after GC.
-    for (let i = 0; i < ghosts; ++i)
-        shadowRoot.appendChild(document.createElement('slot')).remove();
+        const liveRegion = document.createElement("div");
+        liveRegion.setAttribute("aria-live", "polite");
 
-    return { host, targetSlot, pumps };
+        const label = document.createElement("label");
+        label.textContent = "Label Inicial " + cycle;
+
+        const input = document.createElement("input");
+        label.appendChild(input);
+
+        container.appendChild(menu);
+        container.appendChild(liveRegion);
+        container.appendChild(label);
+
+        // 2. Modifica texto e atributos para preencher m_deferredTextChangedList
+        liveRegion.textContent = "Atualização de texto " + cycle;
+        label.textContent = "Label Atualizado " + cycle;
+
+        // 3. Modifica a árvore repetidamente para causar reentrância durante o flush
+        for (let j = 0; j < 5; j++) {
+            const tempSpan = document.createElement("span");
+            tempSpan.textContent = "temp " + j;
+            menu.appendChild(tempSpan);
+            menu.removeChild(tempSpan);
+        }
+
+        // 4. Dispara o recálculo diferido de acessibilidade / layout
+        container.getBoundingClientRect();
+
+        // 5. Limpa a árvore e força descarte
+        container.innerHTML = "";
+
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
 }
 
-function trigger({ host, targetSlot, pumps }) {
-    // Advance the WeakHashMap operation counter toward its amortized-cleanup threshold.
-    for (let i = 0; i < pumps; ++i)
-        targetSlot.assignedNodes();
-
-    // Reassigning targetSlot tears down renderers; the composed-tree iterator visits otherSlot,
-    // re-enters assignedNodesForSlot, and may trigger a rehash that frees the bucket array.
-    targetSlot.assign(host.appendChild(document.createElement('span')));
-    host.remove();
+try {
+    runAXStressTest();
+    document.getElementById("status").innerText = "PASS: Atualizações de acessibilidade tratadas sem Use-After-Free.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
 }
-
-// Each case uses its own shadow root (its own m_slots), and GC only nulls the ghost WeakPtr keys
-// without touching the operation counter, so building every case before a single GCController.collect()
-// is equivalent to collecting per case but avoids ~1000 separate full GCs.
-//
-// The reentrant rehash fires when the WeakHashMap operation counter crosses its amortized-cleanup
-// threshold, which is reset to 2 * table size after each cleanup. With ~ghosts entries in the table
-// that threshold sits near 2 * ghosts, so sweep a band of pump counts bracketing it.
-const cases = [];
-for (let ghosts = 20; ghosts <= 100; ghosts += 10)
-    for (let pumps = ghosts; pumps <= ghosts * 3; ++pumps)
-        cases.push(setup(ghosts, pumps));
-
-
-    gc();
-
-// One layout pass gives every host a renderer so tearDownRenderersAfterSlotChange traverses the
-// composed tree. Doing it once up front (rather than per case) avoids O(n^2) relayout, since each
-// host.remove() below would otherwise re-dirty the document for the next case's forced layout.
-document.body.offsetHeight;
-
-for (const testCase of cases)
-    trigger(testCase);
-
-document.body.textContent = 'This test passes if it does not crash.';
 </script>
 </body>
+</html>

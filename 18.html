@@ -1,145 +1,77 @@
-<style>
-  iframe { content: url(); zoom: 0.01; }
-  #out {
-    position: fixed; top: 0; right: 0;
-    width: 280px; height: 180px;
-    background: #000; color: #0f0;
-    font: 10px monospace;
-    overflow: hidden; padding: 4px;
-    z-index: 9999;
-  }
-</style>
-<div id="out">aguardando...</div>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Descarte Concorrente de Worker e runCleanupTasks</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
+
 <script>
-  // sessionStorage â€” sobrevive se location.hash causar reload completo
-  let ciclo = parseInt(sessionStorage.getItem('_c') || '0', 10);
-
-  const out = document.getElementById('out');
-  function log(msg) {
-    out.textContent = '[' + ciclo + '] ' + msg + '\n'
-                    + out.textContent.slice(0, 600);
-  }
-
-  const MAX_CICLOS   = 150;
-  const SIZE_CLASSES = [0x100, 0x140, 0x180, 0x1c0, 0x200, 0x240, 0x280];
-  let _spray = null;
-  const anomalias = [];
-
-  function fazerSpray(sz) {
-    try {
-      _spray = null;
-      const buf = [];
-      for (let i = 0; i < 512; i++) {
-        const ab = new ArrayBuffer(sz);
-        new Uint32Array(ab).fill(0x41414141);
-        buf.push(ab);
-      }
-      _spray = buf;
-    } catch(e) { log('ERR spray:' + e.message); }
-  }
-
-  function checar(sz) {
-    try {
-      const r = i0.getBoundingClientRect();
-      if (r.width === 0 && r.height === 0) {
-        anomalias.push({ ciclo, sz });
-        log('!! geom-zero sz=0x' + sz.toString(16));
-      }
-    } catch(e) {
-      anomalias.push({ ciclo, sz, e: e.message });
-      log('!! ERR:' + e.message);
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
-  }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
 
-  const EST = [
-    { label: 'A-baseline',
-      fn: () => {} },
+function runWorkerRaceTest() {
+    // Código do worker que enfileira microtarefas, timers e tarefas de limpeza contínuas
+    const workerScript = `
+        self.onmessage = function(e) {
+            // Agenda tarefas pendentes no event loop
+            setTimeout(() => {
+                Promise.resolve().then(() => {
+                    postMessage("ack");
+                });
+            }, 0);
 
-    { label: 'B-layout-thrash',
-      fn: () => { try {
-        for (let i = 0; i < 8; i++) {
-          i0.style.outline = i + 'px solid red';
-          void i0.offsetWidth;
+            // Aloca objetos para estressar o escopo
+            let buffer = new Uint8Array(1024 * 64);
+        };
+    `;
+
+    const blobUrl = URL.createObjectURL(new Blob([workerScript], { type: "application/javascript" }));
+
+    for (let cycle = 0; cycle < 150; cycle++) {
+        // 1. Cria o worker
+        const worker = new Worker(blobUrl);
+
+        // 2. Despacha mensagem para iniciar o loop e enfileirar tarefas
+        worker.postMessage("start");
+
+        // 3. Força interrupção abrupta no mesmo tick ou em ticks imediatamente seguintes
+        // Isso aciona WorkerDedicatedRunLoop::runCleanupTasks() concorrente com destroyWorkerGlobalScope()
+        if (cycle % 2 === 0) {
+            worker.terminate();
+        } else {
+            setTimeout(() => {
+                worker.terminate();
+            }, 0);
         }
-        i0.style.outline = '';
-      } catch(e) { log('ERR B:' + e.message); } } },
 
-    { label: 'C-zoom-cycle',
-      fn: () => { try {
-        i0.style.zoom = '0.02'; void i0.offsetWidth;
-        i0.style.zoom = '0.01'; void i0.offsetWidth;
-      } catch(e) { log('ERR C:' + e.message); } } },
-
-    { label: 'D-content-cycle',
-      fn: () => { try {
-        i0.style.content = 'url(about:blank)'; void i0.offsetWidth;
-        i0.style.content = 'url()';            void i0.offsetWidth;
-      } catch(e) { log('ERR D:' + e.message); } } },
-
-    { label: 'E-gc-pressure',
-      fn: () => { try {
-        const tmp = [];
-        for (let i = 0; i < 30; i++) tmp.push(new ArrayBuffer(1024 * 1024));
-      } catch(e) { log('ERR E:' + e.message); } } },
-
-    { label: 'F-post-layout',
-      fn: () => { try {
-        void i0.offsetWidth;
-        void i0.getBoundingClientRect();
-        void i0.offsetWidth;
-      } catch(e) { log('ERR F:' + e.message); } } },
-  ];
-
-  function relatorio() {
-    sessionStorage.removeItem('_c');
-    log('FIM ' + ciclo + ' ciclos ' + anomalias.length + ' anomalias');
-    if (anomalias.length > 0) {
-      const freq = {};
-      anomalias.forEach(a => { freq[a.sz] = (freq[a.sz] || 0) + 1; });
-      const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
-      log('CANDIDATA 0x' + parseInt(top[0]).toString(16)
-          + ' (' + top[1] + 'x)');
-    } else {
-      log('sem anomalia JS');
-      log('UAF em C++ puro');
+        // 4. Dispara pressão no coletor para liberar a memória na heap
+        if (cycle % 15 === 0) {
+            gc();
+        }
     }
-  }
+}
 
-  onload = () => {
-    log('onload');
-    document.documentElement.append(document.createElement('frameset'));
-
-    i0.onfocus = () => {
-      if (ciclo >= MAX_CICLOS) {
-        i0.onfocus = null;
-        relatorio();
-        return;
-      }
-
-      const sz  = SIZE_CLASSES[ciclo % SIZE_CLASSES.length];
-      const est = EST[ciclo % EST.length];
-
-      // â”€â”€ CRÃTICO: ciclo++ e sessionStorage ANTES do location.hash â”€â”€â”€â”€â”€â”€
-      // location.hash = 'y' interrompe execuÃ§Ã£o JS no PS4
-      // tudo apÃ³s essa linha Ã© abandonado â€” por isso ciclo ficava em 0
-      ciclo++;
-      sessionStorage.setItem('_c', ciclo);
-
-      if (ciclo % 5 === 0)
-        log(est.label + ' sz=0x' + sz.toString(16));
-
-      fazerSpray(sz);
-      est.fn();
-      checar(sz);
-
-      location.hash = 'y';   // â† intacto â€” JS pode interromper aqui
-    };
-
-    location.hash = 'x';   // â† intacto
-
-    let s0 = document.createElement('script');
-    s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
-    document.head.append(s0);
-  };
+try {
+    runWorkerRaceTest();
+    setTimeout(() => {
+        gc();
+        document.getElementById("status").innerText = "PASS: Workers criados e terminados abruptamente sem UAF em runCleanupTasks.";
+    }, 100);
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
-<iframe id="i0"></iframe>
+</body>
+</html>

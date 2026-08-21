@@ -1,21 +1,70 @@
-<style>
-:first-letter {
-    float: right;
-    content: url()
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Transferência IPC de Strings > 16KB</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
+
+<script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
 }
 
-body {
-    columns: 2;
+function runTest() {
+    // 1. Testa o caminho Latin1 (SharedSpan8) com string > 16KB (~64KB)
+    const latin1LargeString = "A".repeat(64 * 1024);
+
+    // 2. Testa o caminho UTF-16 (SharedSpan16) com caracteres não-Latin1 > 16KB (~64KB)
+    const utf16LargeString = "?".repeat(32 * 1024);
+
+    // 3. Força a serialização e desserialização IPC através de um Web Worker / BroadcastChannel
+    const blob = new Blob([`
+        self.onmessage = function(e) {
+            // Devolve a string para testar a volta pelo canal IPC
+            self.postMessage(e.data);
+        };
+    `], { type: "application/javascript" });
+
+    const worker = new Worker(URL.createObjectURL(blob));
+    let receivedCount = 0;
+
+    worker.onmessage = function(e) {
+        receivedCount++;
+        
+        // Dispara pressão de GC para limpar referências de strings externas
+        gc();
+
+        if (receivedCount === 2) {
+            worker.terminate();
+            document.getElementById("status").innerText = "PASS: Strings IPC > 16KB manipuladas sem crash.";
+        }
+    };
+
+    worker.onerror = function(err) {
+        document.getElementById("status").innerText = "FAIL: " + err.message;
+    };
+
+    // Envia ambas as strings (Latin1 e UTF-16) que ultrapassam o limite de 16383 bytes
+    worker.postMessage(latin1LargeString);
+    worker.postMessage(utf16LargeString);
 }
-</style>
-<body>First letter -PASS if no crash.<span id=outer><span id=inner>
-<script>
-outer.addEventListener("DOMSubtreeModified", function() {
-    document.execCommand(false);
-    document.body.style.setProperty("-webkit-columns","initial");
-    inner.setAttribute("foobar","");
-    document.body.style.setProperty("-webkit-writing-mode","vertical-lr");
-    
-});
-outer.setAttribute("foobar","");
+
+try {
+    runTest();
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
+</body>
+</html>

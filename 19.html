@@ -1,22 +1,84 @@
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Mutação Concorrente em AXObjectCache</title>
 </head>
 <body>
-This test makes sure that canvas2d's text functions don't crash when passed unexpected font strings.
-The test passes if you see "Hello" in Helvetica, followed by "Hello" in Times.
-<div><canvas id="c" width="400" height="400"></canvas></div>
+<div id="container"></div>
+<div id="status">Executando teste...</div>
+
 <script>
-var context = document.getElementById("c").getContext("2d");
-context.font = "32px 'Helvetica'";
-context.font = "32px ''";
-context.fillText("Hello", 0, 100);
-context.font = "32px 'Times'";
-context.font = "32px ''";
-context.fillText("Hello", 0, 200);
-</script>
-</body>
-</html>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runAXStressTest() {
+    const container = document.getElementById("container");
+
+    for (let cycle = 0; cycle < 60; cycle++) {
+        // 1. Cria elementos com roles de acessibilidade monitorados por listas diferidas
+        const menu = document.createElement("div");
+        menu.setAttribute("role", "menu");
+
+        const liveRegion = document.createElement("div");
+        liveRegion.setAttribute("aria-live", "polite");
+
+        const label = document.createElement("label");
+        label.textContent = "Label Inicial " + cycle;
+
+        const input = document.createElement("input");
+        label.appendChild(input);
+
+        container.appendChild(menu);
+        container.appendChild(liveRegion);
+        container.appendChild(label);
+
+        // 2. Modifica texto e atributos para enfileirar em m_deferredTextChangedList
+        liveRegion.textContent = "Atualização de texto " + cycle;
+        label.textContent = "Label Atualizado " + cycle;
+
+        // 3. Força mutação imediata no DOM (adiciona e remove nós filhos)
+        // Sem a cópia para vetor, isso alterava o WeakListHashSet durante o flush do cache
+        for (let j = 0; j < 5; j++) {
+            const tempSpan = document.createElement("span");
+            tempSpan.textContent = "temp " + j;
+            menu.appendChild(tempSpan);
+            menu.removeChild(tempSpan);
+        }
+
+        // 4. Força medição de acessibilidade/layout para disparar performDeferredCacheUpdate()
+        if (window.accessibilityController) {
+            accessibilityController.accessibleElementById("container");
+        } else {
+            // Gatilho visual de layout
+            container.getBoundingClientRect();
+        }
+
+        // 5. Limpa a árvore e força descarte
+        container.innerHTML = "";
+
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
+}
+
+try {
+    runAXStressTest();
+    document.getElementById("status").innerText = "PASS: Atualizações diferidas de acessibilidade tratadas sem Use-After-Free.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
 </body>
 </html>

@@ -2,284 +2,62 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>RenderWidget Layout / Lifecycle Test</title>
-
-<style>
-    iframe {
-        content: url();
-        zoom: 0.01;
-        width: 300px;
-        height: 200px;
-        border: 1px solid black;
-    }
-
-    #container {
-        width: 100%;
-        min-height: 100px;
-    }
-</style>
+<title>Teste de Regress�o: Race Condition entre ReadableStreamDefaultReader e GC</title>
 </head>
-
 <body>
-
-<h3>RenderWidget lifecycle test</h3>
-<button onclick="start()">Start</button>
-
-<div id="container">
-    <iframe id="i0"></iframe>
-</div>
-
 <script>
-(function () {
-
-    var iteration = 0;
-    var running = false;
-
-    function forceLayout(element) {
-        if (!element)
-            return;
-
-        /*
-         * Essas operações exigem informações atualizadas de geometria
-         * e podem provocar atualização síncrona de layout.
-         */
-
-        try {
-            element.offsetWidth;
-            element.offsetHeight;
-            element.clientWidth;
-            element.clientHeight;
-            element.scrollWidth;
-            element.scrollHeight;
-
-            element.getBoundingClientRect();
-            element.getClientRects();
-
-            window.getComputedStyle(element).width;
-            window.getComputedStyle(element).height;
-            window.getComputedStyle(element).display;
-        } catch (e) {
-        }
+// Fun��o utilit�ria de GC via aloca��o recursiva de mem�ria
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
 
-    function mutateDocument() {
-        /*
-         * Equivalente aproximado à parte do teste original que adiciona
-         * um frameset durante a preparação do estado.
-         */
-
-        try {
-            var frameset = document.createElement("frameset");
-            document.documentElement.appendChild(frameset);
-
-            forceLayout(document.documentElement);
-
-            frameset.parentNode.removeChild(frameset);
-        } catch (e) {
-        }
-    }
-
-    function createFrame() {
-        var oldFrame = document.getElementById("i0");
-
-        if (oldFrame && oldFrame.parentNode)
-            oldFrame.parentNode.removeChild(oldFrame);
-
-        forceLayout(document.documentElement);
-
-        var frame = document.createElement("iframe");
-        frame.id = "i0";
-
-        frame.onload = function () {
-
-            /*
-             * Força consultas de layout enquanto o RenderWidget
-             * associado ao iframe está ativo.
-             */
-
-            forceLayout(frame);
-            forceLayout(document.documentElement);
-
-            /*
-             * Navegação semelhante ao LayoutTest original.
-             */
-
-            try {
-                location.hash = "x" + iteration;
-            } catch (e) {
+function runTest() {
+    for (let i = 0; i < 500; i++) {
+        // 1. Cria um ReadableStream e obt�m seu reader
+        let stream = new ReadableStream({
+            start(controller) {
+                controller.enqueue(new Uint8Array([1, 2, 3]));
             }
-
-            forceLayout(frame);
-
-            /*
-             * Foco no iframe.
-             */
-
-            try {
-                frame.focus();
-            } catch (e) {
-            }
-
-            forceLayout(frame);
-
-            /*
-             * Outra mudança de fragmento após focus/layout.
-             */
-
-            Promise.resolve().then(function () {
-
-                try {
-                    location.hash = "y" + iteration;
-                } catch (e) {
-                }
-
-                forceLayout(frame);
-                forceLayout(document.documentElement);
-            });
-        };
-
-        frame.onfocus = function () {
-
-            /*
-             * Durante o evento de focus, realizamos nova navegação
-             * e forçamos novamente o layout.
-             */
-
-            try {
-                location.hash = "focus" + iteration;
-            } catch (e) {
-            }
-
-            forceLayout(frame);
-            forceLayout(document.documentElement);
-        };
-
-        document.getElementById("container").appendChild(frame);
-
-        return frame;
-    }
-
-    function runDataScript(frame) {
-
-        /*
-         * Mantém a ideia do teste original:
-         * um script data: é carregado assincronamente.
-         */
-
-        var script = document.createElement("script");
-
-        script.src =
-            "data:text/javascript," +
-            "Promise.resolve().then(function(){" +
-            "var f=document.getElementById('i0');" +
-            "if(f){try{f.focus();}catch(e){}}" +
-            "});";
-
-        script.onload = function () {
-
-            forceLayout(frame);
-            forceLayout(document.documentElement);
-        };
-
-        script.onerror = function () {
-            forceLayout(frame);
-        };
-
-        document.head.appendChild(script);
-    }
-
-    function oneIteration() {
-
-        if (!running)
-            return;
-
-        iteration++;
-
-        mutateDocument();
-
-        var frame = createFrame();
-
-        /*
-         * Primeiro flush de layout após criação do iframe.
-         */
-
-        forceLayout(frame);
-        forceLayout(document.documentElement);
-
-        /*
-         * Carrega o script assíncrono que posteriormente tenta focar
-         * o mesmo iframe.
-         */
-
-        runDataScript(frame);
-
-        /*
-         * Cria várias fronteiras assíncronas para aumentar as
-         * possibilidades de interleaving entre layout, focus e
-         * lifecycle do iframe.
-         */
-
-        Promise.resolve().then(function () {
-
-            forceLayout(frame);
-
-            try {
-                frame.focus();
-            } catch (e) {
-            }
-
-            forceLayout(document.documentElement);
-
-        }).then(function () {
-
-            try {
-                location.hash = "async" + iteration;
-            } catch (e) {
-            }
-
-            forceLayout(frame);
-
-        }).then(function () {
-
-            /*
-             * Em algumas iterações, remove o iframe enquanto existem
-             * callbacks assíncronos pendentes que podem ainda tentar
-             * operar sobre ele.
-             */
-
-            if ((iteration % 3) === 0) {
-
-                try {
-                    if (frame.parentNode)
-                        frame.parentNode.removeChild(frame);
-                } catch (e) {
-                }
-
-                forceLayout(document.documentElement);
-            }
-
         });
+        let reader = stream.getReader();
 
-        /*
-         * Próxima iteração.
-         */
+        // 2. Dispara leituras e libera��es r�pidas para alterar m_stream constantemente
+        reader.read().catch(() => {});
+        
+        // releaseLock() e cancel() zeram internamente o m_stream
+        if (i % 2 === 0) {
+            try {
+                reader.releaseLock();
+            } catch (e) {}
+        } else {
+            reader.cancel().catch(() => {});
+        }
 
-        setTimeout(oneIteration, 50);
+        // 3. Descarta refer�ncias locais
+        stream = null;
+        reader = null;
+
+        // 4. For�a press�o no GC a cada poucas itera��es para cruzar o ciclo de vida com a GCThread
+        if (i % 25 === 0) {
+            gc();
+        }
     }
+}
 
-    window.start = function () {
-
-        if (running)
-            return;
-
-        running = true;
-        iteration = 0;
-
-        oneIteration();
-    };
-
-})();
+try {
+    runTest();
+    document.body.innerText = "PASS: Executado sem travamento por race condition no coletor de lixo.";
+} catch (e) {
+    document.body.innerText = "FAIL: " + e.message;
+}
 </script>
-
 </body>
 </html>

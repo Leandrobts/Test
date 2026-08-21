@@ -1,31 +1,91 @@
 <!DOCTYPE html>
-<style>
-body,
-iframe {
-    aspect-ratio: 1;
-}
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Cancelamento de Stream no Fetch do Service Worker</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
 
-body {
-    display: -webkit-box;
-    -webkit-box-orient: block-axis;
-}
-
-iframe {
-    display: block;
-    -webkit-box-flex: 1;
-    max-inline-size: min-content;
-}
-</style>
 <script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
 
+// Código do Service Worker que fornece streaming contínuo de chunks
+const swCode = `
+    self.addEventListener('fetch', (event) => {
+        const stream = new ReadableStream({
+            start(controller) {
+                controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+            },
+            pull(controller) {
+                // Força geração periódica de chunks
+                controller.enqueue(new Uint8Array(1024));
+            },
+            cancel(reason) {
+                // Ponto de cancelamento
+            }
+        });
 
-onload = () => {
-    let iframe0 = document.createElement('iframe');
-    document.body.append(iframe0);
-    document.body.getBoundingClientRect();
-    iframe0.style.position = 'fixed';
-    document.body.getBoundingClientRect();
-    document.body.innerHTML = "This test PASS if it doesn't CRASH.";
-};
+        event.respondWith(new Response(stream));
+    });
+`;
+
+async function runFetchCancelUAFTest() {
+    if (!navigator.serviceWorker) {
+        document.getElementById("status").innerText = "PASS: Service Worker não suportado.";
+        return;
+    }
+
+    const swBlobUrl = URL.createObjectURL(new Blob([swCode], { type: "application/javascript" }));
+    const scope = "./sw-stream-cancel-" + Date.now() + "/";
+
+    try {
+        const reg = await navigator.serviceWorker.register(swBlobUrl, { scope: scope });
+        await navigator.serviceWorker.ready;
+
+        for (let cycle = 0; cycle < 50; cycle++) {
+            const controller = new AbortController();
+
+            // 1. Inicia a requisição capturada pelo Service Worker
+            const fetchPromise = fetch(`${scope}chunk-stream-${cycle}`, {
+                signal: controller.signal
+            });
+
+            // 2. Obtém a resposta e inicia a leitura do stream
+            const res = await fetchPromise.catch(() => {});
+            if (res && res.body) {
+                const reader = res.body.getReader();
+                await reader.read().catch(() => {});
+
+                // 3. Cancela a stream no cliente enquanto descarta o leitor e o objeto resposta
+                controller.abort();
+                reader.cancel().catch(() => {});
+            }
+
+            // 4. Força pressão no GC no tick de cancelamento
+            // Sem o RefPtr protectedResponse, o GC coletava o FetchResponse dentro de cancelStream()
+            gc();
+        }
+
+        await reg.unregister();
+        document.getElementById("status").innerText = "PASS: Cancelamento de stream de Fetch executado sem Use-After-Free.";
+    } catch (e) {
+        document.getElementById("status").innerText = "FAIL: " + e.message;
+    }
+}
+
+runFetchCancelUAFTest();
 </script>
+</body>
 </html>

@@ -1,31 +1,70 @@
 <!DOCTYPE html>
 <html>
-<noembed id=test4></noembed>
-<h6 id=test3>
-<h3 id=test7></h3>
-<span id=tCF36>
-<math>
-<and>
-<equivalent>
-<csc id=test5 style="float: left; "> X6DDguzp|m_v c;</csc>
-<otherwise id=test1>
-</equivalent>
-</and>
-<cartesianproduct id=test2>#L    }|2pqynn</cartesianproduct>
-<factorial></factorial>
-<product id=test6>.
-</math>
-</span>
-</h6>
-<script>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Descarte de CachedCSSStyleSheet durante didFinishLoading</title>
+</head>
+<body>
+<div id="container"></div>
+<div id="status">Executando teste...</div>
 
-document.documentElement.offsetTop;
-test1.appendChild(test2);
-test2.appendChild(test3);
-document.documentElement.offsetTop;
-test4.appendChild(test5);
-test6.appendChild(test7);
-document.documentElement.offsetTop;
-document.documentElement.innerHTML = "Bug 107226. Heap-use-after-free in WebCore::RenderObject::isDescendantOf.<br />PASS. WebKit didn't crash";
+<script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runCSSLoaderRaceTest() {
+    const container = document.getElementById("container");
+
+    // CSS com especificação de charset para exercitar TextResourceDecoder e PAL::newTextCodec
+    const cssData = "@charset \"utf-8\"; body { background-color: #fff; } .test { color: green; }";
+    const cssBlobUrl = URL.createObjectURL(new Blob([cssData], { type: "text/css" }));
+
+    for (let cycle = 0; cycle < 100; cycle++) {
+        // 1. Cria o elemento link para disparar o SubresourceLoader e CachedCSSStyleSheet
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = cssBlobUrl + "?cycle=" + cycle;
+
+        link.onload = () => {
+            // 2. Remove o link do DOM imediatamente no callback de carga
+            if (link.parentNode) {
+                container.removeChild(link);
+            }
+        };
+
+        container.appendChild(link);
+
+        // 3. Remove imediatamente alguns links antes mesmo do onload completar
+        if (cycle % 2 === 0) {
+            container.removeChild(link);
+        }
+
+        // 4. Dispara pressão no Garbage Collector
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
+}
+
+try {
+    runCSSLoaderRaceTest();
+    setTimeout(() => {
+        gc();
+        document.getElementById("status").innerText = "PASS: Carregamentos e descartes de folhas de estilo executados sem UAF no decoder.";
+    }, 200);
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
+</body>
 </html>

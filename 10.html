@@ -1,22 +1,64 @@
 <!DOCTYPE html>
 <html>
 <head>
-<style></style>
-<title>InsertHRWithStyle</title>
-<script>
-
-onload = () => {
-    document.styleSheets[0].insertRule(`:not(:read-only) { display: inline-table; }`);
-    document.styleSheets[0].insertRule(`:not(:host) { border-top: 1px solid; }`);
-    document.styleSheets[0].insertRule(`:last-of-type { all: unset; }`);
-    document.querySelector('title').appendChild(document.createElement('div'));
-    document.execCommand('SelectAll');
-    document.designMode = 'on';
-    document.execCommand('InsertHorizontalRule');
-    document.head.replaceChildren();
-    document.body.textContent = 'This test passes if it does not crash. PASS';
-};
-</script>
-<script></script>
+<meta charset="utf-8">
+<title>Teste de Regressão: setContentsSize durante descarte de Frame/Page</title>
 </head>
+<body>
+<div id="status">Executando teste...</div>
+
+<script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runTest() {
+    for (let i = 0; i < 100; i++) {
+        // 1. Cria um frame aninhado com sua própria LocalFrameView
+        const iframe = document.createElement("iframe");
+        document.body.appendChild(iframe);
+
+        const doc = iframe.contentDocument;
+        if (!doc) continue;
+
+        // 2. Insere conteúdo e altera as dimensões do documento para forçar setContentsSize
+        const div = doc.createElement("div");
+        div.style.width = "2000px";
+        div.style.height = "2000px";
+        div.style.backgroundColor = "red";
+        doc.body.appendChild(div);
+
+        // Força o cálculo de layout / atualização de tamanho
+        iframe.contentWindow.scrollTo(500, 500);
+
+        // 3. Modifica o tamanho novamente e destrói o iframe de forma imediata
+        div.style.height = "5000px";
+
+        // Remove o elemento do DOM no mesmo tick de atualização para invalidar a Page/Frame
+        document.body.removeChild(iframe);
+
+        // 4. Dispara pressão no GC
+        if (i % 10 === 0) {
+            gc();
+        }
+    }
+}
+
+try {
+    runTest();
+    document.getElementById("status").innerText = "PASS: Redimensionamentos e descartes de FrameView executados sem UAF.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
+</script>
+</body>
 </html>

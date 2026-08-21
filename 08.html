@@ -1,17 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste: Ciclo de vida e reutilização de FcPattern em FontPlatformData</title>
+<style>
+    .test-font-1 { font-family: monospace; font-size: 14px; }
+    .test-font-2 { font-family: monospace; font-size: 18px; font-weight: bold; }
+    .test-font-3 { font-family: monospace; font-size: 24px; font-style: italic; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<div id="status">Executando...</div>
+
 <script>
-  onload = () => {
-    let n0 = document.createElement('embed');
-    n0.src = '#';
-    document.body.appendChild(n0);
-    document.documentElement.appendChild(document.createElement('input'));
-    document.documentElement.appendChild(document.createElement('span'));
-    document.execCommand('SelectAll');
-    document.designMode = 'on';
-    let animation = new Animation();
-    animation.onfinish = () => document.execCommand('InsertText');
-    setTimeout(() => {
-      animation.reverse();
-      document.execCommand('InsertText');
-    }, 0);    
-  };
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runFontLifecycleTest() {
+    const container = document.getElementById("container");
+    const classes = ["test-font-1", "test-font-2", "test-font-3"];
+
+    for (let cycle = 0; cycle < 50; cycle++) {
+        // 1. Cria elementos usando a família de fontes para forçar instanciação de FontPlatformData
+        for (let i = 0; i < 10; i++) {
+            const span = document.createElement("span");
+            span.className = classes[i % classes.length];
+            span.innerText = "WebKit FreeType Text " + cycle;
+            container.appendChild(span);
+        }
+
+        // Força medição de layout para garantir instanciação completa das fontes
+        container.getBoundingClientRect();
+
+        // 2. Remove os elementos para permitir que o cache de fontes e FontPlatformData sejam destruídos
+        container.innerHTML = "";
+
+        // 3. Força descarte de referências e coleta de lixo
+        // Sem o patch, a primeira rodada destruía o FcPattern global, causando UAF/crash na rodada seguinte
+        gc();
+    }
+}
+
+try {
+    runFontLifecycleTest();
+    document.getElementById("status").innerText = "PASS: Fontes FreeType reutilizadas e liberadas sem Double Free / UAF.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
+</body>
+</html>

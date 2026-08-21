@@ -1,16 +1,59 @@
-<meta>
-<style>
-</style>
-<script>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Leitura de document.cookie com domCookiesForHost (SOUP)</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
 
-  console.log("This test passes if it does not crash.")
-  onload = () => {
-    document.styleSheets[0].insertRule(`head, script, meta, input { display: block; }`);
-    document.styleSheets[0].insertRule(`input { text-indent: 1px; }`);
-    document.querySelector('meta').appendChild(document.createElement('input'));
-    document.execCommand('SelectAll');
-    document.designMode = 'on';
-    document.execCommand('Copy');
-    document.execCommand('PasteAsPlainText');
-  };
+<script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runCookieSoupTest() {
+    // 1. Popula o cookie jar com múltiplos cookies para iterar no loop do soupCookies
+    for (let i = 0; i < 30; i++) {
+        document.cookie = `session_cookie_${i}=value_${i}; path=/; SameSite=Lax`;
+    }
+
+    // 2. Loop de leitura rápida forçando chamadas repetidas a domCookiesForHost()
+    for (let cycle = 0; cycle < 100; cycle++) {
+        // Dispara a resolução nativa de cookies e o casamento com soup_cookie_domain_matches
+        const cookies = document.cookie;
+
+        if (!cookies || !cookies.includes("session_cookie_0")) {
+            throw new Error("Erro na integridade dos cookies recuperados.");
+        }
+
+        // 3. Força alocações e pressão de GC para reutilizar o buffer desalocado do CString temporário
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
+
+    // 4. Limpeza dos cookies criados
+    for (let i = 0; i < 30; i++) {
+        document.cookie = `session_cookie_${i}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+    }
+}
+
+try {
+    runCookieSoupTest();
+    document.getElementById("status").innerText = "PASS: Leitura de cookies via SOUP executada sem Use-After-Free.";
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
+</body>
+</html>

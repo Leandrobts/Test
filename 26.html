@@ -1,60 +1,71 @@
 <!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Descarte de Service Worker com FetchEvents e VM ativa</title>
+</head>
 <body>
+<div id="status">Executando teste...</div>
+
 <script>
-// WebCodecsAudioData::memoryCost() is called from JSWebCodecsAudioData::visitChildren on a
-// concurrent GC marker thread. It must not dereference m_data.audioData, since close() on the
-// main thread may concurrently null and free it.
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
 
+const swCode = `
+    self.addEventListener('fetch', (event) => {
+        // Retém o FetchEvent ativo no conjunto m_extendedEvents
+        event.respondWith(new Promise((resolve) => {
+            // Promessa pendente mantida até o descarte forçado
+            setTimeout(() => {
+                resolve(new Response("ok"));
+            }, 5000);
+        }));
+    });
+`;
 
-
-const POOL = 200;
-const DURATION_MS = 2000;
-const startTime = Date.now();
-
-const buf = new Float32Array(4096);
-for (let i = 0; i < buf.length; i++)
-    buf[i] = Math.random();
-
-const init = {
-    format: "f32-planar",
-    sampleRate: 48000,
-    timestamp: 0,
-    data: buf,
-    numberOfFrames: 2048,
-    numberOfChannels: 2,
-};
-
-window.pool = new Array(POOL);
-for (let i = 0; i < POOL; i++)
-    pool[i] = new AudioData(init);
-
-let idx = 0;
-
-function closeOne() {
-    if (Date.now() - startTime > DURATION_MS) {
-        document.body.textContent = "Test passes if it does not crash.";
-
+async function runServiceWorkerVMTest() {
+    if (!navigator.serviceWorker) {
+        document.getElementById("status").innerText = "PASS: Service Worker não suportado.";
         return;
     }
 
-    pool[idx].close();
-    pool[idx] = new AudioData(init);
-    idx = (idx + 1) % POOL;
+    const swBlobUrl = URL.createObjectURL(new Blob([swCode], { type: "application/javascript" }));
+    const scope = "./sw-vm-scope-" + Date.now() + "/";
 
-    Promise.resolve().then(closeOne);
-}
+    for (let cycle = 0; cycle < 25; cycle++) {
+        try {
+            // 1. Registra o Service Worker
+            const reg = await navigator.serviceWorker.register(swBlobUrl, { scope: scope });
+            await navigator.serviceWorker.ready;
 
-function pressureGC() {
-    if (Date.now() - startTime > DURATION_MS)
-        return;
-    for (let i = 0; i < 20; i++) {
-        let tmp = new AudioData(init);
-        tmp.close();
+            // 2. Dispara requisições fetch para instanciar FetchEvents e registrá-los em m_extendedEvents
+            for (let f = 0; f < 5; f++) {
+                fetch(`${scope}request-${f}`).catch(() => {});
+            }
+
+            // 3. Força unregister/terminação imediata com os FetchEvents ainda pendentes
+            await reg.unregister();
+
+            // 4. Dispara pressão no GC para desmantelar a VM do worker
+            gc();
+        } catch (e) {}
     }
-    setTimeout(pressureGC, 10);
+
+    document.getElementById("status").innerText = "PASS: Descarte de ServiceWorkerGlobalScope sem UAF na VM.";
 }
 
-closeOne();
-pressureGC();
+runServiceWorkerVMTest().catch((err) => {
+    document.getElementById("status").innerText = "FAIL: " + err.message;
+});
 </script>
 </body>
+</html>

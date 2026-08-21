@@ -2,81 +2,83 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>Teste de Mutação do Input com Datalist</title>
+<title>Teste de Regressão: Descarte de Scrollbar durante animação NSScrollerImp</title>
 <style>
-  input {
-    width: 300px;
-    height: 50px;
-    box-sizing: border-box;
-  }
-  #log {
-    margin-top: 15px;
-    font-family: monospace;
-    white-space: pre-wrap;
-  }
+    .scroller {
+        width: 150px;
+        height: 150px;
+        overflow-y: scroll;
+        border: 1px solid black;
+    }
+    .content {
+        height: 1200px;
+    }
 </style>
 </head>
 <body>
-
-<input id="input" type="text" list="list">
-<datalist id="list">
-  <option value="a">
-  <option value="b">
-</datalist>
-
-<div id="log"></div>
+<div id="container"></div>
+<div id="status">Executando teste...</div>
 
 <script>
-// Implementação adaptada do gc() sem dependência de harness externo
 function gc() {
     function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
     for (var i = 0; i < 1000; i++)
-    gcRec(10);
+        gcRec(10);
 }
 
-function log(msg) {
-    const el = document.getElementById('log');
-    el.textContent += msg + '\n';
-    console.log(msg);
+function runScrollbarTest() {
+    const container = document.getElementById("container");
+    let cycle = 0;
+    const maxCycles = 60;
+
+    function step() {
+        if (cycle >= maxCycles) {
+            document.getElementById("status").innerText = "PASS: Animações de scrollbar e ciclos de vida de nós executados sem Use-After-Free.";
+            return;
+        }
+
+        cycle++;
+
+        // 1. Cria o contêiner com scroll para instanciar a Scrollbar do WebCore
+        const scroller = document.createElement("div");
+        scroller.className = "scroller";
+
+        const content = document.createElement("div");
+        content.className = "content";
+        scroller.appendChild(content);
+        container.appendChild(scroller);
+
+        // 2. Aciona o scroll para iniciar o timer de animação de UI/fade da barra
+        scroller.scrollTop = 250;
+
+        // 3. Remove o elemento no tick seguinte durante a execução da animação
+        requestAnimationFrame(() => {
+            if (scroller.parentNode) {
+                container.removeChild(scroller);
+            }
+
+            if (cycle % 6 === 0) {
+                gc();
+            }
+
+            setTimeout(step, 10);
+        });
+    }
+
+    step();
 }
 
-addEventListener("load", async () => {
-    const input = document.getElementById('input');
-
-    // 1. Mantém o listener original: ao receber o clique, altera o tipo e dispara o GC
-    input.addEventListener('click', () => {
-        log("[+] Evento 'click' disparado. Alterando tipo para 'button' e chamando gc()...");
-        input.type = 'button';
-        gc();
-    }, { once: true });
-
-    // 2. Simulação aproximada de clique no canto direito (onde fica o botão de seta do datalist)
-    const rect = input.getBoundingClientRect();
-    const targetX = rect.right - 15; // 15px antes da borda direita
-    const targetY = rect.top + (rect.height / 2);
-
-    const eventInit = {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX: targetX,
-        clientY: targetY
-    };
-
-    input.dispatchEvent(new MouseEvent('mousedown', eventInit));
-    input.dispatchEvent(new MouseEvent('mouseup', eventInit));
-    input.dispatchEvent(new MouseEvent('click', eventInit));
-
-    log("PASS if no crash.");
-});
+try {
+    runScrollbarTest();
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
-
 </body>
 </html>

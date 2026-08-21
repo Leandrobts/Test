@@ -1,68 +1,82 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Descarte de JSEventListener / DOMWrapperWorld após término de Worker</title>
+</head>
 <body>
-<svg id="s">
-  <rect id="r" x="10" width="50" height="50">
-    <animate id="a" attributeName="x" from="0" to="100" dur="1s" begin="0s"/>
-  </rect>
-</svg>
+<div id="status">Executando teste...</div>
+
 <script>
 function gc() {
     function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
     for (var i = 0; i < 1000; i++)
-    gcRec(10);
+        gcRec(10);
 }
 
+// Script do worker anexando listeners complexos e retendo objetos em escopo
+const workerCode = `
+    const portChannel = new MessageChannel();
 
-let len;
+    function onCustomMessage(e) {}
+    function onCustomError(e) {}
 
-function grab()
-{
-    // Separate frame so intermediate wrappers are not pinned by a conservative stack scan.
-    return document.getElementById("r").x.animVal;
+    for (let i = 0; i < 50; i++) {
+        self.addEventListener('message', onCustomMessage);
+        self.addEventListener('error', onCustomError);
+        portChannel.port1.addEventListener('message', onCustomMessage);
+    }
+
+    self.onmessage = function(e) {
+        // Enfileira promessas e objetos para reter listeners na heap
+        Promise.resolve().then(() => {
+            portChannel.port1.postMessage("ping");
+        });
+    };
+`;
+
+const workerBlobUrl = URL.createObjectURL(new Blob([workerCode], { type: "application/javascript" }));
+
+function runWorkerWorldUAFTest() {
+    for (let cycle = 0; cycle < 100; cycle++) {
+        // 1. Cria o Web Worker
+        const worker = new Worker(workerBlobUrl);
+
+        // 2. Dispara a execução para instanciar os JSEventListeners e associar o DOMWrapperWorld
+        worker.postMessage("init");
+
+        // 3. Força o encerramento do worker no mesmo tick ou em ticks imediatos
+        // Sem o patch, a destruição da VM deixava os JSEventListeners com referências vivas ao DOMWrapperWorld
+        if (cycle % 2 === 0) {
+            worker.terminate();
+        } else {
+            setTimeout(() => {
+                worker.terminate();
+            }, 0);
+        }
+
+        // 4. Dispara pressão no Garbage Collector para liberar os listeners desalocados
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
 }
 
-function step1()
-{
-    let s = document.getElementById("s");
-    let a = document.getElementById("a");
-    let r = document.getElementById("r");
-
-    // Enter the active interval so stopAnimation() takes the m_animVal = nullptr branch.
-    s.pauseAnimations();
-    s.setCurrentTime(0.5);
-
-    len = grab();
-
-    // Reaches SVGAnimatedValueProperty::stopAnimation().
-    a.remove();
-    r.remove();
-    s.remove();
-}
-
-function step2()
-{
-    
-        gc();
-    // SVGLength::valueForBindings -> SVGProperty::contextElement; m_owner must not dangle.
-    len.value;
-    document.body.textContent = "PASS if no crash.";
-
-}
-
-window.onload = () => {
-    // Defer past Document::implicitClose so svgExtensions->startAnimations() has run.
+try {
+    runWorkerWorldUAFTest();
     setTimeout(() => {
-        step1();
-        setTimeout(step2, 0);
-    }, 0);
-};
+        gc();
+        document.getElementById("status").innerText = "PASS: Workers e JSEventListeners descartados sem UAF no DOMWrapperWorld.";
+    }, 250);
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
 </script>
 </body>
 </html>

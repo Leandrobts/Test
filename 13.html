@@ -1,24 +1,58 @@
-<script>
-
-onload = () => {
-    document.designMode = 'on';
-    getSelection().selectAllChildren(input);
-    getSelection().extend(div);
-    queueMicrotask(() => {
-        document.execCommand('Cut');
-    });
-    document.execCommand('Outdent');
-    document.write("Test passes if it does not crash.");
-};
-</script>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Teste de Regressão: Descarte assíncrono de Page/ResourceUsageOverlay</title>
+</head>
 <body>
-  <blockquote>
-    <div>
-      <div>
-        <iframe></iframe>
-      </div>
-      <input id="input"></input>
-    </div>
-  </blockquote>
-  <div id="div"></div>
+<div id="status">Executando teste...</div>
+
+<script>
+// Função utilitária de GC via alocação recursiva de memória
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++)
+        gcRec(10);
+}
+
+function runOverlayRaceTest() {
+    for (let i = 0; i < 100; i++) {
+        // 1. Cria um iframe efêmero para instanciar uma nova Page e FrameView
+        const iframe = document.createElement("iframe");
+        document.body.appendChild(iframe);
+
+        // 2. Se a interface internals estiver disponível (WebKit LayoutTests), habilita o overlay
+        if (window.internals && internals.setResourceUsageOverlayVisible) {
+            internals.setResourceUsageOverlayVisible(true);
+        }
+
+        // 3. Remove imediatamente o iframe no mesmo tick síncrono
+        // Isso destrói a Page antes de callOnMainThread disparar initialize()
+        document.body.removeChild(iframe);
+
+        // 4. Dispara pressão no coletor para invalidar os blocos de memória da Page/Overlay
+        if (i % 10 === 0) {
+            gc();
+        }
+    }
+}
+
+try {
+    runOverlayRaceTest();
+    // Aguarda o próximo tick para permitir que tarefas pendentes no event loop sejam consumidas
+    setTimeout(() => {
+        gc();
+        document.getElementById("status").innerText = "PASS: Tarefas de inicialização do overlay descartadas sem Use-After-Free.";
+    }, 50);
+} catch (e) {
+    document.getElementById("status").innerText = "FAIL: " + e.message;
+}
+</script>
 </body>
+</html>
