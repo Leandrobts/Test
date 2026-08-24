@@ -1,70 +1,67 @@
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Descarte de CachedCSSStyleSheet durante didFinishLoading</title>
-</head>
-<body>
-<div id="container"></div>
-<div id="status">Executando teste...</div>
-
+<style>
+  iframe { 
+    content: url(); 
+    zoom: 0.01;
+    /* Dimensões que forçam recálculo constante */
+    width: calc(100vw - 1px);
+  }
+</style>
+<div id="log"></div>
 <script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+  let crashed = false;
 
-function runCSSLoaderRaceTest() {
-    const container = document.getElementById("container");
+  onload = () => {
+    document.documentElement.append(document.createElement('frameset'));
 
-    // CSS com especificação de charset para exercitar TextResourceDecoder e PAL::newTextCodec
-    const cssData = "@charset \"utf-8\"; body { background-color: #fff; } .test { color: green; }";
-    const cssBlobUrl = URL.createObjectURL(new Blob([cssData], { type: "text/css" }));
+    const i0 = document.getElementById('i0');
 
-    for (let cycle = 0; cycle < 100; cycle++) {
-        // 1. Cria o elemento link para disparar o SubresourceLoader e CachedCSSStyleSheet
-        const link = document.createElement("link");
-        link.rel = "stylesheet";
-        link.href = cssBlobUrl + "?cycle=" + cycle;
+    // Handler que destrói o RenderWidget durante o layout
+    i0.onfocus = () => {
+      location.hash = 'y';
+      // Forçar destruição do widget durante re-layout reentrante
+      const parent = i0.parentNode;
+      parent.innerHTML = ''; // Remove iframe ? destroi RenderWidget
+    };
 
-        link.onload = () => {
-            // 2. Remove o link do DOM imediatamente no callback de carga
-            if (link.parentNode) {
-                container.removeChild(link);
-            }
-        };
+    // MutationObserver para detectar mudanças causadas pelo crash prevenido
+    const observer = new MutationObserver(() => {
+      if (!crashed) {
+        document.getElementById('log').textContent = 
+          'DOM mutado durante layout - verificar crash';
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
 
-        container.appendChild(link);
+    // Sequência do trigger:
+    // 1. Hash change inicia navegação ? schedule de layout
+    location.hash = 'x';
 
-        // 3. Remove imediatamente alguns links antes mesmo do onload completar
-        if (cycle % 2 === 0) {
-            container.removeChild(link);
-        }
+    // 2. Script async que foca o iframe durante o layout pendente
+    //    Usa Promise (microtask) para garantir execução no momento certo
+    const s0 = document.createElement('script');
+    const cachesFallback = window.caches
+      ? `caches.has('a').then(() => document.getElementById('i0').focus())`
+      : `Promise.resolve().then(() => document.getElementById('i0').focus())`;
+    s0.src = `data:text/javascript,${cachesFallback}`;
+    document.head.append(s0);
 
-        // 4. Dispara pressão no Garbage Collector
-        if (cycle % 10 === 0) {
-            gc();
-        }
-    }
-}
+    // 3. Forçar layout repetidamente para aumentar a janela de race condition
+    let count = 0;
+    const forceLayout = () => {
+      if (count++ < 20 && !crashed) {
+        i0.getBoundingClientRect(); // força layout síncrono ? updateWidgetPositions()
+        requestAnimationFrame(forceLayout);
+      }
+    };
+    requestAnimationFrame(forceLayout);
 
-try {
-    runCSSLoaderRaceTest();
+    // 4. Detector de sobrevivência
     setTimeout(() => {
-        gc();
-        document.getElementById("status").innerText = "PASS: Carregamentos e descartes de folhas de estilo executados sem UAF no decoder.";
-    }, 200);
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
+      document.getElementById('log').textContent = crashed
+        ? 'CRASH detectado'
+        : 'PASS: sem crash nesta janela (code path pode não ter sido atingido)';
+    }, 3000);
+  };
 </script>
-</body>
-</html>
+<iframe id="i0"></iframe>

