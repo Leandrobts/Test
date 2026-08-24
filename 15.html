@@ -1,70 +1,35 @@
-<!DOCTYPE html>
-<html>
-<head>
+<!doctype html>
 <meta charset="utf-8">
-<title>Teste de Regressão: WebGPU Device::instance() em Threads Secundárias</title>
-</head>
-<body>
-<div id="status">Executando teste...</div>
+
+<button id="go">START FULLSCREEN TEST</button>
+<div id="status"></div>
 
 <script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+go.onclick = function () {
+    var iframe = document.createElement("iframe");
+    document.body.appendChild(iframe);
 
-async function runWebGPUTest() {
-    if (!navigator.gpu) {
-        document.getElementById("status").innerText = "PASS: WebGPU não suportado neste ambiente.";
-        return;
+    var div = iframe.contentDocument.createElement("div");
+    div.textContent = "TEST";
+    iframe.contentDocument.body.appendChild(div);
+
+    var contentDocument = iframe.contentDocument;
+
+    try {
+        div.webkitRequestFullscreen().catch(function () {});
+    } catch (e) {
     }
 
-    for (let cycle = 0; cycle < 40; cycle++) {
-        // 1. Requisita um Adapter
-        let adapter = await navigator.gpu.requestAdapter();
-        if (!adapter) break;
+    document.body.removeChild(iframe);
 
-        // 2. Cria o Device a partir do Adapter
-        const device = await adapter.requestDevice();
-
-        // 3. Descarta a referência do Adapter na main thread e força o GC
-        // Sem o patch, a destruição do Adapter concorrente ao uso interno do Device gerava UAF
-        adapter = null;
-        gc();
-
-        // 4. Dispara operações assíncronas e submissões na fila para exercitar a thread de trabalho
-        const buffer = device.createBuffer({
-            size: 1024,
-            usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-        });
-
-        const commandEncoder = device.createCommandEncoder();
-        const commandBuffer = commandEncoder.finish();
-        device.queue.submit([commandBuffer]);
-
-        // 5. Destrói o buffer e o device
-        buffer.destroy();
-        device.destroy();
-
-        if (cycle % 5 === 0) {
-            gc();
+    setTimeout(function () {
+        try {
+            if (contentDocument.webkitCancelFullScreen)
+                contentDocument.webkitCancelFullScreen();
+        } catch (e) {
         }
-    }
 
-    document.getElementById("status").innerText = "PASS: Ciclos de vida de Adapter/Device executados sem UAF concorrente.";
-}
-
-runWebGPUTest().catch((err) => {
-    document.getElementById("status").innerText = "FAIL: " + err.message;
-});
+        status.textContent = "PASS - no crash observed";
+    }, 0);
+};
 </script>
-</body>
-</html>

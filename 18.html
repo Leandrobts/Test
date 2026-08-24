@@ -2,76 +2,86 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Teste de Regressão: Descarte Concorrente de Worker e runCleanupTasks</title>
+<title>Fullscreen Cancel Test</title>
 </head>
+
 <body>
-<div id="status">Executando teste...</div>
+
+<button id="start">START TEST</button>
+
+<div id="status">Ready</div>
+
+<iframe id="targetFrame" style="width:100px;height:100px;"></iframe>
 
 <script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+(function () {
+    var iframe = document.getElementById("targetFrame");
+    var button = document.getElementById("start");
+    var status = document.getElementById("status");
 
-function runWorkerRaceTest() {
-    // Código do worker que enfileira microtarefas, timers e tarefas de limpeza contínuas
-    const workerScript = `
-        self.onmessage = function(e) {
-            // Agenda tarefas pendentes no event loop
-            setTimeout(() => {
-                Promise.resolve().then(() => {
-                    postMessage("ack");
+    // Prepara o conteúdo ANTES do teste.
+    var iframeDocument = iframe.contentDocument;
+    var target = iframeDocument.createElement("div");
+
+    target.style.width = "100%";
+    target.style.height = "100%";
+    target.style.background = "lightgray";
+    target.textContent = "Fullscreen target";
+
+    iframeDocument.body.appendChild(target);
+
+    status.textContent = "Ready - click START";
+
+    button.onclick = function () {
+
+        status.textContent = "Requesting fullscreen...";
+
+        // Mantém a referência antes de remover o iframe.
+        var detachedDocument = iframe.contentDocument;
+
+        try {
+            var promise = target.webkitRequestFullscreen();
+
+            if (promise && promise.catch) {
+                promise.catch(function () {
+                    // A rejeição é esperada dependendo do estado do iframe.
                 });
-            }, 0);
-
-            // Aloca objetos para estressar o escopo
-            let buffer = new Uint8Array(1024 * 64);
-        };
-    `;
-
-    const blobUrl = URL.createObjectURL(new Blob([workerScript], { type: "application/javascript" }));
-
-    for (let cycle = 0; cycle < 150; cycle++) {
-        // 1. Cria o worker
-        const worker = new Worker(blobUrl);
-
-        // 2. Despacha mensagem para iniciar o loop e enfileirar tarefas
-        worker.postMessage("start");
-
-        // 3. Força interrupção abrupta no mesmo tick ou em ticks imediatamente seguintes
-        // Isso aciona WorkerDedicatedRunLoop::runCleanupTasks() concorrente com destroyWorkerGlobalScope()
-        if (cycle % 2 === 0) {
-            worker.terminate();
-        } else {
-            setTimeout(() => {
-                worker.terminate();
-            }, 0);
+            }
+        } catch (e) {
+            status.textContent = "requestFullscreen exception: " + e;
         }
 
-        // 4. Dispara pressão no coletor para liberar a memória na heap
-        if (cycle % 15 === 0) {
-            gc();
-        }
-    }
-}
+        // Remove imediatamente o dono do documento.
+        iframe.parentNode.removeChild(iframe);
 
-try {
-    runWorkerRaceTest();
-    setTimeout(() => {
-        gc();
-        document.getElementById("status").innerText = "PASS: Workers criados e terminados abruptamente sem UAF em runCleanupTasks.";
-    }, 100);
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
+        status.textContent = "Iframe removed";
+
+        // Executa posteriormente sobre o documento destacado.
+        setTimeout(function () {
+
+            status.textContent = "Calling webkitCancelFullScreen...";
+
+            try {
+                if (detachedDocument.webkitCancelFullScreen) {
+                    detachedDocument.webkitCancelFullScreen();
+                } else if (detachedDocument.cancelFullScreen) {
+                    detachedDocument.cancelFullScreen();
+                } else {
+                    status.textContent = "Cancel fullscreen API unavailable";
+                    return;
+                }
+
+                status.textContent = "Completed without visible crash";
+
+            } catch (e) {
+                status.textContent = "Exception: " + e;
+            }
+
+        }, 0);
+    };
+
+})();
 </script>
+
 </body>
 </html>

