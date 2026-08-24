@@ -1,70 +1,67 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Race Condition em JSAttr::visitAdditionalChildren</title>
+    <meta charset="utf-8">
+    <title>WebAudio Iframe Detach Test</title>
 </head>
 <body>
-<div id="container"></div>
-<div id="status">Executando teste...</div>
+    <button id="btn" style="font-size:20px; padding:10px 20px;">Iniciar Teste</button>
+    <div id="status" style="margin-top:15px; font-family: monospace;">Aguardando início...</div>
 
-<script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+    <script>
+    let cycle = 0;
+    const maxCycles = 100; // Múltiplos ciclos para aumentar a probabilidade de acertar a race window
+    let audioCtx = null;
 
-function runAttrGCRaceTest() {
-    const container = document.getElementById("container");
-    const heldAttrWrappers = [];
-
-    for (let cycle = 0; cycle < 120; cycle++) {
-        // 1. Cria elementos com atributos DOM
-        const el = document.createElement("div");
-        el.setAttribute("data-test", "val_" + cycle);
-        el.setAttribute("id", "target_" + cycle);
-        container.appendChild(el);
-
-        // 2. Obtém os nós Attr diretamente para criar wrappers JSAttr
-        const attr1 = el.getAttributeNode("data-test");
-        const attr2 = el.getAttributeNode("id");
-
-        // Retém os nós Attr vivos na heap JS
-        heldAttrWrappers.push(attr1, attr2);
-
-        // 3. Desanexa os atributos e destrói o elemento pai imediatamente
-        el.removeAttributeNode(attr1);
-        container.removeChild(el);
-
-        // 4. Dispara pressão no GC concorrente enquanto mutações adicionais ocorrem
-        if (cycle % 4 === 0) {
-            // Força novas alocações e ativação da thread de marcação concorrente
-            gc();
+    async function runCycle() {
+        if (cycle++ >= maxCycles) {
+            document.getElementById('status').innerText = 'Concluído: ' + maxCycles + ' ciclos sem crash.';
+            return;
         }
 
-        // Limpa parte das referências acumuladas periodicamente
-        if (heldAttrWrappers.length > 50) {
-            heldAttrWrappers.splice(0, 20);
-        }
-    }
-}
+        document.getElementById('status').innerText = 'Executando ciclo ' + cycle + '/' + maxCycles + '...';
 
-try {
-    runAttrGCRaceTest();
-    setTimeout(() => {
-        gc();
-        document.getElementById("status").innerText = "PASS: Ciclos concorrentes de nós Attr e GC executados sem Use-After-Free.";
-    }, 200);
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
-</script>
+        const frame = document.createElement('iframe');
+        frame.src = '07.html';
+
+        frame.onload = async function() {
+            try {
+                const audio = frame.contentDocument.querySelector('audio');
+                if (!audio) return;
+
+                // Conecta o elemento de áudio do iframe ao AudioContext da página pai
+                const source = audioCtx.createMediaElementSource(audio);
+                source.connect(audioCtx.destination);
+                
+                await audio.play().catch(() => {});
+
+                // Delay curto para garantir que a Audio Render Thread esteja processando buffers ativamente
+                setTimeout(() => {
+                    // Remove o iframe abruptamente para disparar HTMLMediaElement::clearMediaPlayer() na main thread
+                    frame.remove();
+                    
+                    // Agenda o próximo ciclo
+                    setTimeout(runCycle, 20);
+                }, Math.floor(Math.random() * 50) + 10); // Variação de timing para varrer a janela de corrida
+            } catch (e) {
+                console.error(e);
+                setTimeout(runCycle, 20);
+            }
+        };
+
+        document.body.appendChild(frame);
+    }
+
+    document.getElementById('btn').onclick = function() {
+        // Inicialização do AudioContext requer interação do usuário (clique) no WebKit
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass();
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+        document.getElementById('btn').disabled = true;
+        runCycle();
+    };
+    </script>
 </body>
 </html>

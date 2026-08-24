@@ -1,64 +1,81 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Teste de Regressão: setContentsSize durante descarte de Frame/Page</title>
+    <meta charset="utf-8">
+    <title>Scroll-Driven Animation Race Test</title>
+    <style>
+        body { 
+            margin: 0; 
+            height: 2000000px; 
+        }
+        @keyframes spin { 
+            from { transform: rotate(0deg); } 
+            to { transform: rotate(360deg); } 
+        }
+        #t {
+            position: fixed;
+            top: 10px; 
+            left: 10px;
+            width: 100px; 
+            height: 100px;
+            background: red;
+            will-change: transform;
+            animation: spin linear;
+            animation-timeline: scroll(root);
+        }
+        #t.noanim { 
+            animation: none; 
+        }
+    </style>
 </head>
 <body>
-<div id="status">Executando teste...</div>
+    <div id="t"></div>
+    <div id="status" style="position: fixed; top: 120px; left: 10px; font-family: monospace;">Executando...</div>
 
-<script>
-// Função utilitária de GC via alocação recursiva de memória
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 1000; i++)
-        gcRec(10);
-}
+    <script>
+    const t = document.getElementById('t');
+    const status = document.getElementById('status');
 
-function runTest() {
-    for (let i = 0; i < 100; i++) {
-        // 1. Cria um frame aninhado com sua própria LocalFrameView
-        const iframe = document.createElement("iframe");
-        document.body.appendChild(iframe);
+    // Verifica se o navegador suporta Scroll Timelines
+    if (!CSS.supports('animation-timeline', 'scroll(root)')) {
+        status.innerText = 'Scroll-driven animations não suportadas neste navegador.';
+    } else {
+        let toggle = 0;
+        let iterations = 0;
 
-        const doc = iframe.contentDocument;
-        if (!doc) continue;
-
-        // 2. Insere conteúdo e altera as dimensões do documento para forçar setContentsSize
-        const div = doc.createElement("div");
-        div.style.width = "2000px";
-        div.style.height = "2000px";
-        div.style.backgroundColor = "red";
-        doc.body.appendChild(div);
-
-        // Força o cálculo de layout / atualização de tamanho
-        iframe.contentWindow.scrollTo(500, 500);
-
-        // 3. Modifica o tamanho novamente e destrói o iframe de forma imediata
-        div.style.height = "5000px";
-
-        // Remove o elemento do DOM no mesmo tick de atualização para invalidar a Page/Frame
-        document.body.removeChild(iframe);
-
-        // 4. Dispara pressão no GC
-        if (i % 10 === 0) {
-            gc();
+        function doScroll() {
+            let target = (window.scrollY < 1000000) ? 1900000 : 100;
+            window.scrollTo({ top: target, behavior: 'smooth' });
         }
-    }
-}
 
-try {
-    runTest();
-    document.getElementById("status").innerText = "PASS: Redimensionamentos e descartes de FrameView executados sem UAF.";
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
-</script>
+        window.addEventListener('load', () => {
+            document.body.offsetHeight;
+            requestAnimationFrame(() => {
+                doScroll();
+                
+                (function loop() {
+                    // Alterna rapidamente entre ativar e desativar a timeline na Main Thread
+                    if (toggle++ & 1) {
+                        t.classList.remove('noanim');
+                    } else {
+                        t.classList.add('noanim');
+                    }
+                    
+                    document.body.offsetHeight; // Força recomputação de layout
+                    
+                    if ((toggle & 0xf) === 0) {
+                        doScroll();
+                    }
+
+                    if (++iterations < 200) {
+                        setTimeout(loop, 8);
+                    } else {
+                        status.innerText = 'Teste finalizado: Sobreviveu (sem crash).';
+                    }
+                })();
+            });
+        });
+    }
+    </script>
 </body>
 </html>
