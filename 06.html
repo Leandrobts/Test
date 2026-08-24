@@ -1,23 +1,364 @@
+
 <!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WebKit IPC/API Probe</title>
+
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+    }
+
+    #status {
+        padding: 12px;
+        border: 1px solid #888;
+        margin-bottom: 15px;
+        font-weight: bold;
+    }
+
+    #log {
+        white-space: pre-wrap;
+        font-family: monospace;
+        font-size: 13px;
+        border: 1px solid #aaa;
+        padding: 12px;
+        min-height: 300px;
+        overflow: auto;
+    }
+
+    .box {
+        border: 1px solid #777;
+        padding: 10px;
+        margin-top: 10px;
+    }
+</style>
+</head>
+
 <body>
-<button onclick="go()">START</button>
+
+<div id="status">BOOT</div>
+
+<div class="box">
+    <button id="probe">Run API Probe</button>
+    <button id="print">Test window.print()</button>
+    <button id="reset">Reset</button>
+</div>
+
+<div id="log"></div>
+
 <script>
-function go() {
-    var f = document.createElement("iframe");
-    document.body.appendChild(f);
 
-    var d = f.contentDocument;
-    d.open();
-    d.write("<body style='margin:0'><div style='height:1px'></div>");
-    d.close();
+(function () {
 
-    setTimeout(function () {
-        d.body.firstChild.style.height = "100000px";
-        f.remove();
-    }, 0);
+    var logBox = document.getElementById("log");
+    var statusBox = document.getElementById("status");
 
-    setTimeout(function () {
-        document.body.innerHTML = "PASS - no crash";
-    }, 1000);
-}
+    function log(msg) {
+        var t = new Date().getTime();
+        logBox.textContent += t + "  " + msg + "\n";
+    }
+
+    function status(msg) {
+        statusBox.textContent = msg;
+        log(msg);
+    }
+
+    function typeOf(name, value) {
+        try {
+            log(name + " = " + typeof value);
+        } catch (e) {
+            log(name + " = <error>");
+        }
+    }
+
+    function probe() {
+
+        log("========================================");
+        log("WEBKIT IPC / API DISCOVERY");
+        log("========================================");
+
+        status("PROBING");
+
+        /*
+         * Basic browser information
+         */
+        log("");
+        log("[BROWSER]");
+
+        log("userAgent = " + navigator.userAgent);
+        log("platform = " + navigator.platform);
+        log("vendor = " + navigator.vendor);
+
+        /*
+         * Potential WebKit public surfaces
+         */
+        log("");
+        log("[WEBKIT SURFACES]");
+
+        typeOf("window.webkit", window.webkit);
+
+        if (window.webkit) {
+            typeOf("window.webkit.messageHandlers",
+                   window.webkit.messageHandlers);
+
+            if (window.webkit.messageHandlers) {
+
+                var handlers = [];
+
+                try {
+                    for (var k in window.webkit.messageHandlers) {
+                        handlers.push(k);
+                    }
+                } catch (e) {
+                    log("messageHandlers enumeration error: " + e);
+                }
+
+                log("messageHandlers keys = " +
+                    (handlers.length ? handlers.join(", ") : "<none>"));
+            }
+        }
+
+        /*
+         * Test-only WebKit objects.
+         *
+         * IMPORTANT:
+         * We only detect them.
+         * We do NOT invoke them.
+         */
+        log("");
+        log("[TEST / INTERNAL OBJECTS]");
+
+        typeOf("window.internals", window.internals);
+        typeOf("window.testRunner", window.testRunner);
+        typeOf("window.testRunnerController",
+               window.testRunnerController);
+
+        /*
+         * Search for suspicious names exposed directly on window.
+         */
+        log("");
+        log("[WINDOW NAME SCAN]");
+
+        var interesting = [
+            "externalRepresentation",
+            "renderTreeExternalRepresentation",
+            "renderTreeExternalRepresentationForPrinting",
+            "getRenderTreeExternalRepresentation",
+            "showRenderTree",
+            "dumpAsText",
+            "setPrinting"
+        ];
+
+        for (var i = 0; i < interesting.length; ++i) {
+
+            var name = interesting[i];
+
+            try {
+                log("window." + name +
+                    " = " + typeof window[name]);
+            } catch (e) {
+                log("window." + name + " = <error>");
+            }
+        }
+
+        /*
+         * Search objects for property names.
+         */
+        log("");
+        log("[INTERNAL PROPERTY SCAN]");
+
+        function scanObject(label, obj) {
+
+            if (!obj) {
+                log(label + " unavailable");
+                return;
+            }
+
+            var matches = [];
+
+            try {
+
+                for (var p in obj) {
+
+                    var lower = String(p).toLowerCase();
+
+                    if (
+                        lower.indexOf("render") !== -1 ||
+                        lower.indexOf("tree") !== -1 ||
+                        lower.indexOf("print") !== -1 ||
+                        lower.indexOf("external") !== -1
+                    ) {
+                        matches.push(p);
+                    }
+                }
+
+            } catch (e) {
+                log(label + " scan error: " + e);
+                return;
+            }
+
+            log(label + " interesting properties = " +
+                (matches.length ? matches.join(", ") : "<none>"));
+        }
+
+        scanObject("window.webkit", window.webkit);
+        scanObject("window.internals", window.internals);
+        scanObject("window.testRunner", window.testRunner);
+
+        /*
+         * Printing capability.
+         */
+        log("");
+        log("[PRINTING]");
+
+        typeOf("window.print", window.print);
+
+        log("matchMedia(print).matches = " +
+            window.matchMedia("print").matches);
+
+        log("matchMedia(screen).matches = " +
+            window.matchMedia("screen").matches);
+
+        /*
+         * iframe used only for normal rendering diagnostics.
+         */
+        log("");
+        log("[FRAME]");
+
+        var frame = document.createElement("iframe");
+
+        frame.style.width = "300px";
+        frame.style.height = "100px";
+        frame.style.border = "1px solid red";
+
+        frame.onload = function () {
+            log("iframe load complete");
+        };
+
+        document.body.appendChild(frame);
+
+        log("iframe created");
+
+        /*
+         * Force ordinary layout.
+         * This is NOT an attempt to trigger the UAF.
+         */
+        try {
+            var r = frame.getBoundingClientRect();
+
+            log(
+                "iframe layout = " +
+                Math.round(r.width) + "x" +
+                Math.round(r.height)
+            );
+
+        } catch (e) {
+            log("layout error: " + e);
+        }
+
+        status("PROBE COMPLETE");
+
+        log("");
+        log("========================================");
+        log("END PROBE");
+        log("========================================");
+    }
+
+
+    /*
+     * Print-path observation.
+     *
+     * This does NOT prove that
+     * renderTreeExternalRepresentationForPrinting()
+     * was called.
+     *
+     * It only establishes whether normal print
+     * machinery is reachable from JavaScript.
+     */
+
+    function testPrint() {
+
+        log("");
+        log("========================================");
+        log("PRINT PATH TEST");
+        log("========================================");
+
+        status("PRINT TEST");
+
+        var before = window.matchMedia("print").matches;
+
+        log("before print media = " + before);
+
+        if (typeof window.print !== "function") {
+            log("window.print is NOT available");
+            status("PRINT API UNAVAILABLE");
+            return;
+        }
+
+        log("window.print is available");
+
+        window.onbeforeprint = function () {
+            log("EVENT: beforeprint");
+        };
+
+        window.onafterprint = function () {
+            log("EVENT: afterprint");
+
+            log(
+                "afterprint media = " +
+                window.matchMedia("print").matches
+            );
+
+            status("PRINT RETURNED");
+        };
+
+        log("calling window.print()");
+
+        try {
+            window.print();
+            log("window.print() returned");
+        } catch (e) {
+            log("window.print exception: " + e);
+        }
+
+        /*
+         * Give the browser time to return from the
+         * platform print path.
+         */
+        setTimeout(function () {
+
+            log(
+                "1000ms after print: " +
+                window.matchMedia("print").matches
+            );
+
+            status("PRINT TEST COMPLETE");
+
+        }, 1000);
+    }
+
+
+    function reset() {
+        logBox.textContent = "";
+        statusBox.textContent = "RESET";
+    }
+
+
+    document.getElementById("probe").onclick = probe;
+    document.getElementById("print").onclick = testPrint;
+    document.getElementById("reset").onclick = reset;
+
+
+    status("READY");
+
+    log("DOM READY");
+    log("Click 'Run API Probe' first.");
+
+})();
+
 </script>
+
+</body>
+</html>
