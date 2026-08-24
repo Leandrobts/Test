@@ -1,81 +1,316 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>Scroll-Driven Animation Race Test</title>
-    <style>
-        body { 
-            margin: 0; 
-            height: 2000000px; 
-        }
-        @keyframes spin { 
-            from { transform: rotate(0deg); } 
-            to { transform: rotate(360deg); } 
-        }
-        #t {
-            position: fixed;
-            top: 10px; 
-            left: 10px;
-            width: 100px; 
-            height: 100px;
-            background: red;
-            will-change: transform;
-            animation: spin linear;
-            animation-timeline: scroll(root);
-        }
-        #t.noanim { 
-            animation: none; 
-        }
-    </style>
+<meta charset="utf-8">
+<title>XPathResult GC Race - e8db86e</title>
+
+<style>
+body {
+    font-family: monospace;
+}
+
+#status {
+    white-space: pre-wrap;
+}
+</style>
 </head>
+
 <body>
-    <div id="t"></div>
-    <div id="status" style="position: fixed; top: 120px; left: 10px; font-family: monospace;">Executando...</div>
 
-    <script>
-    const t = document.getElementById('t');
-    const status = document.getElementById('status');
+<button onclick="start()">START</button>
+<button onclick="stop()">STOP</button>
 
-    // Verifica se o navegador suporta Scroll Timelines
-    if (!CSS.supports('animation-timeline', 'scroll(root)')) {
-        status.innerText = 'Scroll-driven animations não suportadas neste navegador.';
-    } else {
-        let toggle = 0;
-        let iterations = 0;
+<pre id="status">Ready</pre>
 
-        function doScroll() {
-            let target = (window.scrollY < 1000000) ? 1900000 : 100;
-            window.scrollTo({ top: target, behavior: 'smooth' });
+<div id="container"></div>
+
+<!-- gc.js do WebKit -->
+<script src="gc.js"></script>
+
+<script>
+"use strict";
+
+var running = false;
+var iteration = 0;
+
+var results = [];
+var garbage = [];
+
+var container = document.getElementById("container");
+var status = document.getElementById("status");
+
+
+function log(message)
+{
+    status.textContent =
+        "Iteration: " + iteration + "\n" +
+        "XPathResults: " + results.length + "\n" +
+        "Garbage: " + garbage.length + "\n\n" +
+        message;
+}
+
+
+function buildDOM()
+{
+    container.innerHTML = "";
+
+    var fragment = document.createDocumentFragment();
+
+    for (var i = 0; i < 1000; i++) {
+        var div = document.createElement("div");
+
+        div.className = i % 2 ? "odd" : "even";
+        div.setAttribute("data-id", i);
+
+        var span = document.createElement("span");
+        span.textContent = "NODE_" + i;
+
+        div.appendChild(span);
+        fragment.appendChild(div);
+    }
+
+    container.appendChild(fragment);
+}
+
+
+function createResults()
+{
+    for (var i = 0; i < 20; i++) {
+
+        try {
+            var result = document.evaluate(
+                ".//div | .//span",
+                container,
+                null,
+                XPathResult.UNORDERED_NODE_ITERATOR_TYPE,
+                null
+            );
+
+            results.push(result);
+
+        } catch (e) {
         }
+    }
+}
 
-        window.addEventListener('load', () => {
-            document.body.offsetHeight;
-            requestAnimationFrame(() => {
-                doScroll();
-                
-                (function loop() {
-                    // Alterna rapidamente entre ativar e desativar a timeline na Main Thread
-                    if (toggle++ & 1) {
-                        t.classList.remove('noanim');
-                    } else {
-                        t.classList.add('noanim');
-                    }
-                    
-                    document.body.offsetHeight; // Força recomputação de layout
-                    
-                    if ((toggle & 0xf) === 0) {
-                        doScroll();
-                    }
 
-                    if (++iterations < 200) {
-                        setTimeout(loop, 8);
-                    } else {
-                        status.innerText = 'Teste finalizado: Sobreviveu (sem crash).';
-                    }
-                })();
-            });
+function accessResults()
+{
+    for (var i = 0; i < results.length; i++) {
+
+        var result = results[i];
+
+        if (!result)
+            continue;
+
+        try {
+            result.iterateNext();
+        } catch (e) {
+        }
+    }
+}
+
+
+function mutateDOM()
+{
+    var nodes = container.getElementsByTagName("div");
+
+    for (var i = nodes.length - 1; i >= 0; i -= 4) {
+
+        try {
+            nodes[i].parentNode.removeChild(nodes[i]);
+        } catch (e) {
+        }
+    }
+
+    for (var j = 0; j < 300; j++) {
+
+        var div = document.createElement("div");
+
+        div.className = "replacement";
+        div.textContent = "replacement_" + iteration + "_" + j;
+
+        container.appendChild(div);
+    }
+}
+
+
+function createMoreResults()
+{
+    for (var i = 0; i < 20; i++) {
+
+        try {
+            var result = document.evaluate(
+                "//*[contains(@class, 'odd') or contains(@class, 'replacement')]",
+                document,
+                null,
+                XPathResult.ORDERED_NODE_ITERATOR_TYPE,
+                null
+            );
+
+            results.push(result);
+
+            result.iterateNext();
+
+        } catch (e) {
+        }
+    }
+}
+
+
+function createGarbage()
+{
+    for (var i = 0; i < 100; i++) {
+
+        garbage.push({
+            value: new Array(500).join("X" + iteration)
         });
     }
-    </script>
+
+    if (garbage.length > 500)
+        garbage.splice(0, 300);
+}
+
+
+function triggerGC()
+{
+    try {
+        gc();
+    } catch (e) {
+    }
+}
+
+
+function releaseResults()
+{
+    if (results.length > 80) {
+
+        var oldResults =
+            results.splice(
+                0,
+                Math.floor(results.length / 2)
+            );
+
+        if (typeof nukeArray === "function")
+            nukeArray(oldResults);
+
+        oldResults = null;
+    }
+}
+
+
+function cycle()
+{
+    if (!running)
+        return;
+
+    iteration++;
+
+    try {
+
+        /*
+         * 1. Criar DOM grande.
+         */
+        buildDOM();
+
+
+        /*
+         * 2. Criar vários XPathResult e mantê-los vivos.
+         */
+        createResults();
+
+
+        /*
+         * 3. Acessar os resultados.
+         */
+        accessResults();
+
+
+        /*
+         * 4. Solicitar GC enquanto XPathResults ainda existem.
+         */
+        triggerGC();
+
+
+        /*
+         * 5. Alterar o DOM.
+         */
+        mutateDOM();
+
+
+        /*
+         * 6. Criar mais XPathResults.
+         */
+        createMoreResults();
+
+
+        /*
+         * 7. Criar pressão adicional.
+         */
+        createGarbage();
+
+
+        /*
+         * 8. Novo GC.
+         */
+        triggerGC();
+
+
+        /*
+         * 9. Voltar a acessar XPathResults.
+         */
+        accessResults();
+
+
+        /*
+         * 10. Liberar parte dos resultados.
+         */
+        releaseResults();
+
+
+        /*
+         * 11. GC após liberar referências.
+         */
+        triggerGC();
+
+
+        log("Running XPathResult / GC race cycle");
+
+    } catch (e) {
+
+        log(
+            "Exception:\n" +
+            e.name + ": " + e.message
+        );
+    }
+
+    setTimeout(cycle, 0);
+}
+
+
+function start()
+{
+    if (running)
+        return;
+
+    running = true;
+    iteration = 0;
+
+    results = [];
+    garbage = [];
+
+    cycle();
+}
+
+
+function stop()
+{
+    running = false;
+
+    log("Stopped");
+}
+
+</script>
+
 </body>
 </html>

