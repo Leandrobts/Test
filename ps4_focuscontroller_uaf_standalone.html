@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WebKit FocusController UAF - PS4 standalone test</title>
+<style>
+    body { font-family: sans-serif; margin: 20px; }
+    #status { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<input id="outerInput">
+
+<iframe
+    id="targetFrame"
+    tabindex="0"
+    srcdoc="<input tabindex='0'><script>parent.innerInput = document.querySelector('input');</script>">
+</iframe>
+
+<div id="status">Loading test...</div>
+
+<script>
+/*
+ * Standalone GC helper derived from WebKit's gc.js.
+ *
+ * The original helper first uses GCController.collect() when available,
+ * then falls back to allocation pressure. This standalone version removes
+ * the internal GCController dependency and keeps the fallback mechanism.
+ */
+if (!window.gc) {
+    window.gc = function() {
+        function gcRec(n) {
+            if (n < 1)
+                return {};
+
+            var temp = {i: "ab" + i + (i / 100000)};
+            temp += "foo";
+            gcRec(n - 1);
+        }
+
+        for (var i = 0; i < 10000; i++)
+            gcRec(10);
+    };
+}
+
+let iframe = document.getElementById('targetFrame');
+let outerInput = document.getElementById('outerInput');
+let innerInput = null;
+let status = document.getElementById('status');
+
+iframe.onload = () => setTimeout(runTest, 0);
+
+function runTest() {
+    innerInput = window.innerInput;
+    window.innerInput = null;
+
+    if (!innerInput) {
+        status.textContent = 'FAIL: inner input was not obtained from iframe.';
+        return;
+    }
+
+    outerInput.addEventListener('blur', () => {
+        status.textContent = 'blur: mutating document...';
+
+        /*
+         * Keep the original ordering from the WebKit regression test:
+         * 1. adopt the iframe's input into the main document
+         * 2. release the local reference
+         * 3. remove the iframe
+         * 4. force GC pressure
+         */
+        document.adoptNode(innerInput);
+        innerInput = null;
+
+        iframe.remove();
+        iframe = null;
+
+        gc();
+
+        status.textContent = 'PASS - sequence completed (no crash)';
+    }, { once: true });
+
+    status.textContent = 'Triggering focus/keydown sequence...';
+
+    outerInput.focus();
+
+    outerInput.dispatchEvent(new KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        detail: 0,
+        key: 'Tab',
+        code: 'Tab',
+        keyIdentifier: 'U+0009',
+        location: 222,
+        ctrlKey: false,
+        altKey: true,
+        shiftKey: false,
+        metaKey: false
+    }));
+
+    /*
+     * Preserve the original test's final DOM mutation.
+     * Do this after dispatchEvent(), exactly as in the regression test.
+     */
+    document.body.innerHTML = '<p id="result">This test passes if PASS (no crash)</p>';
+
+    /*
+     * The original test calls testRunner.notifyDone() here.
+     * It is intentionally omitted because testRunner is a LayoutTests
+     * harness API and is not exposed to normal browser pages.
+     */
+}
+</script>
+</body>
+</html>
