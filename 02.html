@@ -1,25 +1,144 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html>
 <head>
-<title>AudioVideoRenderer time-observer reinstall during first tick should not crash the GPU process</title>
-<script src="resources/video-test.js"></script>
-<script>
-    async function init()
-    {
-        findMediaElement();
-
-        video.src = "resources/test-vp8.webm";
-        video.muted = true;
-
-        run('video.play()');
-        await waitFor(video, 'playing');
-        await testExpectedEventually('video.currentTime', 0, '>');
-
-        endTest();
-    }
-</script>
+<meta charset="utf-8">
+<title>FocusController Test</title>
 </head>
-<body onload="init();">
-    <video></video>
+
+<body>
+
+<button id="start">INICIAR TESTE</button>
+
+<div id="status">Aguardando...</div>
+
+<script>
+/*
+ * GC fallback baseado no gc.js do WebKit.
+ */
+if (!window.gc) {
+    window.gc = function() {
+        function gcRec(n) {
+            if (n < 1)
+                return {};
+
+            var temp = {
+                i: "ab" + i + (i / 100000)
+            };
+
+            temp += "foo";
+            gcRec(n - 1);
+        }
+
+        for (var i = 0; i < 10000; i++)
+            gcRec(10);
+    };
+}
+
+document.getElementById("start").addEventListener("click", function() {
+
+    document.getElementById("status").textContent =
+        "Executando...";
+
+    /*
+     * Mantemos a mesma estrutura do teste original:
+     *
+     * main document
+     *   ├── outerInput
+     *   └── iframe
+     *        └── innerInput
+     */
+
+    var outerInput = document.createElement("input");
+
+    outerInput.id = "outerInput";
+
+    var iframe = document.createElement("iframe");
+
+    iframe.id = "targetFrame";
+    iframe.tabIndex = 0;
+
+    iframe.srcdoc =
+        "<input tabindex='0'>" +
+        "<script>" +
+        "parent.innerInput = document.querySelector('input');" +
+        "<\/script>";
+
+    document.body.appendChild(outerInput);
+    document.body.appendChild(iframe);
+
+    iframe.onload = function() {
+
+        setTimeout(function() {
+
+            var innerInput = window.innerInput;
+
+            window.innerInput = null;
+
+            if (!innerInput) {
+                document.getElementById("status").textContent =
+                    "innerInput não encontrado";
+                return;
+            }
+
+            outerInput.addEventListener("blur", function() {
+
+                /*
+                 * MESMA SEQUÊNCIA DO TESTE ORIGINAL
+                 */
+
+                document.adoptNode(innerInput);
+
+                innerInput = null;
+
+                iframe.remove();
+
+                iframe = null;
+
+                /*
+                 * Fallback GC do WebKit.
+                 */
+                gc();
+
+                document.getElementById("status").textContent =
+                    "Sequência concluída.";
+                
+            }, {
+                once: true
+            });
+
+            /*
+             * Mesmo mecanismo do teste original.
+             */
+            outerInput.focus();
+
+            outerInput.dispatchEvent(
+                new KeyboardEvent("keydown", {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    detail: 0,
+                    key: "Tab",
+                    code: "Tab",
+                    keyIdentifier: "U+0009",
+                    location: 222,
+                    ctrlKey: false,
+                    altKey: true,
+                    shiftKey: false,
+                    metaKey: false
+                })
+            );
+
+            /*
+             * Mesma mutação final do LayoutTest.
+             */
+            document.body.innerHTML =
+                "<p>This test passes if PASS (no crash)</p>";
+
+        }, 0);
+    };
+
+});
+</script>
+
 </body>
 </html>
