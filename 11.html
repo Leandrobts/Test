@@ -1,17 +1,38 @@
 <!DOCTYPE html>
 <html>
-<body>
-<p>This test passes if it does not crash.</p>
-<div id="host"></div>
-<div id="result"></div>
+<head>
+<meta charset="utf-8">
+
+<title>WebKit 03ee49b - Implicit Global ID Variant</title>
+
+<style>
+*:last-child,
+*:placeholder-shown {
+    -webkit-clip-path: url(#fontFaceID);
+}
+
+*:empty {
+    -webkit-border-after: #D1C78D;
+}
+</style>
+
 <script>
 
-function gc() {
-    function gcRec(n) {
+/*
+ * Substituto experimental para GCController.collect().
+ */
+
+function gc()
+{
+    function gcRec(n)
+    {
         if (n < 1)
             return {};
 
-        var temp = { i: "ab" + i + (i / 100000) };
+        var temp = {
+            i: "ab" + i + (i / 100000)
+        };
+
         temp += "foo";
 
         gcRec(n - 1);
@@ -21,39 +42,559 @@ function gc() {
         gcRec(10);
 }
 
-let shadowRoot = host.attachShadow({ mode: 'open' });
-let victim = document.createElement('div');
 
-victim.tabIndex = 0;
-victim.textContent = 'Focusable';
+/*
+ * Log visual e console.
+ */
 
-shadowRoot.appendChild(victim);
+function log(message)
+{
+    console.log(message);
 
-victim.focus();
+    var output = document.getElementById("log");
 
-async function runTest() {
-
-    document.addEventListener('blur', () => {
-        victim.remove();
-        victim = null;
-        gc();
-    }, true);
-
-
-prompt('Test', '');
-await new Promise(resolve => {
-    requestAnimationFrame(() => setTimeout(resolve, 0));
-});
-
-
-
-
-
-    result.textContent = 'PASS';
+    if (output)
+        output.textContent += message + "\n";
 }
 
-runTest();
+
+/*
+ * Mostra o estado das referências implícitas.
+ *
+ * Usamos typeof porque ele não lança ReferenceError
+ * quando a variável não existe.
+ */
+
+function logImplicitIDs()
+{
+    log("");
+    log("--- IMPLICIT ID STATE ---");
+
+    log("typeof svgID = " + typeof svgID);
+    log("typeof meterID = " + typeof meterID);
+    log("typeof marqueeID = " + typeof marqueeID);
+    log(
+        "typeof animateTransformID = " +
+        typeof animateTransformID
+    );
+    log(
+        "typeof animateMotionID = " +
+        typeof animateMotionID
+    );
+    log("typeof symbolID = " + typeof symbolID);
+    log("typeof iframeID = " + typeof iframeID);
+}
+
+
+/*
+ * Callback usando deliberadamente as referências
+ * implícitas do testcase original.
+ */
+
+function domNodeRemovedCallback(event)
+{
+    log("");
+    log(">>> DOMNodeRemoved FIRED");
+    log("event.target = " + event.target.nodeName);
+
+    logImplicitIDs();
+
+    try {
+
+        log("");
+        log(
+            "Callback: BEFORE svgID.prepend(animateMotionID)"
+        );
+
+        /*
+         * Linha propositalmente igual ao testcase original.
+         *
+         * Se svgID não existir como variável implícita,
+         * esta linha deve gerar ReferenceError.
+         */
+
+        svgID.prepend(animateMotionID);
+
+        log(
+            "Callback: AFTER svgID.prepend(animateMotionID)"
+        );
+
+        log(
+            "Callback: animateMotion parent = " +
+            animateMotionID.parentNode.nodeName
+        );
+
+    } catch (e) {
+
+        log("");
+        log("!!! SVG IMPLICIT REFERENCE EXCEPTION");
+        log(e.name + ": " + e.message);
+
+        console.error(e);
+
+        /*
+         * Não interrompemos o callback.
+         *
+         * O objetivo é comparar:
+         *
+         * 1. a exceção ReferenceError
+         * 2. a sequência posterior do testcase
+         */
+
+        log(
+            "Continuing callback after SVG exception"
+        );
+    }
+
+
+    try {
+
+        log("");
+        log(
+            "Callback: BEFORE iframeID.contentDocument.createRange()"
+        );
+
+        range =
+            iframeID.contentDocument.createRange();
+
+        log(
+            "Callback: Range created"
+        );
+
+        log(
+            "Callback: BEFORE selectNodeContents(animateTransformID)"
+        );
+
+        range.selectNodeContents(
+            animateTransformID
+        );
+
+        log(
+            "Callback: BEFORE surroundContents()"
+        );
+
+        range.surroundContents(
+            document.createElement("meter")
+        );
+
+        log(
+            "Callback: surroundContents completed"
+        );
+
+    } catch (e) {
+
+        log("");
+        log("!!! RANGE EXCEPTION");
+        log(e.name + ": " + e.message);
+
+        console.error(e);
+    }
+
+
+    log("");
+    log(">>> CALLBACK END");
+}
+
+
+/*
+ * Continuação do teste.
+ */
+
+function continueAfterMutation()
+{
+    try {
+
+        log("");
+        log("================================");
+        log("CONTINUING AFTER MUTATION");
+        log("================================");
+
+
+        var svg =
+            document.getElementById("svgID");
+
+        var symbol =
+            document.getElementById("symbolID");
+
+
+        log("");
+
+        if (!svg) {
+
+            log(
+                "SVG already missing before geometry query"
+            );
+
+        } else {
+
+            log("--- BEFORE GEOMETRY QUERY ---");
+
+            var screenCTM = null;
+
+            if (
+                symbol &&
+                typeof symbol.getScreenCTM === "function"
+            ) {
+
+                log(
+                    "Using symbol.getScreenCTM()"
+                );
+
+                screenCTM =
+                    symbol.getScreenCTM();
+
+            } else if (
+                typeof svg.getScreenCTM === "function"
+            ) {
+
+                log(
+                    "symbol.getScreenCTM unavailable"
+                );
+
+                log(
+                    "Using svg.getScreenCTM()"
+                );
+
+                screenCTM =
+                    svg.getScreenCTM();
+
+            } else {
+
+                log(
+                    "getScreenCTM unavailable"
+                );
+            }
+
+
+            log("--- AFTER GEOMETRY QUERY ---");
+
+            log(
+                "screenCTM = " +
+                (screenCTM ? "OK" : "null")
+            );
+
+
+            try {
+
+                var rect =
+                    svg.getBoundingClientRect();
+
+                log(
+                    "SVG rect = " +
+                    rect.width +
+                    "x" +
+                    rect.height
+                );
+
+            } catch (e) {
+
+                log(
+                    "getBoundingClientRect exception: " +
+                    e.name +
+                    ": " +
+                    e.message
+                );
+            }
+
+
+            log("");
+            log("--- BEFORE SVG REMOVAL ---");
+
+            svg.outerHTML = "A";
+
+            log("--- AFTER SVG REMOVAL ---");
+        }
+
+
+        /*
+         * Pressão de GC.
+         */
+
+        log("");
+        log("--- BEFORE GC ---");
+
+        gc();
+
+        log("--- AFTER GC ---");
+
+
+        /*
+         * Avança o event loop.
+         */
+
+        log("");
+        log("--- WAITING FOR EVENT LOOP ---");
+
+
+        setTimeout(function() {
+
+            log("setTimeout #1 fired");
+
+            requestAnimationFrame(function() {
+
+                log(
+                    "requestAnimationFrame #1 fired"
+                );
+
+                requestAnimationFrame(function() {
+
+                    log(
+                        "requestAnimationFrame #2 fired"
+                    );
+
+                    setTimeout(function() {
+
+                        log(
+                            "setTimeout #2 fired"
+                        );
+
+                        log("");
+                        log(
+                            "================================"
+                        );
+
+                        log(
+                            "PASS IF NO CRASH"
+                        );
+
+                        log(
+                            "================================"
+                        );
+
+                    }, 0);
+
+                });
+
+            });
+
+        }, 0);
+
+    } catch (e) {
+
+        log("");
+        log("================================");
+        log("!!! POST-MUTATION EXCEPTION");
+        log(e.name + ": " + e.message);
+        log("================================");
+
+        console.error(e);
+    }
+}
+
+
+/*
+ * Teste principal.
+ */
+
+function test()
+{
+    try {
+
+        log("================================");
+        log("TEST START");
+        log("================================");
+
+
+        logImplicitIDs();
+
+
+        /*
+         * Para a mutação principal usamos referências
+         * explícitas apenas para garantir que o teste
+         * alcance o callback.
+         */
+
+        var meter =
+            document.getElementById("meterID");
+
+        var marquee =
+            document.getElementById("marqueeID");
+
+        var animateTransform =
+            document.getElementById(
+                "animateTransformID"
+            );
+
+        var animateMotion =
+            document.getElementById(
+                "animateMotionID"
+            );
+
+
+        log("");
+        log("--- INITIAL DOM STATE ---");
+
+        log(
+            "marquee parent = " +
+            marquee.parentNode.nodeName
+        );
+
+        log(
+            "animateMotion parent = " +
+            animateMotion.parentNode.nodeName
+        );
+
+        log(
+            "animateMotion is child of animateTransform = " +
+            (animateMotion.parentNode === animateTransform)
+        );
+
+
+        /*
+         * Listener original.
+         */
+
+        log("");
+        log("--- ADD DOMNodeRemoved LISTENER ---");
+
+        meter.addEventListener(
+            "DOMNodeRemoved",
+            domNodeRemovedCallback
+        );
+
+        log(
+            "DOMNodeRemoved listener added"
+        );
+
+
+        /*
+         * Tentativa reentrante.
+         */
+
+        log("");
+        log("================================");
+        log("REENTRANT INSERTION");
+        log("================================");
+
+        log(
+            "Reference valid before insertion = " +
+            (
+                animateMotion.parentNode ===
+                animateTransform
+            )
+        );
+
+
+        try {
+
+            log(
+                "--- BEFORE insertBefore(marquee, animateMotion) ---"
+            );
+
+            animateTransform.insertBefore(
+                marquee,
+                animateMotion
+            );
+
+            log(
+                "--- AFTER insertBefore ---"
+            );
+
+        } catch (e) {
+
+            log("");
+            log(
+                "!!! REENTRANT INSERTION EXCEPTION"
+            );
+
+            log(
+                e.name + ": " + e.message
+            );
+
+            console.error(e);
+        }
+
+
+        /*
+         * Estado depois da mutação.
+         */
+
+        log("");
+        log("--- DOM STATE AFTER MUTATION ---");
+
+        log(
+            "marquee parent = " +
+            (
+                marquee.parentNode ?
+                marquee.parentNode.nodeName :
+                "null"
+            )
+        );
+
+        log(
+            "animateMotion parent = " +
+            (
+                animateMotion.parentNode ?
+                animateMotion.parentNode.nodeName :
+                "null"
+            )
+        );
+
+        log(
+            "animateTransform childNodes = " +
+            animateTransform.childNodes.length
+        );
+
+
+        continueAfterMutation();
+
+    } catch (e) {
+
+        log("");
+        log("================================");
+        log("!!! MAIN EXCEPTION");
+        log(e.name + ": " + e.message);
+        log("================================");
+
+        console.error(e);
+    }
+}
 
 </script>
+</head>
+
+<body onload="test()">
+
+<pre id="log" style="
+white-space: pre-wrap;
+font-family: monospace;
+font-size: 14px;
+padding: 10px;
+border: 1px solid black;
+margin-bottom: 20px;
+"></pre>
+
+
+<meter id="meterID">
+
+    <marquee id="marqueeID">
+    </marquee>
+
+</meter>
+
+
+<svg id="svgID">
+
+    <symbol id="symbolID">
+
+        <font-face id="fontFaceID">
+
+            <animateTransform id="animateTransformID">
+
+                <animateMotion id="animateMotionID">
+                </animateMotion>
+
+            </animateTransform>
+
+        </font-face>
+
+    </symbol>
+
+</svg>
+
+
+<iframe id="iframeID">
+</iframe>
+
 </body>
 </html>
