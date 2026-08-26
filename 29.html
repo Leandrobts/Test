@@ -1,82 +1,55 @@
+
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<title>Teste de Regressão: Descarte de JSEventListener / DOMWrapperWorld após término de Worker</title>
-</head>
 <body>
-<div id="status">Executando teste...</div>
+
+<button id="start">Start</button>
 
 <script>
 function gc() {
     function gcRec(n) {
         if (n < 1)
             return {};
+
         var temp = { i: "ab" + i + (i / 100000) };
         temp += "foo";
         gcRec(n - 1);
     }
-    for (var i = 0; i < 1000; i++)
+
+    for (var i = 0; i < 10000; i++)
         gcRec(10);
 }
 
-// Script do worker anexando listeners complexos e retendo objetos em escopo
-const workerCode = `
-    const portChannel = new MessageChannel();
+const iframe = document.body.appendChild(
+    document.createElement("iframe")
+);
 
-    function onCustomMessage(e) {}
-    function onCustomError(e) {}
+iframe.width = "200";
+iframe.height = "200";
 
-    for (let i = 0; i < 50; i++) {
-        self.addEventListener('message', onCustomMessage);
-        self.addEventListener('error', onCustomError);
-        portChannel.port1.addEventListener('message', onCustomMessage);
-    }
+const div = iframe.contentDocument.body.appendChild(
+    document.createElement("div")
+);
 
-    self.onmessage = function(e) {
-        // Enfileira promessas e objetos para reter listeners na heap
-        Promise.resolve().then(() => {
-            portChannel.port1.postMessage("ping");
-        });
-    };
-`;
+div.style.width = "200px";
+div.style.height = "200px";
+div.style.background = "red";
 
-const workerBlobUrl = URL.createObjectURL(new Blob([workerCode], { type: "application/javascript" }));
+document.getElementById("start").onclick = function () {
+    div.webkitRequestFullscreen();
 
-function runWorkerWorldUAFTest() {
-    for (let cycle = 0; cycle < 100; cycle++) {
-        // 1. Cria o Web Worker
-        const worker = new Worker(workerBlobUrl);
+    const contentDocument = iframe.contentDocument;
 
-        // 2. Dispara a execução para instanciar os JSEventListeners e associar o DOMWrapperWorld
-        worker.postMessage("init");
-
-        // 3. Força o encerramento do worker no mesmo tick ou em ticks imediatos
-        // Sem o patch, a destruição da VM deixava os JSEventListeners com referências vivas ao DOMWrapperWorld
-        if (cycle % 2 === 0) {
-            worker.terminate();
-        } else {
-            setTimeout(() => {
-                worker.terminate();
-            }, 0);
-        }
-
-        // 4. Dispara pressão no Garbage Collector para liberar os listeners desalocados
-        if (cycle % 10 === 0) {
-            gc();
-        }
-    }
-}
-
-try {
-    runWorkerWorldUAFTest();
     setTimeout(() => {
-        gc();
-        document.getElementById("status").innerText = "PASS: Workers e JSEventListeners descartados sem UAF no DOMWrapperWorld.";
-    }, 250);
-} catch (e) {
-    document.getElementById("status").innerText = "FAIL: " + e.message;
-}
+        document.body.removeChild(iframe);
+
+        setTimeout(() => {
+            contentDocument.webkitCancelFullScreen();
+            gc();
+        }, 0);
+    }, 5);
+};
 </script>
+
 </body>
 </html>
