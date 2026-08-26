@@ -1,35 +1,57 @@
-<!doctype html>
-<meta charset="utf-8">
-
-<button id="go">START FULLSCREEN TEST</button>
-<div id="status"></div>
-
+<!DOCTYPE html>
+<html>
+<body>
+<p>This test passes if it does not crash.</p>
+<div id="host"></div>
+<div id="result"></div>
 <script>
-go.onclick = function () {
-    var iframe = document.createElement("iframe");
-    document.body.appendChild(iframe);
-
-    var div = iframe.contentDocument.createElement("div");
-    div.textContent = "TEST";
-    iframe.contentDocument.body.appendChild(div);
-
-    var contentDocument = iframe.contentDocument;
-
-    try {
-        div.webkitRequestFullscreen().catch(function () {});
-    } catch (e) {
+// Substituto para GCController.collect() — heurístico, mas funcional
+function gc() {
+    function gcRec(n) {
+        if (n < 1) return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
+}
 
-    document.body.removeChild(iframe);
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
+victim.focus();
 
-    setTimeout(function () {
-        try {
-            if (contentDocument.webkitCancelFullScreen)
-                contentDocument.webkitCancelFullScreen();
-        } catch (e) {
-        }
+let blurFired = false;
 
-        status.textContent = "PASS - no crash observed";
-    }, 0);
-};
+// Listener em capture para pegar o blur do elemento dentro do shadow DOM
+document.addEventListener('blur', () => {
+    blurFired = true;
+    victim.remove(); // remove do shadow DOM
+    victim = null;   // apaga a última referência JS
+    gc(); // força coleta — mais agressivo que o original por ser heurístico
+}, true);
+
+async function runTest() {
+    result.textContent = 'Running...';
+
+    // Substituto para UIHelper.setWindowIsKey(false):
+    // window.blur() roteia pelo FocusController e dispara dispatchEventsOnWindowAndFocusedElement,
+    // o mesmo caminho do bug original.
+    window.blur();
+
+    // Aguarda um frame + macrotask para o engine processar eventos pós-blur
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+
+    if (blurFired)
+        result.textContent = 'PASS';
+    else
+        result.textContent = 'WARN: blur não disparou — tente mudar de janela manualmente';
+}
+
+runTest();
 </script>
+</body>
+</html>
