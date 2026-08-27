@@ -1,113 +1,151 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>PS4 XSLT Delayed Import - Static Variant</title>
+
+<style>
+body {
+    background: #111;
+    color: #ddd;
+    font-family: Arial, sans-serif;
+    margin: 20px;
+}
+
+#log {
+    background: #000;
+    border: 1px solid #555;
+    padding: 12px;
+    white-space: pre-wrap;
+    font-family: monospace;
+    min-height: 260px;
+}
+
+iframe {
+    width: 100%;
+    height: 120px;
+    margin-top: 15px;
+    border: 1px solid #555;
+}
+</style>
+</head>
+
 <body>
-<p>This test passes if it does not crash.</p>
-<div id="host"></div>
-<div id="result"></div>
+
+<h2>XSLT Delayed Import - GitHub Pages Variant</h2>
+
+<div id="log"></div>
+
+<iframe id="f" src="resources/target.xml"></iframe>
+
 <script>
+(function () {
+    var output = document.getElementById("log");
+    var frame = document.getElementById("f");
 
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-         temp += "foo";
-        gcRec(n - 1);
+    function log(message) {
+        output.textContent += message + "\n";
     }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
-}
 
+    function triggerEmbeddedPI() {
+        try {
+            var doc = frame.contentDocument;
 
-let shadowRoot = host.attachShadow({ mode: 'open' });
+            if (!doc) {
+                log("[500ms] ERROR: contentDocument unavailable");
+                return;
+            }
 
-let victim = document.createElement('div');
+            log("[500ms] XML document acquired");
+            log("[500ms] Creating embedded xml-stylesheet PI");
 
-victim.tabIndex = 0;
-victim.textContent = 'Focusable';
+            var pi = doc.createProcessingInstruction(
+                "xml-stylesheet",
+                'type="text/xsl" href="#x"'
+            );
 
-shadowRoot.appendChild(victim);
+            doc.insertBefore(pi, doc.firstChild);
 
-victim.focus();
+            log("[500ms] PI inserted");
 
+            pi.parentNode.removeChild(pi);
 
-async function runTest() {
+            log("[500ms] PI removed");
 
-    document.addEventListener('blur', () => {
+        } catch (e) {
+            log("[500ms] Exception: " + e);
+        }
+    }
 
-        victim.remove();
+    function loadGrandchildVariant() {
+        try {
+            var doc = frame.contentDocument;
 
-        victim = null;
+            if (!doc) {
+                log("[1000ms] ERROR: contentDocument unavailable");
+                return;
+            }
 
-        gc();
+            log("[1000ms] Introducing grandchild stage");
 
-    }, true);
+            /*
+             * Remove the current xml-stylesheet PI if present.
+             * Then install a new one pointing to root-delayed.xml.
+             *
+             * This causes a new stylesheet parsing/loading path
+             * without requiring a dynamic HTTP endpoint.
+             */
 
+            var oldPI = null;
+            var node = doc.firstChild;
 
-    /*
-     * Original:
-     *
-     * await UIHelper.setWindowIsKey(false);
-     *
-     * PS4 replacement:
-     *
-     * Press the physical PS button and return
-     * to the PS4 Home screen.
-     *
-     * The PS4 Web Content Guidelines state that
-     * this produces window.onblur.
-     */
+            while (node) {
+                if (node.nodeType === 7 &&
+                    node.target === "xml-stylesheet") {
+                    oldPI = node;
+                    break;
+                }
 
+                node = node.nextSibling;
+            }
 
-    result.textContent =
-        'READY - PRESS PS BUTTON TO LEAVE BROWSER';
+            if (oldPI)
+                oldPI.parentNode.removeChild(oldPI);
 
+            var newPI = doc.createProcessingInstruction(
+                "xml-stylesheet",
+                'type="text/xsl" href="root.xsl?grandchild=1"'
+            );
 
-    /*
-     * Keep the document alive and give the focus
-     * state time to settle before the external
-     * window deactivation.
-     */
+            doc.insertBefore(newPI, doc.firstChild);
 
-    await new Promise((resolve) => {
+            log("[1000ms] New stylesheet PI inserted");
 
-        requestAnimationFrame(() => {
-            setTimeout(resolve, 0);
-        });
+        } catch (e) {
+            log("[1000ms] Exception: " + e);
+        }
+    }
 
-    });
+    log("[0ms] Test started");
+    log("[0ms] Loading target.xml");
+    log("[0ms] Initial chain:");
+    log("       target.xml -> root.xsl -> child.xsl");
 
+    setTimeout(function () {
+        triggerEmbeddedPI();
+    }, 500);
 
-    /*
-     * We cannot wait for the PS button from JavaScript.
-     *
-     * The test now waits for the real window deactivation.
-     */
+    setTimeout(function () {
+        loadGrandchildVariant();
+    }, 1000);
 
-    result.textContent =
-        'READY - PRESS PS BUTTON NOW';
+    setTimeout(function () {
+        log("[3500ms] Test completed");
+        log("[3500ms] Browser still alive");
+    }, 3500);
 
-
-    /*
-     * After returning to the browser, allow any
-     * pending event-loop work to execute.
-     */
-
-    await new Promise((resolve) => {
-
-        requestAnimationFrame(() => {
-            setTimeout(resolve, 0);
-        });
-
-    });
-
-
-    result.textContent = 'PASS';
-}
-
-
-runTest();
-
+})();
 </script>
+
 </body>
 </html>
