@@ -1,30 +1,9 @@
+
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<title>PS4 Focus / Blur Shadow DOM Diagnostic</title>
-
-<style>
-
-
-#host {
-    margin: 20px 0;
-    padding: 20px;
-    border: 2px solid black;
-}
-
-#result {
-    white-space: pre-wrap;
-    border: 1px solid black;
-    padding: 10px;
-    margin-top: 20px;
-    min-height: 300px;
-}
-</style>
-
-</head>
-
 <body>
+
+<p>This test passes if it does not crash.</p>
 
 <div id="host"></div>
 
@@ -34,16 +13,34 @@
 
 <script>
 
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
+}
+
+
 var result = document.getElementById('result');
 var host = document.getElementById('host');
 var other = document.getElementById('other');
+
 
 function log(text) {
     console.log(text);
     result.textContent += text + '\n';
 }
 
+
 function nameOf(node) {
+
     if (!node)
         return 'null';
 
@@ -65,6 +62,7 @@ function nameOf(node) {
     return node.tagName || String(node);
 }
 
+
 var shadowRoot = host.attachShadow({ mode: 'open' });
 
 var victim = document.createElement('div');
@@ -81,7 +79,7 @@ shadowRoot.appendChild(victim);
 
 
 /*
- * Mostra o estado atual do foco.
+ * Focus diagnostics.
  */
 
 function dumpFocusState(prefix) {
@@ -104,7 +102,7 @@ function dumpFocusState(prefix) {
 
     log(
         'victim.isConnected = ' +
-        victim.isConnected
+        (victim ? victim.isConnected : 'victim=null')
     );
 
     log('==========================');
@@ -113,20 +111,8 @@ function dumpFocusState(prefix) {
 
 
 /*
- * WINDOW
+ * WINDOW BLUR
  */
-
-window.addEventListener('focus', function(event) {
-
-    log(
-        '[WINDOW CAPTURE] FOCUS target = ' +
-        nameOf(event.target)
-    );
-
-    dumpFocusState('WINDOW FOCUS');
-
-}, true);
-
 
 window.addEventListener('blur', function(event) {
 
@@ -141,20 +127,16 @@ window.addEventListener('blur', function(event) {
 
 
 /*
- * DOCUMENT
+ * DOCUMENT BLUR
+ *
+ * This is the important part.
+ *
+ * The real focus transition is produced by
+ * clicking the "Other" button.
+ *
+ * During the blur handler we remove the
+ * currently focused Shadow DOM element.
  */
-
-document.addEventListener('focus', function(event) {
-
-    log(
-        '[DOCUMENT CAPTURE] FOCUS target = ' +
-        nameOf(event.target)
-    );
-
-    dumpFocusState('DOCUMENT FOCUS');
-
-}, true);
-
 
 document.addEventListener('blur', function(event) {
 
@@ -163,24 +145,52 @@ document.addEventListener('blur', function(event) {
         nameOf(event.target)
     );
 
-    dumpFocusState('DOCUMENT BLUR');
+    dumpFocusState('DOCUMENT BLUR - BEFORE REMOVAL');
+
+
+    log('[DOCUMENT] BLUR HANDLER - BEGIN');
+
+
+    if (victim) {
+
+        log('victim.remove()');
+
+        victim.remove();
+
+
+        log(
+            'victim.isConnected after remove = ' +
+            victim.isConnected
+        );
+
+
+        victim = null;
+
+        log('victim = null');
+
+
+        log('starting gc()');
+
+        gc();
+
+        log('gc() completed');
+
+    } else {
+
+        log('victim already null');
+
+    }
+
+
+    log('[DOCUMENT] BLUR HANDLER - END');
+
 
 }, true);
 
 
 /*
- * HOST
+ * HOST BLUR
  */
-
-host.addEventListener('focus', function(event) {
-
-    log(
-        '[HOST CAPTURE] FOCUS target = ' +
-        nameOf(event.target)
-    );
-
-}, true);
-
 
 host.addEventListener('blur', function(event) {
 
@@ -193,20 +203,8 @@ host.addEventListener('blur', function(event) {
 
 
 /*
- * VICTIM
+ * VICTIM BLUR
  */
-
-victim.addEventListener('focus', function(event) {
-
-    log(
-        '[VICTIM] FOCUS target = ' +
-        nameOf(event.target)
-    );
-
-    dumpFocusState('VICTIM FOCUS');
-
-});
-
 
 victim.addEventListener('blur', function(event) {
 
@@ -224,7 +222,7 @@ victim.addEventListener('blur', function(event) {
  * OTHER BUTTON
  */
 
-other.addEventListener('focus', function(event) {
+other.addEventListener('focus', function() {
 
     log('[OTHER] FOCUS');
 
@@ -233,17 +231,17 @@ other.addEventListener('focus', function(event) {
 });
 
 
-other.addEventListener('blur', function(event) {
+other.addEventListener('click', function() {
 
-    log('[OTHER] BLUR');
+    log('[OTHER] CLICK');
 
-    dumpFocusState('OTHER BLUR');
+    dumpFocusState('OTHER CLICK');
 
 });
 
 
 /*
- * CLICK DIAGNOSTICS
+ * DOCUMENT CLICK
  */
 
 document.addEventListener('click', function(event) {
@@ -253,8 +251,6 @@ document.addEventListener('click', function(event) {
         nameOf(event.target)
     );
 
-    dumpFocusState('AFTER CLICK');
-
 }, true);
 
 
@@ -263,15 +259,11 @@ document.addEventListener('click', function(event) {
  */
 
 log('======================================');
-log('PS4 FOCUS / BLUR DIAGNOSTIC STARTED');
+log('PS4 FOCUS / BLUR REMOVAL TEST');
 log('======================================');
 
 dumpFocusState('BEFORE victim.focus()');
 
-
-/*
- * Focus the element inside Shadow DOM.
- */
 
 log('Calling victim.focus()');
 
@@ -282,7 +274,8 @@ dumpFocusState('AFTER victim.focus()');
 
 
 /*
- * Wait one complete async cycle and inspect focus again.
+ * Give the browser an opportunity to
+ * stabilize the focus state.
  */
 
 requestAnimationFrame(function() {
@@ -292,14 +285,12 @@ requestAnimationFrame(function() {
         dumpFocusState('AFTER rAF + setTimeout');
 
         log('');
+        log('======================================');
         log('TEST READY');
+        log('======================================');
+
         log('');
-        log('Now test the following:');
-        log('1. Do nothing.');
-        log('2. Click on the Focusable Victim.');
-        log('3. Click on Other Focusable Element.');
-        log('4. Click elsewhere on the page.');
-        log('5. If applicable, leave and return to the browser.');
+        log('CLICK "Other Focusable Element" ONCE');
         log('');
 
     }, 0);
