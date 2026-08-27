@@ -8,9 +8,19 @@
 
     <xsl:template match="/">
         <html>
-        <body>
-            XSLT root stylesheet loaded.
-        </body>
+            <head>
+                <title>PS4 XSLT V2</title>
+            </head>
+
+            <body>
+                <h3>
+                    Root stylesheet loaded.
+                </h3>
+
+                <p>
+                    root.xsl → child.xsl → grandchild.xsl
+                </p>
+            </body>
         </html>
     </xsl:template>
 
