@@ -1,44 +1,2836 @@
+
 <!DOCTYPE html>
 <html>
-<body>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit Crash Hunter V15</title>
 
-<button id="start">Start</button>
-
-<script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+<style>
+body {
+    margin: 10px;
+    font-family: sans-serif;
+    background: #f3f3f3;
 }
 
-const iframe = document.body.appendChild(
-    document.createElement("iframe")
+button {
+    padding: 12px 32px;
+    font-size: 18px;
+}
+
+.panel {
+    margin-top: 8px;
+    padding: 9px;
+    background: white;
+    border: 1px solid #777;
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+
+#log {
+    height: 230px;
+    overflow-y: auto;
+}
+
+#testRoot {
+    margin-top: 10px;
+    min-height: 100px;
+    border: 1px solid #555;
+    background: white;
+    padding: 5px;
+}
+
+.node {
+    padding: 4px;
+    margin: 2px;
+    border: 1px solid #aaa;
+}
+</style>
+</head>
+
+<body>
+
+<h2>PS4 WebKit Crash Hunter V15</h2>
+
+<button id="start">START</button>
+
+<div id="status" class="panel">READY</div>
+<div id="pipeline" class="panel"></div>
+<div id="statistics" class="panel"></div>
+<div id="candidate" class="panel"></div>
+<div id="minimizer" class="panel"></div>
+<div id="sequence" class="panel"></div>
+<div id="log" class="panel"></div>
+
+<div id="testRoot"></div>
+
+<script>
+(function () {
+
+"use strict";
+
+
+/* ============================================================
+   CONFIGURATION
+   ============================================================ */
+
+var CONFIG = {
+
+    prefix:
+        "PS4_CRASH_HUNTER_V15_",
+
+    minOperations:
+        8,
+
+    maxOperations:
+        28,
+
+    maxObjects:
+        6,
+
+    operationDelay:
+        25,
+
+    asyncDelay:
+        60,
+
+    caseDelay:
+        80,
+
+    replayAttempts:
+        3,
+
+    maxCorpus:
+        120,
+
+    interestingScore:
+        4,
+
+    generatedProbability:
+        0.35,
+
+    maxLogLines:
+        500
+
+};
+
+
+/* ============================================================
+   STORAGE
+   ============================================================ */
+
+function storageSet(name, value)
+{
+    try {
+
+        localStorage.setItem(
+            CONFIG.prefix + name,
+            JSON.stringify(value)
+        );
+
+    }
+    catch (e) {
+    }
+}
+
+function storageGet(name, fallback)
+{
+    try {
+
+        var value =
+            localStorage.getItem(
+                CONFIG.prefix + name
+            );
+
+        if (value === null)
+            return fallback;
+
+        return JSON.parse(value);
+
+    }
+    catch (e) {
+
+        return fallback;
+
+    }
+}
+
+function storageRemove(name)
+{
+    try {
+
+        localStorage.removeItem(
+            CONFIG.prefix + name
+        );
+
+    }
+    catch (e) {
+    }
+}
+
+
+/* ============================================================
+   CLONE
+   ============================================================ */
+
+function clone(value)
+{
+    return JSON.parse(
+        JSON.stringify(value)
+    );
+}
+
+
+/* ============================================================
+   LOGGING
+   ============================================================ */
+
+function log(text)
+{
+    var box =
+        document.getElementById("log");
+
+    var lines =
+        box.textContent
+            .split("\n")
+            .filter(function (x) {
+                return x.length > 0;
+            });
+
+    lines.push(text);
+
+    while (
+        lines.length >
+        CONFIG.maxLogLines
+    ) {
+        lines.shift();
+    }
+
+    box.textContent =
+        lines.join("\n");
+
+    box.scrollTop =
+        box.scrollHeight;
+
+    console.log(text);
+}
+
+function status(text)
+{
+    document
+        .getElementById("status")
+        .textContent = text;
+}
+
+
+/* ============================================================
+   RNG
+   ============================================================ */
+
+var RNG = {
+
+    seed: 1,
+
+    state: 1
+
+};
+
+function setSeed(seed)
+{
+    RNG.seed =
+        seed >>> 0;
+
+    RNG.state =
+        RNG.seed;
+}
+
+function rnd()
+{
+    RNG.state =
+        (
+            RNG.state * 1664525 +
+            1013904223
+        ) >>> 0;
+
+    return RNG.state /
+        4294967296;
+}
+
+function randint(max)
+{
+    if (max <= 0)
+        return 0;
+
+    return Math.floor(
+        rnd() * max
+    );
+}
+
+function pick(array)
+{
+    if (!array.length)
+        return null;
+
+    return array[
+        randint(array.length)
+    ];
+}
+
+function newSeed()
+{
+    var old =
+        storageGet(
+            "lastSeed",
+            1
+        );
+
+    var seed =
+        (
+            Date.now() ^
+            old ^
+            Math.floor(
+                Math.random() *
+                0x7fffffff
+            )
+        ) >>> 0;
+
+    if (!seed)
+        seed = 1;
+
+    storageSet(
+        "lastSeed",
+        seed
+    );
+
+    return seed;
+}
+
+
+/* ============================================================
+   GLOBAL STATE
+   ============================================================ */
+
+var State = {
+
+    running:
+        false,
+
+    mode:
+        "IDLE",
+
+    run:
+        0,
+
+    caseId:
+        0,
+
+    sequence:
+        [],
+
+    index:
+        0,
+
+    objects:
+        {},
+
+    current:
+        "",
+
+    lastCompleted:
+        "",
+
+    started:
+        false,
+
+    completed:
+        false,
+
+    errors:
+        0,
+
+    events:
+        0,
+
+    asyncOps:
+        0,
+
+    score:
+        0,
+
+    history:
+        [],
+
+    transitions:
+        {},
+
+    operationTypes:
+        {},
+
+    corpus:
+        [],
+
+    candidate:
+        null,
+
+    replay:
+        null,
+
+    minimization:
+        null,
+
+    stats: {
+
+        cases:
+            0,
+
+        completed:
+            0,
+
+        interrupted:
+            0,
+
+        candidates:
+            0,
+
+        minimized:
+            0
+
+    }
+
+};
+
+
+/* ============================================================
+   MACHINE STATE
+   ============================================================ */
+
+function setMode(mode)
+{
+    State.mode =
+        mode;
+
+    storageSet(
+        "mode",
+        mode
+    );
+
+    updateDisplay();
+}
+
+
+/* ============================================================
+   EXECUTION CHECKPOINT
+   ============================================================ */
+
+function checkpoint()
+{
+    storageSet(
+        "execution",
+        {
+
+            run:
+                State.run,
+
+            caseId:
+                State.caseId,
+
+            seed:
+                RNG.seed,
+
+            sequence:
+                clone(
+                    State.sequence
+                ),
+
+            index:
+                State.index,
+
+            current:
+                State.current,
+
+            lastCompleted:
+                State.lastCompleted,
+
+            started:
+                State.started,
+
+            completed:
+                State.completed,
+
+            mode:
+                State.mode,
+
+            timestamp:
+                Date.now()
+
+        }
+    );
+}
+
+function clearCheckpoint()
+{
+    storageRemove(
+        "execution"
+    );
+}
+
+
+/* ============================================================
+   TASK STATE
+   ============================================================ */
+
+function saveTask(task)
+{
+    storageSet(
+        "task",
+        task
+    );
+}
+
+function getTask()
+{
+    return storageGet(
+        "task",
+        null
+    );
+}
+
+function clearTask()
+{
+    storageRemove(
+        "task"
+    );
+}
+
+
+/* ============================================================
+   CANDIDATE
+   ============================================================ */
+
+function saveCandidate(reason)
+{
+    State.candidate = {
+
+        id:
+            Date.now() +
+            "-" +
+            randint(100000),
+
+        reason:
+            reason,
+
+        run:
+            State.run,
+
+        caseId:
+            State.caseId,
+
+        seed:
+            RNG.seed,
+
+        sequence:
+            clone(
+                State.sequence
+            ),
+
+        index:
+            State.index,
+
+        current:
+            State.current,
+
+        lastCompleted:
+            State.lastCompleted,
+
+        timestamp:
+            Date.now()
+
+    };
+
+    storageSet(
+        "candidate",
+        State.candidate
+    );
+
+    State.stats.candidates++;
+
+    storageSet(
+        "stats",
+        State.stats
+    );
+}
+
+function loadCandidate()
+{
+    State.candidate =
+        storageGet(
+            "candidate",
+            null
+        );
+}
+
+
+/* ============================================================
+   CORPUS
+   ============================================================ */
+
+function loadCorpus()
+{
+    State.corpus =
+        storageGet(
+            "corpus",
+            []
+        );
+
+    if (
+        !Array.isArray(
+            State.corpus
+        )
+    ) {
+        State.corpus = [];
+    }
+}
+
+function saveCorpus()
+{
+    storageSet(
+        "corpus",
+        State.corpus
+    );
+}
+
+function addCorpus(
+    sequence,
+    score
+)
+{
+    State.corpus.push({
+
+        id:
+            Date.now() +
+            "-" +
+            randint(100000),
+
+        sequence:
+            clone(sequence),
+
+        score:
+            score,
+
+        uses:
+            0,
+
+        timestamp:
+            Date.now()
+
+    });
+
+    State.corpus.sort(
+        function (a, b) {
+            return b.score -
+                   a.score;
+        }
+    );
+
+    while (
+        State.corpus.length >
+        CONFIG.maxCorpus
+    ) {
+        State.corpus.pop();
+    }
+
+    saveCorpus();
+}
+
+function chooseCorpus()
+{
+    if (!State.corpus.length)
+        return null;
+
+    var total =
+        0;
+
+    var i;
+
+    for (
+        i = 0;
+        i < State.corpus.length;
+        i++
+    ) {
+
+        total +=
+            Math.max(
+                1,
+                State.corpus[i].score
+            );
+    }
+
+    var value =
+        rnd() * total;
+
+    for (
+        i = 0;
+        i < State.corpus.length;
+        i++
+    ) {
+
+        value -=
+            Math.max(
+                1,
+                State.corpus[i].score
+            );
+
+        if (
+            value <= 0
+        ) {
+            return State.corpus[i];
+        }
+    }
+
+    return State.corpus[0];
+}
+
+
+/* ============================================================
+   GENERATOR MODEL
+   ============================================================ */
+
+var IDS = [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F"
+];
+
+var ELEMENTS = [
+    "div",
+    "span",
+    "button",
+    "input"
+];
+
+function modelIds(model)
+{
+    return Object.keys(model);
+}
+
+function attached(model)
+{
+    var result = [];
+    var id;
+
+    for (id in model) {
+
+        if (
+            model[id].attached
+        ) {
+            result.push(id);
+        }
+    }
+
+    return result;
+}
+
+function detached(model)
+{
+    var result = [];
+    var id;
+
+    for (id in model) {
+
+        if (
+            !model[id].attached
+        ) {
+            result.push(id);
+        }
+    }
+
+    return result;
+}
+
+
+/* ============================================================
+   OPERATION GENERATOR
+   ============================================================ */
+
+function generateOperation(model)
+{
+    var all =
+        modelIds(model);
+
+    var on =
+        attached(model);
+
+    var off =
+        detached(model);
+
+    var choices = [];
+
+    if (
+        all.length <
+        CONFIG.maxObjects
+    ) {
+        choices.push(
+            "CREATE"
+        );
+    }
+
+    if (off.length)
+        choices.push(
+            "ATTACH"
+        );
+
+    if (on.length) {
+
+        choices.push(
+            "DETACH"
+        );
+
+        choices.push(
+            "MUTATE"
+        );
+
+        choices.push(
+            "LISTEN"
+        );
+
+        choices.push(
+            "DISPATCH"
+        );
+
+        choices.push(
+            "FOCUS"
+        );
+
+        choices.push(
+            "BLUR"
+        );
+
+        choices.push(
+            "LAYOUT"
+        );
+
+        choices.push(
+            "ASYNC_ACCESS"
+        );
+
+    }
+
+    if (all.length)
+        choices.push(
+            "ACCESS"
+        );
+
+    if (
+        on.length >= 2
+    ) {
+        choices.push(
+            "REPLACE"
+        );
+    }
+
+    var type =
+        pick(
+            choices.length ?
+            choices :
+            ["CREATE"]
+        );
+
+    if (
+        type === "CREATE"
+    ) {
+
+        var available =
+            IDS.filter(
+                function (id) {
+                    return !model[id];
+                }
+            );
+
+        var id =
+            pick(available);
+
+        model[id] = {
+            attached: false
+        };
+
+        return {
+
+            type:
+                "CREATE",
+
+            id:
+                id,
+
+            elementType:
+                pick(ELEMENTS)
+
+        };
+    }
+
+    if (
+        type === "ATTACH"
+    ) {
+
+        var attachId =
+            pick(off);
+
+        model[attachId]
+            .attached = true;
+
+        return {
+
+            type:
+                "ATTACH",
+
+            id:
+                attachId
+
+        };
+    }
+
+    if (
+        type === "DETACH"
+    ) {
+
+        var detachId =
+            pick(on);
+
+        model[detachId]
+            .attached = false;
+
+        return {
+
+            type:
+                "DETACH",
+
+            id:
+                detachId
+
+        };
+    }
+
+    if (
+        type === "REPLACE"
+    ) {
+
+        var source =
+            pick(on);
+
+        var targets =
+            on.filter(
+                function (id) {
+                    return id !== source;
+                }
+            );
+
+        var target =
+            pick(targets);
+
+        model[source]
+            .attached = false;
+
+        model[target]
+            .attached = true;
+
+        return {
+
+            type:
+                "REPLACE",
+
+            id:
+                source,
+
+            target:
+                target
+
+        };
+    }
+
+    return {
+
+        type:
+            type,
+
+        id:
+            pick(
+                type === "ACCESS" ?
+                all :
+                on
+            )
+
+    };
+}
+
+function generateSequence()
+{
+    var model = {};
+
+    var count =
+        CONFIG.minOperations +
+        randint(
+            CONFIG.maxOperations -
+            CONFIG.minOperations +
+            1
+        );
+
+    var result = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < count;
+        i++
+    ) {
+
+        result.push(
+            generateOperation(
+                model
+            )
+        );
+    }
+
+    return result;
+}
+
+
+/* ============================================================
+   MUTATION
+   ============================================================ */
+
+function mutateSequence(sequence)
+{
+    var result =
+        clone(sequence);
+
+    var mode =
+        randint(6);
+
+    if (
+        mode === 0 &&
+        result.length <
+        CONFIG.maxOperations
+    ) {
+
+        result.splice(
+            randint(
+                result.length + 1
+            ),
+            0,
+            {
+
+                type:
+                    pick([
+                        "MUTATE",
+                        "LISTEN",
+                        "DISPATCH",
+                        "LAYOUT",
+                        "ASYNC_ACCESS",
+                        "ACCESS"
+                    ]),
+
+                id:
+                    pick(IDS)
+
+            }
+        );
+    }
+
+    else if (
+        mode === 1 &&
+        result.length >
+        CONFIG.minOperations
+    ) {
+
+        result.splice(
+            randint(
+                result.length
+            ),
+            1
+        );
+    }
+
+    else if (
+        mode === 2 &&
+        result.length > 1
+    ) {
+
+        var a =
+            randint(
+                result.length
+            );
+
+        var b =
+            randint(
+                result.length
+            );
+
+        var temp =
+            result[a];
+
+        result[a] =
+            result[b];
+
+        result[b] =
+            temp;
+    }
+
+    else if (
+        mode === 3 &&
+        result.length
+    ) {
+
+        var op =
+            clone(
+                pick(result)
+            );
+
+        result.splice(
+            randint(
+                result.length + 1
+            ),
+            0,
+            op
+        );
+    }
+
+    else if (
+        mode === 4 &&
+        result.length
+    ) {
+
+        var index =
+            randint(
+                result.length
+            );
+
+        result[index] = {
+
+            type:
+                pick([
+                    "MUTATE",
+                    "LISTEN",
+                    "DISPATCH",
+                    "LAYOUT",
+                    "ASYNC_ACCESS",
+                    "ACCESS"
+                ]),
+
+            id:
+                pick(IDS)
+
+        };
+    }
+
+    else if (
+        result.length >= 3
+    ) {
+
+        /*
+         * Move a lifecycle-related
+         * operation to another location.
+         */
+
+        var from =
+            randint(
+                result.length
+            );
+
+        var moved =
+            result.splice(
+                from,
+                1
+            )[0];
+
+        var to =
+            randint(
+                result.length + 1
+            );
+
+        result.splice(
+            to,
+            0,
+            moved
+        );
+    }
+
+    return result;
+}
+
+function buildCase()
+{
+    if (
+        !State.corpus.length ||
+        rnd() <
+        CONFIG.generatedProbability
+    ) {
+        return generateSequence();
+    }
+
+    var entry =
+        chooseCorpus();
+
+    if (entry)
+        entry.uses++;
+
+    return mutateSequence(
+        entry.sequence
+    );
+}
+
+
+/* ============================================================
+   OBSERVATION
+   ============================================================ */
+
+function resetObservation()
+{
+    State.history = [];
+    State.transitions = {};
+    State.operationTypes = {};
+}
+
+function observe(op)
+{
+    State.operationTypes[
+        op.type
+    ] = true;
+
+    if (
+        State.history.length
+    ) {
+
+        var previous =
+            State.history[
+                State.history.length - 1
+            ];
+
+        var transition =
+            previous.type +
+            "->" +
+            op.type;
+
+        State.transitions[
+            transition
+        ] = true;
+    }
+
+    State.history.push(op);
+
+    if (
+        State.history.length > 12
+    ) {
+        State.history.shift();
+    }
+}
+
+function calculateScore()
+{
+    var score = 0;
+
+    score += Math.min(
+        8,
+        Object.keys(
+            State.transitions
+        ).length
+    );
+
+    if (
+        State.operationTypes.DETACH &&
+        State.operationTypes.ASYNC_ACCESS
+    ) {
+        score += 3;
+    }
+
+    if (
+        State.operationTypes.REPLACE &&
+        State.operationTypes.LAYOUT
+    ) {
+        score += 2;
+    }
+
+    if (
+        State.operationTypes.LISTEN &&
+        State.operationTypes.DISPATCH
+    ) {
+        score += 2;
+    }
+
+    if (
+        State.operationTypes.FOCUS &&
+        State.operationTypes.BLUR
+    ) {
+        score++;
+    }
+
+    if (
+        State.asyncOps
+    ) {
+        score++;
+    }
+
+    if (
+        State.errors
+    ) {
+        score += 2;
+    }
+
+    return score;
+}
+
+
+/* ============================================================
+   DOM RESET
+   ============================================================ */
+
+function resetDOM()
+{
+    State.objects = {};
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    while (
+        root.firstChild
+    ) {
+        root.removeChild(
+            root.firstChild
+        );
+    }
+}
+
+
+/* ============================================================
+   EXECUTE OPERATION
+   ============================================================ */
+
+function executeOperation(op)
+{
+    State.current =
+        describeOperation(op);
+
+    observe(op);
+
+    checkpoint();
+
+    try {
+
+        if (
+            op.type === "CREATE"
+        ) {
+
+            if (
+                State.objects[op.id]
+            ) {
+                return;
+            }
+
+            var element =
+                document.createElement(
+                    op.elementType ||
+                    "div"
+                );
+
+            element.className =
+                "node";
+
+            element.textContent =
+                op.id;
+
+            State.objects[op.id] = {
+
+                element:
+                    element
+
+            };
+        }
+
+        else {
+
+            var object =
+                State.objects[op.id];
+
+            if (!object)
+                return;
+
+            var element =
+                object.element;
+
+            if (
+                op.type === "ATTACH"
+            ) {
+
+                document
+                    .getElementById(
+                        "testRoot"
+                    )
+                    .appendChild(
+                        element
+                    );
+            }
+
+            else if (
+                op.type === "DETACH"
+            ) {
+
+                if (
+                    element.parentNode
+                ) {
+
+                    element.parentNode
+                        .removeChild(
+                            element
+                        );
+                }
+            }
+
+            else if (
+                op.type === "REPLACE"
+            ) {
+
+                var target =
+                    State.objects[
+                        op.target
+                    ];
+
+                if (
+                    target &&
+                    element.parentNode
+                ) {
+
+                    element.parentNode
+                        .replaceChild(
+                            target.element,
+                            element
+                        );
+                }
+            }
+
+            else if (
+                op.type === "MUTATE"
+            ) {
+
+                element.textContent =
+                    op.id +
+                    ":" +
+                    randint(
+                        1000000
+                    );
+
+                element.setAttribute(
+                    "data-case",
+                    String(
+                        State.caseId
+                    )
+                );
+            }
+
+            else if (
+                op.type === "LISTEN"
+            ) {
+
+                element.addEventListener(
+                    "v15-event",
+                    function () {
+                        State.events++;
+                    },
+                    false
+                );
+            }
+
+            else if (
+                op.type === "DISPATCH"
+            ) {
+
+                var event =
+                    document.createEvent(
+                        "Event"
+                    );
+
+                event.initEvent(
+                    "v15-event",
+                    true,
+                    true
+                );
+
+                element.dispatchEvent(
+                    event
+                );
+            }
+
+            else if (
+                op.type === "FOCUS"
+            ) {
+
+                if (
+                    element.focus
+                ) {
+                    element.focus();
+                }
+            }
+
+            else if (
+                op.type === "BLUR"
+            ) {
+
+                if (
+                    element.blur
+                ) {
+                    element.blur();
+                }
+            }
+
+            else if (
+                op.type === "LAYOUT"
+            ) {
+
+                void element.offsetWidth;
+
+                element.getBoundingClientRect();
+            }
+
+            else if (
+                op.type === "ASYNC_ACCESS"
+            ) {
+
+                State.asyncOps++;
+
+                (function (reference) {
+
+                    setTimeout(
+                        function () {
+
+                            try {
+
+                                void reference.parentNode;
+
+                                void reference.textContent;
+
+                                void reference.offsetWidth;
+
+                            }
+                            catch (e) {
+
+                                State.errors++;
+
+                            }
+
+                        },
+                        CONFIG.asyncDelay
+                    );
+
+                })(element);
+            }
+
+            else if (
+                op.type === "ACCESS"
+            ) {
+
+                void element.parentNode;
+
+                void element.textContent;
+
+                void element.offsetWidth;
+            }
+        }
+
+        State.lastCompleted =
+            State.current;
+
+    }
+    catch (e) {
+
+        State.errors++;
+
+        log(
+            "JS EXCEPTION: " +
+            e.name
+        );
+    }
+
+    checkpoint();
+}
+
+
+/* ============================================================
+   DESCRIPTION
+   ============================================================ */
+
+function describeOperation(op)
+{
+    var text =
+        op.type;
+
+    if (op.id)
+        text +=
+            " " +
+            op.id;
+
+    if (op.target)
+        text +=
+            " -> " +
+            op.target;
+
+    return text;
+}
+
+
+/* ============================================================
+   RUN SEQUENCE
+   ============================================================ */
+
+function runSequence(
+    sequence,
+    callback
+)
+{
+    resetDOM();
+
+    resetObservation();
+
+    State.sequence =
+        clone(sequence);
+
+    State.index =
+        0;
+
+    State.current =
+        "";
+
+    State.lastCompleted =
+        "";
+
+    State.errors =
+        0;
+
+    State.events =
+        0;
+
+    State.asyncOps =
+        0;
+
+    State.started =
+        true;
+
+    State.completed =
+        false;
+
+    checkpoint();
+
+    function next()
+    {
+        if (
+            State.index >=
+            State.sequence.length
+        ) {
+
+            setTimeout(
+                function () {
+
+                    State.completed =
+                        true;
+
+                    State.stats.completed++;
+
+                    storageSet(
+                        "stats",
+                        State.stats
+                    );
+
+                    checkpoint();
+
+                    callback();
+
+                },
+                CONFIG.asyncDelay
+            );
+
+            return;
+        }
+
+        executeOperation(
+            State.sequence[
+                State.index
+            ]
+        );
+
+        State.index++;
+
+        checkpoint();
+
+        updateDisplay();
+
+        setTimeout(
+            next,
+            CONFIG.operationDelay
+        );
+    }
+
+    next();
+}
+
+
+/* ============================================================
+   FUZZ LOOP
+   ============================================================ */
+
+function startFuzz()
+{
+    State.running =
+        true;
+
+    State.run++;
+
+    setMode(
+        "FUZZ"
+    );
+
+    function nextCase()
+    {
+        if (
+            State.mode !==
+            "FUZZ"
+        ) {
+            return;
+        }
+
+        State.caseId++;
+
+        State.stats.cases++;
+
+        setSeed(
+            newSeed()
+        );
+
+        var sequence =
+            buildCase();
+
+        runSequence(
+            sequence,
+            function () {
+
+                State.score =
+                    calculateScore();
+
+                if (
+                    State.score >=
+                    CONFIG.interestingScore
+                ) {
+
+                    addCorpus(
+                        sequence,
+                        State.score
+                    );
+                }
+
+                clearCheckpoint();
+
+                updateDisplay();
+
+                setTimeout(
+                    nextCase,
+                    CONFIG.caseDelay
+                );
+            }
+        );
+    }
+
+    nextCase();
+}
+
+
+/* ============================================================
+   REPLAY
+   ============================================================ */
+
+function createReplay()
+{
+    return {
+
+        attempt:
+            0,
+
+        required:
+            CONFIG.replayAttempts,
+
+        completed:
+            0,
+
+        interrupted:
+            0
+
+    };
+}
+
+function startReplay()
+{
+    if (
+        !State.candidate
+    ) {
+        startFuzz();
+        return;
+    }
+
+    State.replay =
+        createReplay();
+
+    storageSet(
+        "replay",
+        State.replay
+    );
+
+    setMode(
+        "REPLAY"
+    );
+
+    replayNext();
+}
+
+function replayNext()
+{
+    if (
+        State.replay.attempt >=
+        State.replay.required
+    ) {
+
+        finishReplay();
+
+        return;
+    }
+
+    State.replay.attempt++;
+
+    storageSet(
+        "replay",
+        State.replay
+    );
+
+    saveTask({
+
+        type:
+            "REPLAY",
+
+        attempt:
+            State.replay.attempt,
+
+        candidateId:
+            State.candidate.id,
+
+        awaiting:
+            true,
+
+        timestamp:
+            Date.now()
+
+    });
+
+    runSequence(
+        State.candidate.sequence,
+        function () {
+
+            State.replay.completed++;
+
+            storageSet(
+                "replay",
+                State.replay
+            );
+
+            clearTask();
+
+            clearCheckpoint();
+
+            setTimeout(
+                replayNext,
+                120
+            );
+        }
+    );
+}
+
+function finishReplay()
+{
+    /*
+     * Se houve uma interrupção recuperada,
+     * o candidato passa para minimização.
+     */
+
+    if (
+        State.replay.interrupted >
+        0
+    ) {
+
+        startMinimization();
+
+        return;
+    }
+
+    /*
+     * Um candidato que não reproduz
+     * não permanece como ativo.
+     */
+
+    clearCandidate();
+
+    storageRemove(
+        "replay"
+    );
+
+    State.replay =
+        null;
+
+    startFuzz();
+}
+
+
+/* ============================================================
+   MINIMIZATION
+   ============================================================ */
+
+function createMinimizer()
+{
+    return {
+
+        original:
+            clone(
+                State.candidate.sequence
+            ),
+
+        best:
+            clone(
+                State.candidate.sequence
+            ),
+
+        chunkSize:
+            Math.max(
+                1,
+                Math.floor(
+                    State.candidate.sequence.length /
+                    2
+                )
+            ),
+
+        chunk:
+            0,
+
+        tests:
+            0,
+
+        accepted:
+            0,
+
+        rejected:
+            0,
+
+        completed:
+            false
+
+    };
+}
+
+function saveMinimizer()
+{
+    storageSet(
+        "minimizer",
+        State.minimization
+    );
+}
+
+function startMinimization()
+{
+    State.minimization =
+        storageGet(
+            "minimizer",
+            null
+        );
+
+    if (
+        !State.minimization
+    ) {
+
+        State.minimization =
+            createMinimizer();
+    }
+
+    saveMinimizer();
+
+    setMode(
+        "MINIMIZE"
+    );
+
+    minimizationStep();
+}
+
+function proposedReduction()
+{
+    var m =
+        State.minimization;
+
+    var start =
+        m.chunk *
+        m.chunkSize;
+
+    var result =
+        clone(
+            m.best
+        );
+
+    result.splice(
+        start,
+        m.chunkSize
+    );
+
+    return result;
+}
+
+function minimizationStep()
+{
+    var m =
+        State.minimization;
+
+    if (
+        !m ||
+        m.completed
+    ) {
+
+        finishMinimization();
+
+        return;
+    }
+
+    if (
+        m.best.length <= 1 ||
+        m.chunkSize < 1
+    ) {
+
+        m.completed =
+            true;
+
+        saveMinimizer();
+
+        finishMinimization();
+
+        return;
+    }
+
+    var proposed =
+        proposedReduction();
+
+    if (
+        !proposed.length
+    ) {
+
+        advanceMinimization();
+
+        return;
+    }
+
+    m.tests++;
+
+    saveMinimizer();
+
+    /*
+     * Persistimos o teste ANTES
+     * da execução.
+     */
+
+    saveTask({
+
+        type:
+            "MINIMIZE",
+
+        candidateId:
+            State.candidate.id,
+
+        proposed:
+            clone(proposed),
+
+        bestBefore:
+            clone(m.best),
+
+        chunkSize:
+            m.chunkSize,
+
+        chunk:
+            m.chunk,
+
+        awaiting:
+            true,
+
+        timestamp:
+            Date.now()
+
+    });
+
+    State.candidate.sequence =
+        clone(proposed);
+
+    storageSet(
+        "candidate",
+        State.candidate
+    );
+
+    runSequence(
+        proposed,
+        function () {
+
+            /*
+             * A proposta completou.
+             * Não houve interrupção.
+             */
+
+            m.rejected++;
+
+            clearTask();
+
+            State.candidate.sequence =
+                clone(m.best);
+
+            storageSet(
+                "candidate",
+                State.candidate
+            );
+
+            clearCheckpoint();
+
+            saveMinimizer();
+
+            advanceMinimization();
+
+        }
+    );
+}
+
+function advanceMinimization()
+{
+    var m =
+        State.minimization;
+
+    var chunks =
+        Math.ceil(
+            m.best.length /
+            m.chunkSize
+        );
+
+    m.chunk++;
+
+    if (
+        m.chunk >= chunks
+    ) {
+
+        m.chunk = 0;
+
+        m.chunkSize =
+            Math.floor(
+                m.chunkSize / 2
+            );
+    }
+
+    saveMinimizer();
+
+    if (
+        m.chunkSize < 1 ||
+        m.best.length <= 1
+    ) {
+
+        m.completed =
+            true;
+
+        saveMinimizer();
+
+        finishMinimization();
+
+        return;
+    }
+
+    setTimeout(
+        minimizationStep,
+        100
+    );
+}
+
+
+/* ============================================================
+   RECOVER REDUCTION
+   ============================================================ */
+
+function acceptInterruptedReduction(task)
+{
+    if (
+        !State.minimization
+    ) {
+        State.minimization =
+            storageGet(
+                "minimizer",
+                null
+            );
+    }
+
+    if (
+        !State.minimization
+    )
+        return;
+
+    /*
+     * A interrupção aconteceu enquanto
+     * a sequência proposta estava sendo
+     * executada.
+     *
+     * Para o harness isso significa:
+     * candidato continua sendo interessante.
+     */
+
+    State.minimization.best =
+        clone(
+            task.proposed
+        );
+
+    State.minimization.accepted++;
+
+    State.minimization.chunk =
+        0;
+
+    State.minimization.chunkSize =
+        Math.max(
+            1,
+            Math.floor(
+                State.minimization.best.length /
+                2
+            )
+        );
+
+    saveMinimizer();
+
+    State.candidate.sequence =
+        clone(
+            State.minimization.best
+        );
+
+    storageSet(
+        "candidate",
+        State.candidate
+    );
+
+    clearTask();
+
+    State.stats.minimized++;
+
+    storageSet(
+        "stats",
+        State.stats
+    );
+
+    log(
+        "MINIMIZATION REDUCTION ACCEPTED"
+    );
+}
+
+
+/* ============================================================
+   MINIMIZATION COMPLETION
+   ============================================================ */
+
+function finishMinimization()
+{
+    if (
+        !State.minimization
+    ) {
+        startFuzz();
+        return;
+    }
+
+    var result = {
+
+        id:
+            Date.now(),
+
+        candidateId:
+            State.candidate ?
+            State.candidate.id :
+            null,
+
+        original:
+            clone(
+                State.minimization.original
+            ),
+
+        minimized:
+            clone(
+                State.minimization.best
+            ),
+
+        originalOperations:
+            State.minimization.original.length,
+
+        minimizedOperations:
+            State.minimization.best.length,
+
+        tests:
+            State.minimization.tests,
+
+        accepted:
+            State.minimization.accepted,
+
+        rejected:
+            State.minimization.rejected,
+
+        timestamp:
+            Date.now()
+
+    };
+
+    storageSet(
+        "bestCrash",
+        result
+    );
+
+    log(
+        "===== MINIMIZED CRASH CANDIDATE ====="
+    );
+
+    log(
+        "ORIGINAL OPS: " +
+        result.originalOperations
+    );
+
+    log(
+        "MINIMIZED OPS: " +
+        result.minimizedOperations
+    );
+
+    log(
+        "TESTS: " +
+        result.tests
+    );
+
+    /*
+     * Mantém o resultado persistido,
+     * mas libera o estado ativo para
+     * continuar a campanha.
+     */
+
+    clearTask();
+
+    clearCheckpoint();
+
+    clearCandidate();
+
+    storageRemove(
+        "replay"
+    );
+
+    storageRemove(
+        "minimizer"
+    );
+
+    State.replay =
+        null;
+
+    State.minimization =
+        null;
+
+    setTimeout(
+        startFuzz,
+        300
+    );
+}
+
+
+/* ============================================================
+   RECOVERY
+   ============================================================ */
+
+function recover()
+{
+    var task =
+        getTask();
+
+    var execution =
+        storageGet(
+            "execution",
+            null
+        );
+
+    /*
+     * MINIMIZATION
+     */
+
+    if (
+        task &&
+        task.type === "MINIMIZE" &&
+        task.awaiting
+    ) {
+
+        State.candidate =
+            storageGet(
+                "candidate",
+                null
+            );
+
+        State.minimization =
+            storageGet(
+                "minimizer",
+                null
+            );
+
+        if (
+            State.candidate &&
+            State.minimization
+        ) {
+
+            log(
+                "RECOVERED MINIMIZATION INTERRUPTION"
+            );
+
+            acceptInterruptedReduction(
+                task
+            );
+
+            setMode(
+                "MINIMIZE"
+            );
+
+            setTimeout(
+                minimizationStep,
+                200
+            );
+
+            return true;
+        }
+    }
+
+    /*
+     * REPLAY
+     */
+
+    if (
+        task &&
+        task.type === "REPLAY" &&
+        task.awaiting
+    ) {
+
+        State.candidate =
+            storageGet(
+                "candidate",
+                null
+            );
+
+        State.replay =
+            storageGet(
+                "replay",
+                createReplay()
+            );
+
+        if (
+            State.candidate
+        ) {
+
+            State.replay.interrupted++;
+
+            storageSet(
+                "replay",
+                State.replay
+            );
+
+            clearTask();
+
+            log(
+                "RECOVERED REPLAY INTERRUPTION"
+            );
+
+            setMode(
+                "REPLAY"
+            );
+
+            setTimeout(
+                replayNext,
+                200
+            );
+
+            return true;
+        }
+    }
+
+    /*
+     * FUZZ CASE
+     */
+
+    if (
+        execution &&
+        execution.started &&
+        !execution.completed
+    ) {
+
+        State.run =
+            execution.run;
+
+        State.caseId =
+            execution.caseId;
+
+        setSeed(
+            execution.seed
+        );
+
+        State.sequence =
+            execution.sequence;
+
+        State.index =
+            execution.index;
+
+        State.current =
+            execution.current;
+
+        State.lastCompleted =
+            execution.lastCompleted;
+
+        State.stats.interrupted++;
+
+        storageSet(
+            "stats",
+            State.stats
+        );
+
+        saveCandidate(
+            "INTERRUPTED_CASE"
+        );
+
+        log(
+            "RECOVERED CRASH CANDIDATE"
+        );
+
+        setMode(
+            "RECOVER"
+        );
+
+        return true;
+    }
+
+    return false;
+}
+
+
+/* ============================================================
+   DISPLAY
+   ============================================================ */
+
+function updateDisplay()
+{
+    document
+        .getElementById(
+            "pipeline"
+        )
+        .textContent =
+
+        "PIPELINE\n" +
+        "START\n" +
+        "  ↓\n" +
+        "FUZZ\n" +
+        "  ↓\n" +
+        "CHECKPOINT\n" +
+        "  ↓\n" +
+        "INTERRUPTION?\n" +
+        "  ↓\n" +
+        "RECOVER\n" +
+        "  ↓\n" +
+        "REPLAY\n" +
+        "  ↓\n" +
+        "MINIMIZE\n" +
+        "  ↓\n" +
+        "SAVE REPRODUCER\n" +
+        "  ↓\n" +
+        "FUZZ AGAIN";
+
+    document
+        .getElementById(
+            "statistics"
+        )
+        .textContent =
+
+        "STATISTICS\n\n" +
+
+        "Cases: " +
+        State.stats.cases +
+
+        "\nCompleted: " +
+        State.stats.completed +
+
+        "\nInterrupted: " +
+        State.stats.interrupted +
+
+        "\nCandidates: " +
+        State.stats.candidates +
+
+        "\nMinimized: " +
+        State.stats.minimized +
+
+        "\nCorpus: " +
+        State.corpus.length +
+
+        "\n\nRUN: " +
+        State.run +
+
+        "\nCASE: " +
+        State.caseId +
+
+        "\nSEED: " +
+        RNG.seed +
+
+        "\nMODE: " +
+        State.mode;
+
+    if (
+        State.candidate
+    ) {
+
+        document
+            .getElementById(
+                "candidate"
+            )
+            .textContent =
+
+            "CRASH CANDIDATE\n\n" +
+
+            "ID: " +
+            State.candidate.id +
+
+            "\nReason: " +
+            State.candidate.reason +
+
+            "\nSeed: " +
+            State.candidate.seed +
+
+            "\nCase: " +
+            State.candidate.caseId +
+
+            "\nOperation index: " +
+            State.candidate.index +
+
+            "\nCurrent: " +
+            State.candidate.current +
+
+            "\nLast completed: " +
+            State.candidate.lastCompleted +
+
+            "\nOperations: " +
+            State.candidate.sequence.length;
+
+    }
+    else {
+
+        document
+            .getElementById(
+                "candidate"
+            )
+            .textContent =
+            "CRASH CANDIDATE\nNONE";
+    }
+
+    if (
+        State.minimization
+    ) {
+
+        var m =
+            State.minimization;
+
+        document
+            .getElementById(
+                "minimizer"
+            )
+            .textContent =
+
+            "MINIMIZATION\n\n" +
+
+            "Original: " +
+            m.original.length +
+
+            "\nBest: " +
+            m.best.length +
+
+            "\nChunk size: " +
+            m.chunkSize +
+
+            "\nChunk: " +
+            m.chunk +
+
+            "\nTests: " +
+            m.tests +
+
+            "\nAccepted: " +
+            m.accepted +
+
+            "\nRejected: " +
+            m.rejected;
+
+    }
+    else {
+
+        document
+            .getElementById(
+                "minimizer"
+            )
+            .textContent =
+            "MINIMIZATION\nIDLE";
+    }
+
+    var lines = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < State.sequence.length;
+        i++
+    ) {
+
+        lines.push(
+
+            (
+                i === State.index ?
+                ">> " :
+                "   "
+            ) +
+
+            "#" +
+            ("00" + i).slice(-2) +
+            " " +
+
+            describeOperation(
+                State.sequence[i]
+            )
+        );
+    }
+
+    document
+        .getElementById(
+            "sequence"
+        )
+        .textContent =
+
+        lines.join("\n") +
+
+        "\n\nCURRENT: " +
+        State.current +
+
+        "\nLAST: " +
+        State.lastCompleted +
+
+        "\nERRORS: " +
+        State.errors +
+
+        "\nEVENTS: " +
+        State.events +
+
+        "\nASYNC: " +
+        State.asyncOps +
+
+        "\nSCORE: " +
+        State.score;
+}
+
+
+/* ============================================================
+   START
+   ============================================================ */
+
+function start()
+{
+    if (
+        State.running
+    )
+        return;
+
+    State.running =
+        true;
+
+    /*
+     * Se já existe um candidato,
+     * a automação começa pelo replay.
+     */
+
+    if (
+        State.candidate
+    ) {
+
+        startReplay();
+
+        return;
+    }
+
+    startFuzz();
+}
+
+
+/* ============================================================
+   INITIALIZATION
+   ============================================================ */
+
+State.run =
+    storageGet(
+        "run",
+        0
+    );
+
+State.caseId =
+    storageGet(
+        "caseId",
+        0
+    );
+
+State.stats =
+    storageGet(
+        "stats",
+        State.stats
+    );
+
+loadCorpus();
+
+loadCandidate();
+
+var recovered =
+    recover();
+
+if (!recovered) {
+
+    updateDisplay();
+
+    log(
+        "V15 READY"
+    );
+
+}
+else {
+
+    updateDisplay();
+
+    log(
+        "V15 RECOVERY COMPLETE"
+    );
+}
+
+storageSet(
+    "run",
+    State.run
 );
 
-const div = iframe.contentDocument.body.appendChild(
-    document.createElement("div")
+storageSet(
+    "caseId",
+    State.caseId
 );
 
-document.getElementById("start").addEventListener("click", () => {
-    div.webkitRequestFullscreen();
+document
+    .getElementById(
+        "start"
+    )
+    .addEventListener(
+        "click",
+        start,
+        false
+    );
 
-    const contentDocument = iframe.contentDocument;
-
-    document.body.removeChild(iframe);
-
-    setTimeout(() => {
-        contentDocument.webkitCancelFullScreen();
-        gc();
-    }, 50);
-});
+})();
 </script>
 
 </body>
