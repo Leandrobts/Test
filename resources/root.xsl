@@ -4,22 +4,13 @@
     version="1.0"
     xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
 
-    <xsl:import href="child.xsl"/>
+    <xsl:import href="child-01.xsl"/>
 
     <xsl:template match="/">
         <html>
-            <head>
-                <title>PS4 XSLT V2</title>
-            </head>
-
             <body>
-                <h3>
-                    Root stylesheet loaded.
-                </h3>
-
-                <p>
-                    root.xsl → child.xsl → grandchild.xsl
-                </p>
+                <h3>V3 XSLT chain loaded</h3>
+                <p>32-level import chain.</p>
             </body>
         </html>
     </xsl:template>
