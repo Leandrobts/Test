@@ -4,12 +4,10 @@
     version="1.0"
     xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
 
-    <xsl:template match="/">
-        <html>
-        <body>
+    <xsl:template match="root">
+        <div>
             Grandchild stylesheet loaded.
-        </body>
-        </html>
+        </div>
     </xsl:template>
 
 </xsl:stylesheet>
