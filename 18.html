@@ -1,34 +1,1942 @@
-This test passes if it doesn't crash.
-<script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+
+<title>Lifetime Campaign Harness V8</title>
+
+<style>
+body {
+    font-family: sans-serif;
+    margin: 10px;
 }
 
-
-function main() {
-    var v63 = x5.attachShadow({mode: "open", delegatesFocus: false});
-    x18.scrollTop;
-    v63.appendChild(x11);
-    gc();
+button {
+    padding: 8px 18px;
+    margin-right: 5px;
 }
-</script>
+
+#status,
+#campaign,
+#recovery,
+#currentCase,
+#log {
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid #777;
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+
+#log {
+    max-height: 400px;
+    overflow: auto;
+}
+
+#testRoot {
+    min-height: 150px;
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid #444;
+}
+
+.boxA {
+    padding: 8px;
+    margin: 3px;
+    border: 1px solid #777;
+}
+
+.boxB {
+    padding: 10px;
+    margin: 5px;
+    outline: 1px dotted black;
+}
+
+.boxC {
+    display: inline-block;
+    width: 40px;
+    height: 25px;
+    margin: 2px;
+    border: 1px solid #555;
+}
+</style>
 </head>
 
-<body onload="main()">
-<svg id="x11" id="x44" tabindex="-1">
-<animateTransform id="x18" 0.97 0.23 0" min="0.5s">
-</animateTransform>
-<clipPath id="x20" 8em id="x25" vector-effect="non-scaling-size" clip-path="url(#x20)" markerUnits="strokeWidth" 1 clip="rect(1em,auto,auto,546px)" patternUnits="userSpaceOnUse">
-<style width="0.20em" translate="no" draggable="true" itemref="x50" itemgroup="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">
-<blockquote id="x5" onfocusout="f3()">
-</pre>
-AAAA
-</content>
+<body>
+
+<h2>Lifetime Campaign Harness V8</h2>
+
+<button id="startButton">
+START
+</button>
+
+<button id="stopButton">
+STOP
+</button>
+
+<div id="status">
+Idle
+</div>
+
+<div id="campaign">
+Campaign not started.
+</div>
+
+<div id="recovery">
+Checking previous state...
+</div>
+
+<div id="currentCase">
+No active case.
+</div>
+
+<div id="testRoot"></div>
+
+<h3>Log</h3>
+
+<div id="log"></div>
+
+<script>
+
+/* ============================================================
+   CONFIGURATION
+   ============================================================ */
+
+var CONFIG = {
+
+    storagePrefix:
+        "LifetimeCampaignV8.",
+
+    maxStepsPerCase:
+        6,
+
+    minStepsPerCase:
+        3,
+
+    caseDelay:
+        300,
+
+    operationDelay:
+        60,
+
+    asyncDelay:
+        120,
+
+    maxHistory:
+        30
+};
+
+
+/* ============================================================
+   GLOBAL STATE
+   ============================================================ */
+
+var State = {
+
+    running:
+        false,
+
+    stopRequested:
+        false,
+
+    runId:
+        0,
+
+    caseId:
+        0,
+
+    seed:
+        0,
+
+    randomState:
+        0,
+
+    sequence:
+        [],
+
+    stepIndex:
+        0,
+
+    errors:
+        0,
+
+    events:
+        0,
+
+    logStep:
+        0,
+
+    currentModule:
+        "",
+
+    currentVariant:
+        "",
+
+    currentOperation:
+        "",
+
+    lastCompletedOperation:
+        "",
+
+    currentCaseStarted:
+        false,
+
+    currentCaseCompleted:
+        false
+};
+
+
+/* ============================================================
+   LOGGING
+   ============================================================ */
+
+function log(message)
+{
+    State.logStep++;
+
+    var line =
+        "[" +
+        ("000000" + State.logStep).slice(-6) +
+        "] " +
+        message;
+
+    var box =
+        document.getElementById("log");
+
+    box.textContent +=
+        line + "\n";
+
+    box.scrollTop =
+        box.scrollHeight;
+
+    console.log(line);
+}
+
+
+function setStatus(text)
+{
+    document
+        .getElementById("status")
+        .textContent =
+        text;
+}
+
+
+function delay(callback, ms)
+{
+    setTimeout(
+        callback,
+        ms || CONFIG.operationDelay
+    );
+}
+
+
+/* ============================================================
+   STORAGE
+   ============================================================ */
+
+function storageSet(key, value)
+{
+    try
+    {
+        localStorage.setItem(
+            CONFIG.storagePrefix + key,
+            String(value)
+        );
+    }
+    catch (e)
+    {
+    }
+}
+
+
+function storageGet(key)
+{
+    try
+    {
+        return localStorage.getItem(
+            CONFIG.storagePrefix + key
+        );
+    }
+    catch (e)
+    {
+        return null;
+    }
+}
+
+
+function saveCampaignState()
+{
+    storageSet(
+        "runId",
+        State.runId
+    );
+
+    storageSet(
+        "caseId",
+        State.caseId
+    );
+
+    storageSet(
+        "running",
+        State.running ? "1" : "0"
+    );
+
+    storageSet(
+        "seed",
+        State.seed
+    );
+}
+
+
+/* ============================================================
+   CASE CHECKPOINT
+   ============================================================ */
+
+function saveCaseCheckpoint()
+{
+    storageSet(
+        "caseActive",
+        State.currentCaseStarted ? "1" : "0"
+    );
+
+    storageSet(
+        "caseCompleted",
+        State.currentCaseCompleted ? "1" : "0"
+    );
+
+    storageSet(
+        "caseId",
+        State.caseId
+    );
+
+    storageSet(
+        "runId",
+        State.runId
+    );
+
+    storageSet(
+        "seed",
+        State.seed
+    );
+
+    storageSet(
+        "sequence",
+        serializeSequence(State.sequence)
+    );
+
+    storageSet(
+        "stepIndex",
+        State.stepIndex
+    );
+
+    storageSet(
+        "module",
+        State.currentModule
+    );
+
+    storageSet(
+        "variant",
+        State.currentVariant
+    );
+
+    storageSet(
+        "operation",
+        State.currentOperation
+    );
+
+    storageSet(
+        "lastCompleted",
+        State.lastCompletedOperation
+    );
+
+    storageSet(
+        "timestamp",
+        new Date().getTime()
+    );
+}
+
+
+function markCaseStarted()
+{
+    State.currentCaseStarted = true;
+    State.currentCaseCompleted = false;
+
+    saveCaseCheckpoint();
+}
+
+
+function markCaseCompleted()
+{
+    State.currentCaseCompleted = true;
+
+    saveCaseCheckpoint();
+}
+
+
+/* ============================================================
+   HISTORY
+   ============================================================ */
+
+function getHistory()
+{
+    var text =
+        storageGet("history");
+
+    if (!text)
+        return [];
+
+    try
+    {
+        return JSON.parse(text);
+    }
+    catch (e)
+    {
+        return [];
+    }
+}
+
+
+function saveHistory(history)
+{
+    try
+    {
+        storageSet(
+            "history",
+            JSON.stringify(history)
+        );
+    }
+    catch (e)
+    {
+    }
+}
+
+
+function addHistoryEntry(status)
+{
+    var history =
+        getHistory();
+
+    history.push({
+
+        runId:
+            State.runId,
+
+        caseId:
+            State.caseId,
+
+        seed:
+            State.seed,
+
+        status:
+            status,
+
+        sequence:
+            serializeSequence(
+                State.sequence
+            ),
+
+        lastCompleted:
+            State.lastCompletedOperation,
+
+        current:
+            State.currentModule +
+            "." +
+            State.currentVariant +
+            "." +
+            State.currentOperation,
+
+        errors:
+            State.errors,
+
+        events:
+            State.events,
+
+        timestamp:
+            new Date().getTime()
+    });
+
+    while (
+        history.length >
+        CONFIG.maxHistory
+    )
+    {
+        history.shift();
+    }
+
+    saveHistory(history);
+}
+
+
+/* ============================================================
+   RECOVERY
+   ============================================================ */
+
+function recoverPreviousCase()
+{
+    var box =
+        document.getElementById(
+            "recovery"
+        );
+
+    var active =
+        storageGet("caseActive");
+
+    var completed =
+        storageGet("caseCompleted");
+
+    if (
+        active !== "1" ||
+        completed === "1"
+    )
+    {
+        box.textContent =
+            "No incomplete case detected.";
+
+        return;
+    }
+
+    var runId =
+        storageGet("runId");
+
+    var caseId =
+        storageGet("caseId");
+
+    var seed =
+        storageGet("seed");
+
+    var sequence =
+        storageGet("sequence");
+
+    var step =
+        storageGet("stepIndex");
+
+    var module =
+        storageGet("module");
+
+    var variant =
+        storageGet("variant");
+
+    var operation =
+        storageGet("operation");
+
+    var last =
+        storageGet("lastCompleted");
+
+    box.textContent =
+        "PREVIOUS CASE INCOMPLETE\n\n" +
+        "Run: " + runId + "\n" +
+        "Case: " + caseId + "\n" +
+        "Seed: " + seed + "\n" +
+        "Step: " + step + "\n\n" +
+        "Sequence:\n" +
+        sequence +
+        "\n\nCurrent checkpoint:\n" +
+        module + "." +
+        variant + "." +
+        operation +
+        "\n\nLast completed:\n" +
+        last;
+}
+
+
+/* ============================================================
+   PRNG
+   ============================================================ */
+
+function setSeed(seed)
+{
+    State.seed =
+        seed >>> 0;
+
+    State.randomState =
+        State.seed;
+}
+
+
+function seededRandom()
+{
+    State.randomState =
+        (
+            State.randomState *
+            1664525 +
+            1013904223
+        ) >>> 0;
+
+    return (
+        State.randomState /
+        4294967296
+    );
+}
+
+
+function randomIndex(length)
+{
+    return Math.floor(
+        seededRandom() *
+        length
+    );
+}
+
+
+function generateSeed()
+{
+    var time =
+        new Date().getTime();
+
+    var previous =
+        parseInt(
+            storageGet("seed") || "0",
+            10
+        );
+
+    var seed =
+        (
+            time ^
+            previous ^
+            Math.floor(
+                Math.random() *
+                0x7fffffff
+            )
+        ) >>> 0;
+
+    if (seed === 0)
+        seed = 1;
+
+    return seed;
+}
+
+
+/* ============================================================
+   TRACKING
+   ============================================================ */
+
+function beginModule(
+    moduleName,
+    variantName
+)
+{
+    State.currentModule =
+        moduleName;
+
+    State.currentVariant =
+        variantName;
+
+    State.currentOperation =
+        "begin";
+
+    saveCaseCheckpoint();
+
+    log(
+        "MODULE | " +
+        moduleName +
+        "." +
+        variantName
+    );
+}
+
+
+function safeCall(name, callback)
+{
+    State.currentOperation =
+        name;
+
+    saveCaseCheckpoint();
+
+    var descriptor =
+        State.currentModule +
+        "." +
+        State.currentVariant +
+        "." +
+        name;
+
+    log(
+        "BEGIN | " +
+        descriptor
+    );
+
+    try
+    {
+        callback();
+
+        State.lastCompletedOperation =
+            descriptor;
+
+        saveCaseCheckpoint();
+
+        log(
+            "OK    | " +
+            descriptor
+        );
+    }
+    catch (e)
+    {
+        State.errors++;
+
+        log(
+            "ERROR | " +
+            descriptor +
+            " | " +
+            e.name
+        );
+
+        saveCaseCheckpoint();
+    }
+}
+
+
+/* ============================================================
+   CLEANUP
+   ============================================================ */
+
+function cleanup()
+{
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    while (root.firstChild)
+    {
+        root.removeChild(
+            root.firstChild
+        );
+    }
+}
+
+
+/* ============================================================
+   LIFETIME.DOM.v1
+   ============================================================ */
+
+function LIFETIME_DOM_v1(done)
+{
+    beginModule(
+        "LIFETIME.DOM",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+    safeCall(
+        "create",
+        function()
+        {
+            node =
+                document.createElement(
+                    "div"
+                );
+
+            node.className =
+                "boxA";
+
+            node.textContent =
+                "node";
+
+            root.appendChild(node);
+        }
+    );
+
+    safeCall(
+        "detach",
+        function()
+        {
+            if (node.parentNode)
+            {
+                node.parentNode.removeChild(
+                    node
+                );
+            }
+        }
+    );
+
+    safeCall(
+        "access-retained",
+        function()
+        {
+            log(
+                "CONNECTED | " +
+                !!node.parentNode
+            );
+
+            node.textContent =
+                "retained";
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.DOM.v2
+   ============================================================ */
+
+function LIFETIME_DOM_v2(done)
+{
+    beginModule(
+        "LIFETIME.DOM",
+        "v2"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var oldNode;
+
+    safeCall(
+        "create-old",
+        function()
+        {
+            oldNode =
+                document.createElement(
+                    "div"
+                );
+
+            oldNode.className =
+                "boxA";
+
+            root.appendChild(oldNode);
+        }
+    );
+
+    safeCall(
+        "replace",
+        function()
+        {
+            var replacement =
+                document.createElement(
+                    "div"
+                );
+
+            replacement.className =
+                "boxB";
+
+            root.replaceChild(
+                replacement,
+                oldNode
+            );
+        }
+    );
+
+    safeCall(
+        "access-old",
+        function()
+        {
+            oldNode.textContent =
+                "still-referenced";
+
+            log(
+                "OLD CONNECTED | " +
+                !!oldNode.parentNode
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.EVENT.v1
+   ============================================================ */
+
+function LIFETIME_EVENT_v1(done)
+{
+    beginModule(
+        "LIFETIME.EVENT",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var target;
+
+    safeCall(
+        "create",
+        function()
+        {
+            target =
+                document.createElement(
+                    "div"
+                );
+
+            target.className =
+                "boxA";
+
+            root.appendChild(target);
+        }
+    );
+
+    safeCall(
+        "listener",
+        function()
+        {
+            target.addEventListener(
+                "v8event",
+                function()
+                {
+                    State.events++;
+
+                    if (target.parentNode)
+                    {
+                        target.parentNode.removeChild(
+                            target
+                        );
+                    }
+
+                    log(
+                        "EVENT MUTATION"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "dispatch",
+        function()
+        {
+            var event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                "v8event",
+                true,
+                true
+            );
+
+            target.dispatchEvent(event);
+        }
+    );
+
+    safeCall(
+        "post-dispatch",
+        function()
+        {
+            log(
+                "CONNECTED | " +
+                !!target.parentNode
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.EVENT.v2
+   ============================================================ */
+
+function LIFETIME_EVENT_v2(done)
+{
+    beginModule(
+        "LIFETIME.EVENT",
+        "v2"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var parent;
+    var child;
+
+    safeCall(
+        "create-tree",
+        function()
+        {
+            parent =
+                document.createElement(
+                    "div"
+                );
+
+            child =
+                document.createElement(
+                    "div"
+                );
+
+            parent.className =
+                "boxA";
+
+            child.className =
+                "boxB";
+
+            parent.appendChild(child);
+            root.appendChild(parent);
+        }
+    );
+
+    safeCall(
+        "listeners",
+        function()
+        {
+            child.addEventListener(
+                "bubble",
+                function()
+                {
+                    State.events++;
+
+                    if (parent.parentNode)
+                    {
+                        parent.parentNode.removeChild(
+                            parent
+                        );
+                    }
+                },
+                false
+            );
+
+            parent.addEventListener(
+                "bubble",
+                function()
+                {
+                    State.events++;
+
+                    log(
+                        "PARENT EVENT"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "dispatch",
+        function()
+        {
+            var event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                "bubble",
+                true,
+                true
+            );
+
+            child.dispatchEvent(event);
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.FOCUS.v1
+   ============================================================ */
+
+function LIFETIME_FOCUS_v1(done)
+{
+    beginModule(
+        "LIFETIME.FOCUS",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var input;
+
+    safeCall(
+        "create-input",
+        function()
+        {
+            input =
+                document.createElement(
+                    "input"
+                );
+
+            root.appendChild(input);
+        }
+    );
+
+    safeCall(
+        "blur-handler",
+        function()
+        {
+            input.addEventListener(
+                "blur",
+                function()
+                {
+                    State.events++;
+
+                    if (input.parentNode)
+                    {
+                        input.parentNode.removeChild(
+                            input
+                        );
+                    }
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "focus",
+        function()
+        {
+            input.focus();
+        }
+    );
+
+    safeCall(
+        "blur",
+        function()
+        {
+            input.blur();
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.ASYNC.v1
+   ============================================================ */
+
+function LIFETIME_ASYNC_v1(done)
+{
+    beginModule(
+        "LIFETIME.ASYNC",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+    safeCall(
+        "create",
+        function()
+        {
+            node =
+                document.createElement(
+                    "div"
+                );
+
+            node.className =
+                "boxA";
+
+            node.textContent =
+                "async";
+
+            root.appendChild(node);
+        }
+    );
+
+    safeCall(
+        "schedule",
+        function()
+        {
+            setTimeout(
+                function()
+                {
+                    State.events++;
+
+                    log(
+                        "ASYNC CONNECTED | " +
+                        !!node.parentNode
+                    );
+
+                    log(
+                        "ASYNC TEXT | " +
+                        node.textContent
+                    );
+                },
+                40
+            );
+        }
+    );
+
+    safeCall(
+        "detach",
+        function()
+        {
+            if (node.parentNode)
+            {
+                node.parentNode.removeChild(
+                    node
+                );
+            }
+        }
+    );
+
+    delay(
+        done,
+        CONFIG.asyncDelay
+    );
+}
+
+
+/* ============================================================
+   LIFETIME.LAYOUT.v1
+   ============================================================ */
+
+function LIFETIME_LAYOUT_v1(done)
+{
+    beginModule(
+        "LIFETIME.LAYOUT",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+    safeCall(
+        "create",
+        function()
+        {
+            node =
+                document.createElement(
+                    "div"
+                );
+
+            node.className =
+                "boxA";
+
+            node.style.width =
+                "100px";
+
+            root.appendChild(node);
+        }
+    );
+
+    safeCall(
+        "layout-read",
+        function()
+        {
+            log(
+                "WIDTH | " +
+                node.offsetWidth
+            );
+        }
+    );
+
+    safeCall(
+        "detach",
+        function()
+        {
+            if (node.parentNode)
+            {
+                node.parentNode.removeChild(
+                    node
+                );
+            }
+        }
+    );
+
+    safeCall(
+        "detached-layout-read",
+        function()
+        {
+            var rect =
+                node.getBoundingClientRect();
+
+            log(
+                "RECT | " +
+                rect.width
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.LAYOUT.v2
+   ============================================================ */
+
+function LIFETIME_LAYOUT_v2(done)
+{
+    beginModule(
+        "LIFETIME.LAYOUT",
+        "v2"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+    safeCall(
+        "create",
+        function()
+        {
+            node =
+                document.createElement(
+                    "div"
+                );
+
+            node.className =
+                "boxA";
+
+            root.appendChild(node);
+        }
+    );
+
+    safeCall(
+        "mutate-layout",
+        function()
+        {
+            node.className =
+                "boxB";
+
+            node.style.width =
+                "160px";
+
+            log(
+                "WIDTH | " +
+                node.offsetWidth
+            );
+        }
+    );
+
+    safeCall(
+        "replace",
+        function()
+        {
+            var replacement =
+                document.createElement(
+                    "div"
+                );
+
+            replacement.className =
+                "boxC";
+
+            root.replaceChild(
+                replacement,
+                node
+            );
+        }
+    );
+
+    safeCall(
+        "old-layout-read",
+        function()
+        {
+            log(
+                "OLD WIDTH | " +
+                node
+                .getBoundingClientRect()
+                .width
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   STEP REGISTRY
+   ============================================================ */
+
+var Steps = [
+
+    {
+        name:
+            "LIFETIME.DOM.v1",
+
+        family:
+            "DOM",
+
+        fn:
+            LIFETIME_DOM_v1
+    },
+
+    {
+        name:
+            "LIFETIME.DOM.v2",
+
+        family:
+            "DOM",
+
+        fn:
+            LIFETIME_DOM_v2
+    },
+
+    {
+        name:
+            "LIFETIME.EVENT.v1",
+
+        family:
+            "EVENT",
+
+        fn:
+            LIFETIME_EVENT_v1
+    },
+
+    {
+        name:
+            "LIFETIME.EVENT.v2",
+
+        family:
+            "EVENT",
+
+        fn:
+            LIFETIME_EVENT_v2
+    },
+
+    {
+        name:
+            "LIFETIME.FOCUS.v1",
+
+        family:
+            "FOCUS",
+
+        fn:
+            LIFETIME_FOCUS_v1
+    },
+
+    {
+        name:
+            "LIFETIME.ASYNC.v1",
+
+        family:
+            "ASYNC",
+
+        fn:
+            LIFETIME_ASYNC_v1
+    },
+
+    {
+        name:
+            "LIFETIME.LAYOUT.v1",
+
+        family:
+            "LAYOUT",
+
+        fn:
+            LIFETIME_LAYOUT_v1
+    },
+
+    {
+        name:
+            "LIFETIME.LAYOUT.v2",
+
+        family:
+            "LAYOUT",
+
+        fn:
+            LIFETIME_LAYOUT_v2
+    }
+
+];
+
+
+/* ============================================================
+   SEQUENCE GENERATION
+   ============================================================ */
+
+function serializeSequence(sequence)
+{
+    var result = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < sequence.length;
+        i++
+    )
+    {
+        result.push(
+            sequence[i].name
+        );
+    }
+
+    return result.join(
+        " -> "
+    );
+}
+
+
+function chooseNextStep(
+    previous
+)
+{
+    var candidates = [];
+    var i;
+
+    /*
+     * Pequena preferência por mudança de família,
+     * evitando repetir indefinidamente o mesmo tipo.
+     */
+
+    for (
+        i = 0;
+        i < Steps.length;
+        i++
+    )
+    {
+        if (
+            !previous ||
+            Steps[i].family !==
+            previous.family
+        )
+        {
+            candidates.push(
+                Steps[i]
+            );
+        }
+    }
+
+    if (!candidates.length)
+        candidates = Steps;
+
+    return candidates[
+        randomIndex(
+            candidates.length
+        )
+    ];
+}
+
+
+function generateSequence()
+{
+    var length =
+        CONFIG.minStepsPerCase +
+        randomIndex(
+            CONFIG.maxStepsPerCase -
+            CONFIG.minStepsPerCase +
+            1
+        );
+
+    var sequence = [];
+    var previous = null;
+
+    var i;
+
+    for (
+        i = 0;
+        i < length;
+        i++
+    )
+    {
+        var step =
+            chooseNextStep(
+                previous
+            );
+
+        sequence.push(step);
+
+        previous = step;
+    }
+
+    return sequence;
+}
+
+
+/* ============================================================
+   DISPLAY
+   ============================================================ */
+
+function updateCampaignDisplay()
+{
+    document
+        .getElementById(
+            "campaign"
+        )
+        .textContent =
+        "RUN: " +
+        State.runId +
+        "\nCASE: " +
+        State.caseId +
+        "\nSEED: " +
+        State.seed +
+        "\nRUNNING: " +
+        State.running;
+}
+
+
+function updateCaseDisplay()
+{
+    document
+        .getElementById(
+            "currentCase"
+        )
+        .textContent =
+        "CURRENT CASE\n\n" +
+        serializeSequence(
+            State.sequence
+        ) +
+        "\n\nSTEP: " +
+        State.stepIndex +
+        "/" +
+        State.sequence.length +
+        "\n\nCURRENT:\n" +
+        State.currentModule +
+        "." +
+        State.currentVariant +
+        "." +
+        State.currentOperation +
+        "\n\nLAST COMPLETED:\n" +
+        State.lastCompletedOperation;
+}
+
+
+/* ============================================================
+   CASE EXECUTION
+   ============================================================ */
+
+function resetCaseState()
+{
+    State.errors = 0;
+    State.events = 0;
+
+    State.stepIndex = 0;
+
+    State.currentModule = "";
+    State.currentVariant = "";
+    State.currentOperation = "";
+    State.lastCompletedOperation = "";
+
+    State.currentCaseStarted = false;
+    State.currentCaseCompleted = false;
+
+    cleanup();
+}
+
+
+function executeCurrentCase(done)
+{
+    resetCaseState();
+
+    markCaseStarted();
+
+    updateCaseDisplay();
+
+    log("");
+    log(
+        "CASE START | " +
+        State.caseId
+    );
+
+    log(
+        "SEED | " +
+        State.seed
+    );
+
+    log(
+        "SEQUENCE | " +
+        serializeSequence(
+            State.sequence
+        )
+    );
+
+    function nextStep()
+    {
+        if (State.stopRequested)
+        {
+            log(
+                "STOP REQUESTED"
+            );
+
+            done("STOPPED");
+
+            return;
+        }
+
+        if (
+            State.stepIndex >=
+            State.sequence.length
+        )
+        {
+            markCaseCompleted();
+
+            addHistoryEntry(
+                "COMPLETED"
+            );
+
+            log(
+                "CASE COMPLETED"
+            );
+
+            log(
+                "ERRORS | " +
+                State.errors
+            );
+
+            log(
+                "EVENTS | " +
+                State.events
+            );
+
+            done("COMPLETED");
+
+            return;
+        }
+
+        var step =
+            State.sequence[
+                State.stepIndex
+            ];
+
+        State.stepIndex++;
+
+        saveCaseCheckpoint();
+
+        updateCaseDisplay();
+
+        log(
+            "STEP | " +
+            State.stepIndex +
+            "/" +
+            State.sequence.length +
+            " | " +
+            step.name
+        );
+
+        step.fn(
+            function()
+            {
+                updateCaseDisplay();
+
+                delay(
+                    nextStep,
+                    CONFIG.operationDelay
+                );
+            }
+        );
+    }
+
+    nextStep();
+}
+
+
+/* ============================================================
+   CAMPAIGN ENGINE
+   ============================================================ */
+
+function startCampaign()
+{
+    if (State.running)
+        return;
+
+    State.running = true;
+
+    State.stopRequested = false;
+
+    State.logStep = 0;
+
+    State.runId++;
+
+    saveCampaignState();
+
+    setStatus(
+        "Campaign running"
+    );
+
+    log(
+        "================================"
+    );
+
+    log(
+        "V8 CAMPAIGN START"
+    );
+
+    log(
+        "RUN | " +
+        State.runId
+    );
+
+    function nextCase()
+    {
+        if (State.stopRequested)
+        {
+            State.running = false;
+
+            saveCampaignState();
+
+            setStatus(
+                "Stopped"
+            );
+
+            log(
+                "CAMPAIGN STOPPED"
+            );
+
+            return;
+        }
+
+        State.caseId++;
+
+        State.seed =
+            generateSeed();
+
+        setSeed(
+            State.seed
+        );
+
+        State.sequence =
+            generateSequence();
+
+        saveCampaignState();
+
+        updateCampaignDisplay();
+
+        executeCurrentCase(
+            function(result)
+            {
+                if (
+                    result ===
+                    "STOPPED"
+                )
+                {
+                    State.running =
+                        false;
+
+                    saveCampaignState();
+
+                    setStatus(
+                        "Stopped"
+                    );
+
+                    return;
+                }
+
+                cleanup();
+
+                updateCampaignDisplay();
+
+                delay(
+                    nextCase,
+                    CONFIG.caseDelay
+                );
+            }
+        );
+    }
+
+    nextCase();
+}
+
+
+/* ============================================================
+   STOP
+   ============================================================ */
+
+function stopCampaign()
+{
+    if (!State.running)
+        return;
+
+    State.stopRequested =
+        true;
+
+    setStatus(
+        "Stopping after current operation..."
+    );
+
+    log(
+        "STOP REQUEST RECEIVED"
+    );
+}
+
+
+/* ============================================================
+   UI
+   ============================================================ */
+
+document
+    .getElementById(
+        "startButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            startCampaign();
+        },
+        false
+    );
+
+
+document
+    .getElementById(
+        "stopButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            stopCampaign();
+        },
+        false
+    );
+
+
+/* ============================================================
+   INITIALIZATION
+   ============================================================ */
+
+State.runId =
+    parseInt(
+        storageGet("runId") || "0",
+        10
+    );
+
+State.caseId =
+    parseInt(
+        storageGet("caseId") || "0",
+        10
+    );
+
+if (
+    isNaN(State.runId)
+)
+{
+    State.runId = 0;
+}
+
+if (
+    isNaN(State.caseId)
+)
+{
+    State.caseId = 0;
+}
+
+log(
+    "V8 INITIALIZED"
+);
+
+recoverPreviousCase();
+
+updateCampaignDisplay();
+
+</script>
+
+</body>
+</html>

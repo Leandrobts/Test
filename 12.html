@@ -2,223 +2,1112 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>WebKit 03ee49b - Literal Variant</title>
+<title>PS4 WebKit Structured Test Harness V2</title>
 
 <style>
-*:last-child,*:placeholder-shown {
-    -webkit-clip-path: url(#fontFaceID);
+body {
+    font-family: sans-serif;
+    margin: 10px;
 }
 
-*:empty {
-    -webkit-border-after: #D1C78D;
+#controls {
+    margin-bottom: 10px;
+}
+
+#status {
+    margin: 10px 0;
+    padding: 6px;
+    border: 1px solid #999;
+}
+
+#testRoot {
+    position: relative;
+    min-height: 180px;
+    padding: 8px;
+    border: 1px solid #444;
+    overflow: hidden;
+}
+
+.mutationA {
+    position: relative;
+    padding: 8px;
+    margin: 3px;
+    border-top: 1px solid green;
+}
+
+.mutationB {
+    position: relative;
+    padding: 5px;
+    margin-left: 10px;
+    outline: 1px dotted black;
+}
+
+.layoutNode {
+    display: inline-block;
+    width: 30px;
+    height: 20px;
+    margin: 2px;
+    border: 1px solid #999;
+}
+
+#log {
+    font-family: monospace;
+    white-space: pre-wrap;
+    border: 1px solid #444;
+    padding: 8px;
+    margin-top: 10px;
+    max-height: 400px;
+    overflow: auto;
 }
 </style>
+</head>
+
+<body>
+
+<h2>PS4 WebKit Structured Test Harness V2</h2>
+
+<div id="controls">
+    <button id="runButton">Run Selected Scenario</button>
+    <button id="runAllButton">Run All Scenarios</button>
+    <button id="clearButton">Clear Log</button>
+
+    <select id="scenarioSelect">
+        <option value="0">Scenario 1 - DOM ? Events ? Layout</option>
+        <option value="1">Scenario 2 - Canvas ? DOM ? Events</option>
+        <option value="2">Scenario 3 - Events ? DOM ? Canvas</option>
+        <option value="3">Scenario 4 - Layout ? DOM ? Editing</option>
+        <option value="4">Scenario 5 - Canvas ? Layout ? DOM</option>
+        <option value="5">Scenario 6 - Events ? Canvas ? Layout</option>
+    </select>
+</div>
+
+<div id="status">Ready</div>
+
+<div id="testRoot">
+    <template id="templateNode">
+        <div class="layoutNode">template</div>
+    </template>
+
+    <details id="detailsNode" open>
+        <summary>Details</summary>
+        Test content
+    </details>
+
+    <canvas id="mainCanvas" width="32" height="32"></canvas>
+</div>
+
+<div id="log"></div>
 
 <script>
 
-/*
- * Logger simples.
- *
- * Não é chamado dentro das linhas críticas do testcase,
- * apenas antes do início e através do tratamento global
- * de erros.
- */
+/* ============================================================
+   CORE
+   ============================================================ */
 
-function log(message)
-{
-    console.log(message);
+var TestState = {
+    running: false,
+    step: 0,
+    errors: 0,
 
-    var output = document.getElementById("log");
+    currentModule: "",
+    currentOperation: "",
 
-    if (output)
-        output.textContent += message + "\n";
-}
+    currentScenario: -1,
 
+    sequence: [],
+    sequenceIndex: 0,
 
-/*
- * Captura exceções não tratadas.
- *
- * Retornamos false para não suprimir o erro natural
- * do navegador.
- */
-
-window.onerror = function(message, source, lineno, colno, error)
-{
-    log("");
-    log("================================");
-    log("UNCAUGHT EXCEPTION");
-    log("================================");
-    log("message: " + message);
-    log("line: " + lineno);
-    log("column: " + colno);
-
-    if (error) {
-        log("name: " + error.name);
-        log("detail: " + error.message);
-    }
-
-    log("================================");
-
-    return false;
+    runAll: false,
+    allScenarioIndex: 0
 };
 
 
-/*
- * Substituto para GCController.collect().
- *
- * Baseado na função gc.js usada nos testes anteriores.
- */
-
-function gc()
+function log(message)
 {
-    function gcRec(n)
+    TestState.step++;
+
+    var text =
+        "[" +
+        ("0000" + TestState.step).slice(-4) +
+        "] " +
+        message;
+
+    var element = document.getElementById("log");
+
+    if (element)
+        element.textContent += text + "\n";
+
+    console.log(text);
+}
+
+
+function setStatus(text)
+{
+    var element = document.getElementById("status");
+
+    if (element)
+        element.textContent = text;
+}
+
+
+function safeCall(name, callback)
+{
+    TestState.currentOperation = name;
+
+    log(
+        "BEGIN | " +
+        TestState.currentModule +
+        " | " +
+        name
+    );
+
+    try
     {
-        if (n < 1)
-            return {};
+        callback();
 
-        var temp = {
-            i: "ab" + i + (i / 100000)
-        };
+        log(
+            "OK    | " +
+            TestState.currentModule +
+            " | " +
+            name
+        );
+    }
+    catch (e)
+    {
+        TestState.errors++;
 
-        temp += "foo";
+        log(
+            "ERROR | " +
+            TestState.currentModule +
+            " | " +
+            name +
+            " | " +
+            e.name
+        );
+    }
+}
 
-        gcRec(n - 1);
+
+function beginModule(name)
+{
+    TestState.currentModule = name;
+
+    log("");
+    log("========================================");
+    log("MODULE: " + name);
+    log("========================================");
+}
+
+
+function delay(callback)
+{
+    setTimeout(callback, 100);
+}
+
+
+/* ============================================================
+   CLEANUP
+   ============================================================ */
+
+function cleanupRoot()
+{
+    var root = document.getElementById("testRoot");
+
+    var children = [];
+
+    var i;
+
+    for (i = 0; i < root.childNodes.length; i++)
+        children.push(root.childNodes[i]);
+
+    for (i = 0; i < children.length; i++)
+    {
+        var node = children[i];
+
+        if (
+            node.id !== "templateNode" &&
+            node.id !== "detailsNode" &&
+            node.id !== "mainCanvas"
+        )
+        {
+            try
+            {
+                root.removeChild(node);
+            }
+            catch (e)
+            {
+            }
+        }
     }
 
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+    var details = document.getElementById("detailsNode");
+
+    if (details)
+        details.open = true;
+
+    var canvas = document.getElementById("mainCanvas");
+
+    if (
+        canvas &&
+        !canvas.parentNode
+    )
+    {
+        root.appendChild(canvas);
+    }
 }
 
 
-/*
- * ==================================================
- * TESTCASE ORIGINAL
- * ==================================================
- *
- * A sequência abaixo foi mantida deliberadamente
- * próxima do commit 03ee49b.
- */
+/* ============================================================
+   MODULE: DOM
+   ============================================================ */
 
-function test()
+function moduleDOM(done)
 {
-    var divElement = document.createElement("div");
+    beginModule("DOM");
 
-    meterID.addEventListener(
-        "DOMNodeRemoved",
-        domNodeRemovedCallback
-    );
+    var root = document.getElementById("testRoot");
 
-    var insertedElement =
-        animateTransformID.insertAdjacentElement(
-            "afterbegin",
-            marqueeID
+    var container = null;
+
+    safeCall("create-container", function()
+    {
+        container = document.createElement("div");
+
+        container.className = "mutationA";
+        container.id = "dynamicContainer";
+
+        container.textContent =
+            "dynamic container";
+
+        root.appendChild(container);
+    });
+
+
+    safeCall("create-child", function()
+    {
+        var child = document.createElement("span");
+
+        child.id = "dynamicChild";
+
+        child.textContent =
+            " child ";
+
+        container.appendChild(child);
+    });
+
+
+    safeCall("insert-before", function()
+    {
+        var node = document.createElement("em");
+
+        node.textContent = "before ";
+
+        if (container.firstChild)
+            container.insertBefore(
+                node,
+                container.firstChild
+            );
+    });
+
+
+    safeCall("replace-child", function()
+    {
+        var child =
+            document.getElementById(
+                "dynamicChild"
+            );
+
+        if (child && child.parentNode)
+        {
+            var replacement =
+                document.createElement("strong");
+
+            replacement.id =
+                "dynamicReplacement";
+
+            replacement.textContent =
+                "replacement";
+
+            child.parentNode.replaceChild(
+                replacement,
+                child
+            );
+        }
+    });
+
+
+    safeCall("move-node", function()
+    {
+        var node =
+            document.getElementById(
+                "dynamicReplacement"
+            );
+
+        if (node)
+            root.appendChild(node);
+    });
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   MODULE: EVENTS
+   ============================================================ */
+
+function moduleEvents(done)
+{
+    beginModule("EVENTS");
+
+    var root =
+        document.getElementById(
+            "testRoot"
         );
 
-    var screenCTM =
-        symbolID.getScreenCTM();
+    var input = null;
 
-    svgID.outerHTML = "A";
 
-    gc();
+    safeCall("create-input", function()
+    {
+        input =
+            document.createElement("input");
 
-    document.body.innerHTML =
-        'PASS if no crash.';
+        input.type = "text";
+
+        input.id =
+            "eventInput";
+
+        input.value =
+            "event test";
+
+        root.appendChild(input);
+    });
+
+
+    safeCall("install-focus", function()
+    {
+        input.addEventListener(
+            "focus",
+            function()
+            {
+                log("EVENT | focus");
+            },
+            false
+        );
+    });
+
+
+    safeCall("install-blur", function()
+    {
+        input.addEventListener(
+            "blur",
+            function()
+            {
+                log("EVENT | blur");
+            },
+            false
+        );
+    });
+
+
+    safeCall("focus", function()
+    {
+        input.focus();
+    });
+
+
+    safeCall("blur", function()
+    {
+        input.blur();
+    });
+
+
+    safeCall("custom-event", function()
+    {
+        var event =
+            document.createEvent("Event");
+
+        event.initEvent(
+            "structuredtest",
+            true,
+            true
+        );
+
+        input.dispatchEvent(event);
+    });
+
+
+    safeCall("remove-input", function()
+    {
+        if (
+            input &&
+            input.parentNode
+        )
+        {
+            input.parentNode.removeChild(
+                input
+            );
+        }
+    });
+
+
+    delay(done);
 }
 
 
-function domNodeRemovedCallback()
+/* ============================================================
+   MODULE: LAYOUT
+   ============================================================ */
+
+function moduleLayout(done)
 {
-    svgID.prepend(animateMotionID);
+    beginModule("LAYOUT");
 
-    range =
-        iframeID.contentDocument.createRange();
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
 
-    range.selectNodeContents(
-        animateTransformID
-    );
+    var container = null;
 
-    range.surroundContents(
-        document.createElement("meter")
+
+    safeCall("create-layout", function()
+    {
+        container =
+            document.createElement("div");
+
+        container.id =
+            "layoutContainer";
+
+        root.appendChild(container);
+    });
+
+
+    safeCall("create-nodes", function()
+    {
+        var i;
+
+        for (i = 0; i < 6; i++)
+        {
+            var node =
+                document.createElement("div");
+
+            node.className =
+                "layoutNode";
+
+            node.textContent =
+                "N" + i;
+
+            container.appendChild(node);
+        }
+    });
+
+
+    safeCall("style-a", function()
+    {
+        container.className =
+            "mutationA";
+
+        container.style.width =
+            "180px";
+    });
+
+
+    safeCall("layout-read-a", function()
+    {
+        log(
+            "LAYOUT | width=" +
+            container.offsetWidth +
+            " height=" +
+            container.offsetHeight
+        );
+    });
+
+
+    safeCall("style-b", function()
+    {
+        container.className =
+            "mutationB";
+
+        container.style.padding =
+            "12px";
+    });
+
+
+    safeCall("layout-read-b", function()
+    {
+        var rect =
+            container.getBoundingClientRect();
+
+        log(
+            "RECT | " +
+            rect.width +
+            "x" +
+            rect.height
+        );
+    });
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   MODULE: CANVAS
+   ============================================================ */
+
+function moduleCanvas(done)
+{
+    beginModule("CANVAS");
+
+    var canvas =
+        document.getElementById(
+            "mainCanvas"
+        );
+
+    var context = null;
+
+
+    safeCall("get-context", function()
+    {
+        context =
+            canvas.getContext("2d");
+    });
+
+
+    safeCall("draw-a", function()
+    {
+        if (context)
+            context.fillRect(
+                0,
+                0,
+                16,
+                16
+            );
+    });
+
+
+    safeCall("resize", function()
+    {
+        canvas.width = 64;
+        canvas.height = 64;
+    });
+
+
+    safeCall("draw-b", function()
+    {
+        context =
+            canvas.getContext("2d");
+
+        if (context)
+            context.fillRect(
+                4,
+                4,
+                32,
+                32
+            );
+    });
+
+
+    safeCall("toBlob", function()
+    {
+        if (!canvas.toBlob)
+        {
+            log("INFO | toBlob unavailable");
+            return;
+        }
+
+        canvas.toBlob(
+            function(blob)
+            {
+                log(
+                    "CALLBACK | toBlob | " +
+                    (
+                        blob
+                        ? "blob"
+                        : "null"
+                    )
+                );
+            }
+        );
+    });
+
+
+    safeCall("detach", function()
+    {
+        if (canvas.parentNode)
+            canvas.parentNode.removeChild(
+                canvas
+            );
+    });
+
+
+    safeCall("reattach", function()
+    {
+        document
+            .getElementById("testRoot")
+            .appendChild(canvas);
+    });
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   MODULE: EDITING
+   ============================================================ */
+
+function moduleEditing(done)
+{
+    beginModule("EDITING");
+
+    safeCall("selectAll", function()
+    {
+        if (document.execCommand)
+        {
+            document.execCommand(
+                "selectAll",
+                false,
+                null
+            );
+        }
+    });
+
+
+    safeCall("insertText", function()
+    {
+        if (document.execCommand)
+        {
+            document.execCommand(
+                "insertText",
+                false,
+                " "
+            );
+        }
+    });
+
+
+    safeCall("undo", function()
+    {
+        if (document.execCommand)
+        {
+            document.execCommand(
+                "undo",
+                false,
+                null
+            );
+        }
+    });
+
+
+    safeCall("redo", function()
+    {
+        if (document.execCommand)
+        {
+            document.execCommand(
+                "redo",
+                false,
+                null
+            );
+        }
+    });
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   MODULE: MISC EVENTS
+   ============================================================ */
+
+function moduleMisc(done)
+{
+    beginModule("MISC");
+
+    var details =
+        document.getElementById(
+            "detailsNode"
+        );
+
+
+    safeCall("install-toggle", function()
+    {
+        details.addEventListener(
+            "toggle",
+            function()
+            {
+                log("EVENT | toggle");
+            },
+            false
+        );
+    });
+
+
+    safeCall("close-details", function()
+    {
+        details.open = false;
+    });
+
+
+    safeCall("open-details", function()
+    {
+        details.open = true;
+    });
+
+
+    safeCall("clone-template", function()
+    {
+        var template =
+            document.getElementById(
+                "templateNode"
+            );
+
+        var clone =
+            template.content.cloneNode(true);
+
+        document
+            .getElementById("testRoot")
+            .appendChild(clone);
+    });
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   SCENARIOS
+   ============================================================ */
+
+var Scenarios = [
+
+    {
+        name:
+            "DOM -> EVENTS -> LAYOUT",
+
+        modules: [
+            moduleDOM,
+            moduleEvents,
+            moduleLayout
+        ]
+    },
+
+    {
+        name:
+            "CANVAS -> DOM -> EVENTS",
+
+        modules: [
+            moduleCanvas,
+            moduleDOM,
+            moduleEvents
+        ]
+    },
+
+    {
+        name:
+            "EVENTS -> DOM -> CANVAS",
+
+        modules: [
+            moduleEvents,
+            moduleDOM,
+            moduleCanvas
+        ]
+    },
+
+    {
+        name:
+            "LAYOUT -> DOM -> EDITING",
+
+        modules: [
+            moduleLayout,
+            moduleDOM,
+            moduleEditing
+        ]
+    },
+
+    {
+        name:
+            "CANVAS -> LAYOUT -> DOM",
+
+        modules: [
+            moduleCanvas,
+            moduleLayout,
+            moduleDOM
+        ]
+    },
+
+    {
+        name:
+            "EVENTS -> CANVAS -> LAYOUT",
+
+        modules: [
+            moduleEvents,
+            moduleCanvas,
+            moduleLayout
+        ]
+    }
+];
+
+
+/* ============================================================
+   SEQUENCER
+   ============================================================ */
+
+function executeNextModule()
+{
+    if (
+        TestState.sequenceIndex >=
+        TestState.sequence.length
+    )
+    {
+        finishScenario();
+        return;
+    }
+
+
+    var module =
+        TestState.sequence[
+            TestState.sequenceIndex
+        ];
+
+    TestState.sequenceIndex++;
+
+
+    module(
+        function()
+        {
+            executeNextModule();
+        }
     );
 }
 
 
-/*
- * Observação assíncrona.
- *
- * Se a sequência principal completar normalmente,
- * estes callbacks demonstram que o event loop continuou.
- *
- * Se uma exceção não tratada interromper test(),
- * o navegador ainda poderá executar este timer.
- */
+function startScenario(index)
+{
+    if (TestState.running)
+    {
+        log(
+            "INFO | Test already running"
+        );
 
-setTimeout(function()
+        return;
+    }
+
+
+    if (
+        index < 0 ||
+        index >= Scenarios.length
+    )
+        return;
+
+
+    cleanupRoot();
+
+
+    TestState.running = true;
+
+    TestState.step = 0;
+
+    TestState.errors = 0;
+
+    TestState.currentScenario =
+        index;
+
+    TestState.sequence =
+        Scenarios[index].modules;
+
+    TestState.sequenceIndex = 0;
+
+
+    document
+        .getElementById("log")
+        .textContent = "";
+
+
+    setStatus(
+        "Running Scenario " +
+        (index + 1)
+    );
+
+
+    log(
+        "PS4 WEBKIT STRUCTURED TEST HARNESS V2"
+    );
+
+    log(
+        "SCENARIO " +
+        (index + 1) +
+        ": " +
+        Scenarios[index].name
+    );
+
+    log(
+        "MODULE COUNT: " +
+        TestState.sequence.length
+    );
+
+
+    setTimeout(
+        executeNextModule,
+        100
+    );
+}
+
+
+function finishScenario()
 {
     log("");
-    log("================================");
-    log("ASYNC OBSERVATION");
-    log("================================");
+
+    log("========================================");
 
     log(
-        "typeof svgID = " +
-        typeof svgID
+        "SCENARIO FINISHED"
     );
 
     log(
-        "typeof animateMotionID = " +
-        typeof animateMotionID
+        "SCENARIO: " +
+        (TestState.currentScenario + 1)
     );
 
     log(
-        "document.readyState = " +
-        document.readyState
+        "LAST MODULE: " +
+        TestState.currentModule
     );
 
-    log("event loop still running");
+    log(
+        "LAST OPERATION: " +
+        TestState.currentOperation
+    );
 
-    log("================================");
+    log(
+        "ERROR COUNT: " +
+        TestState.errors
+    );
 
-}, 1000);
+    log("========================================");
+
+
+    cleanupRoot();
+
+    TestState.running = false;
+
+
+    setStatus(
+        "Finished Scenario " +
+        (TestState.currentScenario + 1) +
+        " | Errors: " +
+        TestState.errors
+    );
+
+
+    if (TestState.runAll)
+    {
+        TestState.allScenarioIndex++;
+
+        if (
+            TestState.allScenarioIndex <
+            Scenarios.length
+        )
+        {
+            setTimeout(
+                function()
+                {
+                    startScenario(
+                        TestState.allScenarioIndex
+                    );
+                },
+                500
+            );
+        }
+        else
+        {
+            TestState.runAll = false;
+
+            log(
+                "ALL SCENARIOS FINISHED"
+            );
+
+            setStatus(
+                "All scenarios finished"
+            );
+        }
+    }
+}
+
+
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+
+document
+    .getElementById("runButton")
+    .addEventListener(
+        "click",
+        function()
+        {
+            var select =
+                document.getElementById(
+                    "scenarioSelect"
+                );
+
+            TestState.runAll = false;
+
+            startScenario(
+                parseInt(
+                    select.value,
+                    10
+                )
+            );
+        },
+        false
+    );
+
+
+document
+    .getElementById("runAllButton")
+    .addEventListener(
+        "click",
+        function()
+        {
+            if (TestState.running)
+                return;
+
+            TestState.runAll = true;
+
+            TestState.allScenarioIndex = 0;
+
+            startScenario(0);
+        },
+        false
+    );
+
+
+document
+    .getElementById("clearButton")
+    .addEventListener(
+        "click",
+        function()
+        {
+            document
+                .getElementById("log")
+                .textContent = "";
+        },
+        false
+    );
+
+
+/* ============================================================
+   INITIALIZATION
+   ============================================================ */
+
+log(
+    "Harness V2 initialized"
+);
 
 </script>
-</head>
-
-<body onload="test()">
-
-<pre id="log" style="
-white-space: pre-wrap;
-font-family: monospace;
-font-size: 14px;
-padding: 10px;
-border: 1px solid black;
-margin-bottom: 20px;
-">
-LITERAL TEST READY
-Waiting for body onload...
-</pre>
-
-
-<meter id="meterID">
-    <marquee id="marqueeID">
-    </marquee>
-</meter>
-
-
-<svg id="svgID">
-    <symbol id="symbolID">
-        <font-face id="fontFaceID">
-            <animateTransform id="animateTransformID">
-                <animateMotion id="animateMotionID">
-                </animateMotion>
-            </animateTransform>
-        </font-face>
-    </symbol>
-</svg>
-
-
-<iframe id="iframeID">
-</iframe>
 
 </body>
 </html>

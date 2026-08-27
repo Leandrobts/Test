@@ -3,598 +3,1248 @@
 <head>
 <meta charset="utf-8">
 
-<title>WebKit 03ee49b - Implicit Global ID Variant</title>
+<title>PS4 WebKit Structured Test Harness V1</title>
 
 <style>
-*:last-child,
-*:placeholder-shown {
-    -webkit-clip-path: url(#fontFaceID);
-}
+    /*
+     * Base inspirada no estilo heterogêneo do testcase original,
+     * porém organizada para permitir mutações controladas.
+     */
 
-*:empty {
-    -webkit-border-after: #D1C78D;
-}
+    #testRoot {
+        position: relative;
+        width: 90%;
+        min-height: 200px;
+
+        border-bottom-left-radius: 20% 0.16em;
+        -webkit-user-modify: read-write-plaintext-only;
+
+        caret-color: auto;
+        column-break-after: auto;
+
+        font-variant: small-caps;
+
+        overflow-x: hidden;
+
+        text-decoration-style: dotted;
+
+        outline-offset: 10px;
+
+        -webkit-shape-outside:
+            repeating-linear-gradient(
+                rgba(215,83,81,0.5),
+                rgba(215,83,81,0.5) 10px,
+                transparent 10px,
+                transparent 20px
+            );
+    }
+
+    .mutationA {
+        position: relative;
+        padding: 10px;
+        margin: 4px;
+        border-top: 1px solid green;
+    }
+
+    .mutationB {
+        position: absolute;
+        padding-top: 2px;
+        outline: 1px dotted black;
+    }
+
+    .layoutNode {
+        display: block;
+        width: 40px;
+        height: 20px;
+        margin: 1px;
+    }
+
+    #log {
+        font-family: monospace;
+        white-space: pre-wrap;
+
+        border: 1px solid black;
+        padding: 10px;
+
+        margin-top: 20px;
+
+        max-height: 400px;
+        overflow: auto;
+
+        -webkit-user-modify: read-write-plaintext-only;
+    }
 </style>
+
+</head>
+
+<body>
+
+<h2>PS4 WebKit Structured Test Harness V1</h2>
+
+<button id="runButton">
+    Run Test
+</button>
+
+<button id="clearButton">
+    Clear Log
+</button>
+
+<div id="status">
+    Waiting...
+</div>
+
+<div id="testRoot">
+
+    <template id="templateNode">
+        <div class="layoutNode">
+            template node
+        </div>
+    </template>
+
+    <details id="detailsNode" open>
+        <summary>Test details</summary>
+        Details content
+    </details>
+
+    <canvas
+        id="mainCanvas"
+        width="32"
+        height="32">
+    </canvas>
+
+</div>
+
+<div id="log"></div>
+
 
 <script>
 
-/*
- * Substituto experimental para GCController.collect().
+/* ============================================================
+ *
+ * CORE
+ *
+ * ============================================================
  */
 
-function gc()
-{
-    function gcRec(n)
-    {
-        if (n < 1)
-            return {};
+var TestState = {
+    running: false,
 
-        var temp = {
-            i: "ab" + i + (i / 100000)
-        };
+    step: 0,
 
-        temp += "foo";
+    currentModule: "",
 
-        gcRec(n - 1);
-    }
+    lastOperation: "",
 
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
-}
+    errors: 0,
 
+    results: []
+};
 
-/*
- * Log visual e console.
- */
 
 function log(message)
 {
-    console.log(message);
+    var text;
 
-    var output = document.getElementById("log");
+    TestState.step++;
 
-    if (output)
-        output.textContent += message + "\n";
+    text =
+        "[" +
+        ("0000" + TestState.step).slice(-4) +
+        "] " +
+        message;
+
+    TestState.results.push(text);
+
+    var logElement =
+        document.getElementById("log");
+
+    if (logElement)
+        logElement.textContent += text + "\n";
+
+    console.log(text);
 }
 
 
-/*
- * Mostra o estado das referências implícitas.
+function setStatus(message)
+{
+    var element =
+        document.getElementById("status");
+
+    if (element)
+        element.textContent = message;
+}
+
+
+function safeCall(name, callback)
+{
+    TestState.lastOperation = name;
+
+    log(
+        "BEGIN | " +
+        TestState.currentModule +
+        " | " +
+        name
+    );
+
+    try
+    {
+        callback();
+
+        log(
+            "OK    | " +
+            TestState.currentModule +
+            " | " +
+            name
+        );
+    }
+    catch (e)
+    {
+        TestState.errors++;
+
+        log(
+            "ERROR | " +
+            TestState.currentModule +
+            " | " +
+            name +
+            " | " +
+            e.name +
+            ": " +
+            e.message
+        );
+    }
+}
+
+
+function beginModule(name)
+{
+    TestState.currentModule = name;
+
+    log("");
+    log("========================================");
+    log("MODULE: " + name);
+    log("========================================");
+}
+
+
+function wait(ms, callback)
+{
+    setTimeout(callback, ms);
+}
+
+
+/* ============================================================
  *
- * Usamos typeof porque ele não lança ReferenceError
- * quando a variável não existe.
+ * MODULE 1
+ * DOM MUTATION
+ *
+ * ============================================================
  */
 
-function logImplicitIDs()
+function runDOMMutation()
 {
-    log("");
-    log("--- IMPLICIT ID STATE ---");
+    beginModule("DOM MUTATION");
 
-    log("typeof svgID = " + typeof svgID);
-    log("typeof meterID = " + typeof meterID);
-    log("typeof marqueeID = " + typeof marqueeID);
-    log(
-        "typeof animateTransformID = " +
-        typeof animateTransformID
-    );
-    log(
-        "typeof animateMotionID = " +
-        typeof animateMotionID
-    );
-    log("typeof symbolID = " + typeof symbolID);
-    log("typeof iframeID = " + typeof iframeID);
-}
+    var root =
+        document.getElementById("testRoot");
 
+    var container = null;
 
-/*
- * Callback usando deliberadamente as referências
- * implícitas do testcase original.
- */
+    safeCall(
+        "create-container",
 
-function domNodeRemovedCallback(event)
-{
-    log("");
-    log(">>> DOMNodeRemoved FIRED");
-    log("event.target = " + event.target.nodeName);
+        function()
+        {
+            container =
+                document.createElement("div");
 
-    logImplicitIDs();
+            container.id =
+                "mutationContainer";
 
-    try {
+            container.className =
+                "mutationA";
 
-        log("");
-        log(
-            "Callback: BEFORE svgID.prepend(animateMotionID)"
-        );
+            container.textContent =
+                "DOM mutation container";
 
-        /*
-         * Linha propositalmente igual ao testcase original.
-         *
-         * Se svgID não existir como variável implícita,
-         * esta linha deve gerar ReferenceError.
-         */
-
-        svgID.prepend(animateMotionID);
-
-        log(
-            "Callback: AFTER svgID.prepend(animateMotionID)"
-        );
-
-        log(
-            "Callback: animateMotion parent = " +
-            animateMotionID.parentNode.nodeName
-        );
-
-    } catch (e) {
-
-        log("");
-        log("!!! SVG IMPLICIT REFERENCE EXCEPTION");
-        log(e.name + ": " + e.message);
-
-        console.error(e);
-
-        /*
-         * Não interrompemos o callback.
-         *
-         * O objetivo é comparar:
-         *
-         * 1. a exceção ReferenceError
-         * 2. a sequência posterior do testcase
-         */
-
-        log(
-            "Continuing callback after SVG exception"
-        );
-    }
-
-
-    try {
-
-        log("");
-        log(
-            "Callback: BEFORE iframeID.contentDocument.createRange()"
-        );
-
-        range =
-            iframeID.contentDocument.createRange();
-
-        log(
-            "Callback: Range created"
-        );
-
-        log(
-            "Callback: BEFORE selectNodeContents(animateTransformID)"
-        );
-
-        range.selectNodeContents(
-            animateTransformID
-        );
-
-        log(
-            "Callback: BEFORE surroundContents()"
-        );
-
-        range.surroundContents(
-            document.createElement("meter")
-        );
-
-        log(
-            "Callback: surroundContents completed"
-        );
-
-    } catch (e) {
-
-        log("");
-        log("!!! RANGE EXCEPTION");
-        log(e.name + ": " + e.message);
-
-        console.error(e);
-    }
-
-
-    log("");
-    log(">>> CALLBACK END");
-}
-
-
-/*
- * Continuação do teste.
- */
-
-function continueAfterMutation()
-{
-    try {
-
-        log("");
-        log("================================");
-        log("CONTINUING AFTER MUTATION");
-        log("================================");
-
-
-        var svg =
-            document.getElementById("svgID");
-
-        var symbol =
-            document.getElementById("symbolID");
-
-
-        log("");
-
-        if (!svg) {
-
-            log(
-                "SVG already missing before geometry query"
-            );
-
-        } else {
-
-            log("--- BEFORE GEOMETRY QUERY ---");
-
-            var screenCTM = null;
-
-            if (
-                symbol &&
-                typeof symbol.getScreenCTM === "function"
-            ) {
-
-                log(
-                    "Using symbol.getScreenCTM()"
-                );
-
-                screenCTM =
-                    symbol.getScreenCTM();
-
-            } else if (
-                typeof svg.getScreenCTM === "function"
-            ) {
-
-                log(
-                    "symbol.getScreenCTM unavailable"
-                );
-
-                log(
-                    "Using svg.getScreenCTM()"
-                );
-
-                screenCTM =
-                    svg.getScreenCTM();
-
-            } else {
-
-                log(
-                    "getScreenCTM unavailable"
-                );
-            }
-
-
-            log("--- AFTER GEOMETRY QUERY ---");
-
-            log(
-                "screenCTM = " +
-                (screenCTM ? "OK" : "null")
-            );
-
-
-            try {
-
-                var rect =
-                    svg.getBoundingClientRect();
-
-                log(
-                    "SVG rect = " +
-                    rect.width +
-                    "x" +
-                    rect.height
-                );
-
-            } catch (e) {
-
-                log(
-                    "getBoundingClientRect exception: " +
-                    e.name +
-                    ": " +
-                    e.message
-                );
-            }
-
-
-            log("");
-            log("--- BEFORE SVG REMOVAL ---");
-
-            svg.outerHTML = "A";
-
-            log("--- AFTER SVG REMOVAL ---");
+            root.appendChild(container);
         }
+    );
 
 
-        /*
-         * Pressão de GC.
-         */
+    safeCall(
+        "create-child",
 
-        log("");
-        log("--- BEFORE GC ---");
+        function()
+        {
+            var child =
+                document.createElement("span");
 
-        gc();
+            child.id =
+                "mutationChild";
 
-        log("--- AFTER GC ---");
+            child.textContent =
+                "child";
 
-
-        /*
-         * Avança o event loop.
-         */
-
-        log("");
-        log("--- WAITING FOR EVENT LOOP ---");
+            container.appendChild(child);
+        }
+    );
 
 
-        setTimeout(function() {
+    safeCall(
+        "insert-before",
 
-            log("setTimeout #1 fired");
+        function()
+        {
+            var before =
+                document.createElement("div");
 
-            requestAnimationFrame(function() {
+            before.textContent =
+                "inserted before";
 
-                log(
-                    "requestAnimationFrame #1 fired"
+            if (container.firstChild)
+                container.insertBefore(
+                    before,
+                    container.firstChild
+                );
+        }
+    );
+
+
+    safeCall(
+        "replace-child",
+
+        function()
+        {
+            var child =
+                document.getElementById(
+                    "mutationChild"
                 );
 
-                requestAnimationFrame(function() {
+            if (child)
+            {
+                var replacement =
+                    document.createElement("em");
 
+                replacement.id =
+                    "mutationReplacement";
+
+                replacement.textContent =
+                    "replacement";
+
+                child.parentNode.replaceChild(
+                    replacement,
+                    child
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "move-node",
+
+        function()
+        {
+            var node =
+                document.getElementById(
+                    "mutationReplacement"
+                );
+
+            if (node)
+                root.appendChild(node);
+        }
+    );
+
+
+    safeCall(
+        "remove-container",
+
+        function()
+        {
+            if (
+                container &&
+                container.parentNode
+            )
+            {
+                container.parentNode.removeChild(
+                    container
+                );
+            }
+        }
+    );
+}
+
+
+/* ============================================================
+ *
+ * MODULE 2
+ * EVENTS
+ *
+ * ============================================================
+ */
+
+function runEvents()
+{
+    beginModule("EVENTS");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var target = null;
+
+
+    safeCall(
+        "create-event-target",
+
+        function()
+        {
+            target =
+                document.createElement("input");
+
+            target.type =
+                "text";
+
+            target.value =
+                "event target";
+
+            target.id =
+                "eventTarget";
+
+            root.appendChild(target);
+        }
+    );
+
+
+    safeCall(
+        "install-focus-handler",
+
+        function()
+        {
+            target.addEventListener(
+                "focus",
+
+                function()
+                {
                     log(
-                        "requestAnimationFrame #2 fired"
+                        "EVENT  | focus"
+                    );
+                },
+
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "install-blur-handler",
+
+        function()
+        {
+            target.addEventListener(
+                "blur",
+
+                function()
+                {
+                    log(
+                        "EVENT  | blur"
+                    );
+                },
+
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "install-focusin-handler",
+
+        function()
+        {
+            target.addEventListener(
+                "focusin",
+
+                function()
+                {
+                    log(
+                        "EVENT  | focusin"
+                    );
+                },
+
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "focus-target",
+
+        function()
+        {
+            target.focus();
+        }
+    );
+
+
+    safeCall(
+        "blur-target",
+
+        function()
+        {
+            target.blur();
+        }
+    );
+
+
+    safeCall(
+        "dispatch-custom-event",
+
+        function()
+        {
+            var event;
+
+            event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                "structuredtest",
+                true,
+                true
+            );
+
+            target.dispatchEvent(event);
+        }
+    );
+
+
+    safeCall(
+        "remove-event-target",
+
+        function()
+        {
+            if (
+                target &&
+                target.parentNode
+            )
+            {
+                target.parentNode.removeChild(
+                    target
+                );
+            }
+        }
+    );
+}
+
+
+/* ============================================================
+ *
+ * MODULE 3
+ * CSS / LAYOUT
+ *
+ * ============================================================
+ */
+
+function runCSSLayout()
+{
+    beginModule("CSS / LAYOUT");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var container = null;
+
+
+    safeCall(
+        "create-layout-container",
+
+        function()
+        {
+            container =
+                document.createElement("div");
+
+            container.id =
+                "layoutContainer";
+
+            root.appendChild(container);
+        }
+    );
+
+
+    safeCall(
+        "create-layout-nodes",
+
+        function()
+        {
+            var i;
+
+            for (
+                i = 0;
+                i < 8;
+                i++
+            )
+            {
+                var node =
+                    document.createElement("div");
+
+                node.className =
+                    "layoutNode";
+
+                node.textContent =
+                    "N" + i;
+
+                container.appendChild(node);
+            }
+        }
+    );
+
+
+    safeCall(
+        "apply-style-a",
+
+        function()
+        {
+            container.className =
+                "mutationA";
+
+            container.style.width =
+                "120px";
+
+            container.style.minHeight =
+                "40px";
+        }
+    );
+
+
+    safeCall(
+        "force-layout-read",
+
+        function()
+        {
+            var width =
+                container.offsetWidth;
+
+            var height =
+                container.offsetHeight;
+
+            log(
+                "LAYOUT | " +
+                width +
+                "x" +
+                height
+            );
+        }
+    );
+
+
+    safeCall(
+        "apply-style-b",
+
+        function()
+        {
+            container.className =
+                "mutationB";
+
+            container.style.left =
+                "5px";
+
+            container.style.top =
+                "5px";
+        }
+    );
+
+
+    safeCall(
+        "second-layout-read",
+
+        function()
+        {
+            var rect =
+                container.getBoundingClientRect();
+
+            log(
+                "RECT | " +
+                rect.width +
+                "x" +
+                rect.height
+            );
+        }
+    );
+
+
+    safeCall(
+        "restore-style",
+
+        function()
+        {
+            container.className =
+                "mutationA";
+
+            container.style.position =
+                "relative";
+        }
+    );
+
+
+    safeCall(
+        "remove-layout-container",
+
+        function()
+        {
+            if (
+                container &&
+                container.parentNode
+            )
+            {
+                container.parentNode.removeChild(
+                    container
+                );
+            }
+        }
+    );
+}
+
+
+/* ============================================================
+ *
+ * MODULE 4
+ * CANVAS
+ *
+ * ============================================================
+ */
+
+function runCanvas()
+{
+    beginModule("CANVAS");
+
+    var canvas =
+        document.getElementById(
+            "mainCanvas"
+        );
+
+    var context = null;
+
+
+    safeCall(
+        "get-context",
+
+        function()
+        {
+            context =
+                canvas.getContext(
+                    "2d"
+                );
+        }
+    );
+
+
+    safeCall(
+        "draw",
+
+        function()
+        {
+            if (context)
+            {
+                context.fillRect(
+                    0,
+                    0,
+                    16,
+                    16
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "resize",
+
+        function()
+        {
+            canvas.width =
+                64;
+
+            canvas.height =
+                64;
+        }
+    );
+
+
+    safeCall(
+        "redraw-after-resize",
+
+        function()
+        {
+            context =
+                canvas.getContext(
+                    "2d"
+                );
+
+            if (context)
+            {
+                context.fillRect(
+                    4,
+                    4,
+                    32,
+                    32
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "toBlob",
+
+        function()
+        {
+            if (!canvas.toBlob)
+            {
+                log(
+                    "INFO   | Canvas.toBlob unavailable"
+                );
+
+                return;
+            }
+
+            canvas.toBlob(
+                function(blob)
+                {
+                    log(
+                        "CALLBACK | canvas.toBlob | " +
+                        (
+                            blob
+                            ? "blob received"
+                            : "null"
+                        )
+                    );
+                }
+            );
+        }
+    );
+
+
+    safeCall(
+        "detach-canvas",
+
+        function()
+        {
+            if (
+                canvas &&
+                canvas.parentNode
+            )
+            {
+                canvas.parentNode.removeChild(
+                    canvas
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "reattach-canvas",
+
+        function()
+        {
+            document
+                .getElementById("testRoot")
+                .appendChild(canvas);
+        }
+    );
+}
+
+
+/* ============================================================
+ *
+ * MODULE 5
+ * ORIGINAL-STYLE EDITING OPERATIONS
+ *
+ * Inspired by the 10.html testcase.
+ *
+ * ============================================================
+ */
+
+function runEditing()
+{
+    beginModule("EDITING");
+
+    safeCall(
+        "execCommand-selectAll",
+
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "selectAll",
+                    false,
+                    null
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "execCommand-insertText",
+
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "insertText",
+                    false,
+                    " "
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "execCommand-undo",
+
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "undo",
+                    false,
+                    null
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "execCommand-redo",
+
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "redo",
+                    false,
+                    null
+                );
+            }
+        }
+    );
+}
+
+
+/* ============================================================
+ *
+ * MODULE 6
+ * TEMPLATE / DETAILS EVENTS
+ *
+ * ============================================================
+ */
+
+function runMiscEvents()
+{
+    beginModule("MISC EVENTS");
+
+    var details =
+        document.getElementById(
+            "detailsNode"
+        );
+
+
+    safeCall(
+        "install-toggle",
+
+        function()
+        {
+            details.addEventListener(
+                "toggle",
+
+                function()
+                {
+                    log(
+                        "EVENT  | details.toggle"
+                    );
+                },
+
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "toggle-details-closed",
+
+        function()
+        {
+            details.open =
+                false;
+        }
+    );
+
+
+    safeCall(
+        "toggle-details-open",
+
+        function()
+        {
+            details.open =
+                true;
+        }
+    );
+
+
+    safeCall(
+        "clone-template",
+
+        function()
+        {
+            var template =
+                document.getElementById(
+                    "templateNode"
+                );
+
+            if (template)
+            {
+                var clone =
+                    template.content.cloneNode(
+                        true
                     );
 
-                    setTimeout(function() {
-
-                        log(
-                            "setTimeout #2 fired"
-                        );
-
-                        log("");
-                        log(
-                            "================================"
-                        );
-
-                        log(
-                            "PASS IF NO CRASH"
-                        );
-
-                        log(
-                            "================================"
-                        );
-
-                    }, 0);
-
-                });
-
-            });
-
-        }, 0);
-
-    } catch (e) {
-
-        log("");
-        log("================================");
-        log("!!! POST-MUTATION EXCEPTION");
-        log(e.name + ": " + e.message);
-        log("================================");
-
-        console.error(e);
-    }
+                document
+                    .getElementById(
+                        "testRoot"
+                    )
+                    .appendChild(clone);
+            }
+        }
+    );
 }
 
 
-/*
- * Teste principal.
+/* ============================================================
+ *
+ * SEQUENCER
+ *
+ * ============================================================
  */
 
-function test()
+function finishTest()
 {
-    try {
+    TestState.running =
+        false;
 
-        log("================================");
-        log("TEST START");
-        log("================================");
+    TestState.currentModule =
+        "";
 
+    setStatus(
+        "Finished | Steps: " +
+        TestState.step +
+        " | Errors: " +
+        TestState.errors
+    );
 
-        logImplicitIDs();
-
-
-        /*
-         * Para a mutação principal usamos referências
-         * explícitas apenas para garantir que o teste
-         * alcance o callback.
-         */
-
-        var meter =
-            document.getElementById("meterID");
-
-        var marquee =
-            document.getElementById("marqueeID");
-
-        var animateTransform =
-            document.getElementById(
-                "animateTransformID"
-            );
-
-        var animateMotion =
-            document.getElementById(
-                "animateMotionID"
-            );
-
-
-        log("");
-        log("--- INITIAL DOM STATE ---");
-
-        log(
-            "marquee parent = " +
-            marquee.parentNode.nodeName
-        );
-
-        log(
-            "animateMotion parent = " +
-            animateMotion.parentNode.nodeName
-        );
-
-        log(
-            "animateMotion is child of animateTransform = " +
-            (animateMotion.parentNode === animateTransform)
-        );
-
-
-        /*
-         * Listener original.
-         */
-
-        log("");
-        log("--- ADD DOMNodeRemoved LISTENER ---");
-
-        meter.addEventListener(
-            "DOMNodeRemoved",
-            domNodeRemovedCallback
-        );
-
-        log(
-            "DOMNodeRemoved listener added"
-        );
-
-
-        /*
-         * Tentativa reentrante.
-         */
-
-        log("");
-        log("================================");
-        log("REENTRANT INSERTION");
-        log("================================");
-
-        log(
-            "Reference valid before insertion = " +
-            (
-                animateMotion.parentNode ===
-                animateTransform
-            )
-        );
-
-
-        try {
-
-            log(
-                "--- BEFORE insertBefore(marquee, animateMotion) ---"
-            );
-
-            animateTransform.insertBefore(
-                marquee,
-                animateMotion
-            );
-
-            log(
-                "--- AFTER insertBefore ---"
-            );
-
-        } catch (e) {
-
-            log("");
-            log(
-                "!!! REENTRANT INSERTION EXCEPTION"
-            );
-
-            log(
-                e.name + ": " + e.message
-            );
-
-            console.error(e);
-        }
-
-
-        /*
-         * Estado depois da mutação.
-         */
-
-        log("");
-        log("--- DOM STATE AFTER MUTATION ---");
-
-        log(
-            "marquee parent = " +
-            (
-                marquee.parentNode ?
-                marquee.parentNode.nodeName :
-                "null"
-            )
-        );
-
-        log(
-            "animateMotion parent = " +
-            (
-                animateMotion.parentNode ?
-                animateMotion.parentNode.nodeName :
-                "null"
-            )
-        );
-
-        log(
-            "animateTransform childNodes = " +
-            animateTransform.childNodes.length
-        );
-
-
-        continueAfterMutation();
-
-    } catch (e) {
-
-        log("");
-        log("================================");
-        log("!!! MAIN EXCEPTION");
-        log(e.name + ": " + e.message);
-        log("================================");
-
-        console.error(e);
-    }
+    log("");
+    log("========================================");
+    log("TEST FINISHED");
+    log(
+        "LAST OPERATION: " +
+        TestState.lastOperation
+    );
+    log(
+        "ERROR COUNT: " +
+        TestState.errors
+    );
+    log("========================================");
 }
 
+
+function runTest()
+{
+    if (TestState.running)
+    {
+        log(
+            "INFO | Test already running"
+        );
+
+        return;
+    }
+
+
+    TestState.running =
+        true;
+
+    TestState.step =
+        0;
+
+    TestState.errors =
+        0;
+
+    TestState.results =
+        [];
+
+    TestState.currentModule =
+        "";
+
+    TestState.lastOperation =
+        "";
+
+    document
+        .getElementById("log")
+        .textContent =
+        "";
+
+
+    setStatus(
+        "Running..."
+    );
+
+
+    log(
+        "PS4 WEBKIT STRUCTURED TEST HARNESS V1"
+    );
+
+
+    /*
+     * Sequência deliberadamente fixa na V1.
+     *
+     * Isto facilita:
+     *
+     * - reprodução;
+     * - comparação entre execuções;
+     * - identificação da última etapa;
+     * - redução futura de um testcase.
+     */
+
+    wait(
+        50,
+
+        function()
+        {
+            runDOMMutation();
+
+            wait(
+                100,
+
+                function()
+                {
+                    runEvents();
+
+                    wait(
+                        100,
+
+                        function()
+                        {
+                            runCSSLayout();
+
+                            wait(
+                                100,
+
+                                function()
+                                {
+                                    runCanvas();
+
+                                    wait(
+                                        150,
+
+                                        function()
+                                        {
+                                            runEditing();
+
+                                            wait(
+                                                100,
+
+                                                function()
+                                                {
+                                                    runMiscEvents();
+
+                                                    wait(
+                                                        200,
+
+                                                        function()
+                                                        {
+                                                            finishTest();
+                                                        }
+                                                    );
+                                                }
+                                            );
+                                        }
+                                    );
+                                }
+                            );
+                        }
+                    );
+                }
+            );
+        }
+    );
+}
+
+
+/* ============================================================
+ *
+ * BUTTONS
+ *
+ * ============================================================
+ */
+
+document
+    .getElementById(
+        "runButton"
+    )
+    .addEventListener(
+        "click",
+        runTest,
+        false
+    );
+
+
+document
+    .getElementById(
+        "clearButton"
+    )
+    .addEventListener(
+        "click",
+
+        function()
+        {
+            document
+                .getElementById(
+                    "log"
+                )
+                .textContent =
+                "";
+        },
+
+        false
+    );
+
+
+/* ============================================================
+ *
+ * INITIALIZATION
+ *
+ * ============================================================
+ */
+
+setStatus(
+    "Ready"
+);
+
+
+log(
+    "Harness initialized"
+);
+
 </script>
-</head>
-
-<body onload="test()">
-
-<pre id="log" style="
-white-space: pre-wrap;
-font-family: monospace;
-font-size: 14px;
-padding: 10px;
-border: 1px solid black;
-margin-bottom: 20px;
-"></pre>
-
-
-<meter id="meterID">
-
-    <marquee id="marqueeID">
-    </marquee>
-
-</meter>
-
-
-<svg id="svgID">
-
-    <symbol id="symbolID">
-
-        <font-face id="fontFaceID">
-
-            <animateTransform id="animateTransformID">
-
-                <animateMotion id="animateMotionID">
-                </animateMotion>
-
-            </animateTransform>
-
-        </font-face>
-
-    </symbol>
-
-</svg>
-
-
-<iframe id="iframeID">
-</iframe>
 
 </body>
 </html>

@@ -1,110 +1,1651 @@
 <!DOCTYPE html>
 <html>
-<body>
-<p>This test passes if it does not crash.</p>
-<button id="start">START TEST</button>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit Structured Test Harness V3</title>
 
-<div id="log">Waiting for user gesture...</div>
+<style>
+body {
+    font-family: sans-serif;
+    margin: 10px;
+}
+
+#controls {
+    margin-bottom: 10px;
+}
+
+button,
+select {
+    margin: 2px;
+    padding: 5px;
+}
+
+#status {
+    padding: 8px;
+    margin-bottom: 10px;
+    border: 1px solid #999;
+}
+
+#testRoot {
+    position: relative;
+    min-height: 200px;
+    padding: 10px;
+    border: 1px solid #444;
+    overflow: hidden;
+}
+
+.layoutNode {
+    display: inline-block;
+    width: 35px;
+    height: 22px;
+    margin: 2px;
+    border: 1px solid #777;
+}
+
+.mutationA {
+    position: relative;
+    padding: 6px;
+    margin: 3px;
+    border-top: 1px solid green;
+}
+
+.mutationB {
+    position: relative;
+    padding: 10px;
+    margin-left: 8px;
+    outline: 1px dotted black;
+}
+
+.mutationC {
+    display: inline-block;
+    padding: 4px;
+    transform: translateX(1px);
+}
+
+#log {
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid #444;
+
+    font-family: monospace;
+    white-space: pre-wrap;
+
+    max-height: 450px;
+    overflow: auto;
+}
+</style>
+</head>
+
+<body>
+
+<h2>PS4 WebKit Structured Test Harness V3</h2>
+
+<div id="controls">
+
+    <button id="runButton">
+        Run Sequence
+    </button>
+
+    <button id="runAllButton">
+        Run All Sequences
+    </button>
+
+    <button id="clearButton">
+        Clear Log
+    </button>
+
+    <select id="sequenceSelect">
+        <option value="0">
+            Sequence 1 - DOM.v1 ? EVENTS.v1 ? CANVAS.v1
+        </option>
+
+        <option value="1">
+            Sequence 2 - DOM.v2 ? LAYOUT.v1 ? EDITING.v1
+        </option>
+
+        <option value="2">
+            Sequence 3 - EVENTS.v2 ? DOM.v3 ? CANVAS.v2
+        </option>
+
+        <option value="3">
+            Sequence 4 - CANVAS.v3 ? LAYOUT.v2 ? DOM.v1
+        </option>
+
+        <option value="4">
+            Sequence 5 - DOM.v2 ? EVENTS.v3 ? LAYOUT.v3
+        </option>
+
+        <option value="5">
+            Sequence 6 - EVENTS.v1 ? CANVAS.v2 ? EDITING.v2
+        </option>
+    </select>
+
+</div>
+
+<div id="status">
+    Ready
+</div>
+
+<div id="testRoot">
+
+    <template id="templateNode">
+        <div class="layoutNode">
+            template
+        </div>
+    </template>
+
+    <details id="detailsNode" open>
+        <summary>Details</summary>
+        Structured test node
+    </details>
+
+    <canvas
+        id="mainCanvas"
+        width="32"
+        height="32">
+    </canvas>
+
+</div>
+
+<div id="log"></div>
 
 <script>
 
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = {
-            i: "ab" + i + (i / 100000)
-        };
-        temp += "foo";
-        gcRec(n - 1);
+/* ============================================================
+   CORE STATE
+   ============================================================ */
+
+var TestState = {
+
+    running: false,
+
+    step: 0,
+
+    errors: 0,
+
+    currentModule: "",
+
+    currentVariant: "",
+
+    currentOperation: "",
+
+    currentSequence: -1,
+
+    sequence: [],
+
+    sequenceIndex: 0,
+
+    runAll: false,
+
+    allSequenceIndex: 0,
+
+    lastDescriptor: ""
+};
+
+
+/* ============================================================
+   LOGGING
+   ============================================================ */
+
+function log(message)
+{
+    TestState.step++;
+
+    var text =
+        "[" +
+        ("0000" + TestState.step).slice(-4) +
+        "] " +
+        message;
+
+    var element =
+        document.getElementById("log");
+
+    if (element)
+    {
+        element.textContent +=
+            text + "\n";
+
+        element.scrollTop =
+            element.scrollHeight;
     }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+
+    console.log(text);
 }
 
-var logElement = document.getElementById("log");
 
-function log(message) {
-    logElement.textContent += "\n" + message;
+function setStatus(message)
+{
+    var element =
+        document.getElementById("status");
 
-    if (window.console && console.log)
-        console.log(message);
+    if (element)
+        element.textContent = message;
 }
 
-document.getElementById("start").addEventListener("click", function() {
 
-    log("STEP 1: User gesture received");
+function safeCall(name, callback)
+{
+    TestState.currentOperation =
+        name;
 
-    const iframe = document.body.appendChild(
-        document.createElement("iframe")
+    TestState.lastDescriptor =
+        TestState.currentModule +
+        "." +
+        TestState.currentVariant +
+        "." +
+        name;
+
+    log(
+        "BEGIN | " +
+        TestState.lastDescriptor
     );
 
-    log("STEP 2: iframe created");
+    try
+    {
+        callback();
 
-    const div = iframe.contentDocument.body.appendChild(
-        document.createElement("div")
+        log(
+            "OK    | " +
+            TestState.lastDescriptor
+        );
+    }
+    catch (e)
+    {
+        TestState.errors++;
+
+        log(
+            "ERROR | " +
+            TestState.lastDescriptor +
+            " | " +
+            e.name +
+            " | " +
+            e.message
+        );
+    }
+}
+
+
+function beginModule(moduleName, variantName)
+{
+    TestState.currentModule =
+        moduleName;
+
+    TestState.currentVariant =
+        variantName;
+
+    log("");
+
+    log("========================================");
+
+    log(
+        "MODULE: " +
+        moduleName +
+        "." +
+        variantName
     );
 
-    log("STEP 3: div created inside iframe");
+    log("========================================");
+}
 
 
-    log("STEP 4: Calling div.webkitRequestFullscreen()");
+function delay(callback, ms)
+{
+    setTimeout(
+        callback,
+        ms || 100
+    );
+}
 
-    try {
 
-        div.webkitRequestFullscreen();
+/* ============================================================
+   CLEANUP
+   ============================================================ */
 
-        log("STEP 5: webkitRequestFullscreen() returned");
+function cleanupRoot()
+{
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
 
-    } catch (error) {
+    var nodes = [];
 
-        log("EXCEPTION: " + error);
+    var i;
 
+    for (
+        i = 0;
+        i < root.childNodes.length;
+        i++
+    )
+    {
+        nodes.push(
+            root.childNodes[i]
+        );
     }
 
 
-    const contentDocument = iframe.contentDocument;
+    for (
+        i = 0;
+        i < nodes.length;
+        i++
+    )
+    {
+        var node =
+            nodes[i];
 
-    log("STEP 6: Saved iframe.contentDocument");
-
-
-
-    document.body.removeChild(iframe);
-
-    log("STEP 7: iframe removed from document");
-
-
-
-    setTimeout(function() {
-
-        log("STEP 8: setTimeout entered");
-
-        try {
-
-            log("STEP 9: Calling contentDocument.webkitCancelFullScreen()");
-
-            contentDocument.webkitCancelFullScreen();
-
-            log("STEP 10: webkitCancelFullScreen() returned");
-
-        } catch (error) {
-
-            log("Cancel exception: " + error);
-
+        if (
+            node.id !== "templateNode" &&
+            node.id !== "detailsNode" &&
+            node.id !== "mainCanvas"
+        )
+        {
+            try
+            {
+                root.removeChild(node);
+            }
+            catch (e)
+            {
+            }
         }
+    }
 
 
-        log("STEP 11: Starting GC pressure");
+    var details =
+        document.getElementById(
+            "detailsNode"
+        );
 
-        gc();
+    if (details)
+        details.open = true;
 
-        log("STEP 12: GC pressure completed");
 
-        log("END OF TEST");
+    var canvas =
+        document.getElementById(
+            "mainCanvas"
+        );
 
-    }, 0);
+    if (
+        canvas &&
+        !canvas.parentNode
+    )
+    {
+        root.appendChild(canvas);
+    }
+}
 
-});
+
+/* ============================================================
+   DOM VARIANT 1
+   Basic creation and replacement
+   ============================================================ */
+
+function DOM_v1(done)
+{
+    beginModule("DOM", "v1");
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var container;
+
+
+    safeCall(
+        "create-container",
+        function()
+        {
+            container =
+                document.createElement("div");
+
+            container.id =
+                "domV1Container";
+
+            container.className =
+                "mutationA";
+
+            container.textContent =
+                "DOM V1";
+
+            root.appendChild(container);
+        }
+    );
+
+
+    safeCall(
+        "append-child",
+        function()
+        {
+            var child =
+                document.createElement("span");
+
+            child.id =
+                "domV1Child";
+
+            child.textContent =
+                " child";
+
+            container.appendChild(child);
+        }
+    );
+
+
+    safeCall(
+        "replace-child",
+        function()
+        {
+            var child =
+                document.getElementById(
+                    "domV1Child"
+                );
+
+            if (
+                child &&
+                child.parentNode
+            )
+            {
+                var replacement =
+                    document.createElement("strong");
+
+                replacement.textContent =
+                    " replacement";
+
+                child.parentNode.replaceChild(
+                    replacement,
+                    child
+                );
+            }
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   DOM VARIANT 2
+   Move nodes
+   ============================================================ */
+
+function DOM_v2(done)
+{
+    beginModule("DOM", "v2");
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var a;
+    var b;
+    var child;
+
+
+    safeCall(
+        "create-a",
+        function()
+        {
+            a =
+                document.createElement("div");
+
+            a.className =
+                "mutationA";
+
+            a.id =
+                "domV2A";
+
+            root.appendChild(a);
+        }
+    );
+
+
+    safeCall(
+        "create-b",
+        function()
+        {
+            b =
+                document.createElement("div");
+
+            b.className =
+                "mutationB";
+
+            b.id =
+                "domV2B";
+
+            root.appendChild(b);
+        }
+    );
+
+
+    safeCall(
+        "create-child",
+        function()
+        {
+            child =
+                document.createElement("span");
+
+            child.textContent =
+                " movable";
+
+            a.appendChild(child);
+        }
+    );
+
+
+    safeCall(
+        "move-a-to-b",
+        function()
+        {
+            b.appendChild(child);
+        }
+    );
+
+
+    safeCall(
+        "move-b-to-root",
+        function()
+        {
+            root.appendChild(child);
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   DOM VARIANT 3
+   before / clone / remove
+   ============================================================ */
+
+function DOM_v3(done)
+{
+    beginModule("DOM", "v3");
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var base;
+
+
+    safeCall(
+        "create-base",
+        function()
+        {
+            base =
+                document.createElement("div");
+
+            base.id =
+                "domV3Base";
+
+            base.className =
+                "mutationC";
+
+            base.textContent =
+                "base";
+
+            root.appendChild(base);
+        }
+    );
+
+
+    safeCall(
+        "insert-before",
+        function()
+        {
+            var node =
+                document.createElement("em");
+
+            node.textContent =
+                "before";
+
+            base.parentNode.insertBefore(
+                node,
+                base
+            );
+        }
+    );
+
+
+    safeCall(
+        "clone",
+        function()
+        {
+            var clone =
+                base.cloneNode(true);
+
+            clone.id =
+                "domV3Clone";
+
+            root.appendChild(clone);
+        }
+    );
+
+
+    safeCall(
+        "remove-base",
+        function()
+        {
+            if (base.parentNode)
+            {
+                base.parentNode.removeChild(
+                    base
+                );
+            }
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   EVENTS VARIANT 1
+   focus / blur
+   ============================================================ */
+
+function EVENTS_v1(done)
+{
+    beginModule("EVENTS", "v1");
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var input;
+
+
+    safeCall(
+        "create-input",
+        function()
+        {
+            input =
+                document.createElement("input");
+
+            input.type =
+                "text";
+
+            input.value =
+                "events";
+
+            root.appendChild(input);
+        }
+    );
+
+
+    safeCall(
+        "install-focus",
+        function()
+        {
+            input.addEventListener(
+                "focus",
+                function()
+                {
+                    log(
+                        "EVENT | focus"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "install-blur",
+        function()
+        {
+            input.addEventListener(
+                "blur",
+                function()
+                {
+                    log(
+                        "EVENT | blur"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "focus",
+        function()
+        {
+            input.focus();
+        }
+    );
+
+
+    safeCall(
+        "blur",
+        function()
+        {
+            input.blur();
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   EVENTS VARIANT 2
+   Custom event
+   ============================================================ */
+
+function EVENTS_v2(done)
+{
+    beginModule("EVENTS", "v2");
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var target;
+
+
+    safeCall(
+        "create-target",
+        function()
+        {
+            target =
+                document.createElement("div");
+
+            target.className =
+                "mutationA";
+
+            root.appendChild(target);
+        }
+    );
+
+
+    safeCall(
+        "install-listener",
+        function()
+        {
+            target.addEventListener(
+                "structuredtest",
+                function()
+                {
+                    log(
+                        "EVENT | structuredtest"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "dispatch",
+        function()
+        {
+            var event =
+                document.createEvent("Event");
+
+            event.initEvent(
+                "structuredtest",
+                true,
+                true
+            );
+
+            target.dispatchEvent(event);
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   EVENTS VARIANT 3
+   details toggle
+   ============================================================ */
+
+function EVENTS_v3(done)
+{
+    beginModule("EVENTS", "v3");
+
+    var details =
+        document.getElementById(
+            "detailsNode"
+        );
+
+
+    safeCall(
+        "install-toggle",
+        function()
+        {
+            details.addEventListener(
+                "toggle",
+                function()
+                {
+                    log(
+                        "EVENT | toggle"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+
+    safeCall(
+        "close",
+        function()
+        {
+            details.open =
+                false;
+        }
+    );
+
+
+    safeCall(
+        "open",
+        function()
+        {
+            details.open =
+                true;
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LAYOUT VARIANT 1
+   Basic style mutation
+   ============================================================ */
+
+function LAYOUT_v1(done)
+{
+    beginModule("LAYOUT", "v1");
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var container;
+
+
+    safeCall(
+        "create-container",
+        function()
+        {
+            container =
+                document.createElement("div");
+
+            container.className =
+                "mutationA";
+
+            root.appendChild(container);
+        }
+    );
+
+
+    safeCall(
+        "create-nodes",
+        function()
+        {
+            var i;
+
+            for (
+                i = 0;
+                i < 5;
+                i++
+            )
+            {
+                var node =
+                    document.createElement("div");
+
+                node.className =
+                    "layoutNode";
+
+                node.textContent =
+                    "L" + i;
+
+                container.appendChild(node);
+            }
+        }
+    );
+
+
+    safeCall(
+        "layout-read",
+        function()
+        {
+            log(
+                "LAYOUT | " +
+                container.offsetWidth +
+                "x" +
+                container.offsetHeight
+            );
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LAYOUT VARIANT 2
+   Style transition
+   ============================================================ */
+
+function LAYOUT_v2(done)
+{
+    beginModule("LAYOUT", "v2");
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+
+    safeCall(
+        "create",
+        function()
+        {
+            node =
+                document.createElement("div");
+
+            node.className =
+                "mutationA";
+
+            root.appendChild(node);
+        }
+    );
+
+
+    safeCall(
+        "style-b",
+        function()
+        {
+            node.className =
+                "mutationB";
+
+            node.style.width =
+                "120px";
+        }
+    );
+
+
+    safeCall(
+        "rect-read",
+        function()
+        {
+            var rect =
+                node.getBoundingClientRect();
+
+            log(
+                "RECT | " +
+                rect.width +
+                "x" +
+                rect.height
+            );
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LAYOUT VARIANT 3
+   Template clone
+   ============================================================ */
+
+function LAYOUT_v3(done)
+{
+    beginModule("LAYOUT", "v3");
+
+    safeCall(
+        "clone-template",
+        function()
+        {
+            var template =
+                document.getElementById(
+                    "templateNode"
+                );
+
+            var clone =
+                template.content.cloneNode(
+                    true
+                );
+
+            document
+                .getElementById(
+                    "testRoot"
+                )
+                .appendChild(clone);
+        }
+    );
+
+
+    safeCall(
+        "layout-read",
+        function()
+        {
+            var root =
+                document.getElementById(
+                    "testRoot"
+                );
+
+            log(
+                "ROOT WIDTH | " +
+                root.offsetWidth
+            );
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   CANVAS VARIANT 1
+   Basic draw
+   ============================================================ */
+
+function CANVAS_v1(done)
+{
+    beginModule("CANVAS", "v1");
+
+    var canvas =
+        document.getElementById(
+            "mainCanvas"
+        );
+
+    var context;
+
+
+    safeCall(
+        "context",
+        function()
+        {
+            context =
+                canvas.getContext("2d");
+        }
+    );
+
+
+    safeCall(
+        "draw",
+        function()
+        {
+            if (context)
+                context.fillRect(
+                    0,
+                    0,
+                    16,
+                    16
+                );
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   CANVAS VARIANT 2
+   Resize + draw
+   ============================================================ */
+
+function CANVAS_v2(done)
+{
+    beginModule("CANVAS", "v2");
+
+    var canvas =
+        document.getElementById(
+            "mainCanvas"
+        );
+
+
+    safeCall(
+        "resize",
+        function()
+        {
+            canvas.width =
+                64;
+
+            canvas.height =
+                64;
+        }
+    );
+
+
+    safeCall(
+        "context",
+        function()
+        {
+            var context =
+                canvas.getContext("2d");
+
+            if (context)
+                context.fillRect(
+                    5,
+                    5,
+                    32,
+                    32
+                );
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   CANVAS VARIANT 3
+   toBlob callback
+   ============================================================ */
+
+function CANVAS_v3(done)
+{
+    beginModule("CANVAS", "v3");
+
+    var canvas =
+        document.getElementById(
+            "mainCanvas"
+        );
+
+
+    safeCall(
+        "toBlob",
+        function()
+        {
+            if (!canvas.toBlob)
+            {
+                log(
+                    "INFO | toBlob unavailable"
+                );
+
+                return;
+            }
+
+            canvas.toBlob(
+                function(blob)
+                {
+                    log(
+                        "CALLBACK | toBlob | " +
+                        (
+                            blob
+                            ? "blob"
+                            : "null"
+                        )
+                    );
+                }
+            );
+        }
+    );
+
+
+    delay(done, 150);
+}
+
+
+/* ============================================================
+   EDITING VARIANT 1
+   Basic edit commands
+   ============================================================ */
+
+function EDITING_v1(done)
+{
+    beginModule("EDITING", "v1");
+
+    safeCall(
+        "selectAll",
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "selectAll",
+                    false,
+                    null
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "insertText",
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "insertText",
+                    false,
+                    " "
+                );
+            }
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   EDITING VARIANT 2
+   Undo / redo
+   ============================================================ */
+
+function EDITING_v2(done)
+{
+    beginModule("EDITING", "v2");
+
+    safeCall(
+        "undo",
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "undo",
+                    false,
+                    null
+                );
+            }
+        }
+    );
+
+
+    safeCall(
+        "redo",
+        function()
+        {
+            if (document.execCommand)
+            {
+                document.execCommand(
+                    "redo",
+                    false,
+                    null
+                );
+            }
+        }
+    );
+
+
+    delay(done);
+}
+
+
+/* ============================================================
+   SEQUENCES
+   ============================================================ */
+
+var Sequences = [
+
+    {
+        name:
+            "DOM.v1 -> EVENTS.v1 -> CANVAS.v1",
+
+        steps: [
+            DOM_v1,
+            EVENTS_v1,
+            CANVAS_v1
+        ]
+    },
+
+    {
+        name:
+            "DOM.v2 -> LAYOUT.v1 -> EDITING.v1",
+
+        steps: [
+            DOM_v2,
+            LAYOUT_v1,
+            EDITING_v1
+        ]
+    },
+
+    {
+        name:
+            "EVENTS.v2 -> DOM.v3 -> CANVAS.v2",
+
+        steps: [
+            EVENTS_v2,
+            DOM_v3,
+            CANVAS_v2
+        ]
+    },
+
+    {
+        name:
+            "CANVAS.v3 -> LAYOUT.v2 -> DOM.v1",
+
+        steps: [
+            CANVAS_v3,
+            LAYOUT_v2,
+            DOM_v1
+        ]
+    },
+
+    {
+        name:
+            "DOM.v2 -> EVENTS.v3 -> LAYOUT.v3",
+
+        steps: [
+            DOM_v2,
+            EVENTS_v3,
+            LAYOUT_v3
+        ]
+    },
+
+    {
+        name:
+            "EVENTS.v1 -> CANVAS.v2 -> EDITING.v2",
+
+        steps: [
+            EVENTS_v1,
+            CANVAS_v2,
+            EDITING_v2
+        ]
+    }
+];
+
+
+/* ============================================================
+   SEQUENCER
+   ============================================================ */
+
+function executeNextStep()
+{
+    if (
+        TestState.sequenceIndex >=
+        TestState.sequence.length
+    )
+    {
+        finishSequence();
+        return;
+    }
+
+
+    var step =
+        TestState.sequence[
+            TestState.sequenceIndex
+        ];
+
+
+    TestState.sequenceIndex++;
+
+
+    step(
+        function()
+        {
+            executeNextStep();
+        }
+    );
+}
+
+
+function startSequence(index)
+{
+    if (TestState.running)
+        return;
+
+
+    if (
+        index < 0 ||
+        index >= Sequences.length
+    )
+        return;
+
+
+    cleanupRoot();
+
+
+    TestState.running =
+        true;
+
+    TestState.step =
+        0;
+
+    TestState.errors =
+        0;
+
+    TestState.currentSequence =
+        index;
+
+    TestState.sequence =
+        Sequences[index].steps;
+
+    TestState.sequenceIndex =
+        0;
+
+    TestState.currentModule =
+        "";
+
+    TestState.currentVariant =
+        "";
+
+    TestState.currentOperation =
+        "";
+
+    TestState.lastDescriptor =
+        "";
+
+
+    document
+        .getElementById("log")
+        .textContent =
+        "";
+
+
+    setStatus(
+        "Running sequence " +
+        (index + 1)
+    );
+
+
+    log(
+        "PS4 WEBKIT STRUCTURED TEST HARNESS V3"
+    );
+
+    log(
+        "SEQUENCE " +
+        (index + 1)
+    );
+
+    log(
+        Sequences[index].name
+    );
+
+    log(
+        "STEP COUNT: " +
+        TestState.sequence.length
+    );
+
+
+    delay(
+        executeNextStep,
+        100
+    );
+}
+
+
+function finishSequence()
+{
+    log("");
+
+    log("========================================");
+
+    log(
+        "SEQUENCE FINISHED"
+    );
+
+    log(
+        "SEQUENCE: " +
+        (TestState.currentSequence + 1)
+    );
+
+    log(
+        "LAST DESCRIPTOR:"
+    );
+
+    log(
+        TestState.lastDescriptor
+    );
+
+    log(
+        "ERROR COUNT: " +
+        TestState.errors
+    );
+
+    log("========================================");
+
+
+    cleanupRoot();
+
+
+    TestState.running =
+        false;
+
+
+    setStatus(
+        "Finished sequence " +
+        (TestState.currentSequence + 1) +
+        " | Errors: " +
+        TestState.errors
+    );
+
+
+    if (TestState.runAll)
+    {
+        TestState.allSequenceIndex++;
+
+
+        if (
+            TestState.allSequenceIndex <
+            Sequences.length
+        )
+        {
+            setTimeout(
+                function()
+                {
+                    startSequence(
+                        TestState.allSequenceIndex
+                    );
+                },
+                500
+            );
+        }
+        else
+        {
+            TestState.runAll =
+                false;
+
+            log(
+                "ALL SEQUENCES FINISHED"
+            );
+
+            setStatus(
+                "All sequences finished"
+            );
+        }
+    }
+}
+
+
+/* ============================================================
+   CONTROLS
+   ============================================================ */
+
+document
+    .getElementById("runButton")
+    .addEventListener(
+        "click",
+        function()
+        {
+            var select =
+                document.getElementById(
+                    "sequenceSelect"
+                );
+
+            TestState.runAll =
+                false;
+
+            startSequence(
+                parseInt(
+                    select.value,
+                    10
+                )
+            );
+        },
+        false
+    );
+
+
+document
+    .getElementById("runAllButton")
+    .addEventListener(
+        "click",
+        function()
+        {
+            if (TestState.running)
+                return;
+
+
+            TestState.runAll =
+                true;
+
+            TestState.allSequenceIndex =
+                0;
+
+            startSequence(0);
+        },
+        false
+    );
+
+
+document
+    .getElementById("clearButton")
+    .addEventListener(
+        "click",
+        function()
+        {
+            document
+                .getElementById("log")
+                .textContent =
+                "";
+        },
+        false
+    );
+
+
+/* ============================================================
+   INITIALIZATION
+   ============================================================ */
+
+log(
+    "Harness V3 initialized"
+);
 
 </script>
 

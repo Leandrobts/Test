@@ -1,36 +1,1710 @@
+<!DOCTYPE html>
 <html>
-<body>
-<script>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit Crash Research Harness V11</title>
 
-var myFeedback = [];
-function UpdateFeedback(line, res) { myFeedback.push([line, res]) }
-function GetVariable(fuzzervars, var_type) { if(fuzzervars[var_type]) { return fuzzervars[var_type]; } else { }}
-function SetVariable(fuzzervars, var_name, var_type) { fuzzervars[var_type] = var_name; }
-function jsfuzzer() { }
-function eventhandler1() {
-    var fuzzervars = {};
-    try { /* newvar{var00034:HTMLCanvasElement} */ var var00034 = document.createElement("canvas");;  UpdateFeedback(String.raw`/* = document.createElement("canvas");`, "Valid"); } catch(e) {  UpdateFeedback(String.raw`/* = document.createElement("canvas");`, e.name) }
-    try { if (!var00034) { } else { SetVariable(fuzzervars, var00034, 'HTMLCanvasElement'); };  UpdateFeedback(String.raw`if (!var00034)  }`, "Valid"); } catch(e) {  UpdateFeedback(String.raw`if (!var00034) { }`, e.name) }
-    try { /* newvar{var00028:HTMLCanvasElement} */ var var00028 = UpdateFeedback(String.raw`/* newvar{var00028:HTMLCanvasElement} var00029.canvas;`, "Valid"); } catch(e) {  UpdateFeedback(String.raw`/* newvar{var00028:HTMLCanvasElement} var00029.canvas;`, e.name) }
-    try { if (!var00028) { var00028 = GetVariable(fuzzervars, 'HTMLCanvasElement'); } { SetVariable(fuzzervars, 'HTMLElement;'); }; UpdateFeedback(String.raw`if }`, "Valid"); } catch(e) { UpdateFeedback(String.raw`if }`, e.name) }
-    try { /* */ var var00027 = var00028.captureStream();; UpdateFeedback(String.raw`/* var00028.captureStream();`, "Valid"); } catch(e) { UpdateFeedback(String.raw`/* var00028.captureStream();`, e.name) }
-    try { if (!var00027) { } { SetVariable(fuzzervars, var00027, 'MediaStream'); SetVariable(fuzzervars, 'EventTarget;');  }; UpdateFeedback(String.raw`if }`, "Valid"); } catch(e) { UpdateFeedback(String.raw`if }`, e.name) }
-    try { var00035 = {};; } catch(e) { UpdateFeedback(String.raw`/* {};`, e.name) }
-    try { /* */ var var00014 = UpdateFeedback(String.raw`/* var00015[0];`, "Valid"); } catch(e) { UpdateFeedback(String.raw`/* var00015[0];`, e.name) }
-    try { if (!var00014) { var00014 = GetVariable(fuzzervars, 'MediaStream'); } { SetVariable(fuzzervars, 'EventTarget;'); }; UpdateFeedback(String.raw`if }`, "Valid"); } catch(e) { UpdateFeedback(String.raw`if }`, e.name) }
-    try { /* */ var var00013 = new MediaRecorder(var00014,var00035);; UpdateFeedback(String.raw`/* MediaRecorder(var00014,var00035);`, "Valid"); } catch(e) { UpdateFeedback(String.raw`/* MediaRecorder(var00014,var00035);`, e.name) }
-    try { var00012 = var00013.videoBitsPerSecond;; UpdateFeedback(String.raw`/* var00013.videoBitsPerSecond;`, "Valid"); } catch(e) { }
-    try { /* */ var00488 = document.createElement("textarea");; UpdateFeedback(String.raw`/* document.createElement("textarea");`, "Valid"); } catch(e) { UpdateFeedback(String.raw`/* document.createElement("textarea");`, e.name) }
-    try { var00487 = var00488.cols;; } catch(e) { UpdateFeedback(String.raw`/* var00488.cols;`, e.name) }
-    try { /* */ var00498 = UpdateFeedback(String.raw`/* {};`, "Valid"); } catch(e) { UpdateFeedback(String.raw`/* newvar{var00498:ImageDataSettings} {};`, e.name) }
-    try { new ImageData(var00012,var00487,var00498);; UpdateFeedback(String.raw`/* ImageData(var00012,var00487,var00498);`, "Valid"); } catch(e) { UpdateFeedback(String.raw`/* ImageData(var00012,var00487,var00498);`, e.name) }
-
-    setTimeout(() => {
-        if (window.testRunner)
-            testRunner.notifyDone();
-    }, 500);
+<style>
+body {
+    font-family: sans-serif;
+    margin: 10px;
+    background: #f5f5f5;
 }
+
+button {
+    padding: 8px 16px;
+    margin-right: 6px;
+}
+
+.panel {
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid #777;
+    background: white;
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+
+#log {
+    max-height: 300px;
+    overflow: auto;
+}
+
+#testRoot {
+    margin-top: 10px;
+    min-height: 120px;
+    padding: 8px;
+    border: 1px solid #444;
+    background: white;
+}
+
+.box {
+    padding: 6px;
+    margin: 3px;
+    border: 1px solid #888;
+}
+</style>
+</head>
+
+<body>
+
+<h2>PS4 WebKit Crash Research Harness V11</h2>
+
+<button id="start">START</button>
+<button id="stop">STOP</button>
+<button id="clearCorpus">CLEAR CORPUS</button>
+
+<div id="status" class="panel">Idle</div>
+<div id="campaign" class="panel"></div>
+<div id="recovery" class="panel"></div>
+<div id="caseInfo" class="panel"></div>
+<div id="corpusInfo" class="panel"></div>
+
+<div id="testRoot"></div>
+
+<div id="log" class="panel"></div>
+
+<script>
+/* ============================================================
+   CONFIG
+   ============================================================ */
+
+var CONFIG = {
+    prefix: "CrashResearchV11.",
+
+    minOps: 10,
+    maxOps: 24,
+
+    maxObjects: 5,
+
+    operationDelay: 30,
+    caseDelay: 180,
+    asyncDelay: 60,
+
+    maxCorpus: 80,
+
+    generatedProbability: 0.20,
+
+    interestingScoreThreshold: 3
+};
+
+
+/* ============================================================
+   STATE
+   ============================================================ */
+
+var State = {
+
+    running: false,
+    stopRequested: false,
+
+    runId: 0,
+    caseId: 0,
+
+    seed: 0,
+    randomState: 0,
+
+    operations: [],
+    operationIndex: 0,
+
+    objects: {},
+
+    corpus: [],
+
+    sourceType: "",
+    sourceCorpusId: null,
+    mutation: "",
+
+    errors: 0,
+    events: 0,
+    invalid: 0,
+
+    asyncCount: 0,
+
+    currentOperation: "",
+    lastCompletedOperation: "",
+
+    caseStarted: false,
+    caseCompleted: false,
+
+    observations: {},
+
+    score: 0,
+
+    history: []
+};
+
+
+/* ============================================================
+   STORAGE
+   ============================================================ */
+
+function storeKey(name)
+{
+    return CONFIG.prefix + name;
+}
+
+function storeSet(name, value)
+{
+    try {
+        localStorage.setItem(
+            storeKey(name),
+            String(value)
+        );
+    } catch (e) {
+    }
+}
+
+function storeGet(name)
+{
+    try {
+        return localStorage.getItem(
+            storeKey(name)
+        );
+    } catch (e) {
+        return null;
+    }
+}
+
+
+/* ============================================================
+   LOG
+   ============================================================ */
+
+function log(text)
+{
+    var box =
+        document.getElementById("log");
+
+    box.textContent +=
+        text + "\n";
+
+    box.scrollTop =
+        box.scrollHeight;
+
+    console.log(text);
+}
+
+function setStatus(text)
+{
+    document
+        .getElementById("status")
+        .textContent = text;
+}
+
+
+/* ============================================================
+   RNG
+   ============================================================ */
+
+function setSeed(seed)
+{
+    State.seed = seed >>> 0;
+    State.randomState = State.seed;
+}
+
+function rnd()
+{
+    State.randomState =
+        (
+            State.randomState * 1664525 +
+            1013904223
+        ) >>> 0;
+
+    return State.randomState / 4294967296;
+}
+
+function pick(array)
+{
+    if (!array.length)
+        return null;
+
+    return array[
+        Math.floor(rnd() * array.length)
+    ];
+}
+
+function newSeed()
+{
+    var previous =
+        parseInt(
+            storeGet("lastSeed") || "1",
+            10
+        );
+
+    var value =
+        (
+            Date.now() ^
+            previous ^
+            Math.floor(Math.random() * 0x7fffffff)
+        ) >>> 0;
+
+    if (!value)
+        value = 1;
+
+    storeSet("lastSeed", value);
+
+    return value;
+}
+
+
+/* ============================================================
+   SERIALIZATION
+   ============================================================ */
+
+function clone(value)
+{
+    return JSON.parse(
+        JSON.stringify(value)
+    );
+}
+
+function describeOperation(op)
+{
+    var text = op.type;
+
+    if (op.id)
+        text += " " + op.id;
+
+    if (op.target)
+        text += " -> " + op.target;
+
+    if (op.elementType)
+        text += " [" + op.elementType + "]";
+
+    return text;
+}
+
+
+/* ============================================================
+   CHECKPOINT
+   ============================================================ */
+
+function saveCheckpoint()
+{
+    storeSet("runId", State.runId);
+    storeSet("caseId", State.caseId);
+    storeSet("seed", State.seed);
+
+    storeSet(
+        "sourceType",
+        State.sourceType
+    );
+
+    storeSet(
+        "sourceCorpusId",
+        State.sourceCorpusId
+    );
+
+    storeSet(
+        "mutation",
+        State.mutation
+    );
+
+    storeSet(
+        "operationIndex",
+        State.operationIndex
+    );
+
+    storeSet(
+        "operations",
+        JSON.stringify(State.operations)
+    );
+
+    storeSet(
+        "currentOperation",
+        State.currentOperation
+    );
+
+    storeSet(
+        "lastCompletedOperation",
+        State.lastCompletedOperation
+    );
+
+    storeSet(
+        "caseStarted",
+        State.caseStarted ? "1" : "0"
+    );
+
+    storeSet(
+        "caseCompleted",
+        State.caseCompleted ? "1" : "0"
+    );
+
+    storeSet(
+        "timestamp",
+        Date.now()
+    );
+}
+
+
+/* ============================================================
+   RECOVERY
+   ============================================================ */
+
+function checkRecovery()
+{
+    var box =
+        document.getElementById("recovery");
+
+    var started =
+        storeGet("caseStarted");
+
+    var completed =
+        storeGet("caseCompleted");
+
+    if (
+        started !== "1" ||
+        completed === "1"
+    ) {
+        box.textContent =
+            "No interrupted case detected.";
+
+        return;
+    }
+
+    var caseId =
+        storeGet("caseId");
+
+    var seed =
+        storeGet("seed");
+
+    var index =
+        storeGet("operationIndex");
+
+    var current =
+        storeGet("currentOperation");
+
+    var last =
+        storeGet("lastCompletedOperation");
+
+    var sequence =
+        storeGet("operations");
+
+    box.textContent =
+        "INTERRUPTED CASE DETECTED\n\n" +
+        "CASE: " + caseId + "\n" +
+        "SEED: " + seed + "\n" +
+        "OPERATION INDEX: " + index + "\n\n" +
+        "CURRENT OPERATION:\n" +
+        current + "\n\n" +
+        "LAST COMPLETED:\n" +
+        last + "\n\n" +
+        "FULL SEQUENCE:\n" +
+        sequence;
+}
+
+
+/* ============================================================
+   CORPUS
+   ============================================================ */
+
+function loadCorpus()
+{
+    var raw =
+        storeGet("corpus");
+
+    if (!raw) {
+        State.corpus = [];
+        return;
+    }
+
+    try {
+        State.corpus =
+            JSON.parse(raw);
+
+        if (!Array.isArray(State.corpus))
+            State.corpus = [];
+    }
+    catch (e) {
+        State.corpus = [];
+    }
+}
+
+function saveCorpus()
+{
+    storeSet(
+        "corpus",
+        JSON.stringify(State.corpus)
+    );
+}
+
+function addCorpus(sequence, score, reason)
+{
+    var entry = {
+        id:
+            Date.now() +
+            "-" +
+            Math.floor(rnd() * 100000),
+
+        sequence:
+            clone(sequence),
+
+        score: score,
+
+        reason: reason,
+
+        seed: State.seed,
+
+        uses: 0,
+
+        created: Date.now()
+    };
+
+    State.corpus.push(entry);
+
+    State.corpus.sort(
+        function(a, b) {
+            return b.score - a.score;
+        }
+    );
+
+    while (
+        State.corpus.length >
+        CONFIG.maxCorpus
+    ) {
+        State.corpus.pop();
+    }
+
+    saveCorpus();
+}
+
+
+/* ============================================================
+   WEIGHTED CORPUS SELECTION
+   ============================================================ */
+
+function selectCorpusEntry()
+{
+    if (!State.corpus.length)
+        return null;
+
+    var total = 0;
+    var i;
+
+    for (
+        i = 0;
+        i < State.corpus.length;
+        i++
+    ) {
+        total +=
+            Math.max(
+                1,
+                State.corpus[i].score + 1
+            );
+    }
+
+    var value =
+        rnd() * total;
+
+    for (
+        i = 0;
+        i < State.corpus.length;
+        i++
+    ) {
+        value -=
+            Math.max(
+                1,
+                State.corpus[i].score + 1
+            );
+
+        if (value <= 0)
+            return State.corpus[i];
+    }
+
+    return State.corpus[0];
+}
+
+
+/* ============================================================
+   GENERATOR
+   ============================================================ */
+
+var OBJECT_NAMES =
+    ["A", "B", "C", "D", "E"];
+
+var ELEMENT_TYPES =
+    ["div", "span", "input", "button"];
+
+var OP_TYPES = [
+    "CREATE",
+    "ATTACH",
+    "DETACH",
+    "REPLACE",
+    "MUTATE",
+    "LISTEN",
+    "DISPATCH",
+    "FOCUS",
+    "BLUR",
+    "LAYOUT",
+    "SCHEDULE",
+    "ACCESS"
+];
+
+
+function modelIds(model)
+{
+    return Object.keys(model);
+}
+
+function attachedIds(model)
+{
+    var result = [];
+
+    var id;
+
+    for (id in model) {
+        if (
+            model[id].state ===
+            "ATTACHED"
+        ) {
+            result.push(id);
+        }
+    }
+
+    return result;
+}
+
+function detachedIds(model)
+{
+    var result = [];
+
+    var id;
+
+    for (id in model) {
+        if (
+            model[id].state ===
+            "DETACHED"
+        ) {
+            result.push(id);
+        }
+    }
+
+    return result;
+}
+
+
+function generateOperation(model)
+{
+    var ids =
+        modelIds(model);
+
+    var attached =
+        attachedIds(model);
+
+    var detached =
+        detachedIds(model);
+
+    var choices = [];
+
+    if (
+        ids.length <
+        CONFIG.maxObjects
+    ) {
+        choices.push("CREATE");
+    }
+
+    if (detached.length)
+        choices.push("ATTACH");
+
+    if (attached.length) {
+        choices.push(
+            "DETACH",
+            "MUTATE",
+            "LISTEN",
+            "DISPATCH",
+            "FOCUS",
+            "BLUR",
+            "LAYOUT",
+            "SCHEDULE"
+        );
+    }
+
+    if (ids.length)
+        choices.push("ACCESS");
+
+    if (
+        attached.length >= 2
+    ) {
+        choices.push("REPLACE");
+    }
+
+    var type =
+        pick(choices.length ?
+            choices :
+            ["CREATE"]);
+
+    if (
+        type === "CREATE"
+    ) {
+        var free =
+            OBJECT_NAMES.filter(
+                function(id) {
+                    return !model[id];
+                }
+            );
+
+        if (free.length) {
+
+            var newId =
+                pick(free);
+
+            model[newId] = {
+                state: "DETACHED"
+            };
+
+            return {
+                type: "CREATE",
+                id: newId,
+                elementType:
+                    pick(ELEMENT_TYPES)
+            };
+        }
+    }
+
+    if (
+        type === "ATTACH"
+    ) {
+        var attachId =
+            pick(detached);
+
+        model[attachId].state =
+            "ATTACHED";
+
+        return {
+            type: "ATTACH",
+            id: attachId
+        };
+    }
+
+    if (
+        type === "DETACH"
+    ) {
+        var detachId =
+            pick(attached);
+
+        model[detachId].state =
+            "DETACHED";
+
+        return {
+            type: "DETACH",
+            id: detachId
+        };
+    }
+
+    if (
+        type === "REPLACE"
+    ) {
+        var source =
+            pick(attached);
+
+        var targets =
+            attached.filter(
+                function(id) {
+                    return id !== source;
+                }
+            );
+
+        var target =
+            pick(targets);
+
+        model[source].state =
+            "DETACHED";
+
+        return {
+            type: "REPLACE",
+            id: source,
+            target: target
+        };
+    }
+
+    return {
+        type: type,
+        id:
+            pick(
+                type === "ACCESS" ?
+                ids :
+                attached
+            )
+    };
+}
+
+
+function generateSequence()
+{
+    var model = {};
+
+    var count =
+        CONFIG.minOps +
+        Math.floor(
+            rnd() *
+            (
+                CONFIG.maxOps -
+                CONFIG.minOps +
+                1
+            )
+        );
+
+    var result = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < count;
+        i++
+    ) {
+        result.push(
+            generateOperation(model)
+        );
+    }
+
+    return result;
+}
+
+
+/* ============================================================
+   MUTATION ENGINE
+   ============================================================ */
+
+function mutationInsert(sequence)
+{
+    var result =
+        clone(sequence);
+
+    if (
+        result.length >=
+        CONFIG.maxOps
+    )
+        return result;
+
+    var index =
+        Math.floor(
+            rnd() *
+            (result.length + 1)
+        );
+
+    result.splice(
+        index,
+        0,
+        {
+            type:
+                pick([
+                    "MUTATE",
+                    "LISTEN",
+                    "DISPATCH",
+                    "LAYOUT",
+                    "SCHEDULE",
+                    "ACCESS"
+                ]),
+
+            id:
+                pick(OBJECT_NAMES)
+        }
+    );
+
+    return result;
+}
+
+
+function mutationDelete(sequence)
+{
+    var result =
+        clone(sequence);
+
+    if (
+        result.length <=
+        CONFIG.minOps
+    )
+        return result;
+
+    result.splice(
+        Math.floor(
+            rnd() * result.length
+        ),
+        1
+    );
+
+    return result;
+}
+
+
+function mutationSwap(sequence)
+{
+    var result =
+        clone(sequence);
+
+    if (
+        result.length < 2
+    )
+        return result;
+
+    var a =
+        Math.floor(
+            rnd() *
+            result.length
+        );
+
+    var b =
+        Math.floor(
+            rnd() *
+            result.length
+        );
+
+    var temp =
+        result[a];
+
+    result[a] =
+        result[b];
+
+    result[b] =
+        temp;
+
+    return result;
+}
+
+
+function mutationDuplicate(sequence)
+{
+    var result =
+        clone(sequence);
+
+    if (!result.length)
+        return result;
+
+    var op =
+        clone([
+            pick(result)
+        ])[0];
+
+    result.splice(
+        Math.floor(
+            rnd() *
+            (result.length + 1)
+        ),
+        0,
+        op
+    );
+
+    return result;
+}
+
+
+function mutationReplace(sequence)
+{
+    var result =
+        clone(sequence);
+
+    if (!result.length)
+        return result;
+
+    var index =
+        Math.floor(
+            rnd() *
+            result.length
+        );
+
+    var old =
+        result[index];
+
+    result[index] = {
+        type:
+            pick(OP_TYPES),
+
+        id:
+            old.id ||
+            pick(OBJECT_NAMES)
+    };
+
+    return result;
+}
+
+
+function mutateSequence(sequence)
+{
+    var mutations = [
+        {
+            name: "INSERT",
+            fn: mutationInsert
+        },
+        {
+            name: "DELETE",
+            fn: mutationDelete
+        },
+        {
+            name: "SWAP",
+            fn: mutationSwap
+        },
+        {
+            name: "DUPLICATE",
+            fn: mutationDuplicate
+        },
+        {
+            name: "REPLACE",
+            fn: mutationReplace
+        }
+    ];
+
+    var selected =
+        pick(mutations);
+
+    State.mutation =
+        selected.name;
+
+    return selected.fn(sequence);
+}
+
+
+/* ============================================================
+   CASE CONSTRUCTION
+   ============================================================ */
+
+function buildCase()
+{
+    State.sourceCorpusId = null;
+    State.mutation = "";
+
+    if (
+        !State.corpus.length ||
+        rnd() <
+        CONFIG.generatedProbability
+    ) {
+        State.sourceType =
+            "GENERATED";
+
+        return generateSequence();
+    }
+
+    var entry =
+        selectCorpusEntry();
+
+    entry.uses++;
+
+    State.sourceType =
+        "CORPUS";
+
+    State.sourceCorpusId =
+        entry.id;
+
+    return mutateSequence(
+        entry.sequence
+    );
+}
+
+
+/* ============================================================
+   OBSERVATION ENGINE
+   ============================================================ */
+
+function resetObservations()
+{
+    State.observations = {
+        operations: {},
+        transitions: {},
+        eventOrder: [],
+        asyncPatterns: {},
+        errors: {}
+    };
+}
+
+
+function observeOperation(op)
+{
+    State.observations
+        .operations[op.type] =
+        true;
+
+    if (
+        State.history.length
+    ) {
+        var previous =
+            State.history[
+                State.history.length - 1
+            ];
+
+        var transition =
+            previous.type +
+            "->" +
+            op.type;
+
+        State.observations
+            .transitions[transition] =
+            true;
+    }
+
+    State.history.push(op);
+
+    if (
+        State.history.length > 8
+    ) {
+        State.history.shift();
+    }
+}
+
+
+function observeEvent(name)
+{
+    State.observations
+        .eventOrder
+        .push(name);
+
+    if (
+        State.observations
+            .eventOrder.length > 12
+    ) {
+        State.observations
+            .eventOrder.shift();
+    }
+}
+
+
+function calculateScore()
+{
+    var score = 0;
+
+    var transitions =
+        Object.keys(
+            State.observations.transitions
+        );
+
+    score +=
+        Math.min(
+            transitions.length,
+            8
+        );
+
+    if (
+        State.events > 0
+    )
+        score += 1;
+
+    if (
+        State.asyncCount > 0
+    )
+        score += 1;
+
+    if (
+        State.errors > 0
+    )
+        score += 3;
+
+    var types =
+        Object.keys(
+            State.observations.operations
+        );
+
+    if (
+        types.indexOf("SCHEDULE") >= 0 &&
+        types.indexOf("DETACH") >= 0
+    ) {
+        score += 2;
+    }
+
+    if (
+        types.indexOf("LISTEN") >= 0 &&
+        types.indexOf("DISPATCH") >= 0
+    ) {
+        score += 2;
+    }
+
+    if (
+        types.indexOf("REPLACE") >= 0 &&
+        types.indexOf("LAYOUT") >= 0
+    ) {
+        score += 2;
+    }
+
+    return score;
+}
+
+
+/* ============================================================
+   OBJECT MANAGEMENT
+   ============================================================ */
+
+function resetObjects()
+{
+    State.objects = {};
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    while (
+        root.firstChild
+    ) {
+        root.removeChild(
+            root.firstChild
+        );
+    }
+}
+
+
+/* ============================================================
+   EXECUTOR
+   ============================================================ */
+
+function executeOperation(op)
+{
+    State.currentOperation =
+        describeOperation(op);
+
+    observeOperation(op);
+
+    saveCheckpoint();
+
+    try {
+
+        if (
+            op.type === "CREATE"
+        ) {
+            if (
+                State.objects[op.id]
+            ) {
+                State.invalid++;
+                return;
+            }
+
+            var element =
+                document.createElement(
+                    op.elementType ||
+                    "div"
+                );
+
+            element.className =
+                "box";
+
+            element.textContent =
+                op.id;
+
+            State.objects[op.id] = {
+                element: element,
+                listeners: 0
+            };
+        }
+
+        else {
+
+            var object =
+                State.objects[op.id];
+
+            if (!object) {
+                State.invalid++;
+                return;
+            }
+
+            var element =
+                object.element;
+
+            if (
+                op.type === "ATTACH"
+            ) {
+                document
+                    .getElementById(
+                        "testRoot"
+                    )
+                    .appendChild(element);
+            }
+
+            else if (
+                op.type === "DETACH"
+            ) {
+                if (
+                    element.parentNode
+                ) {
+                    element.parentNode
+                        .removeChild(element);
+                }
+            }
+
+            else if (
+                op.type === "REPLACE"
+            ) {
+                var target =
+                    State.objects[
+                        op.target
+                    ];
+
+                if (
+                    target &&
+                    element.parentNode
+                ) {
+                    element.parentNode
+                        .replaceChild(
+                            target.element,
+                            element
+                        );
+                }
+                else {
+                    State.invalid++;
+                }
+            }
+
+            else if (
+                op.type === "MUTATE"
+            ) {
+                element.textContent =
+                    op.id +
+                    ":" +
+                    Math.floor(
+                        rnd() * 100000
+                    );
+
+                element.setAttribute(
+                    "data-case",
+                    State.caseId
+                );
+            }
+
+            else if (
+                op.type === "LISTEN"
+            ) {
+                element.addEventListener(
+                    "v11-event",
+                    function() {
+
+                        State.events++;
+
+                        observeEvent(
+                            "EVENT:" +
+                            op.id
+                        );
+                    },
+                    false
+                );
+            }
+
+            else if (
+                op.type === "DISPATCH"
+            ) {
+                var event =
+                    document.createEvent(
+                        "Event"
+                    );
+
+                event.initEvent(
+                    "v11-event",
+                    true,
+                    true
+                );
+
+                element.dispatchEvent(event);
+            }
+
+            else if (
+                op.type === "FOCUS"
+            ) {
+                if (element.focus)
+                    element.focus();
+            }
+
+            else if (
+                op.type === "BLUR"
+            ) {
+                if (element.blur)
+                    element.blur();
+            }
+
+            else if (
+                op.type === "LAYOUT"
+            ) {
+                void element.offsetWidth;
+
+                element.getBoundingClientRect();
+            }
+
+            else if (
+                op.type === "SCHEDULE"
+            ) {
+                State.asyncCount++;
+
+                observeEvent(
+                    "ASYNC-SCHEDULE:" +
+                    op.id
+                );
+
+                setTimeout(
+                    function() {
+
+                        try {
+
+                            observeEvent(
+                                "ASYNC-RUN:" +
+                                op.id
+                            );
+
+                            void element.parentNode;
+                            void element.textContent;
+                            void element.offsetWidth;
+
+                        }
+                        catch (e) {
+
+                            State.errors++;
+
+                            State.observations
+                                .errors[
+                                    e.name
+                                ] = true;
+                        }
+
+                    },
+                    CONFIG.asyncDelay
+                );
+            }
+
+            else if (
+                op.type === "ACCESS"
+            ) {
+                void element.textContent;
+                void element.parentNode;
+            }
+        }
+
+        State.lastCompletedOperation =
+            State.currentOperation;
+
+        saveCheckpoint();
+    }
+    catch (e) {
+
+        State.errors++;
+
+        State.observations
+            .errors[e.name] =
+            true;
+
+        log(
+            "JS ERROR | " +
+            e.name +
+            " | " +
+            State.currentOperation
+        );
+
+        saveCheckpoint();
+    }
+}
+
+
+/* ============================================================
+   CASE RUNNER
+   ============================================================ */
+
+function runCase(done)
+{
+    resetObjects();
+
+    resetObservations();
+
+    State.history = [];
+
+    State.operationIndex = 0;
+
+    State.errors = 0;
+    State.events = 0;
+    State.invalid = 0;
+    State.asyncCount = 0;
+
+    State.currentOperation = "";
+    State.lastCompletedOperation = "";
+
+    State.caseStarted = true;
+    State.caseCompleted = false;
+
+    saveCheckpoint();
+
+    function next()
+    {
+        if (
+            State.stopRequested
+        ) {
+            done();
+            return;
+        }
+
+        if (
+            State.operationIndex >=
+            State.operations.length
+        ) {
+
+            State.caseCompleted =
+                true;
+
+            State.score =
+                calculateScore();
+
+            saveCheckpoint();
+
+            if (
+                State.score >=
+                CONFIG.interestingScoreThreshold
+            ) {
+                addCorpus(
+                    State.operations,
+                    State.score,
+                    "score=" +
+                    State.score
+                );
+            }
+
+            done();
+
+            return;
+        }
+
+        var op =
+            State.operations[
+                State.operationIndex
+            ];
+
+        saveCheckpoint();
+
+        executeOperation(op);
+
+        State.operationIndex++;
+
+        saveCheckpoint();
+
+        updateDisplay();
+
+        setTimeout(
+            next,
+            CONFIG.operationDelay
+        );
+    }
+
+    next();
+}
+
+
+/* ============================================================
+   DISPLAY
+   ============================================================ */
+
+function updateDisplay()
+{
+    document
+        .getElementById("campaign")
+        .textContent =
+        "RUN: " +
+        State.runId +
+        "\nCASE: " +
+        State.caseId +
+        "\nSEED: " +
+        State.seed +
+        "\nSOURCE: " +
+        State.sourceType +
+        "\nCORPUS ID: " +
+        State.sourceCorpusId +
+        "\nMUTATION: " +
+        State.mutation +
+        "\nSCORE: " +
+        State.score;
+
+    var lines = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < State.operations.length;
+        i++
+    ) {
+        lines.push(
+            (
+                i === State.operationIndex ?
+                ">> " :
+                "   "
+            ) +
+            "#" +
+            ("00" + i).slice(-2) +
+            " " +
+            describeOperation(
+                State.operations[i]
+            )
+        );
+    }
+
+    document
+        .getElementById("caseInfo")
+        .textContent =
+        lines.join("\n") +
+        "\n\nCURRENT: " +
+        State.currentOperation +
+        "\nLAST: " +
+        State.lastCompletedOperation +
+        "\nERRORS: " +
+        State.errors +
+        "\nEVENTS: " +
+        State.events +
+        "\nINVALID: " +
+        State.invalid;
+
+    document
+        .getElementById("corpusInfo")
+        .textContent =
+        "CORPUS SIZE: " +
+        State.corpus.length +
+        " / " +
+        CONFIG.maxCorpus +
+        "\nINTEREST THRESHOLD: " +
+        CONFIG.interestingScoreThreshold;
+}
+
+
+/* ============================================================
+   CAMPAIGN
+   ============================================================ */
+
+function startCampaign()
+{
+    if (State.running)
+        return;
+
+    State.running = true;
+    State.stopRequested = false;
+
+    State.runId++;
+
+    setStatus(
+        "Campaign running"
+    );
+
+    function nextCase()
+    {
+        if (
+            State.stopRequested
+        ) {
+            State.running = false;
+
+            setStatus("Stopped");
+
+            log("CAMPAIGN STOPPED");
+
+            return;
+        }
+
+        State.caseId++;
+
+        setSeed(
+            newSeed()
+        );
+
+        State.operations =
+            buildCase();
+
+        State.score = 0;
+
+        log(
+            "CASE " +
+            State.caseId +
+            " | " +
+            State.sourceType +
+            " | " +
+            State.mutation
+        );
+
+        updateDisplay();
+
+        runCase(
+            function() {
+
+                updateDisplay();
+
+                setTimeout(
+                    nextCase,
+                    CONFIG.caseDelay
+                );
+            }
+        );
+    }
+
+    nextCase();
+}
+
+
+function stopCampaign()
+{
+    State.stopRequested = true;
+
+    setStatus(
+        "Stopping..."
+    );
+}
+
+
+/* ============================================================
+   CLEAR CORPUS
+   ============================================================ */
+
+function clearCorpus()
+{
+    State.corpus = [];
+
+    saveCorpus();
+
+    updateDisplay();
+
+    log("CORPUS CLEARED");
+}
+
+
+/* ============================================================
+   INITIALIZATION
+   ============================================================ */
+
+State.runId =
+    parseInt(
+        storeGet("runId") || "0",
+        10
+    );
+
+State.caseId =
+    parseInt(
+        storeGet("caseId") || "0",
+        10
+    );
+
+if (isNaN(State.runId))
+    State.runId = 0;
+
+if (isNaN(State.caseId))
+    State.caseId = 0;
+
+loadCorpus();
+
+document
+    .getElementById("start")
+    .addEventListener(
+        "click",
+        startCampaign,
+        false
+    );
+
+document
+    .getElementById("stop")
+    .addEventListener(
+        "click",
+        stopCampaign,
+        false
+    );
+
+document
+    .getElementById("clearCorpus")
+    .addEventListener(
+        "click",
+        clearCorpus,
+        false
+    );
+
+checkRecovery();
+
+updateDisplay();
+
+log("V11 INITIALIZED");
+
 </script>
-<video onloadstart="eventhandler1()" src="data:video/mp4;base64,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" loopend="1">
+
 </body>
 </html>

@@ -1,12 +1,2048 @@
-<script>
-function myfunc() {
-try { myvideo.poster = "" + String.fromCharCode(117, 67, 45, 112, 50, 57, 122, 86, 51, 72, 81, 67, 110, 100, 111, 43, 58, 74) + ""; } catch(e) { }
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Structured Lifetime Test Harness V7</title>
 
+<style>
+body {
+    font-family: sans-serif;
+    margin: 10px;
 }
+
+button,
+input,
+textarea {
+    margin: 3px;
+    padding: 5px;
+}
+
+#status,
+#recovery,
+#sequenceInfo,
+#minimizeInfo,
+#log {
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid #777;
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+
+#log {
+    max-height: 400px;
+    overflow: auto;
+}
+
+textarea {
+    width: 96%;
+    height: 90px;
+}
+
+#testRoot {
+    min-height: 180px;
+    padding: 10px;
+    margin-top: 10px;
+    border: 1px solid #444;
+}
+
+.boxA {
+    padding: 8px;
+    margin: 3px;
+    border: 1px solid #777;
+}
+
+.boxB {
+    padding: 10px;
+    margin: 5px;
+    outline: 1px dotted black;
+}
+
+.boxC {
+    display: inline-block;
+    width: 40px;
+    height: 25px;
+    margin: 2px;
+    border: 1px solid #555;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Structured Lifetime Test Harness V7</h2>
+
+<div>
+
+    <button id="generateButton">
+        Generate + Run
+    </button>
+
+    <button id="replayButton">
+        Replay Descriptor
+    </button>
+
+    <button id="minimizeButton">
+        Minimize
+    </button>
+
+    <button id="newSeedButton">
+        New Seed
+    </button>
+
+    <button id="clearCheckpointButton">
+        Clear Checkpoint
+    </button>
+
+    <button id="clearLogButton">
+        Clear Log
+    </button>
+
+    <br><br>
+
+    Seed:
+
+    <input
+        id="seedInput"
+        value="123456"
+        size="12"
+    >
+
+    Steps:
+
+    <input
+        id="stepCountInput"
+        value="6"
+        size="4"
+    >
+
+</div>
+
+<div id="status">
+Ready
+</div>
+
+<div id="recovery">
+Checking previous run...
+</div>
+
+<div id="testRoot">
+</div>
+
+<h3>Current Sequence</h3>
+
+<div id="sequenceInfo">
+No sequence generated.
+</div>
+
+<h3>Replay Descriptor</h3>
+
+<textarea id="descriptorInput"></textarea>
+
+<h3>Minimization</h3>
+
+<div id="minimizeInfo">
+No minimization started.
+</div>
+
+<h3>Log</h3>
+
+<div id="log"></div>
+
+<script>
+
+/* ============================================================
+   CONSTANTS
+   ============================================================ */
+
+var STORAGE_PREFIX =
+    "lifetimeHarnessV7.";
+
+
+/* ============================================================
+   STATE
+   ============================================================ */
+
+var State = {
+
+    running: false,
+
+    seed: 0,
+
+    randomState: 0,
+
+    sequence: [],
+
+    sequenceIndex: 0,
+
+    logStep: 0,
+
+    errors: 0,
+
+    events: 0,
+
+    currentModule: "",
+
+    currentVariant: "",
+
+    currentOperation: "",
+
+    lastOperation: "",
+
+    minimizing: false,
+
+    minimizeCandidate: [],
+
+    minimizeGranularity: 2,
+
+    minimizeIteration: 0
+};
+
+
+/* ============================================================
+   LOGGING
+   ============================================================ */
+
+function log(message)
+{
+    State.logStep++;
+
+    var line =
+        "[" +
+        ("0000" + State.logStep).slice(-4) +
+        "] " +
+        message;
+
+    var output =
+        document.getElementById("log");
+
+    output.textContent +=
+        line + "\n";
+
+    output.scrollTop =
+        output.scrollHeight;
+
+    console.log(line);
+}
+
+
+function setStatus(message)
+{
+    document
+        .getElementById("status")
+        .textContent =
+        message;
+}
+
+
+function delay(callback, ms)
+{
+    setTimeout(
+        callback,
+        ms || 80
+    );
+}
+
+
+/* ============================================================
+   STORAGE / CHECKPOINT
+   ============================================================ */
+
+function saveCheckpoint()
+{
+    try
+    {
+        localStorage.setItem(
+            STORAGE_PREFIX + "active",
+            "1"
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "seed",
+            String(State.seed)
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "sequence",
+            serializeSequence(State.sequence)
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "index",
+            String(State.sequenceIndex)
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "module",
+            State.currentModule
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "variant",
+            State.currentVariant
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "operation",
+            State.currentOperation
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "lastOperation",
+            State.lastOperation
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "timestamp",
+            String(new Date().getTime())
+        );
+    }
+    catch (e)
+    {
+        log(
+            "CHECKPOINT STORAGE ERROR"
+        );
+    }
+}
+
+
+function clearCheckpoint()
+{
+    try
+    {
+        var keys = [
+            "active",
+            "seed",
+            "sequence",
+            "index",
+            "module",
+            "variant",
+            "operation",
+            "lastOperation",
+            "timestamp"
+        ];
+
+        var i;
+
+        for (
+            i = 0;
+            i < keys.length;
+            i++
+        )
+        {
+            localStorage.removeItem(
+                STORAGE_PREFIX +
+                keys[i]
+            );
+        }
+    }
+    catch (e)
+    {
+    }
+
+    document
+        .getElementById("recovery")
+        .textContent =
+        "No active checkpoint.";
+}
+
+
+function completeCheckpoint()
+{
+    try
+    {
+        localStorage.setItem(
+            STORAGE_PREFIX + "active",
+            "0"
+        );
+
+        localStorage.setItem(
+            STORAGE_PREFIX + "lastOperation",
+            State.lastOperation
+        );
+    }
+    catch (e)
+    {
+    }
+}
+
+
+function recoverPreviousRun()
+{
+    var box =
+        document.getElementById(
+            "recovery"
+        );
+
+    try
+    {
+        var active =
+            localStorage.getItem(
+                STORAGE_PREFIX + "active"
+            );
+
+        if (active !== "1")
+        {
+            box.textContent =
+                "No incomplete previous run.";
+
+            return;
+        }
+
+        var seed =
+            localStorage.getItem(
+                STORAGE_PREFIX + "seed"
+            );
+
+        var sequence =
+            localStorage.getItem(
+                STORAGE_PREFIX + "sequence"
+            );
+
+        var index =
+            localStorage.getItem(
+                STORAGE_PREFIX + "index"
+            );
+
+        var module =
+            localStorage.getItem(
+                STORAGE_PREFIX + "module"
+            );
+
+        var variant =
+            localStorage.getItem(
+                STORAGE_PREFIX + "variant"
+            );
+
+        var operation =
+            localStorage.getItem(
+                STORAGE_PREFIX + "operation"
+            );
+
+        var last =
+            localStorage.getItem(
+                STORAGE_PREFIX + "lastOperation"
+            );
+
+        box.textContent =
+            "PREVIOUS RUN INCOMPLETE\n\n" +
+            "Seed: " + seed + "\n" +
+            "Step index: " + index + "\n" +
+            "Sequence:\n" + sequence + "\n\n" +
+            "Current:\n" +
+            module + "." +
+            variant + "." +
+            operation + "\n\n" +
+            "Last completed:\n" +
+            last;
+
+        document
+            .getElementById(
+                "descriptorInput"
+            )
+            .value =
+            sequence || "";
+
+        if (seed)
+        {
+            document
+                .getElementById(
+                    "seedInput"
+                )
+                .value =
+                seed;
+        }
+    }
+    catch (e)
+    {
+        box.textContent =
+            "Checkpoint recovery unavailable.";
+    }
+}
+
+
+/* ============================================================
+   DETERMINISTIC PRNG
+   ============================================================ */
+
+function setSeed(seed)
+{
+    seed =
+        parseInt(seed, 10);
+
+    if (isNaN(seed))
+        seed = 1;
+
+    State.seed = seed;
+
+    State.randomState =
+        seed >>> 0;
+}
+
+
+function seededRandom()
+{
+    State.randomState =
+        (
+            State.randomState *
+            1664525 +
+            1013904223
+        ) >>> 0;
+
+    return (
+        State.randomState /
+        4294967296
+    );
+}
+
+
+function randomIndex(length)
+{
+    return Math.floor(
+        seededRandom() * length
+    );
+}
+
+
+/* ============================================================
+   MODULE / OPERATION TRACKING
+   ============================================================ */
+
+function beginModule(moduleName, variantName)
+{
+    State.currentModule =
+        moduleName;
+
+    State.currentVariant =
+        variantName;
+
+    State.currentOperation =
+        "begin";
+
+    saveCheckpoint();
+
+    log(
+        "MODULE | " +
+        moduleName +
+        "." +
+        variantName
+    );
+}
+
+
+function safeCall(name, callback)
+{
+    State.currentOperation =
+        name;
+
+    saveCheckpoint();
+
+    var descriptor =
+        State.currentModule +
+        "." +
+        State.currentVariant +
+        "." +
+        name;
+
+    log(
+        "BEGIN | " +
+        descriptor
+    );
+
+    try
+    {
+        callback();
+
+        State.lastOperation =
+            descriptor;
+
+        saveCheckpoint();
+
+        log(
+            "OK    | " +
+            descriptor
+        );
+    }
+    catch (e)
+    {
+        State.errors++;
+
+        log(
+            "ERROR | " +
+            descriptor +
+            " | " +
+            e.name
+        );
+    }
+}
+
+
+/* ============================================================
+   CLEANUP
+   ============================================================ */
+
+function cleanup()
+{
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    while (root.firstChild)
+    {
+        root.removeChild(
+            root.firstChild
+        );
+    }
+}
+
+
+/* ============================================================
+   LIFETIME.DOM.v1
+   create -> retain -> detach -> retained access
+   ============================================================ */
+
+function LIFETIME_DOM_v1(done)
+{
+    beginModule(
+        "LIFETIME.DOM",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var retained;
+
+    safeCall(
+        "create-target",
+        function()
+        {
+            retained =
+                document.createElement("div");
+
+            retained.className =
+                "boxA";
+
+            retained.textContent =
+                "retained";
+
+            root.appendChild(retained);
+        }
+    );
+
+    safeCall(
+        "detach-target",
+        function()
+        {
+            if (retained.parentNode)
+            {
+                retained.parentNode.removeChild(
+                    retained
+                );
+            }
+        }
+    );
+
+    safeCall(
+        "access-retained-reference",
+        function()
+        {
+            var value =
+                retained.textContent;
+
+            log(
+                "RETAINED | " +
+                value
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.DOM.v2
+   create -> replace -> retain old reference
+   ============================================================ */
+
+function LIFETIME_DOM_v2(done)
+{
+    beginModule(
+        "LIFETIME.DOM",
+        "v2"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var oldNode;
+
+    safeCall(
+        "create-old",
+        function()
+        {
+            oldNode =
+                document.createElement("div");
+
+            oldNode.className =
+                "boxA";
+
+            oldNode.textContent =
+                "old";
+
+            root.appendChild(oldNode);
+        }
+    );
+
+    safeCall(
+        "replace-old",
+        function()
+        {
+            var replacement =
+                document.createElement("div");
+
+            replacement.className =
+                "boxB";
+
+            replacement.textContent =
+                "replacement";
+
+            root.replaceChild(
+                replacement,
+                oldNode
+            );
+        }
+    );
+
+    safeCall(
+        "access-old-reference",
+        function()
+        {
+            log(
+                "OLD CONNECTED | " +
+                !!oldNode.parentNode
+            );
+
+            oldNode.textContent =
+                "still referenced";
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.EVENT.v1
+   dispatch -> mutation during handler
+   ============================================================ */
+
+function LIFETIME_EVENT_v1(done)
+{
+    beginModule(
+        "LIFETIME.EVENT",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var target;
+
+    safeCall(
+        "create-target",
+        function()
+        {
+            target =
+                document.createElement("div");
+
+            target.className =
+                "boxA";
+
+            target.textContent =
+                "event target";
+
+            root.appendChild(target);
+        }
+    );
+
+    safeCall(
+        "install-listener",
+        function()
+        {
+            target.addEventListener(
+                "lifetime-test",
+                function()
+                {
+                    State.events++;
+
+                    if (target.parentNode)
+                    {
+                        target.parentNode.removeChild(
+                            target
+                        );
+                    }
+
+                    log(
+                        "EVENT HANDLER MUTATED TREE"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "dispatch-event",
+        function()
+        {
+            var event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                "lifetime-test",
+                true,
+                true
+            );
+
+            target.dispatchEvent(event);
+        }
+    );
+
+    safeCall(
+        "post-dispatch-access",
+        function()
+        {
+            log(
+                "TARGET CONNECTED | " +
+                !!target.parentNode
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.EVENT.v2
+   bubbling with structural mutation
+   ============================================================ */
+
+function LIFETIME_EVENT_v2(done)
+{
+    beginModule(
+        "LIFETIME.EVENT",
+        "v2"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var parent;
+    var child;
+
+    safeCall(
+        "create-tree",
+        function()
+        {
+            parent =
+                document.createElement("div");
+
+            child =
+                document.createElement("div");
+
+            parent.className =
+                "boxA";
+
+            child.className =
+                "boxB";
+
+            parent.appendChild(child);
+            root.appendChild(parent);
+        }
+    );
+
+    safeCall(
+        "listeners",
+        function()
+        {
+            child.addEventListener(
+                "bubble-test",
+                function()
+                {
+                    State.events++;
+
+                    if (parent.parentNode)
+                    {
+                        parent.parentNode.removeChild(
+                            parent
+                        );
+                    }
+                },
+                false
+            );
+
+            parent.addEventListener(
+                "bubble-test",
+                function()
+                {
+                    State.events++;
+
+                    log(
+                        "PARENT HANDLER"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "dispatch",
+        function()
+        {
+            var event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                "bubble-test",
+                true,
+                true
+            );
+
+            child.dispatchEvent(event);
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.FOCUS.v1
+   focus -> mutation -> blur
+   ============================================================ */
+
+function LIFETIME_FOCUS_v1(done)
+{
+    beginModule(
+        "LIFETIME.FOCUS",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var input;
+
+    safeCall(
+        "create-input",
+        function()
+        {
+            input =
+                document.createElement("input");
+
+            input.type =
+                "text";
+
+            root.appendChild(input);
+        }
+    );
+
+    safeCall(
+        "install-blur-handler",
+        function()
+        {
+            input.addEventListener(
+                "blur",
+                function()
+                {
+                    State.events++;
+
+                    if (input.parentNode)
+                    {
+                        input.parentNode.removeChild(
+                            input
+                        );
+                    }
+
+                    log(
+                        "BLUR HANDLER DETACHED INPUT"
+                    );
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "focus",
+        function()
+        {
+            input.focus();
+        }
+    );
+
+    safeCall(
+        "blur",
+        function()
+        {
+            input.blur();
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.FOCUS.v2
+   focus transition between nodes
+   ============================================================ */
+
+function LIFETIME_FOCUS_v2(done)
+{
+    beginModule(
+        "LIFETIME.FOCUS",
+        "v2"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var a;
+    var b;
+
+    safeCall(
+        "create-inputs",
+        function()
+        {
+            a =
+                document.createElement("input");
+
+            b =
+                document.createElement("input");
+
+            root.appendChild(a);
+            root.appendChild(b);
+        }
+    );
+
+    safeCall(
+        "install-handler",
+        function()
+        {
+            a.addEventListener(
+                "blur",
+                function()
+                {
+                    State.events++;
+
+                    if (b.parentNode)
+                    {
+                        b.parentNode.removeChild(b);
+                    }
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "focus-a",
+        function()
+        {
+            a.focus();
+        }
+    );
+
+    safeCall(
+        "focus-b",
+        function()
+        {
+            b.focus();
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.ASYNC.v1
+   timer -> detach -> callback access
+   ============================================================ */
+
+function LIFETIME_ASYNC_v1(done)
+{
+    beginModule(
+        "LIFETIME.ASYNC",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+    safeCall(
+        "create-node",
+        function()
+        {
+            node =
+                document.createElement("div");
+
+            node.className =
+                "boxA";
+
+            node.textContent =
+                "async";
+
+            root.appendChild(node);
+        }
+    );
+
+    safeCall(
+        "schedule-callback",
+        function()
+        {
+            setTimeout(
+                function()
+                {
+                    State.events++;
+
+                    log(
+                        "ASYNC CONNECTED | " +
+                        !!node.parentNode
+                    );
+
+                    log(
+                        "ASYNC TEXT | " +
+                        node.textContent
+                    );
+                },
+                40
+            );
+        }
+    );
+
+    safeCall(
+        "detach-before-callback",
+        function()
+        {
+            if (node.parentNode)
+            {
+                node.parentNode.removeChild(
+                    node
+                );
+            }
+        }
+    );
+
+    delay(done, 120);
+}
+
+
+/* ============================================================
+   LIFETIME.LAYOUT.v1
+   attach -> mutate -> detach -> layout access
+   ============================================================ */
+
+function LIFETIME_LAYOUT_v1(done)
+{
+    beginModule(
+        "LIFETIME.LAYOUT",
+        "v1"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+    safeCall(
+        "create-node",
+        function()
+        {
+            node =
+                document.createElement("div");
+
+            node.className =
+                "boxA";
+
+            node.style.width =
+                "100px";
+
+            root.appendChild(node);
+        }
+    );
+
+    safeCall(
+        "force-layout",
+        function()
+        {
+            log(
+                "WIDTH | " +
+                node.offsetWidth
+            );
+        }
+    );
+
+    safeCall(
+        "detach",
+        function()
+        {
+            if (node.parentNode)
+            {
+                node.parentNode.removeChild(
+                    node
+                );
+            }
+        }
+    );
+
+    safeCall(
+        "read-detached-layout",
+        function()
+        {
+            var rect =
+                node.getBoundingClientRect();
+
+            log(
+                "DETACHED RECT | " +
+                rect.width
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LIFETIME.LAYOUT.v2
+   replace -> layout transition
+   ============================================================ */
+
+function LIFETIME_LAYOUT_v2(done)
+{
+    beginModule(
+        "LIFETIME.LAYOUT",
+        "v2"
+    );
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    var node;
+
+    safeCall(
+        "create",
+        function()
+        {
+            node =
+                document.createElement("div");
+
+            node.className =
+                "boxA";
+
+            root.appendChild(node);
+        }
+    );
+
+    safeCall(
+        "mutate",
+        function()
+        {
+            node.className =
+                "boxB";
+
+            node.style.width =
+                "150px";
+
+            log(
+                "LAYOUT | " +
+                node.offsetWidth
+            );
+        }
+    );
+
+    safeCall(
+        "replace",
+        function()
+        {
+            var replacement =
+                document.createElement("div");
+
+            replacement.className =
+                "boxC";
+
+            root.replaceChild(
+                replacement,
+                node
+            );
+        }
+    );
+
+    safeCall(
+        "access-old",
+        function()
+        {
+            log(
+                "OLD RECT | " +
+                node.getBoundingClientRect().width
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   MODULE REGISTRY
+   ============================================================ */
+
+var Steps = [
+
+    {
+        name: "LIFETIME.DOM.v1",
+        fn: LIFETIME_DOM_v1
+    },
+
+    {
+        name: "LIFETIME.DOM.v2",
+        fn: LIFETIME_DOM_v2
+    },
+
+    {
+        name: "LIFETIME.EVENT.v1",
+        fn: LIFETIME_EVENT_v1
+    },
+
+    {
+        name: "LIFETIME.EVENT.v2",
+        fn: LIFETIME_EVENT_v2
+    },
+
+    {
+        name: "LIFETIME.FOCUS.v1",
+        fn: LIFETIME_FOCUS_v1
+    },
+
+    {
+        name: "LIFETIME.FOCUS.v2",
+        fn: LIFETIME_FOCUS_v2
+    },
+
+    {
+        name: "LIFETIME.ASYNC.v1",
+        fn: LIFETIME_ASYNC_v1
+    },
+
+    {
+        name: "LIFETIME.LAYOUT.v1",
+        fn: LIFETIME_LAYOUT_v1
+    },
+
+    {
+        name: "LIFETIME.LAYOUT.v2",
+        fn: LIFETIME_LAYOUT_v2
+    }
+
+];
+
+
+/* ============================================================
+   LOOKUP / SERIALIZATION
+   ============================================================ */
+
+function getStep(name)
+{
+    var i;
+
+    for (
+        i = 0;
+        i < Steps.length;
+        i++
+    )
+    {
+        if (
+            Steps[i].name === name
+        )
+        {
+            return Steps[i];
+        }
+    }
+
+    return null;
+}
+
+
+function serializeSequence(sequence)
+{
+    var names = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < sequence.length;
+        i++
+    )
+    {
+        names.push(
+            sequence[i].name
+        );
+    }
+
+    return names.join(" -> ");
+}
+
+
+function parseSequence(text)
+{
+    var parts =
+        text.split("->");
+
+    var sequence = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < parts.length;
+        i++
+    )
+    {
+        var name =
+            parts[i]
+            .replace(
+                /^\s+|\s+$/g,
+                ""
+            );
+
+        var step =
+            getStep(name);
+
+        if (step)
+        {
+            sequence.push(step);
+        }
+    }
+
+    return sequence;
+}
+
+
+/* ============================================================
+   GENERATOR
+   ============================================================ */
+
+function generateSequence(seed, count)
+{
+    setSeed(seed);
+
+    var sequence = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < count;
+        i++
+    )
+    {
+        sequence.push(
+            Steps[
+                randomIndex(
+                    Steps.length
+                )
+            ]
+        );
+    }
+
+    return sequence;
+}
+
+
+/* ============================================================
+   DISPLAY
+   ============================================================ */
+
+function showSequence(sequence)
+{
+    document
+        .getElementById(
+            "sequenceInfo"
+        )
+        .textContent =
+        "SEED: " +
+        State.seed +
+        "\n\n" +
+        serializeSequence(sequence);
+
+    document
+        .getElementById(
+            "descriptorInput"
+        )
+        .value =
+        serializeSequence(sequence);
+}
+
+
+/* ============================================================
+   EXECUTION ENGINE
+   ============================================================ */
+
+function resetExecutionState()
+{
+    State.errors = 0;
+    State.events = 0;
+
+    State.currentModule = "";
+    State.currentVariant = "";
+    State.currentOperation = "";
+    State.lastOperation = "";
+}
+
+
+function runSequence(sequence, finished)
+{
+    cleanup();
+
+    resetExecutionState();
+
+    State.sequence =
+        sequence.slice(0);
+
+    State.sequenceIndex = 0;
+
+    saveCheckpoint();
+
+    function next()
+    {
+        if (
+            State.sequenceIndex >=
+            State.sequence.length
+        )
+        {
+            completeCheckpoint();
+
+            finished();
+
+            return;
+        }
+
+        var step =
+            State.sequence[
+                State.sequenceIndex
+            ];
+
+        log(
+            "STEP | " +
+            (State.sequenceIndex + 1) +
+            "/" +
+            State.sequence.length +
+            " | " +
+            step.name
+        );
+
+        State.sequenceIndex++;
+
+        saveCheckpoint();
+
+        step.fn(next);
+    }
+
+    next();
+}
+
+
+/* ============================================================
+   NORMAL RUN
+   ============================================================ */
+
+function startRun(sequence)
+{
+    if (
+        State.running ||
+        !sequence.length
+    )
+    {
+        return;
+    }
+
+    State.running = true;
+
+    State.logStep = 0;
+
+    document
+        .getElementById(
+            "log"
+        )
+        .textContent =
+        "";
+
+    showSequence(sequence);
+
+    setStatus(
+        "Running " +
+        sequence.length +
+        " steps"
+    );
+
+    log(
+        "V7 LIFETIME TEST START"
+    );
+
+    log(
+        "SEED | " +
+        State.seed
+    );
+
+    runSequence(
+        sequence,
+        function()
+        {
+            log("");
+
+            log(
+                "RUN FINISHED"
+            );
+
+            log(
+                "ERRORS | " +
+                State.errors
+            );
+
+            log(
+                "EVENTS | " +
+                State.events
+            );
+
+            log(
+                "LAST | " +
+                State.lastOperation
+            );
+
+            State.running = false;
+
+            setStatus(
+                "Finished"
+            );
+
+            recoverPreviousRun();
+        }
+    );
+}
+
+
+/* ============================================================
+   MINIMIZATION
+   ============================================================ */
+
+function updateMinimize(message)
+{
+    document
+        .getElementById(
+            "minimizeInfo"
+        )
+        .textContent =
+        message;
+}
+
+
+/*
+ * Esta redução preserva apenas sequências que
+ * executam sem erro JavaScript adicional.
+ * Ela é um mecanismo de redução estrutural,
+ * não um detector automático de crash.
+ */
+
+function minimize(sequence)
+{
+    if (
+        State.running ||
+        !sequence.length
+    )
+    {
+        return;
+    }
+
+    State.running = true;
+    State.minimizing = true;
+
+    State.minimizeCandidate =
+        sequence.slice(0);
+
+    State.minimizeGranularity = 2;
+    State.minimizeIteration = 0;
+
+    function candidateTest(testSequence, callback)
+    {
+        runSequence(
+            testSequence,
+            function()
+            {
+                callback(
+                    State.errors === 0
+                );
+            }
+        );
+    }
+
+    function iterate()
+    {
+        var candidate =
+            State.minimizeCandidate;
+
+        if (
+            candidate.length <= 1
+        )
+        {
+            finish();
+            return;
+        }
+
+        var chunkSize =
+            Math.ceil(
+                candidate.length /
+                State.minimizeGranularity
+            );
+
+        var chunk = 0;
+
+        function testNext()
+        {
+            if (
+                chunk >=
+                State.minimizeGranularity
+            )
+            {
+                if (
+                    State.minimizeGranularity >=
+                    candidate.length
+                )
+                {
+                    finish();
+                    return;
+                }
+
+                State.minimizeGranularity =
+                    Math.min(
+                        candidate.length,
+                        State.minimizeGranularity * 2
+                    );
+
+                iterate();
+
+                return;
+            }
+
+            var start =
+                chunk * chunkSize;
+
+            var end =
+                Math.min(
+                    candidate.length,
+                    start + chunkSize
+                );
+
+            chunk++;
+
+            var reduced =
+                candidate
+                .slice(0, start)
+                .concat(
+                    candidate.slice(end)
+                );
+
+            if (!reduced.length)
+            {
+                testNext();
+                return;
+            }
+
+            State.minimizeIteration++;
+
+            updateMinimize(
+                "Iteration: " +
+                State.minimizeIteration +
+                "\n\nTesting:\n" +
+                serializeSequence(reduced)
+            );
+
+            candidateTest(
+                reduced,
+                function(valid)
+                {
+                    if (valid)
+                    {
+                        State.minimizeCandidate =
+                            reduced;
+
+                        State.minimizeGranularity =
+                            Math.max(
+                                2,
+                                State.minimizeGranularity - 1
+                            );
+
+                        delay(
+                            iterate,
+                            80
+                        );
+                    }
+                    else
+                    {
+                        delay(
+                            testNext,
+                            80
+                        );
+                    }
+                }
+            );
+        }
+
+        testNext();
+    }
+
+    function finish()
+    {
+        State.running = false;
+        State.minimizing = false;
+
+        document
+            .getElementById(
+                "descriptorInput"
+            )
+            .value =
+            serializeSequence(
+                State.minimizeCandidate
+            );
+
+        updateMinimize(
+            "MINIMIZATION FINISHED\n\n" +
+            "Original length: " +
+            sequence.length +
+            "\nReduced length: " +
+            State.minimizeCandidate.length +
+            "\nIterations: " +
+            State.minimizeIteration +
+            "\n\nResult:\n" +
+            serializeSequence(
+                State.minimizeCandidate
+            )
+        );
+
+        setStatus(
+            "Minimization finished"
+        );
+    }
+
+    iterate();
+}
+
+
+/* ============================================================
+   UI
+   ============================================================ */
+
+document
+    .getElementById(
+        "generateButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            var seed =
+                parseInt(
+                    document
+                    .getElementById(
+                        "seedInput"
+                    )
+                    .value,
+                    10
+                );
+
+            var count =
+                parseInt(
+                    document
+                    .getElementById(
+                        "stepCountInput"
+                    )
+                    .value,
+                    10
+                );
+
+            if (isNaN(seed))
+            {
+                seed = 1;
+            }
+
+            if (
+                isNaN(count) ||
+                count < 1
+            )
+            {
+                count = 1;
+            }
+
+            if (count > 12)
+            {
+                count = 12;
+            }
+
+            var sequence =
+                generateSequence(
+                    seed,
+                    count
+                );
+
+            startRun(sequence);
+        },
+        false
+    );
+
+
+document
+    .getElementById(
+        "replayButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            var sequence =
+                parseSequence(
+                    document
+                    .getElementById(
+                        "descriptorInput"
+                    )
+                    .value
+                );
+
+            startRun(sequence);
+        },
+        false
+    );
+
+
+document
+    .getElementById(
+        "minimizeButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            var sequence =
+                parseSequence(
+                    document
+                    .getElementById(
+                        "descriptorInput"
+                    )
+                    .value
+                );
+
+            minimize(sequence);
+        },
+        false
+    );
+
+
+document
+    .getElementById(
+        "newSeedButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            document
+                .getElementById(
+                    "seedInput"
+                )
+                .value =
+                Math.floor(
+                    Math.random() *
+                    2147483647
+                ) + 1;
+        },
+        false
+    );
+
+
+document
+    .getElementById(
+        "clearCheckpointButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            clearCheckpoint();
+        },
+        false
+    );
+
+
+document
+    .getElementById(
+        "clearLogButton"
+    )
+    .addEventListener(
+        "click",
+        function()
+        {
+            document
+                .getElementById(
+                    "log"
+                )
+                .textContent =
+                "";
+        },
+        false
+    );
+
+
+/* ============================================================
+   INITIALIZATION
+   ============================================================ */
+
+log(
+    "V7 initialized"
+);
+
+recoverPreviousRun();
+
 </script>
-<body onload=myfunc()>
-<video id="myvideo" preload="metadata" video">&lt;ls&#x27;|</video>
 
-
-<p>This test passes if it doesn't crash.</p>
 </body>
+</html>

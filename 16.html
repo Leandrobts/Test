@@ -1,32 +1,1584 @@
 <!DOCTYPE html>
 <html>
-<body>
-<button id="start">Start</button>
-<script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+<head>
+<meta charset="utf-8">
+<title>Structured Test Harness V6</title>
+
+<style>
+body {
+    font-family: sans-serif;
+    margin: 10px;
 }
-(() => {
-    const iframe = document.body.appendChild(document.createElement("iframe"));
-    const div = iframe.contentDocument.body.appendChild(document.createElement("div"));
-    document.getElementById("start").addEventListener("click", () => {
-        div.webkitRequestFullscreen();        
-        const contentDocument = iframe.contentDocument;
-        document.body.removeChild(iframe);
-        setTimeout(() => {
-            contentDocument.webkitCancelFullScreen();
-            gc();
-        }, 0);
-    });
-})();
+
+button, input, select, textarea {
+    margin: 3px;
+    padding: 5px;
+}
+
+#status,
+#sequenceInfo,
+#log,
+#minimizeInfo {
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid #777;
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+
+#log {
+    max-height: 350px;
+    overflow: auto;
+}
+
+textarea {
+    width: 95%;
+    height: 90px;
+}
+
+#testRoot {
+    min-height: 160px;
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid #444;
+    overflow: hidden;
+}
+
+.layoutNode {
+    display: inline-block;
+    width: 35px;
+    height: 22px;
+    margin: 2px;
+    border: 1px solid #777;
+}
+
+.mutationA {
+    padding: 6px;
+    margin: 3px;
+    border: 1px solid #777;
+}
+
+.mutationB {
+    padding: 10px;
+    margin-left: 8px;
+    outline: 1px dotted black;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Structured Test Harness V6</h2>
+
+<div>
+
+<button id="generateButton">
+Generate + Run
+</button>
+
+<button id="replayButton">
+Replay Descriptor
+</button>
+
+<button id="minimizeButton">
+Minimize Current Sequence
+</button>
+
+<button id="newSeedButton">
+New Seed
+</button>
+
+<button id="clearButton">
+Clear Log
+</button>
+
+<br><br>
+
+Seed:
+
+<input id="seedInput"
+       value="123456"
+       size="12">
+
+Steps:
+
+<input id="stepCountInput"
+       value="6"
+       size="4">
+
+<br><br>
+
+Oracle:
+
+<select id="oracleSelect">
+<option value="errors">
+At least one JavaScript error
+</option>
+
+<option value="events">
+Minimum event count
+</option>
+
+<option value="manual">
+Manual marker
+</option>
+</select>
+
+Threshold:
+
+<input id="thresholdInput"
+       value="1"
+       size="4">
+
+<button id="setMarkerButton">
+Set Manual Marker
+</button>
+
+</div>
+
+<div id="status">
+Ready
+</div>
+
+<div id="testRoot">
+
+<details id="detailsNode" open>
+<summary>Details</summary>
+Test node
+</details>
+
+<canvas id="mainCanvas"
+        width="32"
+        height="32"></canvas>
+
+</div>
+
+<h3>Sequence</h3>
+
+<div id="sequenceInfo">
+No sequence.
+</div>
+
+<h3>Descriptor</h3>
+
+<textarea id="descriptorInput"></textarea>
+
+<h3>Minimization</h3>
+
+<div id="minimizeInfo">
+No minimization run.
+</div>
+
+<div id="log"></div>
+
+<script>
+
+/* ============================================================
+   STATE
+   ============================================================ */
+
+var State = {
+
+    running: false,
+
+    minimizing: false,
+
+    logStep: 0,
+
+    seed: 0,
+
+    randomState: 0,
+
+    sequence: [],
+
+    sequenceIndex: 0,
+
+    errors: 0,
+
+    events: 0,
+
+    manualMarker: false,
+
+    currentModule: "",
+
+    currentVariant: "",
+
+    currentOperation: "",
+
+    lastDescriptor: "",
+
+    minimizeOriginal: [],
+
+    minimizeCandidate: [],
+
+    minimizeGranularity: 2,
+
+    minimizeIteration: 0,
+
+    oracleResult: false
+};
+
+
+/* ============================================================
+   LOGGING
+   ============================================================ */
+
+function log(message)
+{
+    State.logStep++;
+
+    var text =
+        "[" +
+        ("0000" + State.logStep).slice(-4) +
+        "] " +
+        message;
+
+    var output =
+        document.getElementById("log");
+
+    output.textContent +=
+        text + "\n";
+
+    output.scrollTop =
+        output.scrollHeight;
+
+    console.log(text);
+}
+
+
+function status(message)
+{
+    document
+        .getElementById("status")
+        .textContent =
+        message;
+}
+
+
+function delay(callback, ms)
+{
+    setTimeout(
+        callback,
+        ms || 100
+    );
+}
+
+
+/* ============================================================
+   STEP IDENTIFICATION
+   ============================================================ */
+
+function beginModule(moduleName, variantName)
+{
+    State.currentModule =
+        moduleName;
+
+    State.currentVariant =
+        variantName;
+
+    log(
+        "MODULE | " +
+        moduleName +
+        "." +
+        variantName
+    );
+}
+
+
+function safeCall(name, callback)
+{
+    State.currentOperation =
+        name;
+
+    State.lastDescriptor =
+        State.currentModule +
+        "." +
+        State.currentVariant +
+        "." +
+        name;
+
+    log(
+        "BEGIN | " +
+        State.lastDescriptor
+    );
+
+    try
+    {
+        callback();
+
+        log(
+            "OK    | " +
+            State.lastDescriptor
+        );
+    }
+    catch (e)
+    {
+        State.errors++;
+
+        log(
+            "ERROR | " +
+            State.lastDescriptor +
+            " | " +
+            e.name
+        );
+    }
+}
+
+
+/* ============================================================
+   DETERMINISTIC PRNG
+   ============================================================ */
+
+function setSeed(seed)
+{
+    seed =
+        parseInt(seed, 10);
+
+    if (isNaN(seed))
+        seed = 1;
+
+    State.seed =
+        seed;
+
+    State.randomState =
+        seed >>> 0;
+}
+
+
+function seededRandom()
+{
+    State.randomState =
+        (
+            State.randomState *
+            1664525 +
+            1013904223
+        ) >>> 0;
+
+    return (
+        State.randomState /
+        4294967296
+    );
+}
+
+
+function randomIndex(length)
+{
+    return Math.floor(
+        seededRandom() *
+        length
+    );
+}
+
+
+/* ============================================================
+   CLEANUP
+   ============================================================ */
+
+function cleanup()
+{
+    var root =
+        document.getElementById("testRoot");
+
+    var keep = [];
+
+    var i;
+
+    for (
+        i = 0;
+        i < root.childNodes.length;
+        i++
+    )
+    {
+        keep.push(root.childNodes[i]);
+    }
+
+    for (
+        i = 0;
+        i < keep.length;
+        i++
+    )
+    {
+        var node =
+            keep[i];
+
+        if (
+            node.id !== "detailsNode" &&
+            node.id !== "mainCanvas"
+        )
+        {
+            try {
+                root.removeChild(node);
+            } catch (e) {
+            }
+        }
+    }
+
+    document
+        .getElementById("detailsNode")
+        .open = true;
+}
+
+
+/* ============================================================
+   DOM.v1
+   ============================================================ */
+
+function DOM_v1(done)
+{
+    beginModule("DOM", "v1");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var box;
+
+    safeCall(
+        "create",
+        function()
+        {
+            box =
+                document.createElement("div");
+
+            box.className =
+                "mutationA";
+
+            root.appendChild(box);
+        }
+    );
+
+    safeCall(
+        "append",
+        function()
+        {
+            var child =
+                document.createElement("span");
+
+            child.textContent =
+                "child";
+
+            box.appendChild(child);
+        }
+    );
+
+    safeCall(
+        "replace",
+        function()
+        {
+            if (box.firstChild)
+            {
+                var replacement =
+                    document.createElement("strong");
+
+                replacement.textContent =
+                    "replacement";
+
+                box.replaceChild(
+                    replacement,
+                    box.firstChild
+                );
+            }
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   DOM.v2
+   ============================================================ */
+
+function DOM_v2(done)
+{
+    beginModule("DOM", "v2");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var a;
+    var b;
+    var child;
+
+    safeCall(
+        "create-a",
+        function()
+        {
+            a =
+                document.createElement("div");
+
+            a.className =
+                "mutationA";
+
+            root.appendChild(a);
+        }
+    );
+
+    safeCall(
+        "create-b",
+        function()
+        {
+            b =
+                document.createElement("div");
+
+            b.className =
+                "mutationB";
+
+            root.appendChild(b);
+        }
+    );
+
+    safeCall(
+        "move",
+        function()
+        {
+            child =
+                document.createElement("span");
+
+            child.textContent =
+                "move";
+
+            a.appendChild(child);
+
+            b.appendChild(child);
+
+            root.appendChild(child);
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   EVENTS.v1
+   ============================================================ */
+
+function EVENTS_v1(done)
+{
+    beginModule("EVENTS", "v1");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var input;
+
+    safeCall(
+        "create-input",
+        function()
+        {
+            input =
+                document.createElement("input");
+
+            root.appendChild(input);
+        }
+    );
+
+    safeCall(
+        "listeners",
+        function()
+        {
+            input.addEventListener(
+                "focus",
+                function()
+                {
+                    State.events++;
+
+                    log("EVENT | focus");
+                },
+                false
+            );
+
+            input.addEventListener(
+                "blur",
+                function()
+                {
+                    State.events++;
+
+                    log("EVENT | blur");
+                },
+                false
+            );
+        }
+    );
+
+    safeCall(
+        "focus-blur",
+        function()
+        {
+            input.focus();
+            input.blur();
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   EVENTS.v2
+   ============================================================ */
+
+function EVENTS_v2(done)
+{
+    beginModule("EVENTS", "v2");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var target;
+
+    safeCall(
+        "create",
+        function()
+        {
+            target =
+                document.createElement("div");
+
+            root.appendChild(target);
+        }
+    );
+
+    safeCall(
+        "dispatch",
+        function()
+        {
+            target.addEventListener(
+                "structuredtest",
+                function()
+                {
+                    State.events++;
+
+                    log(
+                        "EVENT | structuredtest"
+                    );
+                },
+                false
+            );
+
+            var event =
+                document.createEvent("Event");
+
+            event.initEvent(
+                "structuredtest",
+                true,
+                true
+            );
+
+            target.dispatchEvent(event);
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   EVENTS.v3
+   ============================================================ */
+
+function EVENTS_v3(done)
+{
+    beginModule("EVENTS", "v3");
+
+    var details =
+        document.getElementById("detailsNode");
+
+    safeCall(
+        "toggle",
+        function()
+        {
+            details.addEventListener(
+                "toggle",
+                function()
+                {
+                    State.events++;
+
+                    log("EVENT | toggle");
+                },
+                false
+            );
+
+            details.open = false;
+            details.open = true;
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LAYOUT.v1
+   ============================================================ */
+
+function LAYOUT_v1(done)
+{
+    beginModule("LAYOUT", "v1");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var container;
+
+    safeCall(
+        "create",
+        function()
+        {
+            container =
+                document.createElement("div");
+
+            root.appendChild(container);
+        }
+    );
+
+    safeCall(
+        "populate-read",
+        function()
+        {
+            var i;
+
+            for (i = 0; i < 5; i++)
+            {
+                var node =
+                    document.createElement("div");
+
+                node.className =
+                    "layoutNode";
+
+                container.appendChild(node);
+            }
+
+            log(
+                "WIDTH | " +
+                container.offsetWidth
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   LAYOUT.v2
+   ============================================================ */
+
+function LAYOUT_v2(done)
+{
+    beginModule("LAYOUT", "v2");
+
+    var root =
+        document.getElementById("testRoot");
+
+    var node;
+
+    safeCall(
+        "mutate-read",
+        function()
+        {
+            node =
+                document.createElement("div");
+
+            node.className =
+                "mutationA";
+
+            root.appendChild(node);
+
+            node.className =
+                "mutationB";
+
+            node.style.width =
+                "120px";
+
+            var rect =
+                node.getBoundingClientRect();
+
+            log(
+                "RECT | " +
+                rect.width
+            );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   CANVAS.v1
+   ============================================================ */
+
+function CANVAS_v1(done)
+{
+    beginModule("CANVAS", "v1");
+
+    safeCall(
+        "draw",
+        function()
+        {
+            var canvas =
+                document.getElementById(
+                    "mainCanvas"
+                );
+
+            var context =
+                canvas.getContext("2d");
+
+            if (context)
+                context.fillRect(
+                    0,
+                    0,
+                    16,
+                    16
+                );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   CANVAS.v2
+   ============================================================ */
+
+function CANVAS_v2(done)
+{
+    beginModule("CANVAS", "v2");
+
+    safeCall(
+        "resize-draw",
+        function()
+        {
+            var canvas =
+                document.getElementById(
+                    "mainCanvas"
+                );
+
+            canvas.width = 64;
+            canvas.height = 64;
+
+            var context =
+                canvas.getContext("2d");
+
+            if (context)
+                context.fillRect(
+                    4,
+                    4,
+                    20,
+                    20
+                );
+        }
+    );
+
+    delay(done);
+}
+
+
+/* ============================================================
+   CANVAS.v3
+   ============================================================ */
+
+function CANVAS_v3(done)
+{
+    beginModule("CANVAS", "v3");
+
+    safeCall(
+        "toBlob",
+        function()
+        {
+            var canvas =
+                document.getElementById(
+                    "mainCanvas"
+                );
+
+            if (!canvas.toBlob)
+            {
+                log(
+                    "INFO | toBlob unavailable"
+                );
+
+                return;
+            }
+
+            canvas.toBlob(
+                function(blob)
+                {
+                    State.events++;
+
+                    log(
+                        "CALLBACK | " +
+                        (blob ? "blob" : "null")
+                    );
+                }
+            );
+        }
+    );
+
+    delay(done, 150);
+}
+
+
+/* ============================================================
+   STEP REGISTRY
+   ============================================================ */
+
+var Steps = [
+
+    { name: "DOM.v1", fn: DOM_v1 },
+    { name: "DOM.v2", fn: DOM_v2 },
+
+    { name: "EVENTS.v1", fn: EVENTS_v1 },
+    { name: "EVENTS.v2", fn: EVENTS_v2 },
+    { name: "EVENTS.v3", fn: EVENTS_v3 },
+
+    { name: "LAYOUT.v1", fn: LAYOUT_v1 },
+    { name: "LAYOUT.v2", fn: LAYOUT_v2 },
+
+    { name: "CANVAS.v1", fn: CANVAS_v1 },
+    { name: "CANVAS.v2", fn: CANVAS_v2 },
+    { name: "CANVAS.v3", fn: CANVAS_v3 }
+
+];
+
+
+/* ============================================================
+   GENERATION / PARSING
+   ============================================================ */
+
+function getStep(name)
+{
+    var i;
+
+    for (i = 0; i < Steps.length; i++)
+    {
+        if (Steps[i].name === name)
+            return Steps[i];
+    }
+
+    return null;
+}
+
+
+function generateSequence(seed, count)
+{
+    setSeed(seed);
+
+    var result = [];
+
+    var i;
+
+    for (i = 0; i < count; i++)
+    {
+        result.push(
+            Steps[
+                randomIndex(Steps.length)
+            ]
+        );
+    }
+
+    return result;
+}
+
+
+function serialize(sequence)
+{
+    var names = [];
+
+    var i;
+
+    for (i = 0; i < sequence.length; i++)
+        names.push(sequence[i].name);
+
+    return names.join(" -> ");
+}
+
+
+function parse(text)
+{
+    var parts =
+        text.split("->");
+
+    var result = [];
+
+    var i;
+
+    for (i = 0; i < parts.length; i++)
+    {
+        var name =
+            parts[i]
+            .replace(/^\s+|\s+$/g, "");
+
+        var step =
+            getStep(name);
+
+        if (step)
+            result.push(step);
+    }
+
+    return result;
+}
+
+
+/* ============================================================
+   ORACLE
+   ============================================================ */
+
+function evaluateOracle()
+{
+    var mode =
+        document
+        .getElementById("oracleSelect")
+        .value;
+
+    var threshold =
+        parseInt(
+            document
+            .getElementById(
+                "thresholdInput"
+            )
+            .value,
+            10
+        );
+
+    if (
+        isNaN(threshold) ||
+        threshold < 1
+    )
+    {
+        threshold = 1;
+    }
+
+    if (mode === "errors")
+    {
+        return (
+            State.errors >= threshold
+        );
+    }
+
+    if (mode === "events")
+    {
+        return (
+            State.events >= threshold
+        );
+    }
+
+    if (mode === "manual")
+    {
+        return State.manualMarker;
+    }
+
+    return false;
+}
+
+
+/* ============================================================
+   EXECUTION
+   ============================================================ */
+
+function resetExecutionState()
+{
+    State.errors = 0;
+    State.events = 0;
+    State.manualMarker = false;
+
+    State.currentModule = "";
+    State.currentVariant = "";
+    State.currentOperation = "";
+    State.lastDescriptor = "";
+}
+
+
+function runSequence(sequence, finished)
+{
+    cleanup();
+
+    resetExecutionState();
+
+    State.sequence =
+        sequence.slice(0);
+
+    State.sequenceIndex =
+        0;
+
+    function next()
+    {
+        if (
+            State.sequenceIndex >=
+            State.sequence.length
+        )
+        {
+            delay(
+                function()
+                {
+                    State.oracleResult =
+                        evaluateOracle();
+
+                    finished(
+                        State.oracleResult
+                    );
+                },
+                50
+            );
+
+            return;
+        }
+
+        var step =
+            State.sequence[
+                State.sequenceIndex
+            ];
+
+        log(
+            "STEP | " +
+            (State.sequenceIndex + 1) +
+            "/" +
+            State.sequence.length +
+            " | " +
+            step.name
+        );
+
+        State.sequenceIndex++;
+
+        step.fn(next);
+    }
+
+    next();
+}
+
+
+/* ============================================================
+   NORMAL RUN
+   ============================================================ */
+
+function startNormalRun(sequence)
+{
+    if (State.running)
+        return;
+
+    State.running = true;
+    State.logStep = 0;
+
+    document
+        .getElementById("log")
+        .textContent =
+        "";
+
+    document
+        .getElementById("descriptorInput")
+        .value =
+        serialize(sequence);
+
+    document
+        .getElementById("sequenceInfo")
+        .textContent =
+        "SEED: " +
+        State.seed +
+        "\n\n" +
+        serialize(sequence);
+
+    status("Running");
+
+    runSequence(
+        sequence,
+        function(result)
+        {
+            log("");
+
+            log(
+                "FINISHED"
+            );
+
+            log(
+                "LAST | " +
+                State.lastDescriptor
+            );
+
+            log(
+                "ERRORS | " +
+                State.errors
+            );
+
+            log(
+                "EVENTS | " +
+                State.events
+            );
+
+            log(
+                "ORACLE | " +
+                result
+            );
+
+            State.running = false;
+
+            status(
+                "Finished | Oracle: " +
+                result
+            );
+        }
+    );
+}
+
+
+/* ============================================================
+   DELTA REDUCTION
+   ============================================================ */
+
+function updateMinimizeInfo(message)
+{
+    document
+        .getElementById("minimizeInfo")
+        .textContent =
+        message;
+}
+
+
+function minimizeSequence(sequence)
+{
+    if (State.running)
+        return;
+
+    if (!sequence.length)
+        return;
+
+    State.running = true;
+    State.minimizing = true;
+
+    State.minimizeCandidate =
+        sequence.slice(0);
+
+    State.minimizeGranularity =
+        2;
+
+    State.minimizeIteration =
+        0;
+
+    updateMinimizeInfo(
+        "Original (" +
+        sequence.length +
+        " steps):\n" +
+        serialize(sequence)
+    );
+
+    function iterate()
+    {
+        var candidate =
+            State.minimizeCandidate;
+
+        if (
+            candidate.length <= 1
+        )
+        {
+            finishMinimization();
+            return;
+        }
+
+        var chunkSize =
+            Math.ceil(
+                candidate.length /
+                State.minimizeGranularity
+            );
+
+        var chunkIndex = 0;
+
+        function testNextChunk()
+        {
+            if (
+                chunkIndex >=
+                State.minimizeGranularity
+            )
+            {
+                if (
+                    State.minimizeGranularity >=
+                    candidate.length
+                )
+                {
+                    finishMinimization();
+                    return;
+                }
+
+                State.minimizeGranularity =
+                    Math.min(
+                        candidate.length,
+                        State.minimizeGranularity * 2
+                    );
+
+                iterate();
+
+                return;
+            }
+
+            var start =
+                chunkIndex *
+                chunkSize;
+
+            var end =
+                Math.min(
+                    candidate.length,
+                    start + chunkSize
+                );
+
+            chunkIndex++;
+
+            if (
+                start >= candidate.length
+            )
+            {
+                testNextChunk();
+                return;
+            }
+
+            var reduced =
+                candidate
+                .slice(0, start)
+                .concat(
+                    candidate.slice(end)
+                );
+
+            if (!reduced.length)
+            {
+                testNextChunk();
+                return;
+            }
+
+            State.minimizeIteration++;
+
+            updateMinimizeInfo(
+                "Iteration: " +
+                State.minimizeIteration +
+                "\n\nCandidate:\n" +
+                serialize(candidate) +
+                "\n\nTesting removal:\n" +
+                start +
+                " .. " +
+                (end - 1) +
+                "\n\nReduced:\n" +
+                serialize(reduced)
+            );
+
+            runSequence(
+                reduced,
+                function(result)
+                {
+                    if (result)
+                    {
+                        State.minimizeCandidate =
+                            reduced;
+
+                        State.minimizeGranularity =
+                            Math.max(
+                                2,
+                                State.minimizeGranularity - 1
+                            );
+
+                        delay(
+                            iterate,
+                            100
+                        );
+                    }
+                    else
+                    {
+                        delay(
+                            testNextChunk,
+                            100
+                        );
+                    }
+                }
+            );
+        }
+
+        testNextChunk();
+    }
+
+    function finishMinimization()
+    {
+        var result =
+            State.minimizeCandidate;
+
+        State.running = false;
+        State.minimizing = false;
+
+        document
+            .getElementById("descriptorInput")
+            .value =
+            serialize(result);
+
+        updateMinimizeInfo(
+            "MINIMIZATION FINISHED\n\n" +
+            "Iterations: " +
+            State.minimizeIteration +
+            "\n\nOriginal length: " +
+            sequence.length +
+            "\nReduced length: " +
+            result.length +
+            "\n\nMINIMAL CANDIDATE:\n" +
+            serialize(result)
+        );
+
+        status(
+            "Minimization finished"
+        );
+
+        log(
+            "MINIMIZATION RESULT | " +
+            serialize(result)
+        );
+    }
+
+    iterate();
+}
+
+
+/* ============================================================
+   CONTROLS
+   ============================================================ */
+
+document
+.getElementById("generateButton")
+.addEventListener(
+    "click",
+    function()
+    {
+        var seed =
+            parseInt(
+                document
+                .getElementById("seedInput")
+                .value,
+                10
+            );
+
+        var count =
+            parseInt(
+                document
+                .getElementById(
+                    "stepCountInput"
+                )
+                .value,
+                10
+            );
+
+        if (isNaN(seed))
+            seed = 1;
+
+        if (
+            isNaN(count) ||
+            count < 1
+        )
+            count = 1;
+
+        if (count > 12)
+            count = 12;
+
+        var sequence =
+            generateSequence(
+                seed,
+                count
+            );
+
+        startNormalRun(sequence);
+    },
+    false
+);
+
+
+document
+.getElementById("replayButton")
+.addEventListener(
+    "click",
+    function()
+    {
+        var sequence =
+            parse(
+                document
+                .getElementById(
+                    "descriptorInput"
+                )
+                .value
+            );
+
+        startNormalRun(sequence);
+    },
+    false
+);
+
+
+document
+.getElementById("minimizeButton")
+.addEventListener(
+    "click",
+    function()
+    {
+        var sequence =
+            parse(
+                document
+                .getElementById(
+                    "descriptorInput"
+                )
+                .value
+            );
+
+        minimizeSequence(sequence);
+    },
+    false
+);
+
+
+document
+.getElementById("newSeedButton")
+.addEventListener(
+    "click",
+    function()
+    {
+        var seed =
+            Math.floor(
+                Math.random() *
+                2147483647
+            ) + 1;
+
+        document
+        .getElementById("seedInput")
+        .value =
+        seed;
+    },
+    false
+);
+
+
+document
+.getElementById("setMarkerButton")
+.addEventListener(
+    "click",
+    function()
+    {
+        State.manualMarker = true;
+
+        log(
+            "MANUAL MARKER SET"
+        );
+    },
+    false
+);
+
+
+document
+.getElementById("clearButton")
+.addEventListener(
+    "click",
+    function()
+    {
+        document
+        .getElementById("log")
+        .textContent =
+        "";
+    },
+    false
+);
+
+
+log(
+    "Harness V6 initialized"
+);
+
 </script>
 
 </body>
