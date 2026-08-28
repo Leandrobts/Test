@@ -1,41 +1,5311 @@
-
-
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit Crash Hunter V18</title>
+
+<style>
+body {
+    margin: 10px;
+    font-family: sans-serif;
+    background: #f2f2f2;
+}
+
+button {
+    padding: 12px 34px;
+    font-size: 18px;
+}
+
+.panel {
+    margin-top: 8px;
+    padding: 9px;
+    background: #fff;
+    border: 1px solid #777;
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+
+#log {
+    height: 230px;
+    overflow-y: auto;
+}
+
+#testRoot {
+    margin-top: 10px;
+    min-height: 120px;
+    padding: 5px;
+    border: 1px solid #555;
+    background: #fff;
+}
+
+.node {
+    margin: 2px;
+    padding: 4px;
+    border: 1px solid #aaa;
+}
+
+.hiddenFrame {
+    width: 2px;
+    height: 2px;
+    border: 0;
+}
+</style>
+</head>
+
 <body>
 
-<button id="start">Start</button>
+<h2>PS4 WebKit Crash Hunter V18</h2>
+
+<button id="start">START</button>
+
+<div id="status" class="panel">READY</div>
+<div id="state" class="panel"></div>
+<div id="pattern" class="panel"></div>
+<div id="candidate" class="panel"></div>
+<div id="minimizer" class="panel"></div>
+<div id="sequence" class="panel"></div>
+<div id="log" class="panel"></div>
+
+<div id="testRoot"></div>
 
 <script>
+(function () {
+
+"use strict";
+
+/*
+ * ============================================================
+ * V18
+ *
+ * Stateful WebCore lifetime/reentrancy crash hunter.
+ *
+ * The generator is organized around patterns observed in
+ * WebCore LayoutTests:
+ *
+ *   1. callback -> mutation -> teardown -> continuation
+ *   2. mutation during traversal
+ *   3. document/frame ownership transition
+ *   4. focus/blur + document mutation
+ *   5. nested/repeated layout
+ *   6. style -> layout -> mutation
+ *   7. SVG -> layout -> mutation
+ *   8. async callback after structural change
+ *   9. element role/type transition
+ *  10. history mutation during processing
+ *
+ * This file intentionally does not attempt memory corruption
+ * primitives, heap grooming, address disclosure, or exploitation.
+ * ============================================================
+ */
 
 
-const iframe = document.body.appendChild(
-    document.createElement("iframe")
-);
+/* ============================================================
+   CONFIG
+   ============================================================ */
 
-iframe.width = "200";
-iframe.height = "200";
+var CONFIG = {
 
-const div = iframe.contentDocument.body.appendChild(
-    document.createElement("div")
-);
+    prefix:
+        "PS4_WEBKIT_CRASH_V18_",
 
-div.style.width = "200px";
-div.style.height = "200px";
-div.style.background = "red";
+    operationDelay:
+        18,
 
-document.getElementById("start").onclick = function () {
-    div.webkitRequestFullscreen();
+    asyncDelay:
+        55,
 
-    const contentDocument = iframe.contentDocument;
-        document.body.removeChild(div);
-        setTimeout(() => {
-            
-            
-            frame.remove();
-        }, 15);
+    caseDelay:
+        65,
+
+    replayAttempts:
+        3,
+
+    maxCorpus:
+        200,
+
+    maxOperations:
+        32,
+
+    maxLogLines:
+        500
+
+};
+
+
+/* ============================================================
+   STORAGE
+   ============================================================ */
+
+function save(name, value)
+{
+    try {
+        localStorage.setItem(
+            CONFIG.prefix + name,
+            JSON.stringify(value)
+        );
+    } catch (e) {
+    }
+}
+
+function load(name, fallback)
+{
+    try {
+
+        var value =
+            localStorage.getItem(
+                CONFIG.prefix + name
+            );
+
+        if (value === null)
+            return fallback;
+
+        return JSON.parse(value);
+
+    } catch (e) {
+
+        return fallback;
+    }
+}
+
+function remove(name)
+{
+    try {
+        localStorage.removeItem(
+            CONFIG.prefix + name
+        );
+    } catch (e) {
+    }
+}
+
+function clone(value)
+{
+    return JSON.parse(
+        JSON.stringify(value)
+    );
+}
+
+
+/* ============================================================
+   LOGGING
+   ============================================================ */
+
+function log(text)
+{
+    var box =
+        document.getElementById("log");
+
+    var lines =
+        box.textContent
+            .split("\n")
+            .filter(function (x) {
+                return x.length;
+            });
+
+    lines.push(text);
+
+    while (
+        lines.length >
+        CONFIG.maxLogLines
+    ) {
+        lines.shift();
+    }
+
+    box.textContent =
+        lines.join("\n");
+
+    box.scrollTop =
+        box.scrollHeight;
+
+    try {
+        console.log(text);
+    } catch (e) {
+    }
+}
+
+function setStatus(text)
+{
+    document
+        .getElementById("status")
+        .textContent =
+        text;
+}
+
+
+/* ============================================================
+   RNG
+   ============================================================ */
+
+var RNG = {
+
+    seed: 1,
+
+    state: 1
+
+};
+
+function setSeed(seed)
+{
+    RNG.seed =
+        seed >>> 0;
+
+    RNG.state =
+        RNG.seed;
+}
+
+function random()
+{
+    RNG.state =
+        (
+            RNG.state * 1664525 +
+            1013904223
+        ) >>> 0;
+
+    return RNG.state /
+        4294967296;
+}
+
+function integer(max)
+{
+    if (max <= 0)
+        return 0;
+
+    return Math.floor(
+        random() * max
+    );
+}
+
+function choose(array)
+{
+    if (!array.length)
+        return null;
+
+    return array[
+        integer(array.length)
+    ];
+}
+
+function nextSeed()
+{
+    var old =
+        load(
+            "lastSeed",
+            1
+        );
+
+    var seed =
+        (
+            Date.now() ^
+            old ^
+            Math.floor(
+                Math.random() *
+                0x7fffffff
+            )
+        ) >>> 0;
+
+    if (!seed)
+        seed = 1;
+
+    save(
+        "lastSeed",
+        seed
+    );
+
+    return seed;
+}
+
+
+/* ============================================================
+   STATE
+   ============================================================ */
+
+var State = {
+
+    running:
+        false,
+
+    mode:
+        "READY",
+
+    run:
+        0,
+
+    caseId:
+        0,
+
+    pattern:
+        "",
+
+    surfaces:
+        [],
+
+    sequence:
+        [],
+
+    index:
+        0,
+
+    objects:
+        {},
+
+    frames:
+        {},
+
+    parserNode:
+        null,
+
+    history:
+        [],
+
+    transitions:
+        {},
+
+    operationTypes:
+        {},
+
+    errors:
+        0,
+
+    events:
+        0,
+
+    asyncCallbacks:
+        0,
+
+    score:
+        0,
+
+    corpus:
+        [],
+
+    candidate:
+        null,
+
+    replay:
+        null,
+
+    minimizer:
+        null,
+
+    stats: {
+
+        cases:
+            0,
+
+        completed:
+            0,
+
+        interrupted:
+            0,
+
+        candidates:
+            0,
+
+        minimized:
+            0
+
+    }
+
+};
+
+
+/* ============================================================
+   CHECKPOINT
+   ============================================================ */
+
+function checkpoint()
+{
+    save(
+        "execution",
+        {
+
+            run:
+                State.run,
+
+            caseId:
+                State.caseId,
+
+            pattern:
+                State.pattern,
+
+            surfaces:
+                clone(
+                    State.surfaces
+                ),
+
+            seed:
+                RNG.seed,
+
+            sequence:
+                clone(
+                    State.sequence
+                ),
+
+            index:
+                State.index,
+
+            current:
+                State.current || "",
+
+            lastCompleted:
+                State.lastCompleted || "",
+
+            completed:
+                State.completed === true,
+
+            timestamp:
+                Date.now()
+
+        }
+    );
+}
+
+function clearCheckpoint()
+{
+    remove("execution");
+}
+
+
+/* ============================================================
+   CANDIDATE
+   ============================================================ */
+
+function saveCandidate(reason)
+{
+    State.candidate = {
+
+        id:
+            Date.now() +
+            "-" +
+            integer(100000),
+
+        reason:
+            reason,
+
+        run:
+            State.run,
+
+        caseId:
+            State.caseId,
+
+        pattern:
+            State.pattern,
+
+        surfaces:
+            clone(
+                State.surfaces
+            ),
+
+        seed:
+            RNG.seed,
+
+        sequence:
+            clone(
+                State.sequence
+            ),
+
+        index:
+            State.index,
+
+        current:
+            State.current || "",
+
+        lastCompleted:
+            State.lastCompleted || "",
+
+        timestamp:
+            Date.now()
+
+    };
+
+    save(
+        "candidate",
+        State.candidate
+    );
+
+    State.stats.candidates++;
+
+    save(
+        "stats",
+        State.stats
+    );
+}
+
+function loadCandidate()
+{
+    State.candidate =
+        load(
+            "candidate",
+            null
+        );
+}
+
+function clearCandidate()
+{
+    State.candidate =
+        null;
+
+    remove("candidate");
+}
+
+
+/* ============================================================
+   CORPUS
+   ============================================================ */
+
+function loadCorpus()
+{
+    State.corpus =
+        load(
+            "corpus",
+            []
+        );
+
+    if (
+        !Array.isArray(
+            State.corpus
+        )
+    ) {
+        State.corpus = [];
+    }
+}
+
+function saveCorpus()
+{
+    save(
+        "corpus",
+        State.corpus
+    );
+}
+
+function addCorpus(
+    sequence,
+    score
+)
+{
+    State.corpus.push({
+
+        id:
+            Date.now() +
+            "-" +
+            integer(100000),
+
+        pattern:
+            State.pattern,
+
+        surfaces:
+            clone(
+                State.surfaces
+            ),
+
+        sequence:
+            clone(sequence),
+
+        score:
+            score,
+
+        uses:
+            0,
+
+        timestamp:
+            Date.now()
+
     });
+
+    State.corpus.sort(
+        function (a, b) {
+
+            return b.score -
+                   a.score;
+
+        }
+    );
+
+    while (
+        State.corpus.length >
+        CONFIG.maxCorpus
+    ) {
+        State.corpus.pop();
+    }
+
+    saveCorpus();
+}
+
+function chooseCorpusEntry()
+{
+    if (!State.corpus.length)
+        return null;
+
+    var total =
+        0;
+
+    var i;
+
+    for (
+        i = 0;
+        i < State.corpus.length;
+        i++
+    ) {
+
+        total +=
+            Math.max(
+                1,
+                State.corpus[i].score
+            );
+    }
+
+    var value =
+        random() * total;
+
+    for (
+        i = 0;
+        i < State.corpus.length;
+        i++
+    ) {
+
+        value -=
+            Math.max(
+                1,
+                State.corpus[i].score
+            );
+
+        if (
+            value <= 0
+        ) {
+            return State.corpus[i];
+        }
+    }
+
+    return State.corpus[0];
+}
+
+
+/* ============================================================
+   MODEL
+   ============================================================ */
+
+var IDS = [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+];
+
+function model()
+{
+    return {};
+}
+
+function attached(m)
+{
+    var result = [];
+    var id;
+
+    for (id in m) {
+
+        if (
+            m[id].attached
+        ) {
+            result.push(id);
+        }
+    }
+
+    return result;
+}
+
+function detached(m)
+{
+    var result = [];
+    var id;
+
+    for (id in m) {
+
+        if (
+            !m[id].attached
+        ) {
+            result.push(id);
+        }
+    }
+
+    return result;
+}
+
+function createOperation(m, type)
+{
+    var available =
+        IDS.filter(
+            function (id) {
+                return !m[id];
+            }
+        );
+
+    if (!available.length)
+        return null;
+
+    var id =
+        choose(available);
+
+    m[id] = {
+
+        attached:
+            false,
+
+        type:
+            type || "div"
+
+    };
+
+    return {
+
+        type:
+            "CREATE",
+
+        id:
+            id,
+
+        elementType:
+            m[id].type
+
+    };
+}
+
+function attachOperation(m)
+{
+    var list =
+        detached(m);
+
+    if (!list.length)
+        return null;
+
+    var id =
+        choose(list);
+
+    m[id].attached =
+        true;
+
+    return {
+
+        type:
+            "ATTACH",
+
+        id:
+            id
+
+    };
+}
+
+function detachOperation(m)
+{
+    var list =
+        attached(m);
+
+    if (!list.length)
+        return null;
+
+    var id =
+        choose(list);
+
+    m[id].attached =
+        false;
+
+    return {
+
+        type:
+            "DETACH",
+
+        id:
+            id
+
+    };
+}
+
+
+/* ============================================================
+   SURFACES
+   ============================================================ */
+
+function surface(name)
+{
+    if (
+        State.surfaces.indexOf(name) < 0
+    ) {
+        State.surfaces.push(name);
+    }
+}
+
+
+/* ============================================================
+   PATTERN 1
+   EVENT REENTRANCY
+   ============================================================ */
+
+function patternEventReentrancy()
+{
+    var m =
+        model();
+
+    var result = [];
+
+    State.pattern =
+        "EVENT_REENTRANCY";
+
+    surface("DOM");
+    surface("Events");
+    surface("Document");
+    surface("FocusController");
+
+    var c =
+        createOperation(
+            m,
+            "button"
+        );
+
+    if (c)
+        result.push(c);
+
+    var a =
+        attachOperation(m);
+
+    if (a)
+        result.push(a);
+
+    var list =
+        attached(m);
+
+    if (!list.length)
+        return result;
+
+    var id =
+        choose(list);
+
+    result.push({
+
+        type:
+            "LISTEN",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "FOCUS",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "DISPATCH",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "MUTATE",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "REMOVE_DURING_CALLBACK",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "DISPATCH",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "LAYOUT",
+
+        id:
+            id
+
+    });
+
+    return result;
+}
+
+
+/* ============================================================
+   PATTERN 2
+   FOCUS / DOCUMENT / FRAME
+   ============================================================ */
+
+function patternFocusDocument()
+{
+    State.pattern =
+        "FOCUS_DOCUMENT_TEARDOWN";
+
+    surface("FocusController");
+    surface("Document");
+    surface("Frame");
+    surface("DOM");
+    surface("Events");
+
+    return [
+
+        {
+            type:
+                "FRAME_CREATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_LOAD",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_CREATE_INPUT",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_FOCUS",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_BLUR",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_MUTATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_REMOVE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_ACCESS",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FRAME_FOCUS",
+
+            id:
+                "A"
+
+        }
+
+    ];
+}
+
+
+/* ============================================================
+   PATTERN 3
+   MUTATION DURING TRAVERSAL
+   ============================================================ */
+
+function patternMutationTraversal()
+{
+    var m =
+        model();
+
+    var result = [];
+
+    State.pattern =
+        "MUTATION_DURING_TRAVERSAL";
+
+    surface("DOM");
+    surface("Events");
+    surface("Document");
+    surface("History");
+
+    var i;
+
+    for (
+        i = 0;
+        i < 4;
+        i++
+    ) {
+
+        var c =
+            createOperation(
+                m,
+                "div"
+            );
+
+        if (c)
+            result.push(c);
+
+        var a =
+            attachOperation(m);
+
+        if (a)
+            result.push(a);
+    }
+
+    result.push({
+
+        type:
+            "BEGIN_TRAVERSAL"
+
+    });
+
+    result.push({
+
+        type:
+            "TRAVERSAL_CALLBACK"
+
+    });
+
+    result.push({
+
+        type:
+            "MUTATE_COLLECTION"
+
+    });
+
+    result.push({
+
+        type:
+            "REMOVE_TRAVERSED"
+
+    });
+
+    result.push({
+
+        type:
+            "CONTINUE_TRAVERSAL"
+
+    });
+
+    result.push({
+
+        type:
+            "LAYOUT"
+
+    });
+
+    return result;
+}
+
+
+/* ============================================================
+   PATTERN 4
+   NESTED LAYOUT / REVALIDATION
+   ============================================================ */
+
+function patternNestedLayout()
+{
+    var m =
+        model();
+
+    var result = [];
+
+    State.pattern =
+        "NESTED_LAYOUT_REVALIDATION";
+
+    surface("DOM");
+    surface("CSS");
+    surface("StyleResolver");
+    surface("RenderTree");
+    surface("Layout");
+
+    var c =
+        createOperation(
+            m,
+            "div"
+        );
+
+    if (c)
+        result.push(c);
+
+    var a =
+        attachOperation(m);
+
+    if (a)
+        result.push(a);
+
+    var list =
+        attached(m);
+
+    if (!list.length)
+        return result;
+
+    var id =
+        choose(list);
+
+    result.push({
+
+        type:
+            "STYLE",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "LAYOUT",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "NESTED_STYLE",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "NESTED_LAYOUT",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "MUTATE",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "LAYOUT",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "DETACH",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "LAYOUT",
+
+        id:
+            id
+
+    });
+
+    return result;
+}
+
+
+/* ============================================================
+   PATTERN 5
+   SVG LAYOUT
+   ============================================================ */
+
+function patternSVG()
+{
+    State.pattern =
+        "SVG_LAYOUT_REVALIDATION";
+
+    surface("SVG");
+    surface("DOM");
+    surface("CSS");
+    surface("StyleResolver");
+    surface("RenderTree");
+    surface("Layout");
+
+    return [
+
+        {
+            type:
+                "SVG_CREATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_ATTACH",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_STYLE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_LAYOUT",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_MUTATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_NESTED_LAYOUT",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_STYLE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_REMOVE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SVG_LAYOUT",
+
+            id:
+                "A"
+
+        }
+
+    ];
+}
+
+
+/* ============================================================
+   PATTERN 6
+   ASYNC AFTER TEARDOWN
+   ============================================================ */
+
+function patternAsyncTeardown()
+{
+    var m =
+        model();
+
+    var result = [];
+
+    State.pattern =
+        "ASYNC_AFTER_TEARDOWN";
+
+    surface("DOM");
+    surface("Events");
+    surface("Document");
+    surface("Frame");
+
+    var c =
+        createOperation(
+            m,
+            "div"
+        );
+
+    if (c)
+        result.push(c);
+
+    var a =
+        attachOperation(m);
+
+    if (a)
+        result.push(a);
+
+    var list =
+        attached(m);
+
+    if (!list.length)
+        return result;
+
+    var id =
+        choose(list);
+
+    result.push({
+
+        type:
+            "LISTEN",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "ASYNC_CALLBACK",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "MUTATE",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "DETACH",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "ASYNC_CALLBACK",
+
+        id:
+            id
+
+    });
+
+    result.push({
+
+        type:
+            "LAYOUT",
+
+        id:
+            id
+
+    });
+
+    return result;
+}
+
+
+/* ============================================================
+   PATTERN 7
+   ROLE / TYPE TRANSITION
+   ============================================================ */
+
+function patternTypeTransition()
+{
+    State.pattern =
+        "TYPE_ROLE_TRANSITION";
+
+    surface("DOM");
+    surface("Events");
+    surface("Forms");
+    surface("FocusController");
+    surface("Document");
+
+    return [
+
+        {
+            type:
+                "INPUT_CREATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "INPUT_ATTACH",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "LISTEN",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FOCUS",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "DISPATCH_CLICK",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "INPUT_TYPE_CHANGE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "INPUT_MUTATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "DISPATCH_CLICK",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "BLUR",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "INPUT_REMOVE",
+
+            id:
+                "A"
+
+        }
+
+    ];
+}
+
+
+/* ============================================================
+   PATTERN 8
+   EDITING / FORMS
+   ============================================================ */
+
+function patternEditing()
+{
+    State.pattern =
+        "EDITING_FORM_LIFETIME";
+
+    surface("Editing");
+    surface("Forms");
+    surface("DOM");
+    surface("Events");
+    surface("FocusController");
+    surface("Document");
+
+    return [
+
+        {
+            type:
+                "TEXTAREA_CREATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "ATTACH",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FOCUS",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "EDIT",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "SELECTION",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "DISPATCH_INPUT",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "MUTATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "BLUR",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "DETACH",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "ACCESS_EDITING_STATE",
+
+            id:
+                "A"
+
+        }
+
+    ];
+}
+
+
+/* ============================================================
+   PATTERN 9
+   TEXT / FONTS / STYLE
+   ============================================================ */
+
+function patternTextFonts()
+{
+    State.pattern =
+        "TEXT_FONT_STYLE_LIFETIME";
+
+    surface("Text");
+    surface("Fonts");
+    surface("CSS");
+    surface("StyleResolver");
+    surface("RenderTree");
+    surface("Layout");
+    surface("DOM");
+
+    return [
+
+        {
+            type:
+                "TEXT_CREATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "ATTACH",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FONT_CHANGE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "TEXT_MUTATE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "LAYOUT",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "STYLE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "FONT_CHANGE",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "LAYOUT",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "DETACH",
+
+            id:
+                "A"
+
+        },
+
+        {
+            type:
+                "LAYOUT",
+
+            id:
+                "A"
+
+        }
+
+    ];
+}
+
+
+/* ============================================================
+   PATTERN 10
+   HISTORY / DOCUMENT MUTATION
+   ============================================================ */
+
+function patternHistory()
+{
+    State.pattern =
+        "HISTORY_DOCUMENT_MUTATION";
+
+    surface("History");
+    surface("Document");
+    surface("Frame");
+    surface("DOM");
+    surface("Events");
+
+    return [
+
+        {
+            type:
+                "HISTORY_PUSH"
+
+        },
+
+        {
+            type:
+                "HISTORY_LISTENER"
+        },
+
+        {
+            type:
+                "HISTORY_BACK"
+        },
+
+        {
+            type:
+                "POPSTATE_MUTATE"
+        },
+
+        {
+            type:
+                "POPSTATE_CREATE_FRAME"
+        },
+
+        {
+            type:
+                "POPSTATE_REMOVE_FRAME"
+        },
+
+        {
+            type:
+                "POPSTATE_CONTINUE"
+        },
+
+        {
+            type:
+                "LAYOUT"
+        }
+
+    ];
+}
+
+
+/* ============================================================
+   PATTERN 11
+   HTML PARSER / STYLE / DOM
+   ============================================================ */
+
+function patternParser()
+{
+    State.pattern =
+        "PARSER_STYLE_DOM";
+
+    surface("HTML parser");
+    surface("DOM");
+    surface("CSS");
+    surface("StyleResolver");
+    surface("RenderTree");
+    surface("Layout");
+
+    return [
+
+        {
+            type:
+                "PARSE_FRAGMENT"
+        },
+
+        {
+            type:
+                "PARSE_ATTACH"
+        },
+
+        {
+            type:
+                "PARSE_STYLE"
+        },
+
+        {
+            type:
+                "PARSE_LAYOUT"
+        },
+
+        {
+            type:
+                "PARSE_MUTATE"
+        },
+
+        {
+            type:
+                "PARSE_REMOVE"
+        },
+
+        {
+            type:
+                "PARSE_STYLE"
+        },
+
+        {
+            type:
+                "PARSE_LAYOUT"
+        }
+
+    ];
+}
+
+
+/* ============================================================
+   PATTERN 12
+   CROSS SURFACE
+   ============================================================ */
+
+function patternCrossSurface()
+{
+    var m =
+        model();
+
+    var result = [];
+
+    State.pattern =
+        "CROSS_SURFACE_LIFETIME";
+
+    surface("DOM");
+    surface("Events");
+    surface("Document");
+    surface("Frame");
+    surface("Page");
+    surface("FocusController");
+    surface("Editing");
+    surface("CSS");
+    surface("StyleResolver");
+    surface("RenderTree");
+    surface("Layout");
+    surface("SVG");
+    surface("Forms");
+    surface("Text");
+    surface("Fonts");
+    surface("History");
+
+    var c =
+        createOperation(
+            m,
+            "textarea"
+        );
+
+    if (c)
+        result.push(c);
+
+    var a =
+        attachOperation(m);
+
+    if (a)
+        result.push(a);
+
+    var list =
+        attached(m);
+
+    if (!list.length)
+        return result;
+
+    var id =
+        choose(list);
+
+    result.push({
+        type:
+            "LISTEN",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "FOCUS",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "EDIT",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "STYLE",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "LAYOUT",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "ASYNC_CALLBACK",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "DISPATCH",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "MUTATE",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "DETACH",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "ASYNC_CALLBACK",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "BLUR",
+        id:
+            id
+    });
+
+    result.push({
+        type:
+            "LAYOUT",
+        id:
+            id
+    });
+
+    return result;
+}
+
+
+/* ============================================================
+   PATTERN TABLE
+   ============================================================ */
+
+var PATTERNS = [
+
+    {
+        name:
+            "EVENT_REENTRANCY",
+
+        weight:
+            14,
+
+        build:
+            patternEventReentrancy
+    },
+
+    {
+        name:
+            "FOCUS_DOCUMENT_TEARDOWN",
+
+        weight:
+            13,
+
+        build:
+            patternFocusDocument
+    },
+
+    {
+        name:
+            "MUTATION_DURING_TRAVERSAL",
+
+        weight:
+            11,
+
+        build:
+            patternMutationTraversal
+    },
+
+    {
+        name:
+            "NESTED_LAYOUT_REVALIDATION",
+
+        weight:
+            12,
+
+        build:
+            patternNestedLayout
+    },
+
+    {
+        name:
+            "SVG_LAYOUT_REVALIDATION",
+
+        weight:
+            8,
+
+        build:
+            patternSVG
+    },
+
+    {
+        name:
+            "ASYNC_AFTER_TEARDOWN",
+
+        weight:
+            12,
+
+        build:
+            patternAsyncTeardown
+    },
+
+    {
+        name:
+            "TYPE_ROLE_TRANSITION",
+
+        weight:
+            9,
+
+        build:
+            patternTypeTransition
+    },
+
+    {
+        name:
+            "EDITING_FORM_LIFETIME",
+
+        weight:
+            6,
+
+        build:
+            patternEditing
+    },
+
+    {
+        name:
+            "TEXT_FONT_STYLE_LIFETIME",
+
+        weight:
+            6,
+
+        build:
+            patternTextFonts
+    },
+
+    {
+        name:
+            "HISTORY_DOCUMENT_MUTATION",
+
+        weight:
+            5,
+
+        build:
+            patternHistory
+    },
+
+    {
+        name:
+            "PARSER_STYLE_DOM",
+
+        weight:
+            4,
+
+        build:
+            patternParser
+    },
+
+    {
+        name:
+            "CROSS_SURFACE_LIFETIME",
+
+        weight:
+            5,
+
+        build:
+            patternCrossSurface
+    }
+
+];
+
+
+/* ============================================================
+   PATTERN SELECTION
+   ============================================================ */
+
+function choosePattern()
+{
+    var total =
+        0;
+
+    var i;
+
+    for (
+        i = 0;
+        i < PATTERNS.length;
+        i++
+    ) {
+
+        total +=
+            PATTERNS[i].weight;
+    }
+
+    var value =
+        random() * total;
+
+    for (
+        i = 0;
+        i < PATTERNS.length;
+        i++
+    ) {
+
+        value -=
+            PATTERNS[i].weight;
+
+        if (
+            value <= 0
+        ) {
+            return PATTERNS[i];
+        }
+    }
+
+    return PATTERNS[0];
+}
+
+
+/* ============================================================
+   CORPUS MUTATION
+   ============================================================ */
+
+function mutateSequence(sequence)
+{
+    var result =
+        clone(sequence);
+
+    if (!result.length)
+        return result;
+
+    var mode =
+        integer(7);
+
+    if (
+        mode === 0 &&
+        result.length < CONFIG.maxOperations
+    ) {
+
+        result.splice(
+            integer(
+                result.length + 1
+            ),
+            0,
+            clone(
+                choose(result)
+            )
+        );
+    }
+
+    else if (
+        mode === 1 &&
+        result.length > 5
+    ) {
+
+        result.splice(
+            integer(
+                result.length
+            ),
+            1
+        );
+    }
+
+    else if (
+        mode === 2 &&
+        result.length > 1
+    ) {
+
+        var a =
+            integer(
+                result.length
+            );
+
+        var b =
+            integer(
+                result.length
+            );
+
+        var temp =
+            result[a];
+
+        result[a] =
+            result[b];
+
+        result[b] =
+            temp;
+    }
+
+    else if (
+        mode === 3
+    ) {
+
+        var lifecycle =
+            result.filter(
+                function (op) {
+
+                    return (
+                        op.type === "DETACH" ||
+                        op.type === "ATTACH" ||
+                        op.type === "LAYOUT" ||
+                        op.type === "DISPATCH" ||
+                        op.type === "ASYNC_CALLBACK" ||
+                        op.type === "MUTATE"
+                    );
+
+                }
+            );
+
+        if (
+            lifecycle.length
+        ) {
+
+            result.splice(
+                integer(
+                    result.length + 1
+                ),
+                0,
+                clone(
+                    choose(lifecycle)
+                )
+            );
+        }
+    }
+
+    else if (
+        mode === 4
+    ) {
+
+        var idx =
+            integer(
+                result.length
+            );
+
+        result[idx] = {
+
+            type:
+                choose([
+                    "MUTATE",
+                    "LAYOUT",
+                    "STYLE",
+                    "ASYNC_CALLBACK",
+                    "DISPATCH"
+                ]),
+
+            id:
+                choose(IDS)
+
+        };
+    }
+
+    else if (
+        mode === 5
+    ) {
+
+        /*
+         * Duplicate an operation that is already
+         * part of a lifetime transition.
+         */
+
+        var candidates =
+            result.filter(
+                function (op) {
+
+                    return (
+                        op.type ===
+                        "DETACH" ||
+
+                        op.type ===
+                        "REMOVE_DURING_CALLBACK" ||
+
+                        op.type ===
+                        "ASYNC_CALLBACK" ||
+
+                        op.type ===
+                        "LAYOUT"
+                    );
+
+                }
+            );
+
+        if (
+            candidates.length
+        ) {
+
+            result.splice(
+                integer(
+                    result.length + 1
+                ),
+                0,
+                clone(
+                    choose(candidates)
+                )
+            );
+        }
+    }
+
+    else {
+
+        result.push(
+            clone(
+                choose(result)
+            )
+        );
+    }
+
+    while (
+        result.length >
+        CONFIG.maxOperations
+    ) {
+        result.pop();
+    }
+
+    return result;
+}
+
+
+/* ============================================================
+   RESET DOM
+   ============================================================ */
+
+function resetDOM()
+{
+    State.objects =
+        {};
+
+    State.frames =
+        {};
+
+    State.parserNode =
+        null;
+
+    State.history =
+        [];
+
+    State.transitions =
+        {};
+
+    State.operationTypes =
+        {};
+
+    State.errors =
+        0;
+
+    State.events =
+        0;
+
+    State.asyncCallbacks =
+        0;
+
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    while (
+        root.firstChild
+    ) {
+
+        root.removeChild(
+            root.firstChild
+        );
+    }
+}
+
+
+/* ============================================================
+   OPERATION DESCRIPTION
+   ============================================================ */
+
+function describe(op)
+{
+    var text =
+        op.type;
+
+    if (op.id)
+        text +=
+            " " +
+            op.id;
+
+    return text;
+}
+
+
+/* ============================================================
+   EXECUTION HELPERS
+   ============================================================ */
+
+function getObject(id)
+{
+    if (!id)
+        return null;
+
+    return State.objects[id] || null;
+}
+
+function getElement(id)
+{
+    var object =
+        getObject(id);
+
+    if (!object)
+        return null;
+
+    return object.element;
+}
+
+
+/* ============================================================
+   FRAME EXECUTION
+   ============================================================ */
+
+function executeFrame(op)
+{
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    if (
+        op.type ===
+        "FRAME_CREATE"
+    ) {
+
+        if (
+            State.frames[op.id]
+        )
+            return;
+
+        var frame =
+            document.createElement(
+                "iframe"
+            );
+
+        frame.className =
+            "hiddenFrame";
+
+        frame.setAttribute(
+            "data-v18-frame",
+            op.id
+        );
+
+        State.frames[op.id] =
+            frame;
+
+        root.appendChild(
+            frame
+        );
+
+        return;
+    }
+
+    var frame =
+        State.frames[op.id];
+
+    if (!frame)
+        return;
+
+    try {
+
+        if (
+            op.type ===
+            "FRAME_LOAD"
+        ) {
+
+            frame.src =
+                "about:blank";
+        }
+
+        else if (
+            op.type ===
+            "FRAME_CREATE_INPUT"
+        ) {
+
+            var doc =
+                frame.contentDocument;
+
+            if (!doc)
+                return;
+
+            var input =
+                doc.createElement(
+                    "input"
+                );
+
+            input.type =
+                "text";
+
+            input.setAttribute(
+                "data-v18",
+                "input"
+            );
+
+            doc.body.appendChild(
+                input
+            );
+
+            State.frames[
+                op.id + "_input"
+            ] =
+                input;
+        }
+
+        else if (
+            op.type ===
+            "FRAME_FOCUS"
+        ) {
+
+            var input =
+                State.frames[
+                    op.id + "_input"
+                ];
+
+            if (
+                input &&
+                input.focus
+            ) {
+                input.focus();
+            }
+        }
+
+        else if (
+            op.type ===
+            "FRAME_BLUR"
+        ) {
+
+            var input2 =
+                State.frames[
+                    op.id + "_input"
+                ];
+
+            if (
+                input2 &&
+                input2.blur
+            ) {
+                input2.blur();
+            }
+        }
+
+        else if (
+            op.type ===
+            "FRAME_MUTATE"
+        ) {
+
+            frame.setAttribute(
+                "data-change",
+                String(
+                    integer(100000)
+                )
+            );
+        }
+
+        else if (
+            op.type ===
+            "FRAME_ACCESS"
+        ) {
+
+            void frame.contentWindow;
+
+            void frame.contentDocument;
+        }
+
+        else if (
+            op.type ===
+            "FRAME_REMOVE"
+        ) {
+
+            if (
+                frame.parentNode
+            ) {
+
+                frame.parentNode
+                    .removeChild(
+                        frame
+                    );
+            }
+        }
+
+    }
+    catch (e) {
+
+        State.errors++;
+
+    }
+}
+
+
+/* ============================================================
+   SVG
+   ============================================================ */
+
+function executeSVG(op)
+{
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    if (
+        op.type ===
+        "SVG_CREATE"
+    ) {
+
+        var svg =
+            document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "svg"
+            );
+
+        svg.setAttribute(
+            "width",
+            "50"
+        );
+
+        svg.setAttribute(
+            "height",
+            "50"
+        );
+
+        var rect =
+            document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "rect"
+            );
+
+        rect.setAttribute(
+            "width",
+            "20"
+        );
+
+        rect.setAttribute(
+            "height",
+            "20"
+        );
+
+        svg.appendChild(
+            rect
+        );
+
+        State.objects[
+            "SVG_" + op.id
+        ] = {
+
+            element:
+                svg
+        };
+
+        return;
+    }
+
+    var object =
+        State.objects[
+            "SVG_" + op.id
+        ];
+
+    if (!object)
+        return;
+
+    var svg =
+        object.element;
+
+    try {
+
+        if (
+            op.type ===
+            "SVG_ATTACH"
+        ) {
+
+            root.appendChild(
+                svg
+            );
+        }
+
+        else if (
+            op.type ===
+            "SVG_STYLE"
+        ) {
+
+            svg.setAttribute(
+                "style",
+                "display:block;" +
+                "width:" +
+                (10 + integer(100)) +
+                "px;" +
+                "height:" +
+                (10 + integer(100)) +
+                "px;"
+            );
+        }
+
+        else if (
+            op.type ===
+            "SVG_LAYOUT"
+        ) {
+
+            void svg.getBoundingClientRect();
+
+            void svg.offsetWidth;
+        }
+
+        else if (
+            op.type ===
+            "SVG_NESTED_LAYOUT"
+        ) {
+
+            void svg.getBoundingClientRect();
+
+            svg.setAttribute(
+                "viewBox",
+                "0 0 " +
+                (20 + integer(100)) +
+                " " +
+                (20 + integer(100))
+            );
+
+            void svg.getBoundingClientRect();
+
+            void svg.offsetWidth;
+        }
+
+        else if (
+            op.type ===
+            "SVG_MUTATE"
+        ) {
+
+            svg.setAttribute(
+                "viewBox",
+                "0 0 " +
+                (10 + integer(100)) +
+                " " +
+                (10 + integer(100))
+            );
+        }
+
+        else if (
+            op.type ===
+            "SVG_REMOVE"
+        ) {
+
+            if (
+                svg.parentNode
+            ) {
+
+                svg.parentNode
+                    .removeChild(
+                        svg
+                    );
+            }
+        }
+
+    }
+    catch (e) {
+
+        State.errors++;
+
+    }
+}
+
+
+/* ============================================================
+   PARSER
+   ============================================================ */
+
+function executeParser(op)
+{
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    try {
+
+        if (
+            op.type ===
+            "PARSE_FRAGMENT"
+        ) {
+
+            var wrapper =
+                document.createElement(
+                    "div"
+                );
+
+            wrapper.innerHTML =
+                "<div class='node'>" +
+                "<span>V18</span>" +
+                "<input type='text'>" +
+                "</div>";
+
+            State.parserNode =
+                wrapper;
+        }
+
+        else if (
+            op.type ===
+            "PARSE_ATTACH"
+        ) {
+
+            if (
+                State.parserNode &&
+                State.parserNode.firstChild
+            ) {
+
+                root.appendChild(
+                    State.parserNode.firstChild
+                );
+            }
+        }
+
+        else if (
+            op.type ===
+            "PARSE_STYLE"
+        ) {
+
+            var list =
+                root.getElementsByTagName(
+                    "div"
+                );
+
+            if (list.length) {
+
+                list[0].style.cssText =
+                    "display:block;" +
+                    "position:relative;" +
+                    "width:60px;" +
+                    "height:20px;";
+            }
+        }
+
+        else if (
+            op.type ===
+            "PARSE_LAYOUT"
+        ) {
+
+            void root.offsetWidth;
+
+            root.getBoundingClientRect();
+        }
+
+        else if (
+            op.type ===
+            "PARSE_MUTATE"
+        ) {
+
+            root.innerHTML +=
+                "<span>" +
+                integer(10000) +
+                "</span>";
+        }
+
+        else if (
+            op.type ===
+            "PARSE_REMOVE"
+        ) {
+
+            if (
+                root.lastChild
+            ) {
+
+                root.removeChild(
+                    root.lastChild
+                );
+            }
+        }
+
+    }
+    catch (e) {
+
+        State.errors++;
+
+    }
+}
+
+
+/* ============================================================
+   HISTORY
+   ============================================================ */
+
+function executeHistory(op)
+{
+    try {
+
+        if (
+            op.type ===
+            "HISTORY_PUSH"
+        ) {
+
+            if (
+                history &&
+                history.pushState
+            ) {
+
+                history.pushState(
+                    {
+                        v:
+                            integer(100000)
+                    },
+                    "",
+                    location.href
+                );
+            }
+        }
+
+        else if (
+            op.type ===
+            "HISTORY_LISTENER"
+        ) {
+
+            window.addEventListener(
+                "popstate",
+                function () {
+
+                    State.events++;
+
+                },
+                false
+            );
+        }
+
+        else if (
+            op.type ===
+            "HISTORY_BACK"
+        ) {
+
+            if (
+                history &&
+                history.back
+            ) {
+
+                history.back();
+            }
+        }
+
+        else if (
+            op.type ===
+            "POPSTATE_MUTATE"
+        ) {
+
+            document.body.appendChild(
+                document.createElement(
+                    "div"
+                )
+            );
+        }
+
+        else if (
+            op.type ===
+            "POPSTATE_CREATE_FRAME"
+        ) {
+
+            var frame =
+                document.createElement(
+                    "iframe"
+                );
+
+            frame.className =
+                "hiddenFrame";
+
+            document.body.appendChild(
+                frame
+            );
+
+            State.frames[
+                "history"
+            ] =
+                frame;
+        }
+
+        else if (
+            op.type ===
+            "POPSTATE_REMOVE_FRAME"
+        ) {
+
+            var f =
+                State.frames[
+                    "history"
+                ];
+
+            if (
+                f &&
+                f.parentNode
+            ) {
+
+                f.parentNode
+                    .removeChild(
+                        f
+                    );
+            }
+        }
+
+        else if (
+            op.type ===
+            "POPSTATE_CONTINUE"
+        ) {
+
+            void document.body.offsetWidth;
+        }
+
+    }
+    catch (e) {
+
+        State.errors++;
+
+    }
+}
+
+
+/* ============================================================
+   NORMAL DOM OPERATIONS
+   ============================================================ */
+
+function executeDOM(op)
+{
+    var root =
+        document.getElementById(
+            "testRoot"
+        );
+
+    if (
+        op.type ===
+        "CREATE"
+    ) {
+
+        if (
+            State.objects[op.id]
+        )
+            return;
+
+        var element =
+            document.createElement(
+                op.elementType ||
+                "div"
+            );
+
+        element.className =
+            "node";
+
+        element.textContent =
+            op.id;
+
+        State.objects[
+            op.id
+        ] = {
+
+            element:
+                element
+
+        };
+
+        return;
+    }
+
+    if (
+        op.type ===
+        "INPUT_CREATE"
+    ) {
+
+        var input =
+            document.createElement(
+                "input"
+            );
+
+        input.type =
+            "text";
+
+        input.className =
+            "node";
+
+        State.objects[
+            op.id
+        ] = {
+
+            element:
+                input
+
+        };
+
+        return;
+    }
+
+    if (
+        op.type ===
+        "TEXTAREA_CREATE"
+    ) {
+
+        var textarea =
+            document.createElement(
+                "textarea"
+            );
+
+        textarea.className =
+            "node";
+
+        State.objects[
+            op.id
+        ] = {
+
+            element:
+                textarea
+
+        };
+
+        return;
+    }
+
+    if (
+        op.type ===
+        "TEXT_CREATE"
+    ) {
+
+        var text =
+            document.createElement(
+                "div"
+            );
+
+        text.className =
+            "node";
+
+        text.textContent =
+            "initial text";
+
+        State.objects[
+            op.id
+        ] = {
+
+            element:
+                text
+
+        };
+
+        return;
+    }
+
+    var element =
+        getElement(
+            op.id
+        );
+
+    if (!element)
+        return;
+
+    try {
+
+        if (
+            op.type ===
+            "ATTACH" ||
+            op.type ===
+            "INPUT_ATTACH"
+        ) {
+
+            root.appendChild(
+                element
+            );
+        }
+
+        else if (
+            op.type ===
+            "DETACH" ||
+            op.type ===
+            "INPUT_REMOVE"
+        ) {
+
+            if (
+                element.parentNode
+            ) {
+
+                element.parentNode
+                    .removeChild(
+                        element
+                    );
+            }
+        }
+
+        else if (
+            op.type ===
+            "MUTATE" ||
+            op.type ===
+            "INPUT_MUTATE"
+        ) {
+
+            element.textContent =
+                "V18-" +
+                integer(1000000);
+
+            element.setAttribute(
+                "data-v18",
+                String(
+                    State.caseId
+                )
+            );
+        }
+
+        else if (
+            op.type ===
+            "STYLE"
+        ) {
+
+            element.style.cssText =
+                "display:block;" +
+                "position:relative;" +
+                "width:" +
+                (10 + integer(200)) +
+                "px;" +
+                "height:" +
+                (10 + integer(100)) +
+                "px;" +
+                "margin:" +
+                integer(20) +
+                "px;";
+        }
+
+        else if (
+            op.type ===
+            "NESTED_STYLE"
+        ) {
+
+            element.style.display =
+                "block";
+
+            void element.offsetWidth;
+
+            element.style.width =
+                (
+                    10 +
+                    integer(200)
+                ) +
+                "px";
+
+            void element.getBoundingClientRect();
+        }
+
+        else if (
+            op.type ===
+            "LAYOUT"
+        ) {
+
+            void element.offsetWidth;
+
+            element.getBoundingClientRect();
+
+            void element.scrollTop;
+        }
+
+        else if (
+            op.type ===
+            "NESTED_LAYOUT"
+        ) {
+
+            void element.offsetWidth;
+
+            element.style.width =
+                (
+                    20 +
+                    integer(100)
+                ) +
+                "px";
+
+            void element.offsetWidth;
+
+            element.getBoundingClientRect();
+
+            void element.scrollTop;
+        }
+
+        else if (
+            op.type ===
+            "LISTEN"
+        ) {
+
+            element.addEventListener(
+                "v18-event",
+                function () {
+
+                    State.events++;
+
+                    /*
+                     * Small synchronous mutation inside
+                     * an event callback.
+                     */
+
+                    try {
+
+                        element.setAttribute(
+                            "data-event",
+                            String(
+                                integer(100000)
+                            )
+                        );
+
+                    } catch (e) {
+                    }
+
+                },
+                false
+            );
+        }
+
+        else if (
+            op.type ===
+            "DISPATCH" ||
+            op.type ===
+            "DISPATCH_CLICK" ||
+            op.type ===
+            "DISPATCH_INPUT"
+        ) {
+
+            var event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                op.type ===
+                "DISPATCH_INPUT" ?
+                "input" :
+                (
+                    op.type ===
+                    "DISPATCH_CLICK" ?
+                    "click" :
+                    "v18-event"
+                ),
+                true,
+                true
+            );
+
+            element.dispatchEvent(
+                event
+            );
+        }
+
+        else if (
+            op.type ===
+            "FOCUS"
+        ) {
+
+            if (
+                element.focus
+            ) {
+                element.focus();
+            }
+        }
+
+        else if (
+            op.type ===
+            "BLUR"
+        ) {
+
+            if (
+                element.blur
+            ) {
+                element.blur();
+            }
+        }
+
+        else if (
+            op.type ===
+            "REMOVE_DURING_CALLBACK"
+        ) {
+
+            /*
+             * Remove through ordinary DOM API.
+             * The interesting part is that this operation
+             * is reached as part of an event sequence.
+             */
+
+            if (
+                element.parentNode
+            ) {
+
+                element.parentNode
+                    .removeChild(
+                        element
+                    );
+            }
+        }
+
+        else if (
+            op.type ===
+            "ASYNC_CALLBACK"
+        ) {
+
+            State.asyncCallbacks++;
+
+            (function (reference) {
+
+                setTimeout(
+                    function () {
+
+                        try {
+
+                            void reference.parentNode;
+
+                            void reference.textContent;
+
+                            void reference.offsetWidth;
+
+                            reference
+                                .getBoundingClientRect();
+
+                        }
+                        catch (e) {
+
+                            State.errors++;
+
+                        }
+
+                    },
+                    CONFIG.asyncDelay
+                );
+
+            })(element);
+        }
+
+        else if (
+            op.type ===
+            "EDIT"
+        ) {
+
+            if (
+                typeof element.value ===
+                "string"
+            ) {
+
+                element.value =
+                    "edit-" +
+                    integer(100000);
+            }
+        }
+
+        else if (
+            op.type ===
+            "SELECTION"
+        ) {
+
+            if (
+                typeof element.setSelectionRange ===
+                "function"
+            ) {
+
+                try {
+
+                    element.setSelectionRange(
+                        0,
+                        0
+                    );
+
+                } catch (e) {
+                }
+            }
+        }
+
+        else if (
+            op.type ===
+            "INPUT_TYPE_CHANGE"
+        ) {
+
+            if (
+                element.tagName &&
+                element.tagName.toLowerCase() ===
+                "input"
+            ) {
+
+                element.type =
+                    choose([
+                        "text",
+                        "search",
+                        "email",
+                        "number"
+                    ]);
+            }
+        }
+
+        else if (
+            op.type ===
+            "FONT_CHANGE"
+        ) {
+
+            element.style.fontFamily =
+                choose([
+                    "serif",
+                    "sans-serif",
+                    "monospace"
+                ]);
+
+            element.style.fontSize =
+                (
+                    8 +
+                    integer(32)
+                ) +
+                "px";
+        }
+
+        else if (
+            op.type ===
+            "TEXT_MUTATE"
+        ) {
+
+            element.textContent =
+                "text-" +
+                integer(1000000);
+        }
+
+        else if (
+            op.type ===
+            "DISPATCH_INPUT"
+        ) {
+
+            var inputEvent =
+                document.createEvent(
+                    "Event"
+                );
+
+            inputEvent.initEvent(
+                "input",
+                true,
+                true
+            );
+
+            element.dispatchEvent(
+                inputEvent
+            );
+        }
+
+        else if (
+            op.type ===
+            "ACCESS_EDITING_STATE"
+        ) {
+
+            void element.value;
+
+            void element.selectionStart;
+
+            void element.selectionEnd;
+        }
+
+    }
+    catch (e) {
+
+        State.errors++;
+
+    }
+}
+
+
+/* ============================================================
+   SPECIAL TYPE TRANSITIONS
+   ============================================================ */
+
+function executeSpecial(op)
+{
+    if (
+        op.type ===
+        "BEGIN_TRAVERSAL"
+    ) {
+
+        var root =
+            document.getElementById(
+                "testRoot"
+            );
+
+        State.traversalSnapshot =
+            root.childNodes.length;
+
+        return;
+    }
+
+    if (
+        op.type ===
+        "TRAVERSAL_CALLBACK"
+    ) {
+
+        /*
+         * Dispatch an ordinary event while a traversal-like
+         * sequence is active.
+         */
+
+        var event =
+            document.createEvent(
+                "Event"
+            );
+
+        event.initEvent(
+            "v18-traversal",
+            true,
+            true
+        );
+
+        document
+            .getElementById(
+                "testRoot"
+            )
+            .dispatchEvent(
+                event
+            );
+
+        return;
+    }
+
+    if (
+        op.type ===
+        "MUTATE_COLLECTION"
+    ) {
+
+        var root2 =
+            document.getElementById(
+                "testRoot"
+            );
+
+        var extra =
+            document.createElement(
+                "div"
+            );
+
+        extra.className =
+            "node";
+
+        root2.appendChild(
+            extra
+        );
+
+        return;
+    }
+
+    if (
+        op.type ===
+        "REMOVE_TRAVERSED"
+    ) {
+
+        var root3 =
+            document.getElementById(
+                "testRoot"
+            );
+
+        if (
+            root3.firstChild
+        ) {
+
+            root3.removeChild(
+                root3.firstChild
+            );
+        }
+
+        return;
+    }
+
+    if (
+        op.type ===
+        "CONTINUE_TRAVERSAL"
+    ) {
+
+        var root4 =
+            document.getElementById(
+                "testRoot"
+            );
+
+        void root4.childNodes.length;
+
+        return;
+    }
+}
+
+
+/* ============================================================
+   EXECUTE OPERATION
+   ============================================================ */
+
+function executeOperation(op)
+{
+    State.current =
+        describe(op);
+
+    State.operationTypes[
+        op.type
+    ] = true;
+
+    if (
+        State.history.length
+    ) {
+
+        var previous =
+            State.history[
+                State.history.length - 1
+            ];
+
+        var transition =
+            previous.type +
+            "->" +
+            op.type;
+
+        State.transitions[
+            transition
+        ] = true;
+    }
+
+    State.history.push(op);
+
+    if (
+        State.history.length >
+        16
+    ) {
+
+        State.history.shift();
+
+    }
+
+    try {
+
+        if (
+            op.type.indexOf(
+                "FRAME_"
+            ) === 0
+        ) {
+
+            executeFrame(op);
+
+        }
+
+        else if (
+            op.type.indexOf(
+                "SVG_"
+            ) === 0
+        ) {
+
+            executeSVG(op);
+
+        }
+
+        else if (
+            op.type.indexOf(
+                "PARSE_"
+            ) === 0
+        ) {
+
+            executeParser(op);
+
+        }
+
+        else if (
+            op.type.indexOf(
+                "HISTORY_"
+            ) === 0 ||
+            op.type.indexOf(
+                "POPSTATE_"
+            ) === 0
+        ) {
+
+            executeHistory(op);
+
+        }
+
+        else if (
+            op.type ===
+            "BEGIN_TRAVERSAL" ||
+            op.type ===
+            "TRAVERSAL_CALLBACK" ||
+            op.type ===
+            "MUTATE_COLLECTION" ||
+            op.type ===
+            "REMOVE_TRAVERSED" ||
+            op.type ===
+            "CONTINUE_TRAVERSAL"
+        ) {
+
+            executeSpecial(op);
+
+        }
+
+        else {
+
+            executeDOM(op);
+
+        }
+
+    }
+    catch (e) {
+
+        State.errors++;
+
+        log(
+            "Exception: " +
+            e.name
+        );
+    }
+
+    State.lastCompleted =
+        State.current;
+
+    checkpoint();
+}
+
+
+/* ============================================================
+   CASE SCORE
+   ============================================================ */
+
+function calculateScore()
+{
+    var score =
+        Math.min(
+            14,
+            Object.keys(
+                State.transitions
+            ).length
+        );
+
+    var t =
+        State.operationTypes;
+
+    if (
+        t.LISTEN &&
+        t.DISPATCH &&
+        t.DETACH
+    )
+        score += 4;
+
+    if (
+        t.ASYNC_CALLBACK &&
+        t.DETACH
+    )
+        score += 4;
+
+    if (
+        t.FOCUS &&
+        t.BLUR &&
+        t.DETACH
+    )
+        score += 3;
+
+    if (
+        t.STYLE &&
+        t.LAYOUT &&
+        t.DETACH
+    )
+        score += 3;
+
+    if (
+        t.NESTED_LAYOUT &&
+        t.STYLE
+    )
+        score += 3;
+
+    if (
+        t.SVG_NESTED_LAYOUT &&
+        t.SVG_REMOVE
+    )
+        score += 3;
+
+    if (
+        t.INPUT_TYPE_CHANGE &&
+        t.DISPATCH_CLICK
+    )
+        score += 3;
+
+    if (
+        t.BEGIN_TRAVERSAL &&
+        t.MUTATE_COLLECTION &&
+        t.CONTINUE_TRAVERSAL
+    )
+        score += 4;
+
+    if (
+        t.FRAME_REMOVE &&
+        t.FRAME_ACCESS
+    )
+        score += 3;
+
+    if (
+        t.FONT_CHANGE &&
+        t.LAYOUT
+    )
+        score += 2;
+
+    if (
+        t.HISTORY_BACK &&
+        t.POPSTATE_MUTATE
+    )
+        score += 3;
+
+    if (
+        State.errors
+    )
+        score += 1;
+
+    return score;
+}
+
+
+/* ============================================================
+   BUILD CASE
+   ============================================================ */
+
+function buildCase()
+{
+    State.surfaces =
+        [];
+
+    /*
+     * Corpus reuse.
+     */
+
+    if (
+        State.corpus.length &&
+        random() < 0.30
+    ) {
+
+        var entry =
+            chooseCorpusEntry();
+
+        if (entry) {
+
+            entry.uses++;
+
+            State.pattern =
+                entry.pattern;
+
+            State.surfaces =
+                clone(
+                    entry.surfaces
+                );
+
+            saveCorpus();
+
+            return mutateSequence(
+                entry.sequence
+            );
+        }
+    }
+
+    var pattern =
+        choosePattern();
+
+    var sequence =
+        pattern.build();
+
+    /*
+     * Small mutation tail.
+     */
+
+    if (
+        sequence.length <
+        CONFIG.maxOperations &&
+        random() < 0.60
+    ) {
+
+        sequence =
+            mutateSequence(
+                sequence
+            );
+    }
+
+    return sequence;
+}
+
+
+/* ============================================================
+   RUN SEQUENCE
+   ============================================================ */
+
+function runSequence(
+    sequence,
+    callback
+)
+{
+    resetDOM();
+
+    State.sequence =
+        clone(sequence);
+
+    State.index =
+        0;
+
+    State.current =
+        "";
+
+    State.lastCompleted =
+        "";
+
+    State.completed =
+        false;
+
+    checkpoint();
+
+    function next()
+    {
+        if (
+            State.index >=
+            State.sequence.length
+        ) {
+
+            setTimeout(
+                function () {
+
+                    State.completed =
+                        true;
+
+                    State.stats.completed++;
+
+                    save(
+                        "stats",
+                        State.stats
+                    );
+
+                    checkpoint();
+
+                    callback();
+
+                },
+                CONFIG.asyncDelay
+            );
+
+            return;
+        }
+
+        var op =
+            State.sequence[
+                State.index
+            ];
+
+        executeOperation(op);
+
+        State.index++;
+
+        checkpoint();
+
+        updateDisplay();
+
+        setTimeout(
+            next,
+            CONFIG.operationDelay
+        );
+    }
+
+    next();
+}
+
+
+/* ============================================================
+   FUZZ LOOP
+   ============================================================ */
+
+function startFuzz()
+{
+    State.running =
+        true;
+
+    State.mode =
+        "FUZZ";
+
+    State.run++;
+
+    function nextCase()
+    {
+        if (
+            State.mode !==
+            "FUZZ"
+        )
+            return;
+
+        State.caseId++;
+
+        State.stats.cases++;
+
+        setSeed(
+            nextSeed()
+        );
+
+        var sequence =
+            buildCase();
+
+        runSequence(
+            sequence,
+            function () {
+
+                State.score =
+                    calculateScore();
+
+                if (
+                    State.score >= 8
+                ) {
+
+                    addCorpus(
+                        sequence,
+                        State.score
+                    );
+                }
+
+                clearCheckpoint();
+
+                updateDisplay();
+
+                setTimeout(
+                    nextCase,
+                    CONFIG.caseDelay
+                );
+            }
+        );
+    }
+
+    nextCase();
+}
+
+
+/* ============================================================
+   REPLAY
+   ============================================================ */
+
+function startReplay()
+{
+    if (
+        !State.candidate
+    ) {
+
+        startFuzz();
+
+        return;
+    }
+
+    State.mode =
+        "REPLAY";
+
+    State.replay = {
+
+        attempt:
+            0,
+
+        required:
+            CONFIG.replayAttempts,
+
+        completed:
+            0,
+
+        interrupted:
+            0
+
+    };
+
+    save(
+        "replay",
+        State.replay
+    );
+
+    replayNext();
+}
+
+function replayNext()
+{
+    if (
+        State.replay.attempt >=
+        State.replay.required
+    ) {
+
+        finishReplay();
+
+        return;
+    }
+
+    State.replay.attempt++;
+
+    save(
+        "replay",
+        State.replay
+    );
+
+    save(
+        "task",
+        {
+
+            type:
+                "REPLAY",
+
+            attempt:
+                State.replay.attempt,
+
+            awaiting:
+                true
+
+        }
+    );
+
+    runSequence(
+        State.candidate.sequence,
+        function () {
+
+            State.replay.completed++;
+
+            save(
+                "replay",
+                State.replay
+            );
+
+            remove("task");
+
+            clearCheckpoint();
+
+            setTimeout(
+                replayNext,
+                100
+            );
+        }
+    );
+}
+
+function finishReplay()
+{
+    /*
+     * If the browser was interrupted and came back,
+     * recovery will have incremented interrupted.
+     */
+
+    if (
+        State.replay.interrupted > 0
+    ) {
+
+        startMinimization();
+
+        return;
+    }
+
+    clearCandidate();
+
+    remove("replay");
+
+    State.replay =
+        null;
+
+    startFuzz();
+}
+
+
+/* ============================================================
+   MINIMIZATION
+   ============================================================ */
+
+function createMinimizer()
+{
+    return {
+
+        original:
+            clone(
+                State.candidate.sequence
+            ),
+
+        best:
+            clone(
+                State.candidate.sequence
+            ),
+
+        chunkSize:
+            Math.max(
+                1,
+                Math.floor(
+                    State.candidate.sequence.length /
+                    2
+                )
+            ),
+
+        chunk:
+            0,
+
+        tests:
+            0,
+
+        accepted:
+            0,
+
+        rejected:
+            0,
+
+        completed:
+            false
+
+    };
+}
+
+function startMinimization()
+{
+    State.mode =
+        "MINIMIZE";
+
+    State.minimizer =
+        load(
+            "minimizer",
+            null
+        );
+
+    if (
+        !State.minimizer
+    ) {
+
+        State.minimizer =
+            createMinimizer();
+    }
+
+    save(
+        "minimizer",
+        State.minimizer
+    );
+
+    minimizationStep();
+}
+
+function minimizationCandidate()
+{
+    var m =
+        State.minimizer;
+
+    var start =
+        m.chunk *
+        m.chunkSize;
+
+    var proposed =
+        clone(
+            m.best
+        );
+
+    proposed.splice(
+        start,
+        m.chunkSize
+    );
+
+    return proposed;
+}
+
+function minimizationStep()
+{
+    var m =
+        State.minimizer;
+
+    if (
+        !m ||
+        m.completed
+    ) {
+
+        finishMinimization();
+
+        return;
+    }
+
+    if (
+        m.best.length <= 1 ||
+        m.chunkSize < 1
+    ) {
+
+        m.completed =
+            true;
+
+        save(
+            "minimizer",
+            m
+        );
+
+        finishMinimization();
+
+        return;
+    }
+
+    var proposed =
+        minimizationCandidate();
+
+    if (
+        !proposed.length
+    ) {
+
+        advanceMinimizer();
+
+        return;
+    }
+
+    m.tests++;
+
+    save(
+        "minimizer",
+        m
+    );
+
+    save(
+        "task",
+        {
+
+            type:
+                "MINIMIZE",
+
+            proposed:
+                clone(proposed),
+
+            bestBefore:
+                clone(m.best),
+
+            awaiting:
+                true,
+
+            timestamp:
+                Date.now()
+
+        }
+    );
+
+    State.candidate.sequence =
+        clone(proposed);
+
+    save(
+        "candidate",
+        State.candidate
+    );
+
+    runSequence(
+        proposed,
+        function () {
+
+            /*
+             * No interruption observed.
+             * Keep current best.
+             */
+
+            m.rejected++;
+
+            State.candidate.sequence =
+                clone(m.best);
+
+            save(
+                "candidate",
+                State.candidate
+            );
+
+            remove("task");
+
+            clearCheckpoint();
+
+            save(
+                "minimizer",
+                m
+            );
+
+            advanceMinimizer();
+        }
+    );
+}
+
+function advanceMinimizer()
+{
+    var m =
+        State.minimizer;
+
+    var chunks =
+        Math.ceil(
+            m.best.length /
+            m.chunkSize
+        );
+
+    m.chunk++;
+
+    if (
+        m.chunk >= chunks
+    ) {
+
+        m.chunk =
+            0;
+
+        m.chunkSize =
+            Math.floor(
+                m.chunkSize /
+                2
+            );
+    }
+
+    save(
+        "minimizer",
+        m
+    );
+
+    if (
+        m.chunkSize < 1
+    ) {
+
+        m.completed =
+            true;
+
+        finishMinimization();
+
+        return;
+    }
+
+    setTimeout(
+        minimizationStep,
+        80
+    );
+}
+
+
+/* ============================================================
+   MINIMIZATION FINISH
+   ============================================================ */
+
+function finishMinimization()
+{
+    if (
+        !State.minimizer
+    ) {
+
+        startFuzz();
+
+        return;
+    }
+
+    var m =
+        State.minimizer;
+
+    var result = {
+
+        id:
+            Date.now(),
+
+        candidateId:
+            State.candidate ?
+            State.candidate.id :
+            null,
+
+        pattern:
+            State.candidate ?
+            State.candidate.pattern :
+            null,
+
+        surfaces:
+            State.candidate ?
+            clone(
+                State.candidate.surfaces
+            ) :
+            [],
+
+        seed:
+            State.candidate ?
+            State.candidate.seed :
+            null,
+
+        original:
+            clone(
+                m.original
+            ),
+
+        minimized:
+            clone(
+                m.best
+            ),
+
+        originalOperations:
+            m.original.length,
+
+        minimizedOperations:
+            m.best.length,
+
+        tests:
+            m.tests,
+
+        accepted:
+            m.accepted,
+
+        rejected:
+            m.rejected,
+
+        timestamp:
+            Date.now()
+
+    };
+
+    save(
+        "bestCrash",
+        result
+    );
+
+    State.stats.minimized++;
+
+    save(
+        "stats",
+        State.stats
+    );
+
+    log(
+        "================================"
+    );
+
+    log(
+        "MINIMIZED CANDIDATE"
+    );
+
+    log(
+        "PATTERN: " +
+        result.pattern
+    );
+
+    log(
+        "SURFACES: " +
+        result.surfaces.join(
+            " -> "
+        )
+    );
+
+    log(
+        "SEED: " +
+        result.seed
+    );
+
+    log(
+        "ORIGINAL OPS: " +
+        result.originalOperations
+    );
+
+    log(
+        "MINIMIZED OPS: " +
+        result.minimizedOperations
+    );
+
+    log(
+        "TESTS: " +
+        result.tests
+    );
+
+    log(
+        "================================"
+    );
+
+    clearCandidate();
+
+    remove("task");
+    remove("replay");
+    remove("minimizer");
+
+    State.replay =
+        null;
+
+    State.minimizer =
+        null;
+
+    clearCheckpoint();
+
+    setTimeout(
+        startFuzz,
+        250
+    );
+}
+
+
+/* ============================================================
+   RECOVERY
+   ============================================================ */
+
+function recover()
+{
+    var task =
+        load(
+            "task",
+            null
+        );
+
+    var execution =
+        load(
+            "execution",
+            null
+        );
+
+    /*
+     * Interrupted minimization.
+     */
+
+    if (
+        task &&
+        task.type ===
+        "MINIMIZE" &&
+        task.awaiting
+    ) {
+
+        State.candidate =
+            load(
+                "candidate",
+                null
+            );
+
+        State.minimizer =
+            load(
+                "minimizer",
+                null
+            );
+
+        if (
+            State.candidate &&
+            State.minimizer
+        ) {
+
+            State.minimizer.best =
+                clone(
+                    task.proposed
+                );
+
+            State.minimizer.accepted++;
+
+            State.minimizer.chunk =
+                0;
+
+            State.minimizer.chunkSize =
+                Math.max(
+                    1,
+                    Math.floor(
+                        State.minimizer.best.length /
+                        2
+                    )
+                );
+
+            State.candidate.sequence =
+                clone(
+                    State.minimizer.best
+                );
+
+            save(
+                "candidate",
+                State.candidate
+            );
+
+            save(
+                "minimizer",
+                State.minimizer
+            );
+
+            remove("task");
+
+            State.mode =
+                "MINIMIZE";
+
+            setTimeout(
+                minimizationStep,
+                250
+            );
+
+            return true;
+        }
+    }
+
+    /*
+     * Interrupted replay.
+     */
+
+    if (
+        task &&
+        task.type ===
+        "REPLAY" &&
+        task.awaiting
+    ) {
+
+        State.candidate =
+            load(
+                "candidate",
+                null
+            );
+
+        State.replay =
+            load(
+                "replay",
+                null
+            );
+
+        if (
+            State.candidate &&
+            State.replay
+        ) {
+
+            State.replay.interrupted++;
+
+            save(
+                "replay",
+                State.replay
+            );
+
+            remove("task");
+
+            State.mode =
+                "REPLAY";
+
+            setTimeout(
+                replayNext,
+                250
+            );
+
+            return true;
+        }
+    }
+
+    /*
+     * Interrupted fuzz case.
+     */
+
+    if (
+        execution &&
+        !execution.completed &&
+        execution.sequence
+    ) {
+
+        State.run =
+            execution.run;
+
+        State.caseId =
+            execution.caseId;
+
+        State.pattern =
+            execution.pattern;
+
+        State.surfaces =
+            clone(
+                execution.surfaces || []
+            );
+
+        setSeed(
+            execution.seed
+        );
+
+        State.sequence =
+            clone(
+                execution.sequence
+            );
+
+        State.index =
+            execution.index;
+
+        State.current =
+            execution.current;
+
+        State.lastCompleted =
+            execution.lastCompleted;
+
+        State.stats.interrupted++;
+
+        save(
+            "stats",
+            State.stats
+        );
+
+        saveCandidate(
+            "INTERRUPTED_CASE"
+        );
+
+        log(
+            "INTERRUPTED CASE RECOVERED"
+        );
+
+        return true;
+    }
+
+    return false;
+}
+
+
+/* ============================================================
+   DISPLAY
+   ============================================================ */
+
+function updateDisplay()
+{
+    document
+        .getElementById("state")
+        .textContent =
+
+        "MODE: " +
+        State.mode +
+
+        "\nRUN: " +
+        State.run +
+
+        "\nCASE: " +
+        State.caseId +
+
+        "\nSEED: " +
+        RNG.seed +
+
+        "\nCASES: " +
+        State.stats.cases +
+
+        "\nCOMPLETED: " +
+        State.stats.completed +
+
+        "\nINTERRUPTED: " +
+        State.stats.interrupted +
+
+        "\nCANDIDATES: " +
+        State.stats.candidates +
+
+        "\nMINIMIZED: " +
+        State.stats.minimized +
+
+        "\nCORPUS: " +
+        State.corpus.length +
+
+        "\nERRORS: " +
+        State.errors +
+
+        "\nSCORE: " +
+        State.score;
+
+    document
+        .getElementById("pattern")
+        .textContent =
+
+        "PATTERN\n" +
+        State.pattern +
+
+        "\n\nSURFACES\n" +
+        (
+            State.surfaces.length ?
+            State.surfaces.join(
+                " -> "
+            ) :
+            "NONE"
+        );
+
+    if (
+        State.candidate
+    ) {
+
+        document
+            .getElementById("candidate")
+            .textContent =
+
+            "CRASH CANDIDATE\n\n" +
+
+            "ID: " +
+            State.candidate.id +
+
+            "\nReason: " +
+            State.candidate.reason +
+
+            "\nPattern: " +
+            State.candidate.pattern +
+
+            "\nSurfaces: " +
+            State.candidate.surfaces.join(
+                " -> "
+            ) +
+
+            "\nSeed: " +
+            State.candidate.seed +
+
+            "\nCase: " +
+            State.candidate.caseId +
+
+            "\nIndex: " +
+            State.candidate.index +
+
+            "\nCurrent: " +
+            State.candidate.current +
+
+            "\nLast: " +
+            State.candidate.lastCompleted +
+
+            "\nOperations: " +
+            State.candidate.sequence.length;
+
+    } else {
+
+        document
+            .getElementById("candidate")
+            .textContent =
+            "CRASH CANDIDATE\nNONE";
+    }
+
+    if (
+        State.minimizer
+    ) {
+
+        var m =
+            State.minimizer;
+
+        document
+            .getElementById("minimizer")
+            .textContent =
+
+            "MINIMIZATION\n\n" +
+
+            "Original: " +
+            m.original.length +
+
+            "\nBest: " +
+            m.best.length +
+
+            "\nChunk: " +
+            m.chunk +
+
+            "\nChunk size: " +
+            m.chunkSize +
+
+            "\nTests: " +
+            m.tests +
+
+            "\nAccepted: " +
+            m.accepted +
+
+            "\nRejected: " +
+            m.rejected;
+
+    } else {
+
+        document
+            .getElementById("minimizer")
+            .textContent =
+            "MINIMIZATION\nIDLE";
+    }
+
+    var lines = [];
+    var i;
+
+    for (
+        i = 0;
+        i < State.sequence.length;
+        i++
+    ) {
+
+        lines.push(
+
+            (
+                i === State.index ?
+                ">> " :
+                "   "
+            ) +
+
+            "#" +
+            ("00" + i).slice(-2) +
+            " " +
+            describe(
+                State.sequence[i]
+            )
+
+        );
+    }
+
+    document
+        .getElementById("sequence")
+        .textContent =
+
+        lines.join("\n") +
+
+        "\n\nCURRENT: " +
+        (State.current || "") +
+
+        "\nLAST: " +
+        (State.lastCompleted || "") +
+
+        "\nEVENTS: " +
+        State.events +
+
+        "\nASYNC CALLBACKS: " +
+        State.asyncCallbacks +
+
+        "\nERRORS: " +
+        State.errors +
+
+        "\nSCORE: " +
+        State.score;
+}
+
+
+/* ============================================================
+   INITIALIZATION
+   ============================================================ */
+
+State.run =
+    load(
+        "run",
+        0
+    );
+
+State.caseId =
+    load(
+        "caseId",
+        0
+    );
+
+State.stats =
+    load(
+        "stats",
+        State.stats
+    );
+
+loadCorpus();
+
+loadCandidate();
+
+var recovered =
+    recover();
+
+updateDisplay();
+
+
+/* ============================================================
+   START BUTTON
+   ============================================================ */
+
+document
+    .getElementById("start")
+    .addEventListener(
+        "click",
+        function () {
+
+            if (
+                State.running
+            )
+                return;
+
+            State.running =
+                true;
+
+            if (
+                State.candidate
+            ) {
+
+                startReplay();
+
+            } else {
+
+                startFuzz();
+
+            }
+
+        },
+        false
+    );
+
+
+/* ============================================================
+   START AFTER RECOVERY
+   ============================================================ */
+
+if (
+    recovered &&
+    State.candidate
+) {
+
+    State.running =
+        true;
+
+    setTimeout(
+        startReplay,
+        300
+    );
+}
+
+
+log(
+    "V18 READY"
+);
+
 })();
 </script>
+
 </body>
 </html>
