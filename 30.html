@@ -2,8 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-
-<title>V22 WebCore State Lifetime Crash Hunter</title>
+<title>PS4 13.52 - WebCore Capability Matrix V23</title>
 
 <style>
 html, body {
@@ -14,2352 +13,2931 @@ html, body {
     font-family: Arial, sans-serif;
 }
 
-#ui {
-    padding: 12px;
-    border-bottom: 1px solid #333;
-    background: #181818;
+body {
+    padding: 14px;
 }
 
 button {
-    padding: 10px 18px;
+    padding: 13px 22px;
+    font-size: 18px;
     margin-right: 8px;
-    font-size: 16px;
 }
 
 #status {
-    margin-top: 8px;
+    margin-top: 12px;
+    padding: 10px;
+    background: #181818;
+    border: 1px solid #333;
+    font-family: monospace;
+}
+
+#summary {
+    margin-top: 10px;
+    padding: 10px;
+    background: #181818;
+    border: 1px solid #333;
+    font-family: monospace;
+}
+
+#matrix {
+    margin-top: 12px;
+    width: 100%;
+    border-collapse: collapse;
     font-size: 13px;
 }
 
-#fixture {
-    position: relative;
-    width: 100%;
-    min-height: 700px;
-    overflow: hidden;
+#matrix th,
+#matrix td {
+    border: 1px solid #333;
+    padding: 7px;
+    text-align: left;
 }
 
-.v22-host {
-    position: relative;
+#matrix th {
+    background: #222;
 }
 
-.block {
-    display: block;
+.supported {
+    font-weight: bold;
 }
 
-.inline {
-    display: inline;
+.partial {
+    font-weight: bold;
 }
 
-.inlineblock {
-    display: inline-block;
+.unsupported {
+    opacity: 0.7;
 }
 
-.positioned {
-    position: relative;
+.error {
+    font-weight: bold;
 }
 
-.absolute {
-    position: absolute;
+.category {
+    background: #202020;
+    font-weight: bold;
 }
 
-.overflow {
-    overflow: auto;
-}
-
-.hidden {
+#recovery {
+    margin-top: 12px;
+    padding: 10px;
+    background: #181818;
+    border: 1px solid #333;
+    font-family: monospace;
     display: none;
-}
-
-.clipped {
-    overflow: hidden;
-}
-
-.sized {
-    width: 120px;
-    height: 50px;
-}
-
-.transform {
-    transform: translateZ(0);
-}
-
-.box {
-    width: 100px;
-    height: 40px;
-    margin: 3px;
-    border: 1px solid #777;
-    padding: 3px;
-}
-
-.deep {
-    position: relative;
-}
-
-#shadow-container {
-    position: relative;
-}
-
-svg {
-    display: block;
-}
-
-#image-zone {
-    position: relative;
-}
-
-textarea {
-    width: 180px;
-    height: 50px;
 }
 </style>
 </head>
 
 <body>
 
-<div id="ui">
-    <button id="startButton">START V22</button>
-    <button id="stopButton">STOP</button>
+<button id="run">RUN CAPABILITY MATRIX</button>
+<button id="clear">CLEAR RESULTS</button>
 
-    <div id="status">
-        V22 idle
-    </div>
+<div id="status">READY</div>
+
+<div id="summary">
+    No test executed.
 </div>
 
-<div id="fixture"></div>
+<div id="recovery"></div>
+
+<table id="matrix">
+<thead>
+<tr>
+    <th>Category</th>
+    <th>Surface</th>
+    <th>Status</th>
+    <th>Probe</th>
+</tr>
+</thead>
+<tbody>
+</tbody>
+</table>
 
 <script>
-
-/*
- ================================================================
- V22 WebCore State / Lifetime Crash Hunter
- ================================================================
-
- Design:
-
-   STATIC FIXTURE
-        |
-        v
-   STATE CREATION
-        |
-        v
-   REENTRANT OPERATION
-        |
-        v
-   MUTATION / TEARDOWN
-        |
-        v
-   CONTINUATION
-
- No exploit primitives.
- No memory disclosure.
- No arbitrary code execution.
- No JIT/WebGL/WebAudio/IndexedDB/TrustedTypes/Navigation API.
-
- The JavaScript side only observes whether execution continues.
- ================================================================
-*/
-
 (function () {
 
-    "use strict";
+"use strict";
 
-    var VERSION = "V22";
+/*
+================================================================
+ V23 — PS4 13.52 WebCore Capability Matrix
+================================================================
 
-    var STORAGE_KEY = "V22_LAST_CHECKPOINT";
+ PURPOSE
+ -------
+ Determine which browser/WebCore surfaces are exposed and
+ minimally exercisable from JavaScript.
 
-    var running = false;
-    var stopRequested = false;
+ THIS IS NOT A FUZZER.
 
-    var globalCase = 0;
+ No resource exhaustion.
+ No large allocations.
+ No worker storms.
+ No navigation loops.
+ No crash-oriented stress.
 
-    var MAX_CASES = 250;
+ RESULT STATES
+ -------------
+ SUPPORTED
+ PARTIAL
+ UNSUPPORTED
+ ERROR
 
-    /*
-     * Keep individual mutations small.
-     * The objective is lifetime/reentrancy coverage,
-     * not resource exhaustion.
-     */
-    var MAX_MUTATIONS_PER_CASE = 12;
+ IMPORTANT
+ ---------
+ JavaScript presence checks cannot prove that an entire WebCore
+ subsystem exists or does not exist.
 
-    var fixture;
-    var shadowHost;
-    var shadowRootRef;
+ Each probe therefore tries, when practical, to perform a small
+ representative operation.
 
-    var statusElement;
-
-    /*
-     ================================================================
-     * Deterministic PRNG
-     * ================================================================
-     */
-
-    function PRNG(seed) {
-
-        this.state = seed >>> 0;
-
-        this.next = function () {
-
-            var x = this.state;
-
-            x ^= x << 13;
-            x ^= x >>> 17;
-            x ^= x << 5;
-
-            this.state = x >>> 0;
-
-            return this.state;
-        };
-
-        this.range = function (n) {
-
-            if (n <= 0)
-                return 0;
-
-            return this.next() % n;
-        };
-
-        this.pick = function (array) {
-
-            if (!array || !array.length)
-                return null;
-
-            return array[this.range(array.length)];
-        };
-
-        this.bool = function () {
-            return (this.next() & 1) !== 0;
-        };
-    }
+ Results are persisted in localStorage.
+================================================================
+*/
 
 
-    /*
-     ================================================================
-     * UI
-     ================================================================
-     */
-
-    function setStatus(text) {
-
-        if (statusElement)
-            statusElement.innerHTML = text;
-    }
+var STORAGE_KEY =
+    "PS4_1352_V23_CAPABILITY_MATRIX";
 
 
-    /*
-     ================================================================
-     * Checkpoint
-     *
-     * Written BEFORE an operation.
-     * This is intentional: if the browser disappears during the
-     * operation, the last checkpoint identifies the candidate.
-     * ================================================================
-     */
+var running = false;
 
-    function checkpoint(data) {
+var results = [];
 
-        try {
+var tbody =
+    document.querySelector(
+        "#matrix tbody"
+    );
 
-            localStorage.setItem(
-                STORAGE_KEY,
-                JSON.stringify(data)
+var status =
+    document.getElementById(
+        "status"
+    );
+
+var summary =
+    document.getElementById(
+        "summary"
+    );
+
+var recovery =
+    document.getElementById(
+        "recovery"
+    );
+
+
+/*
+================================================================
+ UTILITIES
+================================================================
+*/
+
+function setStatus(text)
+{
+    status.textContent = text;
+}
+
+
+function saveResults()
+{
+    try {
+
+        localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({
+                version: "V23",
+                target: "PS4 13.52",
+                timestamp: Date.now(),
+                results: results
+            })
+        );
+
+    } catch (e) {}
+}
+
+
+function loadResults()
+{
+    try {
+
+        var raw =
+            localStorage.getItem(
+                STORAGE_KEY
             );
 
-        } catch (e) {
-            /*
-             * localStorage is diagnostic only.
-             * Never allow it to affect the test.
-             */
-        }
-    }
-
-
-    function loadCheckpoint() {
-
-        try {
-
-            var value =
-                localStorage.getItem(STORAGE_KEY);
-
-            if (!value)
-                return null;
-
-            return JSON.parse(value);
-
-        } catch (e) {
-
-            return null;
-        }
-    }
-
-
-    /*
-     ================================================================
-     * DOM utilities
-     * ================================================================
-     */
-
-    function safeRemove(node) {
-
-        if (!node)
-            return;
-
-        if (node.parentNode)
-            node.parentNode.removeChild(node);
-    }
-
-
-    function childrenOf(node) {
-
-        var result = [];
-
-        if (!node)
-            return result;
-
-        var children = node.childNodes;
-
-        for (var i = 0; i < children.length; i++)
-            result.push(children[i]);
-
-        return result;
-    }
-
-
-    function allElements(root) {
-
-        var result = [];
-
-        if (!root)
-            return result;
-
-        if (root.nodeType === 1)
-            result.push(root);
-
-        var list = root.getElementsByTagName("*");
-
-        for (var i = 0; i < list.length; i++)
-            result.push(list[i]);
-
-        return result;
-    }
-
-
-    function randomElement(prng, root) {
-
-        var list = allElements(root);
-
-        if (!list.length)
+        if (!raw)
             return null;
 
-        return prng.pick(list);
+        return JSON.parse(raw);
+
+    } catch (e) {
+
+        return null;
     }
+}
 
 
-    /*
-     ================================================================
-     * Fixture construction
-     *
-     * Important difference from V21:
-     *
-     * The DOM is NOT generated from scratch for each mutation.
-     *
-     * We establish WebCore state first.
-     * ================================================================
-     */
+function clearResults()
+{
+    try {
+        localStorage.removeItem(
+            STORAGE_KEY
+        );
+    } catch (e) {}
 
-    function buildFixture(seed) {
+    results = [];
 
-        fixture.innerHTML = "";
+    tbody.innerHTML = "";
 
-        /*
-         ------------------------------------------------------------
-         * Main document tree
-         * ------------------------------------------------------------
-         */
+    summary.textContent =
+        "No test executed.";
 
-        var root =
-            document.createElement("div");
+    recovery.style.display =
+        "none";
 
-        root.id = "v22-root";
-        root.className =
-            "v22-host block positioned overflow";
+    setStatus("CLEARED");
+}
 
-        fixture.appendChild(root);
 
+function addResult(
+    category,
+    surface,
+    state,
+    probe
+)
+{
+    var result = {
 
-        /*
-         ------------------------------------------------------------
-         * Focus fixture
-         * ------------------------------------------------------------
-         */
+        category: category,
 
-        var focusZone =
-            document.createElement("div");
+        surface: surface,
 
-        focusZone.id = "focus-zone";
-        focusZone.className =
-            "block positioned sized";
+        status: state,
 
-        var inputA =
-            document.createElement("input");
+        probe: probe
 
-        inputA.id = "focus-input-a";
-        inputA.type = "text";
+    };
 
-        var inputB =
-            document.createElement("input");
+    results.push(result);
 
-        inputB.id = "focus-input-b";
-        inputB.type = "search";
+    renderResult(result);
 
-        var button =
-            document.createElement("button");
+    saveResults();
+}
 
-        button.id = "focus-button";
-        button.innerHTML = "focus";
 
-        focusZone.appendChild(inputA);
-        focusZone.appendChild(inputB);
-        focusZone.appendChild(button);
-
-        root.appendChild(focusZone);
-
-
-        /*
-         ------------------------------------------------------------
-         * Forms fixture
-         * ------------------------------------------------------------
-         */
-
-        var form =
-            document.createElement("form");
-
-        form.id = "form-zone";
-
-        var text =
-            document.createElement("input");
-
-        text.id = "form-text";
-        text.type = "text";
-
-        var search =
-            document.createElement("input");
-
-        search.id = "form-search";
-        search.type = "search";
-
-        var email =
-            document.createElement("input");
-
-        email.id = "form-email";
-        email.type = "email";
-
-        var list =
-            document.createElement("input");
-
-        list.id = "form-list";
-        list.setAttribute("list", "v22-list");
-
-        var datalist =
-            document.createElement("datalist");
-
-        datalist.id = "v22-list";
-
-        for (var d = 0; d < 4; d++) {
-
-            var option =
-                document.createElement("option");
-
-            option.value = "value-" + d;
-
-            datalist.appendChild(option);
-        }
-
-        form.appendChild(text);
-        form.appendChild(search);
-        form.appendChild(email);
-        form.appendChild(list);
-        form.appendChild(datalist);
-
-        root.appendChild(form);
-
-
-        /*
-         ------------------------------------------------------------
-         * Shadow DOM fixture
-         * ------------------------------------------------------------
-         */
-
-        shadowHost =
-            document.createElement("div");
-
-        shadowHost.id =
-            "shadow-container";
-
-        root.appendChild(shadowHost);
-
-        shadowRootRef = null;
-
-        try {
-
-            if (shadowHost.attachShadow) {
-
-                shadowRootRef =
-                    shadowHost.attachShadow({
-                        mode: "open"
-                    });
-
-                var shadowWrapper =
-                    document.createElement("div");
-
-                shadowWrapper.className =
-                    "block positioned";
-
-                var slot =
-                    document.createElement("slot");
-
-                slot.name = "v22-slot";
-
-                shadowWrapper.appendChild(slot);
-
-                var shadowInner =
-                    document.createElement("span");
-
-                shadowInner.className =
-                    "box inlineblock";
-
-                shadowInner.innerHTML =
-                    "shadow";
-
-                shadowWrapper.appendChild(
-                    shadowInner
-                );
-
-                shadowRootRef.appendChild(
-                    shadowWrapper
-                );
-
-                var slotted =
-                    document.createElement("span");
-
-                slotted.slot =
-                    "v22-slot";
-
-                slotted.innerHTML =
-                    "slotted";
-
-                shadowHost.appendChild(
-                    slotted
-                );
-            }
-
-        } catch (e) {
-        }
-
-
-        /*
-         ------------------------------------------------------------
-         * Range / text fixture
-         * ------------------------------------------------------------
-         */
-
-        var textZone =
-            document.createElement("div");
-
-        textZone.id = "range-zone";
-
-        var textOne =
-            document.createTextNode(
-                "alpha "
-            );
-
-        var spanOne =
-            document.createElement("span");
-
-        spanOne.innerHTML =
-            "beta";
-
-        var spanTwo =
-            document.createElement("span");
-
-        spanTwo.innerHTML =
-            "gamma";
-
-        var textTwo =
-            document.createTextNode(
-                " delta"
-            );
-
-        textZone.appendChild(textOne);
-        textZone.appendChild(spanOne);
-        textZone.appendChild(spanTwo);
-        textZone.appendChild(textTwo);
-
-        root.appendChild(textZone);
-
-
-        /*
-         ------------------------------------------------------------
-         * Render tree fixture
-         * ------------------------------------------------------------
-         */
-
-        var renderZone =
-            document.createElement("div");
-
-        renderZone.id = "render-zone";
-
-        renderZone.className =
-            "block positioned overflow";
-
-        for (var r = 0; r < 8; r++) {
-
-            var box =
-                document.createElement("div");
-
-            box.className =
-                "box " +
-                (r % 2 ?
-                    "inlineblock" :
-                    "block");
-
-            box.setAttribute(
-                "data-index",
-                String(r)
-            );
-
-            renderZone.appendChild(box);
-        }
-
-        root.appendChild(renderZone);
-
-
-        /*
-         ------------------------------------------------------------
-         * Deep subtree
-         * ------------------------------------------------------------
-         */
-
-        var deep =
-            document.createElement("div");
-
-        deep.id = "deep-zone";
-        deep.className = "deep";
-
-        var current = deep;
-
-        for (var level = 0; level < 7; level++) {
-
-            var child =
-                document.createElement("div");
-
-            child.className =
-                "box positioned";
-
-            child.setAttribute(
-                "data-depth",
-                String(level)
-            );
-
-            current.appendChild(child);
-
-            current = child;
-        }
-
-        root.appendChild(deep);
-
-
-        /*
-         ------------------------------------------------------------
-         * SVG fixture
-         * ------------------------------------------------------------
-         */
-
-        var svg =
-            document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "svg"
-            );
-
-        svg.setAttribute(
-            "width",
-            "240"
+function renderResult(result)
+{
+    var row =
+        document.createElement(
+            "tr"
         );
 
-        svg.setAttribute(
-            "height",
-            "120"
+    var category =
+        document.createElement(
+            "td"
         );
 
-        svg.id = "svg-zone";
-
-        var group =
-            document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "g"
-            );
-
-        var rect =
-            document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "rect"
-            );
-
-        rect.setAttribute("x", "5");
-        rect.setAttribute("y", "5");
-        rect.setAttribute("width", "80");
-        rect.setAttribute("height", "40");
-
-        var circle =
-            document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "circle"
-            );
-
-        circle.setAttribute("cx", "130");
-        circle.setAttribute("cy", "30");
-        circle.setAttribute("r", "20");
-
-        group.appendChild(rect);
-        group.appendChild(circle);
-        svg.appendChild(group);
-
-        root.appendChild(svg);
-
-
-        /*
-         ------------------------------------------------------------
-         * Image / picture fixture
-         * ------------------------------------------------------------
-         */
-
-        var imageZone =
-            document.createElement("div");
-
-        imageZone.id =
-            "image-zone";
-
-        var picture =
-            document.createElement("picture");
-
-        var source =
-            document.createElement("source");
-
-        source.setAttribute(
-            "media",
-            "(min-width: 1px)"
+    var surface =
+        document.createElement(
+            "td"
         );
 
-        /*
-         * Intentionally invalid/non-network-dependent source.
-         * We are interested in lifecycle handling, not network
-         * access.
-         */
-
-        source.setAttribute(
-            "srcset",
-            "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+    var statusCell =
+        document.createElement(
+            "td"
         );
 
-        var img =
-            document.createElement("img");
+    var probe =
+        document.createElement(
+            "td"
+        );
 
-        img.id = "v22-image";
+    category.textContent =
+        result.category;
 
-        img.src =
-            "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+    surface.textContent =
+        result.surface;
 
-        picture.appendChild(source);
-        picture.appendChild(img);
+    statusCell.textContent =
+        result.status;
 
-        imageZone.appendChild(picture);
+    probe.textContent =
+        result.probe;
 
-        root.appendChild(imageZone);
+    if (
+        result.status ===
+        "SUPPORTED"
+    ) {
 
+        statusCell.className =
+            "supported";
 
-        /*
-         ------------------------------------------------------------
-         * Textarea
-         * ------------------------------------------------------------
-         */
+    } else if (
+        result.status ===
+        "PARTIAL"
+    ) {
 
-        var textarea =
-            document.createElement("textarea");
+        statusCell.className =
+            "partial";
 
-        textarea.id =
-            "v22-textarea";
+    } else if (
+        result.status ===
+        "UNSUPPORTED"
+    ) {
 
-        textarea.value =
-            "v22 text";
+        statusCell.className =
+            "unsupported";
 
-        root.appendChild(textarea);
+    } else {
 
-
-        /*
-         ------------------------------------------------------------
-         * Event handlers
-         *
-         * These are deliberately lightweight.
-         * The interesting mutation happens while dispatch is active.
-         * ------------------------------------------------------------
-         */
-
-        inputA.onclick = function () {
-
-            mutateInputType(
-                inputA,
-                seed
-            );
-
-        };
-
-        inputB.onfocus = function () {
-
-            mutateFocusZone(
-                focusZone
-            );
-
-        };
-
-        button.onclick = function () {
-
-            mutateFocusZone(
-                focusZone
-            );
-
-        };
-
-        img.onload = function () {
-
-            mutateImageZone(
-                imageZone
-            );
-
-        };
-
-        img.onerror = function () {
-
-            mutateImageZone(
-                imageZone
-            );
-
-        };
-
-
-        return root;
+        statusCell.className =
+            "error";
     }
 
+    row.appendChild(category);
+    row.appendChild(surface);
+    row.appendChild(statusCell);
+    row.appendChild(probe);
 
-    /*
-     ================================================================
-     * Pattern: State Replacement During Active Event Dispatch
-     * ================================================================
-     */
+    tbody.appendChild(row);
+}
 
-    function mutateInputType(input, seed) {
 
-        if (!input)
-            return;
+function updateSummary()
+{
+    var supported = 0;
+    var partial = 0;
+    var unsupported = 0;
+    var errors = 0;
 
-        try {
+    for (
+        var i = 0;
+        i < results.length;
+        i++
+    ) {
 
-            var oldType =
-                input.type;
+        if (
+            results[i].status ===
+            "SUPPORTED"
+        )
+            supported++;
 
-            input.type =
-                oldType === "text" ?
-                    "search" :
-                    "text";
+        else if (
+            results[i].status ===
+            "PARTIAL"
+        )
+            partial++;
 
-            input.setAttribute(
-                "data-v22-transition",
-                String(seed)
+        else if (
+            results[i].status ===
+            "UNSUPPORTED"
+        )
+            unsupported++;
+
+        else
+            errors++;
+    }
+
+    summary.textContent =
+        "TOTAL: " + results.length +
+        " | SUPPORTED: " + supported +
+        " | PARTIAL: " + partial +
+        " | UNSUPPORTED: " + unsupported +
+        " | ERROR: " + errors;
+}
+
+
+/*
+================================================================
+ PROBE HELPERS
+================================================================
+*/
+
+function probeGlobal(
+    category,
+    surface,
+    name
+)
+{
+    var exists =
+        typeof window[name] !==
+        "undefined";
+
+    addResult(
+        category,
+        surface,
+        exists ?
+            "SUPPORTED" :
+            "UNSUPPORTED",
+        "window." + name
+    );
+}
+
+
+function probeConstructor(
+    category,
+    surface,
+    name,
+    constructorTest
+)
+{
+    if (
+        typeof window[name] ===
+        "undefined"
+    ) {
+
+        addResult(
+            category,
+            surface,
+            "UNSUPPORTED",
+            "constructor absent"
+        );
+
+        return;
+    }
+
+    try {
+
+        var value =
+            constructorTest();
+
+        addResult(
+            category,
+            surface,
+            value === false ?
+                "PARTIAL" :
+                "SUPPORTED",
+            "construct/operation"
+        );
+
+    } catch (e) {
+
+        addResult(
+            category,
+            surface,
+            "PARTIAL",
+            "constructor exists; operation threw"
+        );
+    }
+}
+
+
+function safeProbe(
+    category,
+    surface,
+    description,
+    fn
+)
+{
+    try {
+
+        var result =
+            fn();
+
+        if (result === false) {
+
+            addResult(
+                category,
+                surface,
+                "PARTIAL",
+                description
             );
 
-            /*
-             * Force a modest read after state replacement.
-             */
-            void input.offsetWidth;
+        } else {
 
-        } catch (e) {
+            addResult(
+                category,
+                surface,
+                "SUPPORTED",
+                description
+            );
         }
+
+    } catch (e) {
+
+        addResult(
+            category,
+            surface,
+            "ERROR",
+            description
+        );
     }
+}
 
 
-    /*
-     ================================================================
-     * Pattern: Focus -> mutation
-     * ================================================================
-     */
+/*
+================================================================
+ DOM
+================================================================
+*/
 
-    function mutateFocusZone(zone) {
+function testDOM()
+{
+    var category = "DOM";
 
-        if (!zone)
-            return;
+    safeProbe(
+        category,
+        "Node / Element",
+        "createElement + appendChild",
+        function () {
 
-        try {
-
-            var list =
-                zone.getElementsByTagName(
-                    "input"
-                );
-
-            if (list.length) {
-
-                var target =
-                    list[0];
-
-                target.className =
-                    target.className ===
-                    "hidden" ?
-                    "sized" :
-                    "hidden";
-
-                /*
-                 * Read immediately after state transition.
-                 */
-                void target.offsetWidth;
-            }
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: Shadow slot mutation
-     * ================================================================
-     */
-
-    function mutateShadow(prng) {
-
-        if (!shadowHost)
-            return;
-
-        try {
-
-            var children =
-                childrenOf(shadowHost);
-
-            if (!children.length)
-                return;
-
-            var child =
-                prng.pick(children);
-
-            if (!child)
-                return;
-
-            /*
-             * Change slot assignment.
-             */
-            if (child.nodeType === 1) {
-
-                if (
-                    child.getAttribute("slot")
-                    === "v22-slot"
-                ) {
-
-                    child.removeAttribute(
-                        "slot"
-                    );
-
-                } else {
-
-                    child.setAttribute(
-                        "slot",
-                        "v22-slot"
-                    );
-                }
-            }
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: Style state transition
-     * ================================================================
-     */
-
-    function mutateStyle(prng, root) {
-
-        var element =
-            randomElement(
-                prng,
-                root
-            );
-
-        if (!element)
-            return;
-
-        try {
-
-            var operation =
-                prng.range(8);
-
-            if (operation === 0) {
-
-                element.style.display =
-                    element.style.display ===
-                    "none" ?
-                    "block" :
-                    "none";
-
-            } else if (operation === 1) {
-
-                element.style.position =
-                    element.style.position ===
-                    "absolute" ?
-                    "relative" :
-                    "absolute";
-
-            } else if (operation === 2) {
-
-                element.style.overflow =
-                    element.style.overflow ===
-                    "hidden" ?
-                    "auto" :
-                    "hidden";
-
-            } else if (operation === 3) {
-
-                element.style.width =
-                    prng.range(180) + 20 + "px";
-
-            } else if (operation === 4) {
-
-                element.style.height =
-                    prng.range(100) + 20 + "px";
-
-            } else if (operation === 5) {
-
-                element.className =
-                    "box inlineblock";
-
-            } else if (operation === 6) {
-
-                element.className =
-                    "box positioned overflow";
-
-            } else {
-
-                element.className =
-                    "block";
-            }
-
-            /*
-             * Layout/style observation.
-             */
-            void element.offsetWidth;
-            void element.offsetHeight;
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: Renderer / iteration invalidation
-     * ================================================================
-     */
-
-    function mutateRenderTree(prng, root) {
-
-        var renderZone =
-            document.getElementById(
-                "render-zone"
-            );
-
-        if (!renderZone)
-            return;
-
-        try {
-
-            var list =
-                renderZone.children;
-
-            if (!list.length)
-                return;
-
-            var target =
-                list[
-                    prng.range(list.length)
-                ];
-
-            /*
-             * Mutation while style/layout information is active.
-             */
-            target.style.display =
-                target.style.display ===
-                "none" ?
-                "inline-block" :
-                "none";
-
-            void renderZone.offsetWidth;
-
-            /*
-             * Reparent one element.
-             */
-            if (
-                target.parentNode ===
-                renderZone
-            ) {
-
-                renderZone.appendChild(
-                    target
-                );
-            }
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: Range + text mutation
-     * ================================================================
-     */
-
-    function mutateRange(prng) {
-
-        var zone =
-            document.getElementById(
-                "range-zone"
-            );
-
-        if (!zone)
-            return;
-
-        try {
-
-            var range =
-                document.createRange();
-
-            var textNode =
-                zone.firstChild;
-
-            if (!textNode)
-                return;
-
-            range.setStart(
-                textNode,
-                0
-            );
-
-            range.setEnd(
-                textNode,
-                Math.min(
-                    3,
-                    textNode.length
-                )
-            );
-
-            /*
-             * Tree mutation while Range is alive.
-             */
-            if (prng.bool()) {
-
-                var extra =
-                    document.createTextNode(
-                        "x"
-                    );
-
-                zone.insertBefore(
-                    extra,
-                    zone.firstChild
-                );
-
-            } else {
-
-                var first =
-                    zone.firstChild;
-
-                if (first)
-                    zone.removeChild(
-                        first
-                    );
-            }
-
-            /*
-             * Continue using the Range.
-             */
-            try {
-                range.cloneContents();
-            } catch (e2) {
-            }
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: SVG mutation
-     * ================================================================
-     */
-
-    function mutateSVG(prng) {
-
-        var svg =
-            document.getElementById(
-                "svg-zone"
-            );
-
-        if (!svg)
-            return;
-
-        try {
-
-            var elements =
-                svg.getElementsByTagName("*");
-
-            if (!elements.length)
-                return;
-
-            var target =
-                elements[
-                    prng.range(
-                        elements.length
-                    )
-                ];
-
-            target.setAttribute(
-                "transform",
-                "translate(" +
-                prng.range(30) +
-                "," +
-                prng.range(30) +
-                ")"
-            );
-
-            target.setAttribute(
-                "opacity",
-                String(
-                    (prng.range(10) + 1) /
-                    10
-                )
-            );
-
-            void svg.getBoundingClientRect();
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: Image lifecycle
-     * ================================================================
-     */
-
-    function mutateImageZone(zone) {
-
-        if (!zone)
-            return;
-
-        try {
-
-            var image =
-                document.getElementById(
-                    "v22-image"
-                );
-
-            if (!image)
-                return;
-
-            /*
-             * Modify attributes during image lifecycle.
-             */
-            image.width =
-                image.width === 1 ?
-                2 :
-                1;
-
-            image.height =
-                image.height === 1 ?
-                2 :
-                1;
-
-            image.setAttribute(
-                "data-state",
-                String(
-                    Date.now()
-                )
-            );
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: Reparent
-     * ================================================================
-     */
-
-    function mutateReparent(prng, root) {
-
-        var elements =
-            allElements(root);
-
-        if (elements.length < 4)
-            return;
-
-        try {
-
-            var a =
-                prng.pick(elements);
-
-            var b =
-                prng.pick(elements);
-
-            if (!a || !b || a === b)
-                return;
-
-            if (
-                a === root ||
-                b === root
-            )
-                return;
-
-            /*
-             * Avoid obvious ancestor cycles.
-             */
-            if (
-                a.contains &&
-                a.contains(b)
-            )
-                return;
-
-            b.appendChild(a);
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: remove/reinsert subtree
-     * ================================================================
-     */
-
-    function mutateDetachAttach(prng, root) {
-
-        var elements =
-            allElements(root);
-
-        if (elements.length < 3)
-            return;
-
-        try {
-
-            var target =
-                prng.pick(elements);
-
-            if (!target || target === root)
-                return;
-
-            var parent =
-                target.parentNode;
-
-            if (!parent)
-                return;
-
-            var next =
-                target.nextSibling;
-
-            parent.removeChild(
-                target
-            );
-
-            /*
-             * Immediate reinsertion gives us a
-             * detach/reattach transition without
-             * uncontrolled resource accumulation.
-             */
-
-            if (next && next.parentNode === parent)
-                parent.insertBefore(
-                    target,
-                    next
-                );
-            else
-                parent.appendChild(
-                    target
-                );
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: subtree replacement
-     * ================================================================
-     */
-
-    function mutateReplace(prng, root) {
-
-        var elements =
-            allElements(root);
-
-        if (elements.length < 3)
-            return;
-
-        try {
-
-            var target =
-                prng.pick(elements);
-
-            if (!target ||
-                target === root ||
-                !target.parentNode)
-                return;
-
-            var replacement =
-                document.createElement(
-                    target.tagName
-                );
-
-            replacement.className =
-                target.className;
-
-            replacement.setAttribute(
-                "data-replacement",
-                "v22"
-            );
-
-            target.parentNode.replaceChild(
-                replacement,
-                target
-            );
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: attribute state transition
-     * ================================================================
-     */
-
-    function mutateAttributes(prng, root) {
-
-        var element =
-            randomElement(
-                prng,
-                root
-            );
-
-        if (!element)
-            return;
-
-        try {
-
-            var operation =
-                prng.range(6);
-
-            if (operation === 0) {
-
-                element.setAttribute(
-                    "class",
-                    "hidden"
-                );
-
-            } else if (operation === 1) {
-
-                element.removeAttribute(
-                    "class"
-                );
-
-            } else if (operation === 2) {
-
-                element.setAttribute(
-                    "data-v22",
-                    String(prng.next())
-                );
-
-            } else if (operation === 3) {
-
-                element.removeAttribute(
-                    "data-v22"
-                );
-
-            } else if (operation === 4) {
-
-                element.setAttribute(
-                    "tabindex",
-                    "0"
-                );
-
-            } else {
-
-                element.removeAttribute(
-                    "tabindex"
-                );
-            }
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: DOM iteration + mutation
-     * ================================================================
-     */
-
-    function mutateDuringIteration(prng, root) {
-
-        try {
-
-            var list =
-                root.getElementsByTagName("*");
-
-            for (
-                var i = 0;
-                i < list.length;
-                i++
-            ) {
-
-                var element =
-                    list[i];
-
-                if (!element)
-                    continue;
-
-                /*
-                 * Small mutation inside traversal.
-                 */
-                if (
-                    i ===
-                    prng.range(
-                        Math.max(
-                            1,
-                            list.length
-                        )
-                    )
-                ) {
-
-                    element.setAttribute(
-                        "data-iter",
-                        String(i)
-                    );
-
-                    if (
-                        element.parentNode &&
-                        prng.bool()
-                    ) {
-
-                        element.parentNode
-                            .appendChild(
-                                element
-                            );
-                    }
-
-                    break;
-                }
-            }
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: focus / blur / DOM mutation
-     * ================================================================
-     */
-
-    function mutateFocusBlur(prng) {
-
-        try {
-
-            var inputs =
-                document.querySelectorAll(
-                    "#focus-zone input"
-                );
-
-            if (!inputs.length)
-                return;
-
-            var target =
-                inputs[
-                    prng.range(
-                        inputs.length
-                    )
-                ];
-
-            target.focus();
-
-            /*
-             * Mutation occurs immediately after focus.
-             */
-            if (prng.bool()) {
-
-                target.className =
-                    "hidden";
-
-            } else {
-
-                target.className =
-                    "sized";
-            }
-
-            target.blur();
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: form state replacement
-     * ================================================================
-     */
-
-    function mutateForm(prng) {
-
-        try {
-
-            var form =
-                document.getElementById(
-                    "form-zone"
-                );
-
-            if (!form)
-                return;
-
-            var inputs =
-                form.getElementsByTagName(
-                    "input"
-                );
-
-            if (!inputs.length)
-                return;
-
-            var target =
-                inputs[
-                    prng.range(
-                        inputs.length
-                    )
-                ];
-
-            /*
-             * The important transition:
-             *
-             * active element state
-             *       ->
-             * input type replacement
-             */
-            var types = [
-                "text",
-                "search",
-                "email",
-                "number"
-            ];
-
-            target.type =
-                types[
-                    prng.range(
-                        types.length
-                    )
-                ];
-
-            target.setAttribute(
-                "data-type-transition",
-                "1"
-            );
-
-        } catch (e) {
-        }
-    }
-
-
-    /*
-     ================================================================
-     * Pattern: Document/subtree teardown
-     *
-     * We do NOT navigate away.
-     * Instead we exercise local subtree teardown.
-     * ================================================================
-     */
-
-    function mutateSubtreeTeardown(prng, root) {
-
-        var candidates = [
-            "focus-zone",
-            "form-zone",
-            "range-zone",
-            "render-zone",
-            "deep-zone",
-            "svg-zone",
-            "image-zone"
-        ];
-
-        try {
-
-            var id =
-                prng.pick(candidates);
-
-            var target =
-                document.getElementById(
-                    id
-                );
-
-            if (!target)
-                return;
-
-            var parent =
-                target.parentNode;
-
-            if (!parent)
-                return;
-
-            /*
-             * Remove and immediately replace with
-             * a fresh equivalent container.
-             */
-            parent.removeChild(
-                target
-            );
-
-            var replacement =
+            var d =
                 document.createElement(
                     "div"
                 );
 
-            replacement.id = id;
+            var s =
+                document.createElement(
+                    "span"
+                );
 
-            replacement.className =
-                "block positioned";
+            d.appendChild(s);
 
-            parent.appendChild(
-                replacement
+            return (
+                d.firstChild === s
             );
-
-        } catch (e) {
         }
-    }
+    );
 
 
-    /*
-     ================================================================
-     * Compound patterns
-     * ================================================================
-     */
+    safeProbe(
+        category,
+        "DocumentFragment",
+        "createDocumentFragment",
+        function () {
 
-    function patternFocus(prng, root) {
+            var f =
+                document.createDocumentFragment();
 
-        mutateFocusBlur(prng);
-        mutateStyle(prng, root);
-    }
+            var d =
+                document.createElement(
+                    "div"
+                );
 
+            f.appendChild(d);
 
-    function patternForm(prng, root) {
-
-        mutateForm(prng);
-        mutateAttributes(prng, root);
-    }
-
-
-    function patternShadow(prng, root) {
-
-        mutateShadow(prng);
-        mutateStyle(prng, root);
-    }
+            return (
+                f.firstChild === d
+            );
+        }
+    );
 
 
-    function patternRender(prng, root) {
+    safeProbe(
+        category,
+        "HTMLCollection",
+        "getElementsByTagName",
+        function () {
 
-        mutateRenderTree(prng, root);
-        mutateStyle(prng, root);
-    }
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.innerHTML =
+                "<span></span><span></span>";
+
+            return (
+                d.getElementsByTagName(
+                    "span"
+                ).length === 2
+            );
+        }
+    );
 
 
-    function patternRange(prng, root) {
+    safeProbe(
+        category,
+        "NodeList",
+        "querySelectorAll",
+        function () {
 
-        mutateRange(prng);
-        mutateAttributes(prng, root);
-    }
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.innerHTML =
+                "<span></span><span></span>";
+
+            return (
+                d.querySelectorAll(
+                    "span"
+                ).length === 2
+            );
+        }
+    );
 
 
-    function patternLifetime(prng, root) {
+    probeConstructor(
+        category,
+        "MutationObserver",
+        "MutationObserver",
+        function () {
 
-        mutateDetachAttach(prng, root);
-        mutateReparent(prng, root);
-    }
+            var observer =
+                new MutationObserver(
+                    function () {}
+                );
+
+            observer.disconnect();
+
+            return true;
+        }
+    );
 
 
-    function patternEventReplacement(prng, root) {
+    probeConstructor(
+        category,
+        "TreeWalker",
+        "document.createTreeWalker",
+        function () {
 
-        var input =
-            document.getElementById(
-                "focus-input-a"
+            var walker =
+                document.createTreeWalker(
+                    document.body,
+                    1,
+                    null,
+                    false
+                );
+
+            return !!walker;
+        }
+    );
+
+
+    probeConstructor(
+        category,
+        "NodeIterator",
+        "document.createNodeIterator",
+        function () {
+
+            var iterator =
+                document.createNodeIterator(
+                    document.body,
+                    1,
+                    null,
+                    false
+                );
+
+            return !!iterator;
+        }
+    );
+
+
+    probeConstructor(
+        category,
+        "DOMParser",
+        "DOMParser",
+        function () {
+
+            var parser =
+                new DOMParser();
+
+            var doc =
+                parser.parseFromString(
+                    "<div>v23</div>",
+                    "text/html"
+                );
+
+            return !!doc;
+        }
+    );
+
+
+    probeConstructor(
+        category,
+        "Range",
+        "Range",
+        function () {
+
+            var range =
+                document.createRange();
+
+            range.selectNode(
+                document.documentElement
             );
 
-        if (!input)
+            return true;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "Selection",
+        "getSelection"
+    );
+
+
+    probeGlobal(
+        category,
+        "Template",
+        "HTMLTemplateElement"
+    );
+
+
+    probeGlobal(
+        category,
+        "CustomEvent",
+        "CustomEvent"
+    );
+
+
+    probeGlobal(
+        category,
+        "EventTarget",
+        "EventTarget"
+    );
+
+
+    safeProbe(
+        category,
+        "ShadowRoot",
+        "attachShadow + shadow tree",
+        function () {
+
+            var host =
+                document.createElement(
+                    "div"
+                );
+
+            if (!host.attachShadow)
+                return false;
+
+            var shadow =
+                host.attachShadow({
+                    mode: "open"
+                });
+
+            var span =
+                document.createElement(
+                    "span"
+                );
+
+            shadow.appendChild(span);
+
+            return (
+                shadow.firstChild === span
+            );
+        }
+    );
+}
+
+
+/*
+================================================================
+ EVENTS
+================================================================
+*/
+
+function testEvents()
+{
+    var category = "Events";
+
+    safeProbe(
+        category,
+        "Event",
+        "createEvent + dispatchEvent",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            var fired = false;
+
+            d.addEventListener(
+                "v23",
+                function () {
+                    fired = true;
+                },
+                false
+            );
+
+            var event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                "v23",
+                true,
+                true
+            );
+
+            d.dispatchEvent(event);
+
+            return fired;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "MouseEvent",
+        "MouseEvent"
+    );
+
+
+    probeGlobal(
+        category,
+        "KeyboardEvent",
+        "KeyboardEvent"
+    );
+
+
+    probeGlobal(
+        category,
+        "FocusEvent",
+        "FocusEvent"
+    );
+
+
+    safeProbe(
+        category,
+        "Event bubbling",
+        "capture/bubble dispatch",
+        function () {
+
+            var parent =
+                document.createElement(
+                    "div"
+                );
+
+            var child =
+                document.createElement(
+                    "button"
+                );
+
+            parent.appendChild(child);
+
+            var count = 0;
+
+            parent.addEventListener(
+                "v23",
+                function () {
+                    count++;
+                },
+                false
+            );
+
+            var event =
+                document.createEvent(
+                    "Event"
+                );
+
+            event.initEvent(
+                "v23",
+                true,
+                true
+            );
+
+            child.dispatchEvent(event);
+
+            return count === 1;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "Focus / blur",
+        "focus/blur methods",
+        function () {
+
+            var input =
+                document.createElement(
+                    "input"
+                );
+
+            document.body.appendChild(input);
+
+            input.focus();
+            input.blur();
+
+            input.parentNode.removeChild(
+                input
+            );
+
+            return true;
+        }
+    );
+}
+
+
+/*
+================================================================
+ FRAMES / PAGE
+================================================================
+*/
+
+function testFrames()
+{
+    var category = "Frame/Page";
+
+    safeProbe(
+        category,
+        "iframe",
+        "create iframe",
+        function () {
+
+            var frame =
+                document.createElement(
+                    "iframe"
+                );
+
+            frame.src =
+                "about:blank";
+
+            document.body.appendChild(
+                frame
+            );
+
+            var ok =
+                !!frame.contentDocument;
+
+            frame.parentNode.removeChild(
+                frame
+            );
+
+            return ok;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "contentWindow",
+        "iframe.contentWindow",
+        function () {
+
+            var frame =
+                document.createElement(
+                    "iframe"
+                );
+
+            frame.src =
+                "about:blank";
+
+            document.body.appendChild(frame);
+
+            var ok =
+                !!frame.contentWindow;
+
+            frame.parentNode.removeChild(
+                frame
+            );
+
+            return ok;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "contentDocument",
+        "iframe.contentDocument",
+        function () {
+
+            var frame =
+                document.createElement(
+                    "iframe"
+                );
+
+            frame.src =
+                "about:blank";
+
+            document.body.appendChild(frame);
+
+            var ok =
+                !!frame.contentDocument.body;
+
+            frame.parentNode.removeChild(
+                frame
+            );
+
+            return ok;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "window.open",
+        "open"
+    );
+
+
+    safeProbe(
+        category,
+        "history",
+        "history.pushState",
+        function () {
+
+            if (!history.pushState)
+                return false;
+
+            history.pushState(
+                {
+                    v23: true
+                },
+                "",
+                location.href
+            );
+
+            return true;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "beforeunload",
+        "onbeforeunload"
+    );
+
+
+    probeGlobal(
+        category,
+        "unload",
+        "onunload"
+    );
+
+
+    probeGlobal(
+        category,
+        "pagehide",
+        "onpagehide"
+    );
+
+
+    probeGlobal(
+        category,
+        "pageshow",
+        "onpageshow"
+    );
+}
+
+
+/*
+================================================================
+ CSS / STYLE
+================================================================
+*/
+
+function testCSS()
+{
+    var category = "CSS/Style";
+
+    safeProbe(
+        category,
+        "CSSStyleDeclaration",
+        "element.style mutation",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.style.width =
+                "100px";
+
+            d.style.display =
+                "block";
+
+            return (
+                d.style.width ===
+                "100px"
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "getComputedStyle",
+        "computed style",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            document.body.appendChild(d);
+
+            d.style.display =
+                "block";
+
+            var style =
+                window.getComputedStyle(d);
+
+            var ok =
+                !!style &&
+                typeof style.display !==
+                "undefined";
+
+            d.parentNode.removeChild(d);
+
+            return ok;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "CSSRule",
+        "CSSRule"
+    );
+
+
+    probeGlobal(
+        category,
+        "CSSStyleSheet",
+        "CSSStyleSheet"
+    );
+
+
+    safeProbe(
+        category,
+        "style element",
+        "dynamic stylesheet",
+        function () {
+
+            var style =
+                document.createElement(
+                    "style"
+                );
+
+            style.textContent =
+                ".v23-test { display:block; }";
+
+            document.head.appendChild(style);
+
+            var ok =
+                style.sheet !== null;
+
+            style.parentNode.removeChild(style);
+
+            return ok;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "CSS.supports",
+        "CSS"
+    );
+
+
+    probeGlobal(
+        category,
+        "Animation",
+        "Animation"
+    );
+
+
+    probeGlobal(
+        category,
+        "KeyframeEffect",
+        "KeyframeEffect"
+    );
+
+
+    probeGlobal(
+        category,
+        "CSSKeyframesRule",
+        "CSSKeyframesRule"
+    );
+
+
+    probeGlobal(
+        category,
+        "TransitionEvent",
+        "TransitionEvent"
+    );
+}
+
+
+/*
+================================================================
+ LAYOUT / RENDER
+================================================================
+*/
+
+function testLayout()
+{
+    var category = "Layout/RenderTree";
+
+    var d =
+        document.createElement(
+            "div"
+        );
+
+    d.style.cssText =
+        "display:block;" +
+        "position:relative;" +
+        "width:100px;" +
+        "height:50px;" +
+        "overflow:auto;";
+
+    d.innerHTML =
+        "<span style='display:inline'>text</span>";
+
+    document.body.appendChild(d);
+
+
+    safeProbe(
+        category,
+        "block layout",
+        "offsetWidth/offsetHeight",
+        function () {
+
+            return (
+                d.offsetWidth >= 0 &&
+                d.offsetHeight >= 0
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "geometry",
+        "getBoundingClientRect",
+        function () {
+
+            var rect =
+                d.getBoundingClientRect();
+
+            return (
+                typeof rect.width !==
+                "undefined"
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "inline layout",
+        "inline element",
+        function () {
+
+            var span =
+                d.firstChild;
+
+            return !!span &&
+                span.nodeType === 1;
+        }
+    );
+
+
+    d.style.display =
+        "inline-block";
+
+
+    safeProbe(
+        category,
+        "inline-block",
+        "display transition",
+        function () {
+
+            void d.offsetWidth;
+
+            return true;
+        }
+    );
+
+
+    d.style.position =
+        "absolute";
+
+
+    safeProbe(
+        category,
+        "positioned layout",
+        "absolute positioning",
+        function () {
+
+            void d.offsetWidth;
+
+            return true;
+        }
+    );
+
+
+    d.style.overflow =
+        "hidden";
+
+
+    safeProbe(
+        category,
+        "overflow",
+        "overflow mutation + layout",
+        function () {
+
+            void d.offsetWidth;
+
+            return true;
+        }
+    );
+
+
+    d.parentNode.removeChild(d);
+
+
+    safeProbe(
+        category,
+        "table layout",
+        "table/table-cell fixture",
+        function () {
+
+            var table =
+                document.createElement(
+                    "div"
+                );
+
+            table.style.display =
+                "table";
+
+            var cell =
+                document.createElement(
+                    "div"
+                );
+
+            cell.style.display =
+                "table-cell";
+
+            table.appendChild(cell);
+
+            document.body.appendChild(
+                table
+            );
+
+            var ok =
+                table.offsetWidth >= 0;
+
+            table.parentNode.removeChild(
+                table
+            );
+
+            return ok;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "flex",
+        "display:flex",
+        function () {
+
+            var flex =
+                document.createElement(
+                    "div"
+                );
+
+            flex.style.display =
+                "flex";
+
+            var child =
+                document.createElement(
+                    "div"
+                );
+
+            flex.appendChild(child);
+
+            document.body.appendChild(
+                flex
+            );
+
+            var ok =
+                flex.offsetWidth >= 0;
+
+            flex.parentNode.removeChild(
+                flex
+            );
+
+            return ok;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "list layout",
+        "ul/li",
+        function () {
+
+            var ul =
+                document.createElement(
+                    "ul"
+                );
+
+            var li =
+                document.createElement(
+                    "li"
+                );
+
+            li.textContent =
+                "v23";
+
+            ul.appendChild(li);
+
+            document.body.appendChild(
+                ul
+            );
+
+            var ok =
+                li.offsetWidth >= 0;
+
+            ul.parentNode.removeChild(
+                ul
+            );
+
+            return ok;
+        }
+    );
+}
+
+
+/*
+================================================================
+ FORMS / EDITING
+================================================================
+*/
+
+function testForms()
+{
+    var category = "Forms/Editing";
+
+    safeProbe(
+        category,
+        "input",
+        "input creation",
+        function () {
+
+            var input =
+                document.createElement(
+                    "input"
+                );
+
+            input.type =
+                "text";
+
+            input.value =
+                "v23";
+
+            return input.value ===
+                "v23";
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "input type replacement",
+        "text -> search -> number",
+        function () {
+
+            var input =
+                document.createElement(
+                    "input"
+                );
+
+            input.type =
+                "text";
+
+            input.type =
+                "search";
+
+            input.type =
+                "number";
+
+            return (
+                input.type ===
+                "number"
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "textarea",
+        "textarea value",
+        function () {
+
+            var textarea =
+                document.createElement(
+                    "textarea"
+                );
+
+            textarea.value =
+                "v23";
+
+            return textarea.value ===
+                "v23";
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "select",
+        "select/option",
+        function () {
+
+            var select =
+                document.createElement(
+                    "select"
+                );
+
+            var option =
+                document.createElement(
+                    "option"
+                );
+
+            option.value =
+                "a";
+
+            select.appendChild(option);
+
+            return (
+                select.options.length ===
+                1
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "datalist",
+        "input[list] + datalist",
+        function () {
+
+            var input =
+                document.createElement(
+                    "input"
+                );
+
+            var datalist =
+                document.createElement(
+                    "datalist"
+                );
+
+            datalist.id =
+                "v23-datalist";
+
+            input.setAttribute(
+                "list",
+                "v23-datalist"
+            );
+
+            var option =
+                document.createElement(
+                    "option"
+                );
+
+            option.value =
+                "one";
+
+            datalist.appendChild(option);
+
+            return (
+                datalist.options.length ===
+                1
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "form",
+        "form controls",
+        function () {
+
+            var form =
+                document.createElement(
+                    "form"
+                );
+
+            var input =
+                document.createElement(
+                    "input"
+                );
+
+            form.appendChild(input);
+
+            return (
+                form.elements.length ===
+                1
+            );
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "contenteditable",
+        "HTMLElement"
+    );
+
+
+    safeProbe(
+        category,
+        "execCommand",
+        "document.execCommand",
+        function () {
+
+            return typeof document.execCommand ===
+                "function";
+        }
+    );
+}
+
+
+/*
+================================================================
+ SVG
+================================================================
+*/
+
+function testSVG()
+{
+    var category = "SVG";
+
+    safeProbe(
+        category,
+        "SVGElement",
+        "create SVG tree",
+        function () {
+
+            var svg =
+                document.createElementNS(
+                    "http://www.w3.org/2000/svg",
+                    "svg"
+                );
+
+            var rect =
+                document.createElementNS(
+                    "http://www.w3.org/2000/svg",
+                    "rect"
+                );
+
+            rect.setAttribute(
+                "width",
+                "20"
+            );
+
+            rect.setAttribute(
+                "height",
+                "20"
+            );
+
+            svg.appendChild(rect);
+
+            return (
+                svg.firstChild ===
+                rect
+            );
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "SVGSVGElement",
+        "SVGSVGElement"
+    );
+
+
+    probeGlobal(
+        category,
+        "SVGRectElement",
+        "SVGRectElement"
+    );
+
+
+    safeProbe(
+        category,
+        "SVG layout",
+        "SVG getBoundingClientRect",
+        function () {
+
+            var svg =
+                document.createElementNS(
+                    "http://www.w3.org/2000/svg",
+                    "svg"
+                );
+
+            svg.setAttribute(
+                "width",
+                "40"
+            );
+
+            svg.setAttribute(
+                "height",
+                "40"
+            );
+
+            document.body.appendChild(svg);
+
+            var rect =
+                svg.getBoundingClientRect();
+
+            var ok =
+                typeof rect.width !==
+                "undefined";
+
+            svg.parentNode.removeChild(svg);
+
+            return ok;
+        }
+    );
+}
+
+
+/*
+================================================================
+ IMAGES / RESOURCES
+================================================================
+*/
+
+function testImages()
+{
+    var category = "Images/Resources";
+
+    safeProbe(
+        category,
+        "Image",
+        "new Image",
+        function () {
+
+            var image =
+                new Image();
+
+            image.width = 1;
+            image.height = 1;
+
+            return true;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "picture",
+        "picture/source/img",
+        function () {
+
+            var picture =
+                document.createElement(
+                    "picture"
+                );
+
+            var source =
+                document.createElement(
+                    "source"
+                );
+
+            var img =
+                document.createElement(
+                    "img"
+                );
+
+            picture.appendChild(source);
+            picture.appendChild(img);
+
+            return (
+                picture.children.length ===
+                2
+            );
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "ImageBitmap",
+        "ImageBitmap"
+    );
+
+
+    probeGlobal(
+        category,
+        "createImageBitmap",
+        "createImageBitmap"
+    );
+}
+
+
+/*
+================================================================
+ TEXT / FONTS
+================================================================
+*/
+
+function testTextFonts()
+{
+    var category = "Text/Fonts";
+
+    safeProbe(
+        category,
+        "TextNode",
+        "createTextNode",
+        function () {
+
+            var text =
+                document.createTextNode(
+                    "v23"
+                );
+
+            return text.length === 3;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "font style",
+        "font-family + font-size",
+        function () {
+
+            var d =
+                document.createElement(
+                    "span"
+                );
+
+            d.style.fontFamily =
+                "serif";
+
+            d.style.fontSize =
+                "16px";
+
+            d.textContent =
+                "v23";
+
+            document.body.appendChild(d);
+
+            void d.offsetWidth;
+
+            var ok =
+                d.offsetWidth >= 0;
+
+            d.parentNode.removeChild(d);
+
+            return ok;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "FontFace",
+        "FontFace"
+    );
+
+
+    probeGlobal(
+        category,
+        "document.fonts",
+        "document"
+    );
+
+
+    safeProbe(
+        category,
+        "text measurement",
+        "offsetWidth text layout",
+        function () {
+
+            var d =
+                document.createElement(
+                    "span"
+                );
+
+            d.textContent =
+                "WebCore V23";
+
+            document.body.appendChild(d);
+
+            var width =
+                d.offsetWidth;
+
+            d.parentNode.removeChild(d);
+
+            return width >= 0;
+        }
+    );
+}
+
+
+/*
+================================================================
+ CANVAS
+================================================================
+*/
+
+function testCanvas()
+{
+    var category = "Canvas";
+
+    safeProbe(
+        category,
+        "Canvas 2D",
+        "getContext('2d')",
+        function () {
+
+            var canvas =
+                document.createElement(
+                    "canvas"
+                );
+
+            canvas.width = 16;
+            canvas.height = 16;
+
+            var context =
+                canvas.getContext("2d");
+
+            if (!context)
+                return false;
+
+            context.fillRect(
+                0,
+                0,
+                4,
+                4
+            );
+
+            return true;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "ImageData",
+        "createImageData",
+        function () {
+
+            var canvas =
+                document.createElement(
+                    "canvas"
+                );
+
+            var context =
+                canvas.getContext("2d");
+
+            if (!context)
+                return false;
+
+            var data =
+                context.createImageData(
+                    2,
+                    2
+                );
+
+            return (
+                data &&
+                data.data &&
+                data.data.length === 16
+            );
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "OffscreenCanvas",
+        "OffscreenCanvas"
+    );
+
+
+    probeGlobal(
+        category,
+        "WebGL",
+        "WebGLRenderingContext"
+    );
+}
+
+
+/*
+================================================================
+ OBSERVERS
+================================================================
+*/
+
+function testObservers()
+{
+    var category = "Observers";
+
+    probeConstructor(
+        category,
+        "MutationObserver",
+        "MutationObserver",
+        function () {
+
+            var observer =
+                new MutationObserver(
+                    function () {}
+                );
+
+            observer.disconnect();
+
+            return true;
+        }
+    );
+
+
+    probeConstructor(
+        category,
+        "ResizeObserver",
+        "ResizeObserver",
+        function () {
+
+            var observer =
+                new ResizeObserver(
+                    function () {}
+                );
+
+            observer.disconnect();
+
+            return true;
+        }
+    );
+
+
+    probeConstructor(
+        category,
+        "IntersectionObserver",
+        "IntersectionObserver",
+        function () {
+
+            var observer =
+                new IntersectionObserver(
+                    function () {}
+                );
+
+            observer.disconnect();
+
+            return true;
+        }
+    );
+
+
+    probeConstructor(
+        category,
+        "PerformanceObserver",
+        "PerformanceObserver",
+        function () {
+
+            var observer =
+                new PerformanceObserver(
+                    function () {}
+                );
+
+            observer.disconnect();
+
+            return true;
+        }
+    );
+}
+
+
+/*
+================================================================
+ MEDIA
+================================================================
+*/
+
+function testMedia()
+{
+    var category = "Media";
+
+    safeProbe(
+        category,
+        "video",
+        "HTMLVideoElement",
+        function () {
+
+            var video =
+                document.createElement(
+                    "video"
+                );
+
+            return (
+                typeof video.play ===
+                "function"
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "audio",
+        "HTMLAudioElement",
+        function () {
+
+            var audio =
+                document.createElement(
+                    "audio"
+                );
+
+            return (
+                typeof audio.play ===
+                "function"
+            );
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "TextTrack",
+        "TextTrack"
+    );
+
+
+    probeGlobal(
+        category,
+        "MediaSource",
+        "MediaSource"
+    );
+
+
+    probeGlobal(
+        category,
+        "SourceBuffer",
+        "SourceBuffer"
+    );
+}
+
+
+/*
+================================================================
+ WORKERS / MESSAGING
+================================================================
+*/
+
+function testWorkers()
+{
+    var category = "Workers/Messaging";
+
+    probeGlobal(
+        category,
+        "Worker",
+        "Worker"
+    );
+
+
+    probeGlobal(
+        category,
+        "SharedWorker",
+        "SharedWorker"
+    );
+
+
+    probeGlobal(
+        category,
+        "MessageChannel",
+        "MessageChannel"
+    );
+
+
+    probeGlobal(
+        category,
+        "MessagePort",
+        "MessagePort"
+    );
+
+
+    probeGlobal(
+        category,
+        "BroadcastChannel",
+        "BroadcastChannel"
+    );
+}
+
+
+/*
+================================================================
+ STORAGE
+================================================================
+*/
+
+function testStorage()
+{
+    var category = "Storage";
+
+    safeProbe(
+        category,
+        "localStorage",
+        "localStorage set/get/remove",
+        function () {
+
+            var key =
+                "__v23_test__";
+
+            localStorage.setItem(
+                key,
+                "1"
+            );
+
+            var ok =
+                localStorage.getItem(
+                    key
+                ) === "1";
+
+            localStorage.removeItem(key);
+
+            return ok;
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "sessionStorage",
+        "sessionStorage set/get/remove",
+        function () {
+
+            var key =
+                "__v23_test__";
+
+            sessionStorage.setItem(
+                key,
+                "1"
+            );
+
+            var ok =
+                sessionStorage.getItem(
+                    key
+                ) === "1";
+
+            sessionStorage.removeItem(key);
+
+            return ok;
+        }
+    );
+
+
+    probeGlobal(
+        category,
+        "IndexedDB",
+        "indexedDB"
+    );
+}
+
+
+/*
+================================================================
+ EXPLICITLY TRACKED ABSENT/LEGACY APIs
+================================================================
+*/
+
+function testKnownUnavailable()
+{
+    var category =
+        "Known/Questioned APIs";
+
+
+    probeGlobal(
+        category,
+        "Trusted Types",
+        "trustedTypes"
+    );
+
+
+    probeGlobal(
+        category,
+        "Navigation API",
+        "navigation"
+    );
+
+
+    probeGlobal(
+        category,
+        "WebAudio",
+        "AudioContext"
+    );
+
+
+    probeGlobal(
+        category,
+        "OfflineAudio",
+        "OfflineAudioContext"
+    );
+
+
+    probeGlobal(
+        category,
+        "WebGL",
+        "WebGLRenderingContext"
+    );
+
+
+    probeGlobal(
+        category,
+        "WebRTC",
+        "RTCPeerConnection"
+    );
+
+
+    probeGlobal(
+        category,
+        "ServiceWorker",
+        "serviceWorker"
+    );
+}
+
+
+/*
+================================================================
+ PARSER
+================================================================
+*/
+
+function testParser()
+{
+    var category = "HTML/XML Parser";
+
+    safeProbe(
+        category,
+        "innerHTML",
+        "HTML parser through innerHTML",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.innerHTML =
+                "<div><span>v23</span></div>";
+
+            return (
+                d.firstChild &&
+                d.firstChild.firstChild
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "outerHTML",
+        "outerHTML serialization",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.innerHTML =
+                "<span>v23</span>";
+
+            return (
+                d.firstChild.outerHTML
+                    .indexOf("span") !== -1
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "insertAdjacentHTML",
+        "insertAdjacentHTML",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.insertAdjacentHTML(
+                "beforeend",
+                "<span>v23</span>"
+            );
+
+            return (
+                d.children.length === 1
+            );
+        }
+    );
+}
+
+
+/*
+================================================================
+ HISTORY / RANGE / SELECTION
+================================================================
+*/
+
+function testHistoryRange()
+{
+    var category =
+        "History/Range/Selection";
+
+
+    safeProbe(
+        category,
+        "history.state",
+        "history state object",
+        function () {
+
+            return (
+                typeof history.state !==
+                "undefined"
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "Range",
+        "create range and contents",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.textContent =
+                "abcdef";
+
+            var range =
+                document.createRange();
+
+            range.selectNodeContents(d);
+
+            var fragment =
+                range.cloneContents();
+
+            return (
+                fragment &&
+                fragment.textContent ===
+                "abcdef"
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "Selection",
+        "window.getSelection",
+        function () {
+
+            if (
+                typeof window.getSelection !==
+                "function"
+            )
+                return false;
+
+            var selection =
+                window.getSelection();
+
+            return !!selection;
+        }
+    );
+}
+
+
+/*
+================================================================
+ EDITING / CONTENTEDITABLE
+================================================================
+*/
+
+function testEditing()
+{
+    var category = "Editing";
+
+    safeProbe(
+        category,
+        "contenteditable",
+        "contenteditable attribute",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.contentEditable =
+                "true";
+
+            d.innerHTML =
+                "editable";
+
+            return (
+                d.isContentEditable ===
+                true ||
+                d.contentEditable ===
+                "true"
+            );
+        }
+    );
+
+
+    safeProbe(
+        category,
+        "selection API",
+        "select text",
+        function () {
+
+            var d =
+                document.createElement(
+                    "div"
+                );
+
+            d.textContent =
+                "editable text";
+
+            document.body.appendChild(d);
+
+            var range =
+                document.createRange();
+
+            range.selectNodeContents(d);
+
+            var selection =
+                window.getSelection();
+
+            if (!selection) {
+
+                d.parentNode.removeChild(d);
+
+                return false;
+            }
+
+            selection.removeAllRanges();
+            selection.addRange(range);
+
+            var ok =
+                selection.rangeCount >= 1;
+
+            selection.removeAllRanges();
+
+            d.parentNode.removeChild(d);
+
+            return ok;
+        }
+    );
+}
+
+
+/*
+================================================================
+ TIMERS / EVENT LOOP
+================================================================
+*/
+
+function testTimers()
+{
+    var category =
+        "Timers/Event Loop";
+
+    probeGlobal(
+        category,
+        "setTimeout",
+        "setTimeout"
+    );
+
+
+    probeGlobal(
+        category,
+        "setInterval",
+        "setInterval"
+    );
+
+
+    probeGlobal(
+        category,
+        "requestAnimationFrame",
+        "requestAnimationFrame"
+    );
+
+
+    probeGlobal(
+        category,
+        "cancelAnimationFrame",
+        "cancelAnimationFrame"
+    );
+}
+
+
+/*
+================================================================
+ DRAG / CLIPBOARD / DND
+================================================================
+*/
+
+function testInteraction()
+{
+    var category =
+        "Interaction";
+
+    probeGlobal(
+        category,
+        "DataTransfer",
+        "DataTransfer"
+    );
+
+
+    probeGlobal(
+        category,
+        "ClipboardEvent",
+        "ClipboardEvent"
+    );
+
+
+    probeGlobal(
+        category,
+        "DragEvent",
+        "DragEvent"
+    );
+
+
+    probeGlobal(
+        category,
+        "TouchEvent",
+        "TouchEvent"
+    );
+}
+
+
+/*
+================================================================
+ WEBKIT / LEGACY
+================================================================
+*/
+
+function testWebKitSpecific()
+{
+    var category =
+        "WebKit/Legacy";
+
+    probeGlobal(
+        category,
+        "webkitRequestAnimationFrame",
+        "webkitRequestAnimationFrame"
+    );
+
+
+    probeGlobal(
+        category,
+        "webkitCancelAnimationFrame",
+        "webkitCancelAnimationFrame"
+    );
+
+
+    probeGlobal(
+        category,
+        "webkitURL",
+        "webkitURL"
+    );
+
+
+    probeGlobal(
+        category,
+        "webkitAudioContext",
+        "webkitAudioContext"
+    );
+
+
+    probeGlobal(
+        category,
+        "webkitSpeechRecognition",
+        "webkitSpeechRecognition"
+    );
+}
+
+
+/*
+================================================================
+ RUNNER
+================================================================
+*/
+
+var TESTS = [
+
+    testDOM,
+
+    testEvents,
+
+    testFrames,
+
+    testCSS,
+
+    testLayout,
+
+    testForms,
+
+    testSVG,
+
+    testImages,
+
+    testTextFonts,
+
+    testCanvas,
+
+    testObservers,
+
+    testMedia,
+
+    testWorkers,
+
+    testStorage,
+
+    testKnownUnavailable,
+
+    testParser,
+
+    testHistoryRange,
+
+    testEditing,
+
+    testTimers,
+
+    testInteraction,
+
+    testWebKitSpecific
+
+];
+
+
+function runMatrix()
+{
+    if (running)
+        return;
+
+    running = true;
+
+    results = [];
+
+    tbody.innerHTML = "";
+
+    summary.textContent =
+        "Running...";
+
+    setStatus(
+        "V23 starting..."
+    );
+
+
+    var index = 0;
+
+
+    function next()
+    {
+        if (index >= TESTS.length) {
+
+            running = false;
+
+            updateSummary();
+
+            saveResults();
+
+            setStatus(
+                "V23 COMPLETE"
+            );
+
             return;
+        }
+
+
+        setStatus(
+            "V23: category " +
+            (index + 1) +
+            " / " +
+            TESTS.length
+        );
+
 
         try {
 
-            input.onclick =
-                function () {
-
-                    mutateInputType(
-                        input,
-                        prng.next()
-                    );
-
-                    mutateStyle(
-                        prng,
-                        root
-                    );
-                };
-
-            input.click();
+            TESTS[index]();
 
         } catch (e) {
+
+            addResult(
+                "Runner",
+                "test #" + index,
+                "ERROR",
+                "category execution"
+            );
         }
-    }
 
 
-    /*
-     ================================================================
-     * Pattern table
-     * ================================================================
-     */
+        index++;
 
-    var PATTERNS = [
+        updateSummary();
 
-        {
-            name:
-                "FOCUS_BLUR_MUTATION",
-
-            run:
-                patternFocus
-        },
-
-        {
-            name:
-                "FORM_STATE_REPLACEMENT",
-
-            run:
-                patternForm
-        },
-
-        {
-            name:
-                "SHADOW_SLOT_MUTATION",
-
-            run:
-                patternShadow
-        },
-
-        {
-            name:
-                "RENDER_STYLE_INVALIDATION",
-
-            run:
-                patternRender
-        },
-
-        {
-            name:
-                "RANGE_TEXT_MUTATION",
-
-            run:
-                patternRange
-        },
-
-        {
-            name:
-                "LIFETIME_REPARENT",
-
-            run:
-                patternLifetime
-        },
-
-        {
-            name:
-                "EVENT_STATE_REPLACEMENT",
-
-            run:
-                patternEventReplacement
-        },
-
-        {
-            name:
-                "SVG_RENDERER_MUTATION",
-
-            run:
-                function (
-                    prng,
-                    root
-                ) {
-
-                    mutateSVG(prng);
-                    mutateStyle(
-                        prng,
-                        root
-                    );
-                }
-        },
-
-        {
-            name:
-                "IMAGE_LIFETIME",
-
-            run:
-                function (
-                    prng,
-                    root
-                ) {
-
-                    mutateImageZone(
-                        document.getElementById(
-                            "image-zone"
-                        )
-                    );
-
-                    mutateAttributes(
-                        prng,
-                        root
-                    );
-                }
-        },
-
-        {
-            name:
-                "DOM_ITERATION_MUTATION",
-
-            run:
-                function (
-                    prng,
-                    root
-                ) {
-
-                    mutateDuringIteration(
-                        prng,
-                        root
-                    );
-                }
-        },
-
-        {
-            name:
-                "SUBTREE_TEARDOWN",
-
-            run:
-                function (
-                    prng,
-                    root
-                ) {
-
-                    mutateSubtreeTeardown(
-                        prng,
-                        root
-                    );
-                }
-        },
-
-        {
-            name:
-                "STYLE_ATTRIBUTE_TRANSITION",
-
-            run:
-                function (
-                    prng,
-                    root
-                ) {
-
-                    mutateStyle(
-                        prng,
-                        root
-                    );
-
-                    mutateAttributes(
-                        prng,
-                        root
-                    );
-                }
-        }
-    ];
-
-
-    /*
-     ================================================================
-     * Case execution
-     * ================================================================
-     */
-
-    function runCase(caseId, seed) {
-
-        var prng =
-            new PRNG(seed);
 
         /*
-         * Rebuild the state before every case.
+         * Yield between categories.
          *
-         * This prevents one pathological case from contaminating
-         * the next case.
+         * This keeps the capability mapper lightweight
+         * on older browser implementations.
          */
-        var root =
-            buildFixture(seed);
 
-        var pattern =
-            prng.pick(
-                PATTERNS
-            );
-
-        var sequence = [];
-
-        var mutationCount =
-            2 +
-            prng.range(
-                MAX_MUTATIONS_PER_CASE - 1
-            );
-
-        for (
-            var i = 0;
-            i < mutationCount;
-            i++
-        ) {
-
-            if (stopRequested)
-                break;
-
-            /*
-             * Occasionally switch to another pattern.
-             * This creates compound state transitions.
-             */
-            var selected =
-                pattern;
-
-            if (
-                i > 0 &&
-                prng.range(4) === 0
-            ) {
-
-                selected =
-                    prng.pick(
-                        PATTERNS
-                    );
-            }
-
-            sequence.push(
-                selected.name
-            );
-
-            /*
-             * CHECKPOINT BEFORE OPERATION.
-             */
-            checkpoint({
-
-                version:
-                    VERSION,
-
-                caseId:
-                    caseId,
-
-                seed:
-                    seed,
-
-                pattern:
-                    pattern.name,
-
-                activePattern:
-                    selected.name,
-
-                sequence:
-                    sequence.slice(),
-
-                index:
-                    i,
-
-                operation:
-                    "BEFORE_" +
-                    selected.name,
-
-                timestamp:
-                    Date.now()
-            });
-
-            /*
-             * Execute pattern.
-             */
-            try {
-
-                selected.run(
-                    prng,
-                    root
-                );
-
-            } catch (e) {
-                /*
-                 * JS exceptions are not the target.
-                 */
-            }
-
-            /*
-             * Lightweight continuation.
-             *
-             * If WebCore survived the mutation, we deliberately
-             * continue touching the fixture.
-             */
-            try {
-
-                if (root) {
-
-                    void root.offsetWidth;
-
-                    void root.offsetHeight;
-
-                    root.getBoundingClientRect();
-
-                }
-
-            } catch (e2) {
-            }
-        }
-
-        /*
-         * Final checkpoint.
-         */
-        checkpoint({
-
-            version:
-                VERSION,
-
-            caseId:
-                caseId,
-
-            seed:
-                seed,
-
-            pattern:
-                pattern.name,
-
-            sequence:
-                sequence,
-
-            index:
-                mutationCount,
-
-            operation:
-                "CASE_COMPLETE",
-
-            timestamp:
-                Date.now()
-        });
-    }
-
-
-    /*
-     ================================================================
-     * Main loop
-     * ================================================================
-     */
-
-    function start() {
-
-        if (running)
-            return;
-
-        running = true;
-        stopRequested = false;
-
-        globalCase = 0;
-
-        setStatus(
-            "V22 running..."
-        );
-
-        runNext();
-    }
-
-
-    function runNext() {
-
-        if (!running)
-            return;
-
-        if (stopRequested) {
-
-            running = false;
-
-            setStatus(
-                "V22 stopped"
-            );
-
-            return;
-        }
-
-        if (
-            globalCase >=
-            MAX_CASES
-        ) {
-
-            running = false;
-
-            setStatus(
-                "V22 completed"
-            );
-
-            return;
-        }
-
-        globalCase++;
-
-        /*
-         * Deterministic but changing seed.
-         */
-        var seed =
-            (
-                0x9E3779B9 ^
-                (
-                    globalCase *
-                    0x45D9F3B
-                )
-            ) >>> 0;
-
-        /*
-         * Update UI only between cases.
-         */
-        setStatus(
-            "V22 case " +
-            globalCase +
-            " / " +
-            MAX_CASES
-        );
-
-        /*
-         * Use a timer boundary to introduce a real event-loop
-         * transition between cases.
-         */
         setTimeout(
-            function () {
-
-                if (!running)
-                    return;
-
-                runCase(
-                    globalCase,
-                    seed
-                );
-
-                setTimeout(
-                    runNext,
-                    0
-                );
-
-            },
-            0
+            next,
+            20
         );
     }
 
 
-    function stop() {
-
-        stopRequested = true;
-
-        running = false;
-
-        setStatus(
-            "V22 stopped"
-        );
-    }
+    next();
+}
 
 
-    /*
-     ================================================================
-     * Recovery information
-     * ================================================================
-     */
+/*
+================================================================
+ RESTORE
+================================================================
+*/
 
-    function showRecovery() {
+function restore()
+{
+    var data =
+        loadResults();
 
-        var previous =
-            loadCheckpoint();
+    if (!data ||
+        !data.results)
+        return;
 
-        if (!previous)
-            return;
+    results =
+        data.results;
 
-        /*
-         * Do not automatically display the full checkpoint.
-         * It remains available in localStorage for diagnosis.
-         */
-    }
+    tbody.innerHTML = "";
 
-
-    /*
-     ================================================================
-     * Initialization
-     * ================================================================
-     */
-
-    function init() {
-
-        fixture =
-            document.getElementById(
-                "fixture"
-            );
-
-        statusElement =
-            document.getElementById(
-                "status"
-            );
-
-        document.getElementById(
-            "startButton"
-        ).onclick =
-            start;
-
-        document.getElementById(
-            "stopButton"
-        ).onclick =
-            stop;
-
-        showRecovery();
-
-        setStatus(
-            "V22 ready"
-        );
-    }
-
-
-    if (
-        document.readyState ===
-        "loading"
+    for (
+        var i = 0;
+        i < results.length;
+        i++
     ) {
 
-        document.addEventListener(
-            "DOMContentLoaded",
-            init
+        renderResult(
+            results[i]
         );
-
-    } else {
-
-        init();
     }
 
-})();
+    updateSummary();
 
+    recovery.style.display =
+        "block";
+
+    recovery.textContent =
+        "Saved V23 matrix restored. " +
+        "Entries: " +
+        results.length;
+}
+
+
+/*
+================================================================
+ BUTTONS
+================================================================
+*/
+
+document.getElementById(
+    "run"
+).onclick =
+    runMatrix;
+
+
+document.getElementById(
+    "clear"
+).onclick =
+    clearResults;
+
+
+/*
+================================================================
+ INIT
+================================================================
+*/
+
+restore();
+
+})();
 </script>
 
 </body>
