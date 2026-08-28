@@ -2,4514 +2,1431 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>PS4 13.52 WebCore Crash Hunter V19</title>
+<meta charset="UTF-8">
+<title>PS4 WebCore Capability Matrix V26</title>
 
 <style>
-body {
-    margin: 10px;
-    font-family: sans-serif;
-    background: #f2f2f2;
+html, body {
+    margin: 0;
+    padding: 0;
+    background: #10131a;
+    color: #e8edf5;
+    font-family: Arial, sans-serif;
+}
+
+#ui {
+    position: fixed;
+    z-index: 999999;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 16px;
+    background: #181d27;
+    border-bottom: 1px solid #394152;
+}
+
+h1 {
+    margin: 0 0 10px 0;
+    font-size: 20px;
+}
+
+#status {
+    font-size: 15px;
+    margin-bottom: 6px;
+}
+
+#info {
+    font-size: 12px;
+    color: #aab4c4;
 }
 
 button {
-    padding: 12px 32px;
-    font-size: 18px;
+    margin-top: 12px;
+    padding: 10px 28px;
+    font-size: 16px;
 }
 
-.panel {
-    margin-top: 8px;
-    padding: 8px;
-    background: #fff;
-    border: 1px solid #777;
-    font-family: monospace;
-    white-space: pre-wrap;
-}
-
-#log {
-    height: 220px;
-    overflow-y: auto;
-}
-
-#root {
-    margin-top: 10px;
-    min-height: 100px;
-    border: 1px solid #555;
-    background: #fff;
-    padding: 5px;
-}
-
-.node {
-    display: block;
-    margin: 2px;
-    padding: 3px;
-    border: 1px solid #aaa;
-}
-
-.frame {
-    width: 4px;
-    height: 4px;
-    border: 0;
+#sandbox {
+    position: absolute;
+    top: 150px;
+    left: -5000px;
+    width: 1500px;
+    min-height: 1500px;
 }
 </style>
 </head>
 
 <body>
 
-<h2>PS4 13.52 — WebCore Crash Hunter V19</h2>
+<div id="ui">
+    <h1>PS4 WebCore Capability Matrix V26</h1>
 
-<button id="start">START</button>
+    <div id="status">STATUS: IDLE</div>
 
-<div id="status" class="panel">READY</div>
-<div id="stats" class="panel"></div>
-<div id="pattern" class="panel"></div>
-<div id="candidate" class="panel"></div>
-<div id="sequence" class="panel"></div>
-<div id="minimize" class="panel"></div>
-<div id="log" class="panel"></div>
+    <div id="info">
+        Balanced capability coverage scheduler
+    </div>
 
-<div id="root"></div>
+    <button id="start">INICIAR</button>
+</div>
+
+<div id="sandbox"></div>
 
 <script>
 (function () {
-
 "use strict";
 
-/*
- ==============================================================
- V19
- PS4 13.52 WebCore crash hunter
-
- IMPORTANT:
- This is a crash/sanity fuzzer only.
-
- It does not attempt:
-   - memory disclosure
-   - heap grooming
-   - arbitrary read/write
-   - exploitation
-   - code execution
-   - ASLR defeat
-
- Design:
-   Pattern-driven WebCore lifetime/reentrancy sequences.
-
- No adaptive feedback is used to choose future patterns.
- ==============================================================
-*/
-
-
 /* ============================================================
- CONFIG
- ============================================================ */
+ * CONFIG
+ * ============================================================ */
 
 var CONFIG = {
-
-    operationDelay: 20,
-
-    asyncDelay: 70,
-
-    caseDelay: 80,
-
-    maxOperations: 30,
-
-    replayAttempts: 3,
-
-    maxCorpus: 160,
-
-    maxLogLines: 450
-
+    delay: 35,
+    cleanupDelay: 0
 };
 
-
 /* ============================================================
- STORAGE PREFIX
- ============================================================ */
+ * STATE
+ * ============================================================ */
 
-var PREFIX =
-    "PS4_1352_WEBCORE_V19_";
-
-
-function put(key, value)
-{
-    try {
-        localStorage.setItem(
-            PREFIX + key,
-            JSON.stringify(value)
-        );
-    } catch (e) {}
-}
-
-
-function get(key, fallback)
-{
-    try {
-
-        var v =
-            localStorage.getItem(
-                PREFIX + key
-            );
-
-        if (v === null)
-            return fallback;
-
-        return JSON.parse(v);
-
-    } catch (e) {
-
-        return fallback;
-    }
-}
-
-
-function del(key)
-{
-    try {
-        localStorage.removeItem(
-            PREFIX + key
-        );
-    } catch (e) {}
-}
-
-
-function copy(value)
-{
-    return JSON.parse(
-        JSON.stringify(value)
-    );
-}
-
-
-/* ============================================================
- LOG
- ============================================================ */
-
-function log(text)
-{
-    var box =
-        document.getElementById("log");
-
-    var lines =
-        box.textContent
-            .split("\n")
-            .filter(function (x) {
-                return x.length;
-            });
-
-    lines.push(text);
-
-    while (
-        lines.length >
-        CONFIG.maxLogLines
-    ) {
-        lines.shift();
-    }
-
-    box.textContent =
-        lines.join("\n");
-
-    box.scrollTop =
-        box.scrollHeight;
-
-    try {
-        console.log(text);
-    } catch (e) {}
-}
-
-
-function status(text)
-{
-    document
-        .getElementById("status")
-        .textContent =
-        text;
-}
-
-
-/* ============================================================
- RNG
- ============================================================ */
-
-var RNG = {
-
-    seed: 1,
-    state: 1
-
-};
-
-
-function setSeed(seed)
-{
-    seed =
-        (seed >>> 0) || 1;
-
-    RNG.seed =
-        seed;
-
-    RNG.state =
-        seed;
-}
-
-
-function rnd()
-{
-    RNG.state =
-        (
-            RNG.state * 1664525 +
-            1013904223
-        ) >>> 0;
-
-    return RNG.state /
-        4294967296;
-}
-
-
-function randInt(max)
-{
-    if (max <= 0)
-        return 0;
-
-    return Math.floor(
-        rnd() * max
-    );
-}
-
-
-function choose(array)
-{
-    if (!array.length)
-        return null;
-
-    return array[
-        randInt(array.length)
-    ];
-}
-
-
-function newSeed()
-{
-    var old =
-        get(
-            "seed",
-            0x13521352
-        );
-
-    var seed =
-        (
-            Date.now() ^
-            old ^
-            randInt(0x7fffffff)
-        ) >>> 0;
-
-    if (!seed)
-        seed = 1;
-
-    put("seed", seed);
-
-    return seed;
-}
-
-
-/* ============================================================
- STATE
- ============================================================ */
-
-var S = {
-
+var state = {
     running: false,
-
-    mode: "READY",
-
-    run: 0,
-
-    caseId: 0,
-
-    pattern: "",
-
-    surfaces: [],
-
-    sequence: [],
-
-    index: 0,
-
-    current: "",
-
-    last: "",
-
-    objects: {},
-
-    frames: {},
-
-    svg: {},
-
-    history: [],
-
-    transitions: {},
-
-    types: {},
-
-    errors: 0,
-
-    events: 0,
-
-    asyncCallbacks: 0,
-
-    corpus: [],
-
-    candidate: null,
-
-    minimizer: null,
-
-    replay: null,
-
-    stats: {
-
-        cases: 0,
-
-        completed: 0,
-
-        interrupted: 0,
-
-        candidates: 0,
-
-        minimized: 0
-
-    }
-
+    sequence: 0,
+    cycle: 0,
+    modules: [],
+    capabilities: {},
+    current: null
 };
 
+var sandbox = document.getElementById("sandbox");
+var status = document.getElementById("status");
+var info = document.getElementById("info");
+var startButton = document.getElementById("start");
 
 /* ============================================================
- PERSISTENCE
- ============================================================ */
+ * UTIL
+ * ============================================================ */
 
-S.run =
-    get(
-        "run",
-        0
-    );
+function rand(n) {
+    return Math.floor(Math.random() * n);
+}
 
-S.caseId =
-    get(
-        "caseId",
-        0
-    );
+function choose(a) {
+    return a && a.length ? a[rand(a.length)] : null;
+}
 
-S.stats =
-    get(
-        "stats",
-        S.stats
-    );
-
-S.corpus =
-    get(
-        "corpus",
-        []
-    );
-
-S.candidate =
-    get(
-        "candidate",
-        null
-    );
-
+function safe(fn) {
+    try {
+        return fn();
+    } catch (e) {
+        return null;
+    }
+}
 
 /* ============================================================
- CHECKPOINT
- ============================================================ */
+ * PERSISTENCE
+ * ============================================================ */
 
-function checkpoint()
-{
-    put(
-        "checkpoint",
-        {
+function saveLast(record) {
+    safe(function () {
+        localStorage.setItem(
+            "ps4_webcore_v26_last",
+            JSON.stringify(record)
+        );
+    });
+}
 
-            run:
-                S.run,
+function loadLast() {
+    return safe(function () {
+        var x = localStorage.getItem("ps4_webcore_v26_last");
+        return x ? JSON.parse(x) : null;
+    });
+}
 
-            caseId:
-                S.caseId,
+/* ============================================================
+ * CAPABILITY DETECTION
+ * ============================================================ */
 
-            pattern:
-                S.pattern,
+function detectCapabilities() {
+    var c = {};
 
-            surfaces:
-                copy(S.surfaces),
+    /* DOM */
+    c.Node = !!window.Node;
+    c.Document = !!window.Document;
+    c.DocumentFragment = !!window.DocumentFragment;
+    c.TreeWalker = !!window.TreeWalker;
+    c.NodeIterator = !!window.NodeIterator;
+    c.Range = !!window.Range;
+    c.Selection = !!window.getSelection;
+    c.DOMTokenList = !!window.DOMTokenList;
+    c.NamedNodeMap = !!window.NamedNodeMap;
 
-            seed:
-                RNG.seed,
+    /* Observers */
+    c.MutationObserver = !!window.MutationObserver;
+    c.ResizeObserver = !!window.ResizeObserver;
+    c.IntersectionObserver = !!window.IntersectionObserver;
+    c.PerformanceObserver = !!window.PerformanceObserver;
 
-            sequence:
-                copy(S.sequence),
+    /* DOM extras */
+    c.DOMParser = !!window.DOMParser;
+    c.XMLSerializer = !!window.XMLSerializer;
+    c.CustomElements = !!window.customElements;
+    c.ShadowDOM = !!HTMLElement.prototype.attachShadow;
 
-            index:
-                S.index,
+    /* Events */
+    c.Event = !!window.Event;
+    c.MouseEvent = !!window.MouseEvent;
+    c.KeyboardEvent = !!window.KeyboardEvent;
+    c.FocusEvent = !!window.FocusEvent;
+    c.PointerEvent = !!window.PointerEvent;
+    c.DragEvent = !!window.DragEvent;
+    c.InputEvent = !!window.InputEvent;
 
-            current:
-                S.current,
+    /* Editing */
+    c.ContentEditable = "contentEditable" in document.createElement("div");
+    c.ExecCommand = typeof document.execCommand === "function";
 
-            last:
-                S.last,
+    /* Frame / document */
+    c.Iframe = true;
+    c.DocumentOpen = typeof document.open === "function";
+    c.History = !!window.history;
+    c.PushState = !!window.history && typeof history.pushState === "function";
 
-            complete:
-                false,
+    /* HTML */
+    c.Template = "content" in document.createElement("template");
+    c.Forms = !!window.HTMLFormElement;
 
-            time:
-                Date.now()
+    /* CSS */
+    c.CSS = !!window.getComputedStyle;
+    c.CSSStyleSheet = !!window.CSSStyleSheet;
+    c.CSSRule = !!window.CSSRule;
+    c.InsertRule = !!window.CSSStyleSheet &&
+                   typeof CSSStyleSheet.prototype.insertRule === "function";
 
+    /* SVG */
+    c.SVG = !!window.SVGElement;
+
+    /* Canvas */
+    c.Canvas2D = !!document.createElement("canvas").getContext;
+
+    /* Animation */
+    c.Animation = typeof HTMLElement.prototype.animate === "function";
+
+    /* Text/fonts */
+    c.Text = !!window.Text;
+    c.CharacterData = !!window.CharacterData;
+    c.FontFace = !!window.FontFace;
+    c.DocumentFonts = !!document.fonts;
+
+    /* Resources */
+    c.Fetch = typeof window.fetch === "function";
+    c.Request = !!window.Request;
+    c.Response = !!window.Response;
+    c.Headers = !!window.Headers;
+    c.URL = !!window.URL;
+    c.URLSearchParams = !!window.URLSearchParams;
+    c.Blob = !!window.Blob;
+    c.File = !!window.File;
+    c.FileReader = !!window.FileReader;
+
+    /* Streams */
+    c.ReadableStream = !!window.ReadableStream;
+    c.WritableStream = !!window.WritableStream;
+    c.TransformStream = !!window.TransformStream;
+    c.CompressionStream = !!window.CompressionStream;
+    c.DecompressionStream = !!window.DecompressionStream;
+
+    /* Messaging */
+    c.MessageChannel = !!window.MessageChannel;
+    c.BroadcastChannel = !!window.BroadcastChannel;
+
+    /* Workers */
+    c.Worker = !!window.Worker;
+    c.SharedWorker = !!window.SharedWorker;
+
+    /* Storage */
+    c.LocalStorage = !!window.localStorage;
+    c.SessionStorage = !!window.sessionStorage;
+    c.Cache = !!window.caches;
+
+    /* Crypto */
+    c.Crypto = !!window.crypto;
+    c.SubtleCrypto = !!(window.crypto && crypto.subtle);
+
+    /* Media */
+    c.Media = !!window.HTMLMediaElement;
+    c.Video = !!window.HTMLVideoElement;
+    c.Audio = !!window.HTMLAudioElement;
+    c.TextTrack = !!window.TextTrack;
+
+    /* Misc */
+    c.WebSocket = !!window.WebSocket;
+    c.Image = !!window.Image;
+    c.ImageBitmap = !!window.createImageBitmap;
+
+    return c;
+}
+
+/* ============================================================
+ * ROOT
+ * ============================================================ */
+
+function makeRoot() {
+    var root = document.createElement("div");
+    root.style.position = "relative";
+    root.style.width = "320px";
+    root.style.minHeight = "100px";
+    sandbox.appendChild(root);
+    return root;
+}
+
+function destroyRoot(root) {
+    safe(function () {
+        if (root && root.parentNode)
+            root.parentNode.removeChild(root);
+    });
+}
+
+/* ============================================================
+ * MODULE REGISTRY
+ * ============================================================ */
+
+function addModule(name, capability, fn) {
+    if (!capability)
+        return;
+
+    state.modules.push({
+        name: name,
+        run: fn,
+        count: 0
+    });
+}
+
+/* ============================================================
+ * DOM MODULES
+ * ============================================================ */
+
+function testNode(root) {
+    var a = document.createElement("div");
+    var b = document.createElement("span");
+
+    root.appendChild(a);
+    a.appendChild(b);
+
+    safe(function () {
+        root.contains(b);
+        a.removeChild(b);
+        root.appendChild(b);
+    });
+}
+
+function testDocumentFragment(root) {
+    var f = document.createDocumentFragment();
+
+    for (var i = 0; i < 4; i++)
+        f.appendChild(document.createElement("div"));
+
+    root.appendChild(f);
+}
+
+function testTreeWalker(root) {
+    root.innerHTML = "<div><span>A</span><b>B</b></div>";
+
+    safe(function () {
+        var w = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_ELEMENT,
+            null,
+            false
+        );
+
+        while (w.nextNode()) {}
+    });
+}
+
+function testNodeIterator(root) {
+    root.innerHTML = "<p>A</p><p>B</p>";
+
+    safe(function () {
+        var it = document.createNodeIterator(
+            root,
+            NodeFilter.SHOW_ALL,
+            null,
+            false
+        );
+
+        while (it.nextNode()) {}
+    });
+}
+
+function testRangeSelection(root) {
+    var text = document.createTextNode("V26 selection text");
+    root.appendChild(text);
+
+    safe(function () {
+        var range = document.createRange();
+        range.selectNodeContents(text);
+
+        var selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        selection.removeAllRanges();
+    });
+}
+
+function testClassList(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    x.classList.add("a");
+    x.classList.toggle("b");
+    x.classList.remove("a");
+}
+
+function testAttributes(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    x.setAttribute("data-v26", "1");
+    x.getAttribute("data-v26");
+    x.removeAttribute("data-v26");
+}
+
+/* ============================================================
+ * OBSERVERS
+ * ============================================================ */
+
+function testMutationObserver(root) {
+    var o = new MutationObserver(function () {});
+
+    safe(function () {
+        o.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true
+        });
+
+        var x = document.createElement("div");
+        root.appendChild(x);
+        x.setAttribute("data-x", "1");
+
+        o.disconnect();
+    });
+}
+
+function testResizeObserver(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    safe(function () {
+        var o = new ResizeObserver(function () {});
+        o.observe(x);
+
+        x.style.width = "100px";
+        x.style.height = "50px";
+
+        o.disconnect();
+    });
+}
+
+function testIntersectionObserver(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    safe(function () {
+        var o = new IntersectionObserver(function () {});
+        o.observe(x);
+        x.getBoundingClientRect();
+        o.disconnect();
+    });
+}
+
+function testPerformanceObserver(root) {
+    safe(function () {
+        var o = new PerformanceObserver(function () {});
+        o.disconnect();
+    });
+}
+
+/* ============================================================
+ * SHADOW / CUSTOM ELEMENTS
+ * ============================================================ */
+
+function testShadowDOM(root) {
+    var host = document.createElement("div");
+    root.appendChild(host);
+
+    safe(function () {
+        var shadow = host.attachShadow({ mode: "open" });
+        var child = document.createElement("span");
+
+        child.textContent = "shadow";
+        shadow.appendChild(child);
+    });
+}
+
+function testCustomElements(root) {
+    safe(function () {
+        var name = "v26-x-" + Date.now() + "-" + rand(9999);
+
+        function V26Element() {
+            return Reflect.construct(
+                HTMLElement,
+                [],
+                V26Element
+            );
         }
+
+        V26Element.prototype =
+            Object.create(HTMLElement.prototype);
+
+        V26Element.prototype.constructor =
+            V26Element;
+
+        customElements.define(name, V26Element);
+
+        var el = document.createElement(name);
+        root.appendChild(el);
+    });
+}
+
+/* ============================================================
+ * EVENTS
+ * ============================================================ */
+
+function testEvent(root) {
+    var x = document.createElement("button");
+    root.appendChild(x);
+
+    var n = 0;
+
+    function handler() {
+        n++;
+    }
+
+    x.addEventListener("click", handler);
+    x.dispatchEvent(new Event("click", { bubbles: true }));
+    x.removeEventListener("click", handler);
+
+    return n;
+}
+
+function testMouseEvent(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    safe(function () {
+        x.dispatchEvent(new MouseEvent("mousedown", {
+            bubbles: true
+        }));
+    });
+}
+
+function testKeyboardEvent(root) {
+    var x = document.createElement("input");
+    root.appendChild(x);
+
+    safe(function () {
+        x.dispatchEvent(new KeyboardEvent("keydown", {
+            bubbles: true,
+            key: "A"
+        }));
+    });
+}
+
+function testFocus(root) {
+    var x = document.createElement("input");
+    root.appendChild(x);
+
+    safe(function () {
+        x.focus();
+        x.blur();
+    });
+}
+
+function testPointerEvent(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    safe(function () {
+        x.dispatchEvent(new PointerEvent("pointerdown", {
+            bubbles: true
+        }));
+    });
+}
+
+function testInputEvent(root) {
+    var x = document.createElement("input");
+    root.appendChild(x);
+
+    safe(function () {
+        x.dispatchEvent(new InputEvent("input", {
+            bubbles: true,
+            data: "A"
+        }));
+    });
+}
+
+/* ============================================================
+ * EDITING
+ * ============================================================ */
+
+function testContentEditable(root) {
+    var x = document.createElement("div");
+    x.contentEditable = "true";
+    x.textContent = "editable";
+
+    root.appendChild(x);
+
+    safe(function () {
+        x.focus();
+        x.blur();
+    });
+}
+
+function testExecCommand(root) {
+    var x = document.createElement("div");
+
+    x.contentEditable = "true";
+    x.textContent = "V26";
+
+    root.appendChild(x);
+
+    safe(function () {
+        x.focus();
+        document.execCommand("selectAll", false, null);
+    });
+}
+
+/* ============================================================
+ * DOCUMENT / FRAME / HISTORY
+ * ============================================================ */
+
+function testIframe(root) {
+    var frame = document.createElement("iframe");
+    frame.src = "about:blank";
+
+    root.appendChild(frame);
+
+    safe(function () {
+        var d = frame.contentDocument;
+
+        if (d && d.body) {
+            var x = d.createElement("div");
+            x.textContent = "frame";
+            d.body.appendChild(x);
+            d.body.removeChild(x);
+        }
+    });
+}
+
+function testHistory(root) {
+    safe(function () {
+        history.pushState(
+            { v26: state.sequence },
+            "",
+            "#v26-" + state.sequence
+        );
+    });
+}
+
+/* ============================================================
+ * HTML / PARSER
+ * ============================================================ */
+
+function testInnerHTML(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    x.innerHTML =
+        "<section><span>A</span><b>B</b></section>";
+
+    x.innerHTML =
+        "<input><textarea></textarea><select><option>X</option></select>";
+}
+
+function testOuterHTML(root) {
+    var x = document.createElement("div");
+    x.textContent = "outer";
+
+    root.appendChild(x);
+
+    safe(function () {
+        x.outerHTML = "<section><span>replacement</span></section>";
+    });
+}
+
+function testAdjacentHTML(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    safe(function () {
+        x.insertAdjacentHTML(
+            "beforeend",
+            "<span>A</span><b>B</b>"
+        );
+    });
+}
+
+function testTemplate(root) {
+    var t = document.createElement("template");
+
+    t.innerHTML =
+        "<div><span>A</span><i>B</i></div>";
+
+    root.appendChild(
+        document.importNode(t.content, true)
     );
 }
 
+function testDOMParser(root) {
+    safe(function () {
+        var parser = new DOMParser();
 
-function clearCheckpoint()
-{
-    del("checkpoint");
+        var d = parser.parseFromString(
+            "<div><span>V26</span></div>",
+            "text/html"
+        );
+
+        if (d.body)
+            root.appendChild(
+                document.importNode(d.body, true)
+            );
+    });
 }
 
+function testXMLSerializer(root) {
+    safe(function () {
+        var x = document.createElement("div");
+        x.setAttribute("data-v26", "xml");
+        root.appendChild(x);
+
+        var s = new XMLSerializer();
+        s.serializeToString(root);
+    });
+}
 
 /* ============================================================
- SURFACES
- ============================================================ */
+ * FORMS
+ * ============================================================ */
 
-function addSurface(name)
-{
-    if (
-        S.surfaces.indexOf(name) === -1
-    ) {
-        S.surfaces.push(name);
+function testForms(root) {
+    var form = document.createElement("form");
+    var input = document.createElement("input");
+    var textarea = document.createElement("textarea");
+    var select = document.createElement("select");
+    var option = document.createElement("option");
+
+    option.textContent = "A";
+
+    select.appendChild(option);
+
+    form.appendChild(input);
+    form.appendChild(textarea);
+    form.appendChild(select);
+
+    root.appendChild(form);
+
+    safe(function () {
+        input.value = "test";
+        textarea.value = "text";
+        select.selectedIndex = 0;
+        form.checkValidity();
+        form.reset();
+    });
+}
+
+/* ============================================================
+ * CSS / STYLE
+ * ============================================================ */
+
+function testInlineStyle(root) {
+    var x = document.createElement("div");
+    root.appendChild(x);
+
+    x.style.display = "block";
+    x.style.position = "relative";
+    x.style.width = "120px";
+    x.style.height = "50px";
+    x.style.overflow = "hidden";
+
+    safe(function () {
+        getComputedStyle(x).display;
+        void x.offsetWidth;
+    });
+}
+
+function testStyleElement(root) {
+    var style = document.createElement("style");
+
+    style.textContent =
+        ".v26-style { width: 50px; height: 30px; }";
+
+    document.head.appendChild(style);
+
+    var x = document.createElement("div");
+    x.className = "v26-style";
+
+    root.appendChild(x);
+
+    safe(function () {
+        getComputedStyle(x).width;
+    });
+
+    safe(function () {
+        style.parentNode.removeChild(style);
+    });
+}
+
+function testCSSStyleSheet(root) {
+    safe(function () {
+        var style = document.createElement("style");
+        document.head.appendChild(style);
+
+        var sheet = style.sheet;
+
+        if (sheet && sheet.insertRule) {
+            sheet.insertRule(
+                ".v26-rule { display:block; }",
+                sheet.cssRules.length
+            );
+
+            if (sheet.cssRules.length)
+                sheet.deleteRule(sheet.cssRules.length - 1);
+        }
+
+        style.parentNode.removeChild(style);
+    });
+}
+
+/* ============================================================
+ * LAYOUT
+ * ============================================================ */
+
+function testLayoutFlex(root) {
+    var x = document.createElement("div");
+
+    x.style.display = "flex";
+
+    for (var i = 0; i < 3; i++) {
+        var c = document.createElement("div");
+        c.style.width = "30px";
+        c.style.height = "20px";
+        x.appendChild(c);
     }
+
+    root.appendChild(x);
+
+    safe(function () {
+        x.getBoundingClientRect();
+    });
 }
 
+function testLayoutGrid(root) {
+    var x = document.createElement("div");
 
-/* ============================================================
- DOM RESET
- ============================================================ */
+    x.style.display = "grid";
+    x.style.gridTemplateColumns = "30px 30px";
 
-function resetState()
-{
-    S.objects = {};
-    S.frames = {};
-    S.svg = {};
-    S.history = [];
-    S.transitions = {};
-    S.types = {};
-    S.errors = 0;
-    S.events = 0;
-    S.asyncCallbacks = 0;
+    root.appendChild(x);
 
-    var root =
-        document.getElementById(
-            "root"
-        );
+    for (var i = 0; i < 4; i++)
+        x.appendChild(document.createElement("div"));
 
-    while (
-        root.firstChild
-    ) {
+    safe(function () {
+        void x.offsetHeight;
+    });
+}
 
-        root.removeChild(
-            root.firstChild
-        );
+function testLayoutTable(root) {
+    var table = document.createElement("table");
+    var tr = document.createElement("tr");
+
+    for (var i = 0; i < 2; i++) {
+        var td = document.createElement("td");
+        td.textContent = "cell";
+        tr.appendChild(td);
     }
-}
 
+    table.appendChild(tr);
+    root.appendChild(table);
+
+    safe(function () {
+        table.getBoundingClientRect();
+    });
+}
 
 /* ============================================================
- GENERIC OBJECT
- ============================================================ */
+ * SVG
+ * ============================================================ */
 
-function makeElement(
-    id,
-    tag
-)
-{
-    var element =
-        document.createElement(
-            tag || "div"
-        );
+function testSVG(root) {
+    var ns = "http://www.w3.org/2000/svg";
 
-    element.className =
-        "node";
+    var svg = document.createElementNS(ns, "svg");
+    var rect = document.createElementNS(ns, "rect");
 
-    element.setAttribute(
-        "data-v19",
-        id
-    );
+    svg.setAttribute("width", "100");
+    svg.setAttribute("height", "60");
 
-    element.textContent =
-        "V19-" + id;
+    rect.setAttribute("x", "5");
+    rect.setAttribute("y", "5");
+    rect.setAttribute("width", "50");
+    rect.setAttribute("height", "30");
 
-    S.objects[id] = {
+    svg.appendChild(rect);
+    root.appendChild(svg);
 
-        element:
-            element
-
-    };
-
-    return element;
+    safe(function () {
+        rect.getBoundingClientRect();
+    });
 }
 
+/* ============================================================
+ * CANVAS
+ * ============================================================ */
 
-function element(id)
-{
-    if (
-        !S.objects[id]
-    )
+function testCanvas(root) {
+    var canvas = document.createElement("canvas");
+
+    canvas.width = 64;
+    canvas.height = 64;
+
+    root.appendChild(canvas);
+
+    safe(function () {
+        var ctx = canvas.getContext("2d");
+
+        if (ctx) {
+            ctx.fillRect(0, 0, 10, 10);
+
+            canvas.width = 32;
+
+            ctx.fillRect(1, 1, 5, 5);
+        }
+    });
+}
+
+/* ============================================================
+ * TEXT / FONTS
+ * ============================================================ */
+
+function testText(root) {
+    var text = document.createTextNode("abcdefgh");
+
+    root.appendChild(text);
+
+    safe(function () {
+        text.data = "12345678";
+        text.splitText(4);
+    });
+}
+
+function testFonts(root) {
+    safe(function () {
+        if (document.fonts)
+            document.fonts.status;
+    });
+}
+
+/* ============================================================
+ * ANIMATION
+ * ============================================================ */
+
+function testAnimation(root) {
+    var x = document.createElement("div");
+
+    x.style.width = "20px";
+    x.style.height = "20px";
+
+    root.appendChild(x);
+
+    safe(function () {
+        var a = x.animate(
+            [
+                { transform: "translateX(0px)" },
+                { transform: "translateX(5px)" }
+            ],
+            {
+                duration: 20
+            }
+        );
+
+        a.cancel();
+    });
+}
+
+/* ============================================================
+ * RESOURCES
+ * ============================================================ */
+
+function testURL(root) {
+    safe(function () {
+        var u = new URL(
+            "https://example.com/path?a=1"
+        );
+
+        u.searchParams.set("v26", "1");
+        u.href;
+    });
+}
+
+function testBlob(root) {
+    safe(function () {
+        var blob = new Blob(
+            ["V26"],
+            { type: "text/plain" }
+        );
+
+        blob.size;
+    });
+}
+
+function testFileReader(root) {
+    safe(function () {
+        var blob = new Blob(["V26"]);
+        var reader = new FileReader();
+
+        reader.onload = function () {};
+        reader.readAsText(blob);
+    });
+}
+
+function testRequestResponse(root) {
+    safe(function () {
+        var req = new Request("https://example.com/");
+        req.method;
+
+        var res = new Response("V26");
+        res.status;
+    });
+}
+
+function testHeaders(root) {
+    safe(function () {
+        var h = new Headers();
+        h.set("X-V26", "1");
+        h.get("X-V26");
+    });
+}
+
+/* ============================================================
+ * STREAMS
+ * ============================================================ */
+
+function testReadableStream(root) {
+    safe(function () {
+        var stream = new ReadableStream({
+            start: function (controller) {
+                controller.enqueue("V26");
+                controller.close();
+            }
+        });
+
+        var reader = stream.getReader();
+
+        reader.read().then(function () {
+            safe(function () {
+                reader.releaseLock();
+            });
+        });
+    });
+}
+
+function testWritableStream(root) {
+    safe(function () {
+        var stream = new WritableStream({
+            write: function () {}
+        });
+
+        var writer = stream.getWriter();
+
+        writer.write("V26").then(function () {
+            return writer.close();
+        });
+    });
+}
+
+function testTransformStream(root) {
+    safe(function () {
+        var ts = new TransformStream({
+            transform: function (chunk, controller) {
+                controller.enqueue(chunk);
+            }
+        });
+
+        ts.readable.getReader();
+        ts.writable.getWriter();
+    });
+}
+
+function testCompressionStream(root) {
+    safe(function () {
+        new CompressionStream("gzip");
+    });
+}
+
+function testDecompressionStream(root) {
+    safe(function () {
+        new DecompressionStream("gzip");
+    });
+}
+
+/* ============================================================
+ * MESSAGING
+ * ============================================================ */
+
+function testMessageChannel(root) {
+    safe(function () {
+        var c = new MessageChannel();
+
+        c.port1.onmessage = function () {};
+
+        c.port2.postMessage("V26");
+
+        c.port1.close();
+        c.port2.close();
+    });
+}
+
+function testBroadcastChannel(root) {
+    safe(function () {
+        var name = "v26-" + state.sequence;
+        var c = new BroadcastChannel(name);
+
+        c.postMessage("V26");
+        c.close();
+    });
+}
+
+/* ============================================================
+ * STORAGE
+ * ============================================================ */
+
+function testLocalStorage(root) {
+    safe(function () {
+        var key = "v26-test";
+        localStorage.setItem(key, "1");
+        localStorage.getItem(key);
+        localStorage.removeItem(key);
+    });
+}
+
+function testSessionStorage(root) {
+    safe(function () {
+        var key = "v26-test";
+        sessionStorage.setItem(key, "1");
+        sessionStorage.getItem(key);
+        sessionStorage.removeItem(key);
+    });
+}
+
+function testCacheAPI(root) {
+    safe(function () {
+        caches.open("v26-capability").then(function (cache) {
+            return cache.keys();
+        });
+    });
+}
+
+/* ============================================================
+ * CRYPTO
+ * ============================================================ */
+
+function testCrypto(root) {
+    safe(function () {
+        var a = new Uint8Array(8);
+        crypto.getRandomValues(a);
+    });
+}
+
+function testSubtleCrypto(root) {
+    safe(function () {
+        crypto.subtle.digest(
+            "SHA-256",
+            new Uint8Array([1, 2, 3])
+        );
+    });
+}
+
+/* ============================================================
+ * MEDIA
+ * ============================================================ */
+
+function testMedia(root) {
+    var audio = document.createElement("audio");
+    root.appendChild(audio);
+
+    safe(function () {
+        audio.volume = 0;
+        audio.muted = true;
+        audio.pause();
+    });
+}
+
+function testVideo(root) {
+    var video = document.createElement("video");
+    root.appendChild(video);
+
+    safe(function () {
+        video.muted = true;
+        video.pause();
+    });
+}
+
+/* ============================================================
+ * IMAGE
+ * ============================================================ */
+
+function testImage(root) {
+    safe(function () {
+        var img = new Image();
+        img.alt = "V26";
+        root.appendChild(img);
+    });
+}
+
+/* ============================================================
+ * MODULE BUILD
+ * ============================================================ */
+
+function buildModules() {
+    state.modules = [];
+
+    /* DOM */
+    addModule("Node", state.capabilities.Node, testNode);
+    addModule("DocumentFragment", state.capabilities.DocumentFragment, testDocumentFragment);
+    addModule("TreeWalker", state.capabilities.TreeWalker, testTreeWalker);
+    addModule("NodeIterator", state.capabilities.NodeIterator, testNodeIterator);
+    addModule("RangeSelection", state.capabilities.Range && state.capabilities.Selection, testRangeSelection);
+    addModule("DOMTokenList", state.capabilities.DOMTokenList, testClassList);
+    addModule("NamedNodeMap", state.capabilities.NamedNodeMap, testAttributes);
+
+    /* Observers */
+    addModule("MutationObserver", state.capabilities.MutationObserver, testMutationObserver);
+    addModule("ResizeObserver", state.capabilities.ResizeObserver, testResizeObserver);
+    addModule("IntersectionObserver", state.capabilities.IntersectionObserver, testIntersectionObserver);
+    addModule("PerformanceObserver", state.capabilities.PerformanceObserver, testPerformanceObserver);
+
+    /* DOM extras */
+    addModule("ShadowDOM", state.capabilities.ShadowDOM, testShadowDOM);
+    addModule("CustomElements", state.capabilities.CustomElements, testCustomElements);
+
+    /* Events */
+    addModule("Event", state.capabilities.Event, testEvent);
+    addModule("MouseEvent", state.capabilities.MouseEvent, testMouseEvent);
+    addModule("KeyboardEvent", state.capabilities.KeyboardEvent, testKeyboardEvent);
+    addModule("Focus", state.capabilities.FocusEvent, testFocus);
+    addModule("PointerEvent", state.capabilities.PointerEvent, testPointerEvent);
+    addModule("InputEvent", state.capabilities.InputEvent, testInputEvent);
+
+    /* Editing */
+    addModule("ContentEditable", state.capabilities.ContentEditable, testContentEditable);
+    addModule("ExecCommand", state.capabilities.ExecCommand, testExecCommand);
+
+    /* Frame/history */
+    addModule("Iframe", state.capabilities.Iframe, testIframe);
+    addModule("History", state.capabilities.PushState, testHistory);
+
+    /* Parser */
+    addModule("InnerHTML", true, testInnerHTML);
+    addModule("OuterHTML", true, testOuterHTML);
+    addModule("InsertAdjacentHTML", true, testAdjacentHTML);
+    addModule("Template", state.capabilities.Template, testTemplate);
+    addModule("DOMParser", state.capabilities.DOMParser, testDOMParser);
+    addModule("XMLSerializer", state.capabilities.XMLSerializer, testXMLSerializer);
+
+    /* Forms */
+    addModule("Forms", state.capabilities.Forms, testForms);
+
+    /* CSS */
+    addModule("InlineStyle", state.capabilities.CSS, testInlineStyle);
+    addModule("StyleElement", state.capabilities.CSS, testStyleElement);
+    addModule("CSSStyleSheet", state.capabilities.InsertRule, testCSSStyleSheet);
+
+    /* Layout */
+    addModule("LayoutFlex", state.capabilities.CSS, testLayoutFlex);
+    addModule("LayoutGrid", state.capabilities.CSS, testLayoutGrid);
+    addModule("LayoutTable", state.capabilities.CSS, testLayoutTable);
+
+    /* SVG/canvas */
+    addModule("SVG", state.capabilities.SVG, testSVG);
+    addModule("Canvas2D", state.capabilities.Canvas2D, testCanvas);
+
+    /* Text/fonts */
+    addModule("Text", state.capabilities.Text, testText);
+    addModule("DocumentFonts", state.capabilities.DocumentFonts, testFonts);
+
+    /* Animation */
+    addModule("Animation", state.capabilities.Animation, testAnimation);
+
+    /* Resources */
+    addModule("URL", state.capabilities.URL, testURL);
+    addModule("Blob", state.capabilities.Blob, testBlob);
+    addModule("FileReader", state.capabilities.FileReader, testFileReader);
+    addModule("RequestResponse", state.capabilities.Request && state.capabilities.Response, testRequestResponse);
+    addModule("Headers", state.capabilities.Headers, testHeaders);
+
+    /* Streams */
+    addModule("ReadableStream", state.capabilities.ReadableStream, testReadableStream);
+    addModule("WritableStream", state.capabilities.WritableStream, testWritableStream);
+    addModule("TransformStream", state.capabilities.TransformStream, testTransformStream);
+    addModule("CompressionStream", state.capabilities.CompressionStream, testCompressionStream);
+    addModule("DecompressionStream", state.capabilities.DecompressionStream, testDecompressionStream);
+
+    /* Messaging */
+    addModule("MessageChannel", state.capabilities.MessageChannel, testMessageChannel);
+    addModule("BroadcastChannel", state.capabilities.BroadcastChannel, testBroadcastChannel);
+
+    /* Storage */
+    addModule("localStorage", state.capabilities.LocalStorage, testLocalStorage);
+    addModule("sessionStorage", state.capabilities.SessionStorage, testSessionStorage);
+    addModule("CacheAPI", state.capabilities.Cache, testCacheAPI);
+
+    /* Crypto */
+    addModule("Crypto", state.capabilities.Crypto, testCrypto);
+    addModule("SubtleCrypto", state.capabilities.SubtleCrypto, testSubtleCrypto);
+
+    /* Media */
+    addModule("Media", state.capabilities.Media, testMedia);
+    addModule("Video", state.capabilities.Video, testVideo);
+
+    /* Images */
+    addModule("Image", state.capabilities.Image, testImage);
+}
+
+/* ============================================================
+ * BALANCED SCHEDULER
+ * ============================================================ */
+
+function getLeastExecutedModule() {
+    if (!state.modules.length)
         return null;
 
-    return S.objects[id].element;
-}
-
-
-/* ============================================================
- PATTERN: EVENT REENTRANCY
- ============================================================ */
-
-function P_EVENT()
-{
-    S.pattern =
-        "EVENT_REENTRANCY";
-
-    addSurface("DOM");
-    addSurface("Events");
-    addSurface("Document");
-    addSurface("FocusController");
-
-    return [
-
-        {
-            t: "CREATE",
-            id: "A",
-            tag: "button"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "LISTENER",
-            id: "A"
-        },
-
-        {
-            t: "FOCUS",
-            id: "A"
-        },
-
-        {
-            t: "DISPATCH",
-            id: "A"
-        },
-
-        {
-            t: "MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "CONTINUE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: FOCUS / FRAME / DOCUMENT
- ============================================================ */
-
-function P_FOCUS()
-{
-    S.pattern =
-        "FOCUS_FRAME_DOCUMENT";
-
-    addSurface("FocusController");
-    addSurface("Document");
-    addSurface("Frame");
-    addSurface("DOM");
-    addSurface("Events");
-
-    return [
-
-        {
-            t: "FRAME_CREATE",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_LOAD",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_INPUT",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_LISTENER",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_FOCUS",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_BLUR",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "FRAME_ACCESS",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: ITERATOR INVALIDATION
- ============================================================ */
-
-function P_ITERATOR()
-{
-    S.pattern =
-        "ITERATOR_INVALIDATION";
-
-    addSurface("DOM");
-    addSurface("Events");
-    addSurface("Document");
-    addSurface("History");
-
-    return [
-
-        {
-            t: "CREATE",
-            id: "A",
-            tag: "div"
-        },
-
-        {
-            t: "CREATE",
-            id: "B",
-            tag: "div"
-        },
-
-        {
-            t: "CREATE",
-            id: "C",
-            tag: "div"
-        },
-
-        {
-            t: "CREATE",
-            id: "D",
-            tag: "div"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "ATTACH",
-            id: "B"
-        },
-
-        {
-            t: "ATTACH",
-            id: "C"
-        },
-
-        {
-            t: "ATTACH",
-            id: "D"
-        },
-
-        {
-            t: "TRAVERSE_BEGIN"
-        },
-
-        {
-            t: "TRAVERSE_CALLBACK"
-        },
-
-        {
-            t: "COLLECTION_ADD"
-        },
-
-        {
-            t: "COLLECTION_REMOVE"
-        },
-
-        {
-            t: "TRAVERSE_CONTINUE"
-        },
-
-        {
-            t: "LAYOUT"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: OWNER / BACK REFERENCE
- ============================================================ */
-
-function P_OWNER()
-{
-    S.pattern =
-        "OWNER_BACK_REFERENCE";
-
-    addSurface("DOM");
-    addSurface("SVG");
-    addSurface("Document");
-    addSurface("Layout");
-
-    return [
-
-        {
-            t: "SVG_CREATE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "SVG_STYLE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "SVG_STATE_CHANGE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_ACCESS",
-            id: "A"
-        },
-
-        {
-            t: "SVG_REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_ACCESS",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: ASYNC LIFETIME
- ============================================================ */
-
-function P_ASYNC()
-{
-    S.pattern =
-        "ASYNC_OWNER_LIFETIME";
-
-    addSurface("DOM");
-    addSurface("Events");
-    addSurface("Document");
-    addSurface("Frame");
-
-    return [
-
-        {
-            t: "CREATE",
-            id: "A",
-            tag: "div"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "ASYNC_SCHEDULE",
-            id: "A"
-        },
-
-        {
-            t: "MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "ASYNC_LATE_ACCESS",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: NESTED LAYOUT
- ============================================================ */
-
-function P_LAYOUT()
-{
-    S.pattern =
-        "NESTED_LAYOUT_REVALIDATION";
-
-    addSurface("DOM");
-    addSurface("CSS");
-    addSurface("StyleResolver");
-    addSurface("RenderTree");
-    addSurface("Layout");
-
-    return [
-
-        {
-            t: "CREATE",
-            id: "A",
-            tag: "div"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "STYLE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "STYLE_REENTER",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT_NESTED",
-            id: "A"
-        },
-
-        {
-            t: "MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: SVG
- ============================================================ */
-
-function P_SVG()
-{
-    S.pattern =
-        "SVG_RENDERER_LIFETIME";
-
-    addSurface("SVG");
-    addSurface("DOM");
-    addSurface("CSS");
-    addSurface("RenderTree");
-    addSurface("Layout");
-
-    return [
-
-        {
-            t: "SVG_CREATE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "SVG_STYLE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "SVG_NESTED_LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "SVG_MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "SVG_REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "SVG_LAYOUT",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: TYPE TRANSITION
- ============================================================ */
-
-function P_TYPE()
-{
-    S.pattern =
-        "TYPE_ROLE_TRANSITION";
-
-    addSurface("DOM");
-    addSurface("Events");
-    addSurface("Forms");
-    addSurface("FocusController");
-    addSurface("Document");
-
-    return [
-
-        {
-            t: "INPUT_CREATE",
-            id: "A"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "LISTENER",
-            id: "A"
-        },
-
-        {
-            t: "FOCUS",
-            id: "A"
-        },
-
-        {
-            t: "CLICK",
-            id: "A"
-        },
-
-        {
-            t: "TYPE_CHANGE",
-            id: "A"
-        },
-
-        {
-            t: "MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "CLICK",
-            id: "A"
-        },
-
-        {
-            t: "BLUR",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: EDITING
- ============================================================ */
-
-function P_EDIT()
-{
-    S.pattern =
-        "EDITING_FORM_LIFETIME";
-
-    addSurface("Editing");
-    addSurface("Forms");
-    addSurface("DOM");
-    addSurface("Events");
-    addSurface("FocusController");
-
-    return [
-
-        {
-            t: "TEXTAREA",
-            id: "A"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "FOCUS",
-            id: "A"
-        },
-
-        {
-            t: "EDIT",
-            id: "A"
-        },
-
-        {
-            t: "SELECTION",
-            id: "A"
-        },
-
-        {
-            t: "INPUT_EVENT",
-            id: "A"
-        },
-
-        {
-            t: "MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "BLUR",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "EDIT_ACCESS",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: FONT / TEXT / CACHE-LIKE PRESSURE
- ============================================================ */
-
-function P_FONT()
-{
-    S.pattern =
-        "FONT_TEXT_STYLE_LIFETIME";
-
-    addSurface("Text");
-    addSurface("Fonts");
-    addSurface("CSS");
-    addSurface("StyleResolver");
-    addSurface("RenderTree");
-    addSurface("Layout");
-
-    return [
-
-        {
-            t: "TEXT_CREATE",
-            id: "A"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "FONT_CHANGE",
-            id: "A"
-        },
-
-        {
-            t: "TEXT_MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "FONT_CHANGE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT_NESTED",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: HISTORY
- ============================================================ */
-
-function P_HISTORY()
-{
-    S.pattern =
-        "HISTORY_COLLECTION_MUTATION";
-
-    addSurface("History");
-    addSurface("Document");
-    addSurface("Frame");
-    addSurface("DOM");
-    addSurface("Events");
-
-    return [
-
-        {
-            t: "HISTORY_PUSH"
-        },
-
-        {
-            t: "HISTORY_LISTENER"
-        },
-
-        {
-            t: "HISTORY_BACK"
-        },
-
-        {
-            t: "HISTORY_MUTATE"
-        },
-
-        {
-            t: "HISTORY_FRAME"
-        },
-
-        {
-            t: "HISTORY_REMOVE_FRAME"
-        },
-
-        {
-            t: "HISTORY_CONTINUE"
-        },
-
-        {
-            t: "LAYOUT"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: PARSER
- ============================================================ */
-
-function P_PARSER()
-{
-    S.pattern =
-        "HTML_PARSER_DOM_STYLE";
-
-    addSurface("HTML parser");
-    addSurface("DOM");
-    addSurface("CSS");
-    addSurface("StyleResolver");
-    addSurface("Layout");
-
-    return [
-
-        {
-            t: "PARSE"
-        },
-
-        {
-            t: "PARSE_ATTACH"
-        },
-
-        {
-            t: "PARSE_STYLE"
-        },
-
-        {
-            t: "PARSE_LAYOUT"
-        },
-
-        {
-            t: "PARSE_MUTATE"
-        },
-
-        {
-            t: "PARSE_REMOVE"
-        },
-
-        {
-            t: "PARSE_STYLE"
-        },
-
-        {
-            t: "PARSE_LAYOUT"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: SHADOW / DOCUMENT TEARDOWN
- ============================================================ */
-
-function P_DOCUMENT()
-{
-    S.pattern =
-        "DOCUMENT_TEARDOWN_LATE_ACCESS";
-
-    addSurface("Document");
-    addSurface("DOM");
-    addSurface("Frame");
-    addSurface("Events");
-    addSurface("Layout");
-
-    return [
-
-        {
-            t: "CREATE",
-            id: "A",
-            tag: "div"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "SHADOW",
-            id: "A"
-        },
-
-        {
-            t: "LISTENER",
-            id: "A"
-        },
-
-        {
-            t: "ASYNC_SCHEDULE",
-            id: "A"
-        },
-
-        {
-            t: "MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "ASYNC_LATE_ACCESS",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN: CROSS SURFACE
- ============================================================ */
-
-function P_CROSS()
-{
-    S.pattern =
-        "CROSS_SURFACE_LIFETIME";
-
-    addSurface("DOM");
-    addSurface("Events");
-    addSurface("Document");
-    addSurface("Frame");
-    addSurface("FocusController");
-    addSurface("Editing");
-    addSurface("CSS");
-    addSurface("StyleResolver");
-    addSurface("RenderTree");
-    addSurface("Layout");
-    addSurface("SVG");
-    addSurface("Forms");
-    addSurface("Text");
-    addSurface("Fonts");
-    addSurface("History");
-
-    return [
-
-        {
-            t: "TEXTAREA",
-            id: "A"
-        },
-
-        {
-            t: "ATTACH",
-            id: "A"
-        },
-
-        {
-            t: "LISTENER",
-            id: "A"
-        },
-
-        {
-            t: "FOCUS",
-            id: "A"
-        },
-
-        {
-            t: "EDIT",
-            id: "A"
-        },
-
-        {
-            t: "STYLE",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        },
-
-        {
-            t: "ASYNC_SCHEDULE",
-            id: "A"
-        },
-
-        {
-            t: "DISPATCH",
-            id: "A"
-        },
-
-        {
-            t: "MUTATE",
-            id: "A"
-        },
-
-        {
-            t: "REMOVE",
-            id: "A"
-        },
-
-        {
-            t: "BLUR",
-            id: "A"
-        },
-
-        {
-            t: "ASYNC_LATE_ACCESS",
-            id: "A"
-        },
-
-        {
-            t: "LAYOUT",
-            id: "A"
-        }
-
-    ];
-}
-
-
-/* ============================================================
- FIXED PATTERN CORPUS
- ============================================================ */
-
-var PATTERNS = [
-
-    P_EVENT,
-    P_EVENT,
-
-    P_FOCUS,
-    P_FOCUS,
-
-    P_ITERATOR,
-    P_ITERATOR,
-
-    P_OWNER,
-
-    P_ASYNC,
-    P_ASYNC,
-
-    P_LAYOUT,
-    P_LAYOUT,
-
-    P_SVG,
-
-    P_TYPE,
-
-    P_EDIT,
-
-    P_FONT,
-
-    P_HISTORY,
-
-    P_PARSER,
-
-    P_DOCUMENT,
-
-    P_CROSS
-
-];
-
-
-/* ============================================================
- SMALL STRUCTURAL MUTATION
- ============================================================ */
-
-function mutateSequence(sequence)
-{
-    /*
-     * This is not adaptive feedback.
-     *
-     * It is simply deterministic random variation of the
-     * selected pattern.
-     */
-
-    var result =
-        copy(sequence);
-
-    if (!result.length)
-        return result;
-
-    var mode =
-        randInt(6);
-
-    if (
-        mode === 0 &&
-        result.length < CONFIG.maxOperations
-    ) {
-
-        result.splice(
-            randInt(
-                result.length + 1
-            ),
-            0,
-            copy(
-                choose(result)
-            )
-        );
-    }
-
-    else if (
-        mode === 1 &&
-        result.length > 8
-    ) {
-
-        result.splice(
-            randInt(
-                result.length
-            ),
-            1
-        );
-    }
-
-    else if (
-        mode === 2
-    ) {
-
-        var candidates =
-            result.filter(
-                function (x) {
-
-                    return (
-                        x.t === "MUTATE" ||
-                        x.t === "REMOVE" ||
-                        x.t === "LAYOUT" ||
-                        x.t === "DISPATCH" ||
-                        x.t === "ASYNC_LATE_ACCESS"
-                    );
-
-                }
-            );
-
-        if (
-            candidates.length
-        ) {
-
-            result.splice(
-                randInt(
-                    result.length + 1
-                ),
-                0,
-                copy(
-                    choose(candidates)
-                )
-            );
+    var min = Infinity;
+    var candidates = [];
+
+    for (var i = 0; i < state.modules.length; i++) {
+        var m = state.modules[i];
+
+        if (m.count < min) {
+            min = m.count;
+            candidates = [m];
+        } else if (m.count === min) {
+            candidates.push(m);
         }
     }
 
-    else if (
-        mode === 3 &&
-        result.length > 2
-    ) {
-
-        var a =
-            randInt(
-                result.length
-            );
-
-        var b =
-            randInt(
-                result.length
-            );
-
-        var tmp =
-            result[a];
-
-        result[a] =
-            result[b];
-
-        result[b] =
-            tmp;
-    }
-
-    else if (
-        mode === 4
-    ) {
-
-        var lifecycle =
-            choose([
-                {
-                    t: "MUTATE",
-                    id: "A"
-                },
-                {
-                    t: "LAYOUT",
-                    id: "A"
-                },
-                {
-                    t: "REMOVE",
-                    id: "A"
-                },
-                {
-                    t: "ASYNC_LATE_ACCESS",
-                    id: "A"
-                }
-            ]);
-
-        result.splice(
-            randInt(
-                result.length + 1
-            ),
-            0,
-            lifecycle
-        );
-    }
-
-    else {
-
-        result.push(
-            copy(
-                choose(result)
-            )
-        );
-    }
-
-    while (
-        result.length >
-        CONFIG.maxOperations
-    ) {
-        result.pop();
-    }
-
-    return result;
+    return choose(candidates);
 }
 
+function checkCycle() {
+    if (!state.modules.length)
+        return;
 
-/* ============================================================
- EXECUTION — DOM
- ============================================================ */
+    var min = Infinity;
 
-function execDOM(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
+    for (var i = 0; i < state.modules.length; i++)
+        min = Math.min(min, state.modules[i].count);
 
-    var el =
-        element(op.id);
-
-    try {
-
-        if (
-            op.t === "CREATE"
-        ) {
-
-            makeElement(
-                op.id,
-                op.tag
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "INPUT_CREATE"
-        ) {
-
-            var input =
-                makeElement(
-                    op.id,
-                    "input"
-                );
-
-            input.type =
-                "text";
-
-            return;
-        }
-
-        if (
-            op.t === "TEXTAREA"
-        ) {
-
-            makeElement(
-                op.id,
-                "textarea"
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "TEXT_CREATE"
-        ) {
-
-            var text =
-                makeElement(
-                    op.id,
-                    "div"
-                );
-
-            text.textContent =
-                "initial text";
-
-            return;
-        }
-
-        if (!el)
-            return;
-
-        if (
-            op.t === "ATTACH"
-        ) {
-
-            root.appendChild(
-                el
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "REMOVE"
-        ) {
-
-            if (
-                el.parentNode
-            ) {
-
-                el.parentNode
-                    .removeChild(
-                        el
-                    );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "MUTATE"
-        ) {
-
-            el.textContent =
-                "mutation-" +
-                randInt(1000000);
-
-            el.setAttribute(
-                "data-change",
-                String(
-                    randInt(100000)
-                )
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "STYLE"
-        ) {
-
-            el.style.cssText =
-                "display:block;" +
-                "position:relative;" +
-                "width:" +
-                (10 + randInt(180)) +
-                "px;" +
-                "height:" +
-                (10 + randInt(90)) +
-                "px;";
-
-            return;
-        }
-
-        if (
-            op.t === "STYLE_REENTER"
-        ) {
-
-            el.style.display =
-                "block";
-
-            void el.offsetWidth;
-
-            el.style.width =
-                (20 + randInt(100)) +
-                "px";
-
-            void el.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "LAYOUT"
-        ) {
-
-            void el.offsetWidth;
-
-            void el.scrollTop;
-
-            el.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "LAYOUT_NESTED"
-        ) {
-
-            void el.offsetWidth;
-
-            el.style.height =
-                (20 + randInt(80)) +
-                "px";
-
-            void el.offsetWidth;
-
-            el.getBoundingClientRect();
-
-            void el.scrollTop;
-
-            return;
-        }
-
-        if (
-            op.t === "LISTENER"
-        ) {
-
-            el.addEventListener(
-                "v19",
-                function () {
-
-                    S.events++;
-
-                    try {
-
-                        el.setAttribute(
-                            "data-event",
-                            String(
-                                randInt(100000)
-                            )
-                        );
-
-                        if (
-                            el.parentNode &&
-                            randInt(4) === 0
-                        ) {
-
-                            el.parentNode
-                                .removeChild(
-                                    el
-                                );
-                        }
-
-                    } catch (e) {}
-
-                },
-                false
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "DISPATCH"
-        ) {
-
-            var ev =
-                document.createEvent(
-                    "Event"
-                );
-
-            ev.initEvent(
-                "v19",
-                true,
-                true
-            );
-
-            el.dispatchEvent(
-                ev
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "CLICK"
-        ) {
-
-            var click =
-                document.createEvent(
-                    "MouseEvents"
-                );
-
-            click.initMouseEvent(
-                "click",
-                true,
-                true,
-                window,
-                1,
-                0,
-                0,
-                0,
-                0,
-                false,
-                false,
-                false,
-                false,
-                0,
-                null
-            );
-
-            el.dispatchEvent(
-                click
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "FOCUS"
-        ) {
-
-            if (
-                el.focus
-            )
-                el.focus();
-
-            return;
-        }
-
-        if (
-            op.t === "BLUR"
-        ) {
-
-            if (
-                el.blur
-            )
-                el.blur();
-
-            return;
-        }
-
-        if (
-            op.t === "TYPE_CHANGE"
-        ) {
-
-            if (
-                el.tagName &&
-                el.tagName.toLowerCase() ===
-                "input"
-            ) {
-
-                el.type =
-                    choose([
-                        "text",
-                        "search",
-                        "email",
-                        "number"
-                    ]);
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "EDIT"
-        ) {
-
-            if (
-                typeof el.value ===
-                "string"
-            ) {
-
-                el.value =
-                    "edit-" +
-                    randInt(1000000);
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "SELECTION"
-        ) {
-
-            if (
-                el.setSelectionRange
-            ) {
-
-                try {
-
-                    el.setSelectionRange(
-                        0,
-                        0
-                    );
-
-                } catch (e) {}
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "INPUT_EVENT"
-        ) {
-
-            var iev =
-                document.createEvent(
-                    "Event"
-                );
-
-            iev.initEvent(
-                "input",
-                true,
-                true
-            );
-
-            el.dispatchEvent(
-                iev
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "EDIT_ACCESS"
-        ) {
-
-            void el.value;
-            void el.selectionStart;
-            void el.selectionEnd;
-
-            return;
-        }
-
-        if (
-            op.t === "FONT_CHANGE"
-        ) {
-
-            el.style.fontFamily =
-                choose([
-                    "serif",
-                    "sans-serif",
-                    "monospace"
-                ]);
-
-            el.style.fontSize =
-                (8 + randInt(30)) +
-                "px";
-
-            return;
-        }
-
-        if (
-            op.t === "TEXT_MUTATE"
-        ) {
-
-            el.textContent =
-                "text-" +
-                randInt(1000000);
-
-            return;
-        }
-
-        if (
-            op.t === "SHADOW"
-        ) {
-
-            /*
-             * Use only if the implementation exposes it.
-             * No assumption about Shadow DOM internals.
-             */
-
-            if (
-                el.attachShadow
-            ) {
-
-                try {
-
-                    var shadow =
-                        el.attachShadow({
-                            mode: "open"
-                        });
-
-                    shadow.innerHTML =
-                        "<span>shadow</span>";
-
-                } catch (e) {}
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "ASYNC_SCHEDULE"
-        ) {
-
-            S.asyncCallbacks++;
-
-            (function (reference) {
-
-                setTimeout(
-                    function () {
-
-                        try {
-
-                            void reference.parentNode;
-                            void reference.textContent;
-                            void reference.offsetWidth;
-
-                        } catch (e) {}
-
-                    },
-                    CONFIG.asyncDelay
-                );
-
-            })(el);
-
-            return;
-        }
-
-        if (
-            op.t === "ASYNC_LATE_ACCESS"
-        ) {
-
-            S.asyncCallbacks++;
-
-            (function (reference) {
-
-                setTimeout(
-                    function () {
-
-                        try {
-
-                            void reference.parentNode;
-                            void reference.firstChild;
-                            void reference.textContent;
-                            void reference.offsetWidth;
-
-                            reference
-                                .getBoundingClientRect();
-
-                        } catch (e) {}
-
-                    },
-                    CONFIG.asyncDelay
-                );
-
-            })(el);
-
-            return;
-        }
-
-        if (
-            op.t === "CONTINUE"
-        ) {
-
-            void el.parentNode;
-            void el.firstChild;
-            void el.textContent;
-            void el.offsetWidth;
-
-            return;
-        }
-
-    } catch (e) {
-
-        S.errors++;
+    if (min > state.cycle) {
+        state.cycle = min;
     }
 }
 
-
 /* ============================================================
- FRAMES
- ============================================================ */
+ * EXECUTION
+ * ============================================================ */
 
-function execFrame(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
+function runNext() {
+    if (!state.running)
+        return;
 
-    try {
+    state.sequence++;
 
-        if (
-            op.t === "FRAME_CREATE"
-        ) {
+    var module = getLeastExecutedModule();
 
-            var frame =
-                document.createElement(
-                    "iframe"
-                );
-
-            frame.className =
-                "frame";
-
-            frame.src =
-                "about:blank";
-
-            root.appendChild(
-                frame
-            );
-
-            S.frames[
-                op.id
-            ] =
-                frame;
-
-            return;
-        }
-
-        var frame2 =
-            S.frames[
-                op.id
-            ];
-
-        if (!frame2)
-            return;
-
-        if (
-            op.t === "FRAME_LOAD"
-        ) {
-
-            frame2.src =
-                "about:blank";
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_INPUT"
-        ) {
-
-            var doc =
-                frame2.contentDocument;
-
-            if (!doc ||
-                !doc.body)
-                return;
-
-            var input =
-                doc.createElement(
-                    "input"
-                );
-
-            input.type =
-                "text";
-
-            doc.body.appendChild(
-                input
-            );
-
-            S.frames[
-                op.id + "_input"
-            ] =
-                input;
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_LISTENER"
-        ) {
-
-            var input2 =
-                S.frames[
-                    op.id + "_input"
-                ];
-
-            if (!input2)
-                return;
-
-            input2.addEventListener(
-                "blur",
-                function () {
-
-                    try {
-
-                        input2.setAttribute(
-                            "data-blur",
-                            "1"
-                        );
-
-                    } catch (e) {}
-
-                },
-                false
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_FOCUS"
-        ) {
-
-            var input3 =
-                S.frames[
-                    op.id + "_input"
-                ];
-
-            if (
-                input3 &&
-                input3.focus
-            )
-                input3.focus();
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_BLUR"
-        ) {
-
-            var input4 =
-                S.frames[
-                    op.id + "_input"
-                ];
-
-            if (
-                input4 &&
-                input4.blur
-            )
-                input4.blur();
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_MUTATE"
-        ) {
-
-            frame2.setAttribute(
-                "data-mutate",
-                String(
-                    randInt(100000)
-                )
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_REMOVE"
-        ) {
-
-            if (
-                frame2.parentNode
-            ) {
-
-                frame2.parentNode
-                    .removeChild(
-                        frame2
-                    );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_ACCESS"
-        ) {
-
-            void frame2.contentWindow;
-            void frame2.contentDocument;
-
-            return;
-        }
-
-    } catch (e) {
-
-        S.errors++;
-    }
-}
-
-
-/* ============================================================
- SVG
- ============================================================ */
-
-function execSVG(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    try {
-
-        if (
-            op.t === "SVG_CREATE"
-        ) {
-
-            var svg =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "svg"
-                );
-
-            svg.setAttribute(
-                "width",
-                "80"
-            );
-
-            svg.setAttribute(
-                "height",
-                "60"
-            );
-
-            var rect =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "rect"
-                );
-
-            rect.setAttribute(
-                "width",
-                "40"
-            );
-
-            rect.setAttribute(
-                "height",
-                "30"
-            );
-
-            svg.appendChild(
-                rect
-            );
-
-            S.svg[
-                op.id
-            ] =
-                svg;
-
-            return;
-        }
-
-        var svg2 =
-            S.svg[
-                op.id
-            ];
-
-        if (!svg2)
-            return;
-
-        if (
-            op.t === "SVG_ATTACH"
-        ) {
-
-            root.appendChild(
-                svg2
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_STYLE"
-        ) {
-
-            svg2.setAttribute(
-                "style",
-                "display:block;" +
-                "width:" +
-                (20 + randInt(100)) +
-                "px;" +
-                "height:" +
-                (20 + randInt(80)) +
-                "px;"
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_MUTATE"
-        ) {
-
-            svg2.setAttribute(
-                "viewBox",
-                "0 0 " +
-                (20 + randInt(100)) +
-                " " +
-                (20 + randInt(80))
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_STATE_CHANGE"
-        ) {
-
-            svg2.setAttribute(
-                "preserveAspectRatio",
-                choose([
-                    "xMidYMid",
-                    "none",
-                    "xMinYMin"
-                ])
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_LAYOUT"
-        ) {
-
-            void svg2.offsetWidth;
-
-            svg2.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_NESTED_LAYOUT"
-        ) {
-
-            void svg2.offsetWidth;
-
-            svg2.setAttribute(
-                "viewBox",
-                "0 0 " +
-                (10 + randInt(120)) +
-                " " +
-                (10 + randInt(100))
-            );
-
-            void svg2.offsetWidth;
-
-            svg2.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_ACCESS"
-        ) {
-
-            void svg2.getBoundingClientRect();
-
-            void svg2.offsetWidth;
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_REMOVE"
-        ) {
-
-            if (
-                svg2.parentNode
-            ) {
-
-                svg2.parentNode
-                    .removeChild(
-                        svg2
-                    );
-            }
-
-            return;
-        }
-
-    } catch (e) {
-
-        S.errors++;
-    }
-}
-
-
-/* ============================================================
- ITERATOR / COLLECTION
- ============================================================ */
-
-function execIterator(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    try {
-
-        if (
-            op.t === "TRAVERSE_BEGIN"
-        ) {
-
-            S.traversal =
-                root.childNodes.length;
-
-            return;
-        }
-
-        if (
-            op.t === "TRAVERSE_CALLBACK"
-        ) {
-
-            var ev =
-                document.createEvent(
-                    "Event"
-                );
-
-            ev.initEvent(
-                "v19-traversal",
-                true,
-                true
-            );
-
-            root.dispatchEvent(
-                ev
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "COLLECTION_ADD"
-        ) {
-
-            var extra =
-                document.createElement(
-                    "div"
-                );
-
-            extra.className =
-                "node";
-
-            root.appendChild(
-                extra
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "COLLECTION_REMOVE"
-        ) {
-
-            if (
-                root.firstChild
-            ) {
-
-                root.removeChild(
-                    root.firstChild
-                );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "TRAVERSE_CONTINUE"
-        ) {
-
-            var length =
-                root.childNodes.length;
-
-            var i;
-
-            for (
-                i = 0;
-                i < length;
-                i++
-            ) {
-
-                var child =
-                    root.childNodes[i];
-
-                if (child) {
-
-                    void child.nodeName;
-
-                    if (
-                        i === 0
-                    ) {
-
-                        var mutation =
-                            document.createElement(
-                                "span"
-                            );
-
-                        child.appendChild(
-                            mutation
-                        );
-                    }
-                }
-            }
-
-            return;
-        }
-
-    } catch (e) {
-
-        S.errors++;
-    }
-}
-
-
-/* ============================================================
- HISTORY
- ============================================================ */
-
-function execHistory(op)
-{
-    try {
-
-        if (
-            op.t === "HISTORY_PUSH"
-        ) {
-
-            if (
-                history &&
-                history.pushState
-            ) {
-
-                history.pushState(
-                    {
-                        v:
-                            randInt(100000)
-                    },
-                    "",
-                    location.href
-                );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_LISTENER"
-        ) {
-
-            window.addEventListener(
-                "popstate",
-                function () {
-
-                    S.events++;
-
-                    try {
-
-                        var node =
-                            document.createElement(
-                                "div"
-                            );
-
-                        node.className =
-                            "node";
-
-                        document
-                            .getElementById(
-                                "root"
-                            )
-                            .appendChild(
-                                node
-                            );
-
-                    } catch (e) {}
-
-                },
-                false
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_BACK"
-        ) {
-
-            if (
-                history &&
-                history.back
-            ) {
-
-                history.back();
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_MUTATE"
-        ) {
-
-            var root =
-                document.getElementById(
-                    "root"
-                );
-
-            root.appendChild(
-                document.createElement(
-                    "div"
-                )
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_FRAME"
-        ) {
-
-            var frame =
-                document.createElement(
-                    "iframe"
-                );
-
-            frame.className =
-                "frame";
-
-            frame.src =
-                "about:blank";
-
-            document
-                .getElementById(
-                    "root"
-                )
-                .appendChild(
-                    frame
-                );
-
-            S.frames.history =
-                frame;
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_REMOVE_FRAME"
-        ) {
-
-            var f =
-                S.frames.history;
-
-            if (
-                f &&
-                f.parentNode
-            ) {
-
-                f.parentNode
-                    .removeChild(
-                        f
-                    );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_CONTINUE"
-        ) {
-
-            void document.body.offsetWidth;
-
-            return;
-        }
-
-    } catch (e) {
-
-        S.errors++;
-    }
-}
-
-
-/* ============================================================
- PARSER
- ============================================================ */
-
-function execParser(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    try {
-
-        if (
-            op.t === "PARSE"
-        ) {
-
-            root.innerHTML =
-                "<div class='node'>" +
-                "<span>V19</span>" +
-                "<input type='text'>" +
-                "</div>";
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_ATTACH"
-        ) {
-
-            root.innerHTML +=
-                "<div class='node'>" +
-                "<span>append</span>" +
-                "</div>";
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_STYLE"
-        ) {
-
-            var divs =
-                root.getElementsByTagName(
-                    "div"
-                );
-
-            if (divs.length) {
-
-                divs[0].style.cssText =
-                    "display:block;" +
-                    "position:relative;" +
-                    "width:80px;" +
-                    "height:30px;";
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_LAYOUT"
-        ) {
-
-            void root.offsetWidth;
-
-            root.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_MUTATE"
-        ) {
-
-            root.innerHTML +=
-                "<span>" +
-                randInt(100000) +
-                "</span>";
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_REMOVE"
-        ) {
-
-            if (
-                root.lastChild
-            ) {
-
-                root.removeChild(
-                    root.lastChild
-                );
-            }
-
-            return;
-        }
-
-    } catch (e) {
-
-        S.errors++;
-    }
-}
-
-
-/* ============================================================
- SPECIAL DISPATCH
- ============================================================ */
-
-function execute(op)
-{
-    S.current =
-        op.t +
-        (
-            op.id ?
-            " " + op.id :
-            ""
-        );
-
-    S.types[
-        op.t
-    ] = true;
-
-    if (
-        S.history.length
-    ) {
-
-        var previous =
-            S.history[
-                S.history.length - 1
-            ];
-
-        var transition =
-            previous.t +
-            "->" +
-            op.t;
-
-        S.transitions[
-            transition
-        ] = true;
+    if (!module) {
+        status.textContent = "STATUS: NO MODULES";
+        return;
     }
 
-    S.history.push(
-        op
-    );
-
-    if (
-        S.history.length > 18
-    ) {
-
-        S.history.shift();
-    }
-
-    if (
-        op.t.indexOf(
-            "FRAME_"
-        ) === 0
-    ) {
-
-        execFrame(op);
-
-    } else if (
-        op.t.indexOf(
-            "SVG_"
-        ) === 0
-    ) {
-
-        execSVG(op);
-
-    } else if (
-        op.t.indexOf(
-            "HISTORY_"
-        ) === 0
-    ) {
-
-        execHistory(op);
-
-    } else if (
-        op.t.indexOf(
-            "PARSE"
-        ) === 0
-    ) {
-
-        execParser(op);
-
-    } else if (
-        op.t === "TRAVERSE_BEGIN" ||
-        op.t === "TRAVERSE_CALLBACK" ||
-        op.t === "COLLECTION_ADD" ||
-        op.t === "COLLECTION_REMOVE" ||
-        op.t === "TRAVERSE_CONTINUE"
-    ) {
-
-        execIterator(op);
-
-    } else {
-
-        execDOM(op);
-    }
-
-    S.last =
-        S.current;
-
-    checkpoint();
-
-    update();
-}
-
-
-/* ============================================================
- SCORE
- ============================================================ */
-
-function scoreSequence()
-{
-    /*
-     * This score is descriptive only.
-     *
-     * It does NOT feed back into future pattern
-     * selection.
-     */
-
-    var score =
-        Object.keys(
-            S.transitions
-        ).length;
-
-    var t =
-        S.types;
-
-    if (
-        t.LISTENER &&
-        t.DISPATCH &&
-        t.REMOVE
-    )
-        score += 4;
-
-    if (
-        t.ASYNC_SCHEDULE &&
-        t.REMOVE
-    )
-        score += 4;
-
-    if (
-        t.FRAME_FOCUS &&
-        t.FRAME_REMOVE
-    )
-        score += 4;
-
-    if (
-        t.TRAVERSE_BEGIN &&
-        t.COLLECTION_ADD &&
-        t.TRAVERSE_CONTINUE
-    )
-        score += 5;
-
-    if (
-        t.STYLE &&
-        t.LAYOUT &&
-        t.REMOVE
-    )
-        score += 3;
-
-    if (
-        t.SVG_NESTED_LAYOUT &&
-        t.SVG_REMOVE
-    )
-        score += 4;
-
-    if (
-        t.TYPE_CHANGE &&
-        t.CLICK
-    )
-        score += 3;
-
-    if (
-        t.HISTORY_BACK &&
-        t.HISTORY_MUTATE
-    )
-        score += 3;
-
-    return score;
-}
-
-
-/* ============================================================
- CORPUS
- ============================================================ */
-
-function storeCorpus(sequence)
-{
-    var entry = {
-
-        pattern:
-            S.pattern,
-
-        surfaces:
-            copy(S.surfaces),
-
-        seed:
-            RNG.seed,
-
-        sequence:
-            copy(sequence),
-
-        score:
-            scoreSequence(),
-
-        time:
-            Date.now()
-
+    var record = {
+        version: "V26",
+        sequence: state.sequence,
+        cycle: state.cycle + 1,
+        module: module.name,
+        timestamp: Date.now()
     };
 
-    S.corpus.push(
-        entry
-    );
+    /* Save BEFORE execution. */
+    saveLast(record);
 
-    while (
-        S.corpus.length >
-        CONFIG.maxCorpus
-    ) {
+    state.current = record;
 
-        S.corpus.shift();
-    }
+    status.textContent = "STATUS: RUNNING";
 
-    /*
-     * Corpus is only a persistent collection.
-     *
-     * It is not used as adaptive feedback.
-     */
+    info.textContent =
+        "Cycle " + record.cycle +
+        " | #" + record.sequence +
+        " | " + record.module;
 
-    put(
-        "corpus",
-        S.corpus
-    );
+    var root = makeRoot();
+
+    safe(function () {
+        module.run(root);
+    });
+
+    module.count++;
+
+    checkCycle();
+
+    destroyRoot(root);
+
+    setTimeout(runNext, CONFIG.delay);
 }
-
 
 /* ============================================================
- BUILD CASE
- ============================================================ */
-
-function buildCase()
-{
-    S.surfaces =
-        [];
-
-    var builder =
-        choose(
-            PATTERNS
-        );
-
-    var sequence =
-        builder();
-
-    /*
-     * Fixed structural mutation.
-     *
-     * No result-based selection.
-     */
-
-    if (
-        rnd() < 0.65
-    ) {
-
-        sequence =
-            mutateSequence(
-                sequence
-            );
-    }
-
-    return sequence;
-}
-
-
-/* ============================================================
- RUN
- ============================================================ */
-
-function runSequence(
-    sequence,
-    done
-)
-{
-    resetState();
-
-    S.sequence =
-        copy(sequence);
-
-    S.index =
-        0;
-
-    S.current =
-        "";
-
-    S.last =
-        "";
-
-    checkpoint();
-
-    function next()
-    {
-        if (
-            S.index >=
-            S.sequence.length
-        ) {
-
-            setTimeout(
-                function () {
-
-                    S.stats.completed++;
-
-                    put(
-                        "stats",
-                        S.stats
-                    );
-
-                    clearCheckpoint();
-
-                    done();
-
-                },
-                CONFIG.asyncDelay
-            );
-
-            return;
-        }
-
-        execute(
-            S.sequence[
-                S.index
-            ]
-        );
-
-        S.index++;
-
-        checkpoint();
-
-        setTimeout(
-            next,
-            CONFIG.operationDelay
-        );
-    }
-
-    next();
-}
-
-
-/* ============================================================
- CANDIDATE
- ============================================================ */
-
-function saveCandidate(
-    reason
-)
-{
-    S.candidate = {
-
-        id:
-            Date.now() +
-            "-" +
-            randInt(100000),
-
-        reason:
-            reason,
-
-        pattern:
-            S.pattern,
-
-        surfaces:
-            copy(S.surfaces),
-
-        seed:
-            RNG.seed,
-
-        caseId:
-            S.caseId,
-
-        sequence:
-            copy(S.sequence),
-
-        index:
-            S.index,
-
-        current:
-            S.current,
-
-        last:
-            S.last,
-
-        time:
-            Date.now()
-
-    };
-
-    S.stats.candidates++;
-
-    put(
-        "candidate",
-        S.candidate
-    );
-
-    put(
-        "stats",
-        S.stats
-    );
-}
-
-
-/* ============================================================
- FUZZ
- ============================================================ */
-
-function startFuzz()
-{
-    S.running =
-        true;
-
-    S.mode =
-        "FUZZ";
-
-    function nextCase()
-    {
-        if (
-            S.mode !==
-            "FUZZ"
-        )
-            return;
-
-        S.run++;
-
-        S.caseId++;
-
-        S.stats.cases++;
-
-        setSeed(
-            newSeed()
-        );
-
-        var sequence =
-            buildCase();
-
-        status(
-            "RUNNING — PS4 13.52"
-        );
-
-        runSequence(
-            sequence,
-            function () {
-
-                /*
-                 * Store the sequence only as corpus history.
-                 *
-                 * No adaptive prioritization.
-                 */
-
-                if (
-                    scoreSequence() >= 8
-                ) {
-
-                    storeCorpus(
-                        sequence
-                    );
-                }
-
-                put(
-                    "run",
-                    S.run
-                );
-
-                put(
-                    "caseId",
-                    S.caseId
-                );
-
-                setTimeout(
-                    nextCase,
-                    CONFIG.caseDelay
-                );
-            }
-        );
-    }
-
-    nextCase();
-}
-
-
-/* ============================================================
- REPLAY
- ============================================================ */
-
-function startReplay()
-{
-    if (
-        !S.candidate
-    ) {
-
-        startFuzz();
-
-        return;
-    }
-
-    S.mode =
-        "REPLAY";
-
-    S.replay = {
-
-        attempt:
-            0,
-
-        required:
-            CONFIG.replayAttempts,
-
-        interrupted:
-            0,
-
-        completed:
-            0
-
-    };
-
-    put(
-        "replay",
-        S.replay
-    );
-
-    replayNext();
-}
-
-
-function replayNext()
-{
-    if (
-        S.replay.attempt >=
-        S.replay.required
-    ) {
-
-        finishReplay();
-
-        return;
-    }
-
-    S.replay.attempt++;
-
-    put(
-        "replay",
-        S.replay
-    );
-
-    put(
-        "task",
-        {
-
-            type:
-                "REPLAY",
-
-            attempt:
-                S.replay.attempt,
-
-            awaiting:
-                true
-
-        }
-    );
-
-    runSequence(
-        S.candidate.sequence,
-        function () {
-
-            S.replay.completed++;
-
-            put(
-                "replay",
-                S.replay
-            );
-
-            del("task");
-
-            clearCheckpoint();
-
-            setTimeout(
-                replayNext,
-                100
-            );
-        }
-    );
-}
-
-
-function finishReplay()
-{
-    /*
-     * A browser restart/interruption is represented by
-     * recovery state. A clean replay does not claim UAF.
-     */
-
-    if (
-        S.replay.interrupted > 0
-    ) {
-
-        startMinimizer();
-
-        return;
-    }
-
-    log(
-        "Candidate replay completed without interruption."
-    );
-
-    del("candidate");
-    del("replay");
-    del("task");
-
-    S.candidate =
-        null;
-
-    S.replay =
-        null;
-
-    startFuzz();
-}
-
-
-/* ============================================================
- MINIMIZATION
- ============================================================ */
-
-function createMinimizer()
-{
-    return {
-
-        original:
-            copy(
-                S.candidate.sequence
-            ),
-
-        best:
-            copy(
-                S.candidate.sequence
-            ),
-
-        chunkSize:
-            Math.max(
-                1,
-                Math.floor(
-                    S.candidate.sequence.length /
-                    2
-                )
-            ),
-
-        chunk:
-            0,
-
-        tests:
-            0,
-
-        accepted:
-            0,
-
-        rejected:
-            0
-
-    };
-}
-
-
-function startMinimizer()
-{
-    S.mode =
-        "MINIMIZE";
-
-    S.minimizer =
-        get(
-            "minimizer",
-            null
-        );
-
-    if (
-        !S.minimizer
-    ) {
-
-        S.minimizer =
-            createMinimizer();
-    }
-
-    put(
-        "minimizer",
-        S.minimizer
-    );
-
-    minimizeStep();
-}
-
-
-function minimizeStep()
-{
-    var m =
-        S.minimizer;
-
-    if (
-        !m ||
-        m.chunkSize < 1
-    ) {
-
-        finishMinimizer();
-
-        return;
-    }
-
-    var start =
-        m.chunk *
-        m.chunkSize;
-
-    if (
-        start >=
-        m.best.length
-    ) {
-
-        m.chunk =
-            0;
-
-        m.chunkSize =
-            Math.floor(
-                m.chunkSize /
-                2
-            );
-
-        put(
-            "minimizer",
-            m
-        );
-
-        setTimeout(
-            minimizeStep,
-            50
-        );
-
-        return;
-    }
-
-    var proposed =
-        copy(
-            m.best
-        );
-
-    proposed.splice(
-        start,
-        m.chunkSize
-    );
-
-    if (
-        !proposed.length
-    ) {
-
-        advanceMinimizer();
-
-        return;
-    }
-
-    m.tests++;
-
-    put(
-        "minimizer",
-        m
-    );
-
-    put(
-        "task",
-        {
-
-            type:
-                "MINIMIZE",
-
-            proposed:
-                copy(proposed),
-
-            previous:
-                copy(m.best),
-
-            awaiting:
-                true
-
-        }
-    );
-
-    S.candidate.sequence =
-        copy(proposed);
-
-    put(
-        "candidate",
-        S.candidate
-    );
-
-    runSequence(
-        proposed,
-        function () {
-
-            /*
-             * No interruption:
-             * proposed reduction did not reproduce the
-             * interruption, so reject it.
-             */
-
-            m.rejected++;
-
-            S.candidate.sequence =
-                copy(m.best);
-
-            put(
-                "candidate",
-                S.candidate
-            );
-
-            del("task");
-
-            advanceMinimizer();
-        }
-    );
-}
-
-
-function advanceMinimizer()
-{
-    var m =
-        S.minimizer;
-
-    m.chunk++;
-
-    var chunks =
-        Math.ceil(
-            m.best.length /
-            m.chunkSize
-        );
-
-    if (
-        m.chunk >= chunks
-    ) {
-
-        m.chunk =
-            0;
-
-        m.chunkSize =
-            Math.floor(
-                m.chunkSize /
-                2
-            );
-    }
-
-    put(
-        "minimizer",
-        m
-    );
-
-    if (
-        m.chunkSize < 1
-    ) {
-
-        finishMinimizer();
-
-        return;
-    }
-
-    setTimeout(
-        minimizeStep,
-        60
-    );
-}
-
-
-function finishMinimizer()
-{
-    var m =
-        S.minimizer;
-
-    if (!m)
+ * START
+ * ============================================================ */
+
+function start() {
+    if (state.running)
         return;
 
-    var result = {
+    state.capabilities = detectCapabilities();
 
-        pattern:
-            S.candidate ?
-            S.candidate.pattern :
-            null,
+    buildModules();
 
-        surfaces:
-            S.candidate ?
-            copy(
-                S.candidate.surfaces
-            ) :
-            [],
+    state.running = true;
 
-        seed:
-            S.candidate ?
-            S.candidate.seed :
-            null,
+    startButton.style.display = "none";
 
-        original:
-            copy(m.original),
+    status.textContent = "STATUS: INITIALIZING";
 
-        minimized:
-            copy(m.best),
+    info.textContent =
+        state.modules.length +
+        " capability modules enabled";
 
-        originalLength:
-            m.original.length,
-
-        minimizedLength:
-            m.best.length,
-
-        tests:
-            m.tests,
-
-        accepted:
-            m.accepted,
-
-        rejected:
-            m.rejected,
-
-        time:
-            Date.now()
-
-    };
-
-    put(
-        "bestCrash",
-        result
-    );
-
-    S.stats.minimized++;
-
-    put(
-        "stats",
-        S.stats
-    );
-
-    log(
-        "================================"
-    );
-
-    log(
-        "MINIMIZED CANDIDATE"
-    );
-
-    log(
-        "Pattern: " +
-        result.pattern
-    );
-
-    log(
-        "Seed: " +
-        result.seed
-    );
-
-    log(
-        "Original operations: " +
-        result.originalLength
-    );
-
-    log(
-        "Minimized operations: " +
-        result.minimizedLength
-    );
-
-    log(
-        "Tests: " +
-        result.tests
-    );
-
-    log(
-        "================================"
-    );
-
-    del("candidate");
-    del("replay");
-    del("minimizer");
-    del("task");
-
-    S.candidate =
-        null;
-
-    S.replay =
-        null;
-
-    S.minimizer =
-        null;
-
-    clearCheckpoint();
-
-    setTimeout(
-        startFuzz,
-        200
-    );
+    setTimeout(runNext, 400);
 }
 
+startButton.addEventListener("click", start);
 
 /* ============================================================
- RECOVERY
- ============================================================ */
+ * LAST RECORD
+ * ============================================================ */
 
-function recover()
-{
-    var task =
-        get(
-            "task",
-            null
-        );
+var last = loadLast();
 
-    var checkpointState =
-        get(
-            "checkpoint",
-            null
-        );
-
-    if (
-        task &&
-        task.type ===
-        "REPLAY" &&
-        task.awaiting
-    ) {
-
-        S.candidate =
-            get(
-                "candidate",
-                null
-            );
-
-        S.replay =
-            get(
-                "replay",
-                null
-            );
-
-        if (
-            S.candidate &&
-            S.replay
-        ) {
-
-            S.replay.interrupted++;
-
-            S.stats.interrupted++;
-
-            put(
-                "replay",
-                S.replay
-            );
-
-            put(
-                "stats",
-                S.stats
-            );
-
-            del("task");
-
-            S.mode =
-                "REPLAY";
-
-            setTimeout(
-                replayNext,
-                300
-            );
-
-            return true;
-        }
-    }
-
-    if (
-        task &&
-        task.type ===
-        "MINIMIZE" &&
-        task.awaiting
-    ) {
-
-        S.candidate =
-            get(
-                "candidate",
-                null
-            );
-
-        S.minimizer =
-            get(
-                "minimizer",
-                null
-            );
-
-        if (
-            S.candidate &&
-            S.minimizer
-        ) {
-
-            S.minimizer.best =
-                copy(
-                    task.proposed
-                );
-
-            S.minimizer.accepted++;
-
-            S.candidate.sequence =
-                copy(
-                    S.minimizer.best
-                );
-
-            put(
-                "candidate",
-                S.candidate
-            );
-
-            put(
-                "minimizer",
-                S.minimizer
-            );
-
-            del("task");
-
-            S.mode =
-                "MINIMIZE";
-
-            setTimeout(
-                minimizeStep,
-                300
-            );
-
-            return true;
-        }
-    }
-
-    /*
-     * If the page/browser restarted during a fuzz case,
-     * preserve the interrupted sequence as candidate.
-     */
-
-    if (
-        checkpointState &&
-        !checkpointState.complete &&
-        checkpointState.sequence
-    ) {
-
-        S.pattern =
-            checkpointState.pattern;
-
-        S.surfaces =
-            copy(
-                checkpointState.surfaces || []
-            );
-
-        S.caseId =
-            checkpointState.caseId;
-
-        setSeed(
-            checkpointState.seed
-        );
-
-        S.sequence =
-            copy(
-                checkpointState.sequence
-            );
-
-        S.index =
-            checkpointState.index;
-
-        S.current =
-            checkpointState.current;
-
-        S.last =
-            checkpointState.last;
-
-        S.stats.interrupted++;
-
-        put(
-            "stats",
-            S.stats
-        );
-
-        saveCandidate(
-            "BROWSER_INTERRUPTION"
-        );
-
-        log(
-            "Interrupted case recovered."
-        );
-
-        return true;
-    }
-
-    return false;
+if (last) {
+    info.textContent =
+        "Last saved: #" +
+        last.sequence +
+        " | " +
+        last.module;
 }
-
-
-/* ============================================================
- DISPLAY
- ============================================================ */
-
-function update()
-{
-    document
-        .getElementById("stats")
-        .textContent =
-
-        "MODE: " +
-        S.mode +
-
-        "\nPS4 TARGET: 13.52" +
-
-        "\nSafari/WebKit family: 17.0" +
-
-        "\nRUN: " +
-        S.run +
-
-        "\nCASE: " +
-        S.caseId +
-
-        "\nSEED: " +
-        RNG.seed +
-
-        "\nCASES: " +
-        S.stats.cases +
-
-        "\nCOMPLETED: " +
-        S.stats.completed +
-
-        "\nINTERRUPTED: " +
-        S.stats.interrupted +
-
-        "\nCANDIDATES: " +
-        S.stats.candidates +
-
-        "\nMINIMIZED: " +
-        S.stats.minimized +
-
-        "\nCORPUS: " +
-        S.corpus.length +
-
-        "\nJS EXCEPTIONS: " +
-        S.errors +
-
-        "\nEVENTS: " +
-        S.events +
-
-        "\nASYNC: " +
-        S.asyncCallbacks;
-
-
-    document
-        .getElementById("pattern")
-        .textContent =
-
-        "PATTERN\n" +
-        S.pattern +
-
-        "\n\nSURFACES\n" +
-        (
-            S.surfaces.length ?
-            S.surfaces.join(
-                " -> "
-            ) :
-            "NONE"
-        );
-
-
-    if (
-        S.candidate
-    ) {
-
-        document
-            .getElementById("candidate")
-            .textContent =
-
-            "CANDIDATE\n" +
-
-            "ID: " +
-            S.candidate.id +
-
-            "\nReason: " +
-            S.candidate.reason +
-
-            "\nPattern: " +
-            S.candidate.pattern +
-
-            "\nSeed: " +
-            S.candidate.seed +
-
-            "\nOperations: " +
-            S.candidate.sequence.length +
-
-            "\nIndex: " +
-            S.candidate.index +
-
-            "\nCurrent: " +
-            S.candidate.current;
-
-    } else {
-
-        document
-            .getElementById("candidate")
-            .textContent =
-            "CANDIDATE\nNONE";
-    }
-
-
-    document
-        .getElementById("minimize")
-        .textContent =
-
-        S.minimizer ?
-
-        (
-            "MINIMIZATION\n" +
-
-            "Original: " +
-            S.minimizer.original.length +
-
-            "\nBest: " +
-            S.minimizer.best.length +
-
-            "\nChunk: " +
-            S.minimizer.chunk +
-
-            "\nChunk size: " +
-            S.minimizer.chunkSize +
-
-            "\nTests: " +
-            S.minimizer.tests +
-
-            "\nAccepted: " +
-            S.minimizer.accepted +
-
-            "\nRejected: " +
-            S.minimizer.rejected
-        ) :
-
-        "MINIMIZATION\nIDLE";
-
-
-    var lines = [];
-    var i;
-
-    for (
-        i = 0;
-        i < S.sequence.length;
-        i++
-    ) {
-
-        lines.push(
-
-            (
-                i === S.index ?
-                ">> " :
-                "   "
-            ) +
-
-            "#" +
-            ("00" + i).slice(-2) +
-            " " +
-
-            S.sequence[i].t +
-
-            (
-                S.sequence[i].id ?
-                " " +
-                S.sequence[i].id :
-                ""
-            )
-
-        );
-    }
-
-    document
-        .getElementById("sequence")
-        .textContent =
-
-        lines.join("\n") +
-
-        "\n\nCURRENT: " +
-        S.current +
-
-        "\nLAST: " +
-        S.last;
-}
-
-
-/* ============================================================
- START
- ============================================================ */
-
-var recovered =
-    recover();
-
-update();
-
-
-document
-    .getElementById("start")
-    .addEventListener(
-        "click",
-        function () {
-
-            if (
-                S.running
-            )
-                return;
-
-            S.running =
-                true;
-
-            if (
-                S.candidate
-            ) {
-
-                startReplay();
-
-            } else {
-
-                startFuzz();
-            }
-
-        },
-        false
-    );
-
-
-/*
- * Automatic continuation after an interrupted browser
- * session.
- */
-
-if (
-    recovered &&
-    S.candidate
-) {
-
-    S.running =
-        true;
-
-    setTimeout(
-        startReplay,
-        400
-    );
-}
-
-
-log(
-    "V19 READY — PS4 13.52"
-);
-
-log(
-    "No adaptive feedback enabled."
-);
-
-log(
-    "Crash hunting / replay / minimization active."
-);
 
 })();
 </script>
