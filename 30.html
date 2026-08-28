@@ -1,3713 +1,1755 @@
+
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
+<meta charset="UTF-8">
 
-<title>PS4 13.52 - WebCore Capability Matrix V24</title>
+<title>PS4 WebCore Capability Crash Hunter V25</title>
 
 <style>
 html, body {
     margin: 0;
     padding: 0;
-    background: #101010;
-    color: #ddd;
+    background: #10131a;
+    color: #e8e8e8;
     font-family: Arial, sans-serif;
+    overflow: hidden;
 }
 
-body {
-    padding: 14px;
+#ui {
+    position: fixed;
+    z-index: 999999;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 18px;
+    background: #181d27;
+    border-bottom: 1px solid #3b4354;
+}
+
+h1 {
+    margin: 0 0 12px 0;
+    font-size: 22px;
+}
+
+#status {
+    font-size: 16px;
+    margin-bottom: 8px;
+}
+
+#info {
+    font-size: 13px;
+    color: #aeb8c8;
 }
 
 button {
-    padding: 12px 20px;
-    margin-right: 8px;
-    font-size: 16px;
-}
-
-#status,
-#summary,
-#scope {
-    margin-top: 10px;
-    padding: 10px;
-    border: 1px solid #333;
-    background: #181818;
-    font-family: monospace;
-}
-
-#matrix {
-    width: 100%;
     margin-top: 12px;
-    border-collapse: collapse;
-    font-size: 12px;
+    padding: 10px 28px;
+    font-size: 17px;
+    background: #2c6bed;
+    color: white;
+    border: 0;
+    border-radius: 4px;
 }
 
-#matrix th,
-#matrix td {
-    border: 1px solid #333;
-    padding: 6px;
-    text-align: left;
-    vertical-align: top;
+#sandbox {
+    position: absolute;
+    top: 130px;
+    left: -10000px;
+    width: 2000px;
+    min-height: 2000px;
 }
 
-#matrix th {
-    background: #222;
-}
-
-.functional {
-    font-weight: bold;
-}
-
-.exposed {
-    font-weight: bold;
-}
-
-.partial {
-    font-weight: bold;
-}
-
-.unsupported {
-    opacity: 0.65;
-}
-
-.error {
-    font-weight: bold;
-}
-
-.category {
-    background: #202020;
-    font-weight: bold;
-}
-
-#export {
-    margin-top: 10px;
-    display: none;
+.hidden-frame {
+    width: 200px;
+    height: 120px;
+    border: 0;
 }
 </style>
 </head>
 
 <body>
 
-<button id="run">RUN V24 MATRIX</button>
-<button id="clear">CLEAR</button>
-<button id="export">EXPORT JSON</button>
+<div id="ui">
+    <h1>PS4 WebCore Capability Crash Hunter V25</h1>
 
-<div id="status">
-READY
+    <div id="status">
+        STATUS: IDLE
+    </div>
+
+    <div id="info">
+        Capability-driven lifecycle stress matrix
+    </div>
+
+    <button id="startButton">
+        INICIAR
+    </button>
 </div>
 
-<div id="scope">
-Target: PS4 13.52<br>
-Mode: capability mapping only<br>
-Excluded: JavaScriptCore / JavaScript / WebAssembly / Linux / tooling / deprecated
-</div>
-
-<div id="summary">
-No tests executed.
-</div>
-
-<table id="matrix">
-<thead>
-<tr>
-    <th>Component</th>
-    <th>Surface</th>
-    <th>Status</th>
-    <th>Probe</th>
-</tr>
-</thead>
-<tbody></tbody>
-</table>
+<div id="sandbox"></div>
 
 <script>
 (function () {
-
 "use strict";
 
+
 /*
-================================================================
- PS4 13.52 WebCore Capability Matrix V24
-================================================================
+ * ============================================================
+ * CONFIGURAÇÃO
+ * ============================================================
+ */
 
- PURPOSE
- -------
- Empirically map WebCore/browser capabilities exposed by the
- target browser.
-
- This is NOT a fuzzer.
-
- No:
-   - large allocations
-   - worker storms
-   - resource exhaustion
-   - navigation loops
-   - crash stress
-   - exploit primitives
-
- STATUS
- ------
- FUNCTIONAL
-     Interface exists and representative operation succeeded.
-
- EXPOSED
-     Interface exists, but only exposure was verified.
-
- PARTIAL
-     Interface exists, but the representative operation could
-     not be completely validated.
-
- UNSUPPORTED
-     Tested interface is not exposed.
-
- ERROR
-     Probe generated an unexpected exception.
-
- IMPORTANT
- ---------
- Presence of a Web API does not prove that every internal
- WebCore component is compiled/enabled.
-
- Likewise, absence of a Web API does not prove that every
- related internal WebCore implementation is absent.
-================================================================
-*/
-
-
-var STORAGE_KEY =
-    "PS4_1352_WEBCORE_MATRIX_V24";
-
-
-var results = [];
-
-var running = false;
-
-var tbody =
-    document.querySelector(
-        "#matrix tbody"
-    );
-
-var statusElement =
-    document.getElementById(
-        "status"
-    );
-
-var summaryElement =
-    document.getElementById(
-        "summary"
-    );
-
-var exportButton =
-    document.getElementById(
-        "export"
-    );
+var CONFIG = {
+    delay: 40,
+    batchSize: 1,
+    maxHistoryEntries: 20,
+    maxNodesPerCase: 12,
+    maxIterationsBeforeYield: 50
+};
 
 
 /*
-================================================================
- CORE
-================================================================
-*/
+ * ============================================================
+ * ESTADO
+ * ============================================================
+ */
 
-function statusText(text)
-{
-    statusElement.textContent = text;
+var state = {
+    running: false,
+    sequence: 0,
+    currentSurface: "",
+    currentCandidate: null,
+    capabilities: {},
+    observers: [],
+    sandbox: null
+};
+
+
+var sandbox = document.getElementById("sandbox");
+var statusElement = document.getElementById("status");
+var infoElement = document.getElementById("info");
+var startButton = document.getElementById("startButton");
+
+
+/*
+ * ============================================================
+ * RANDOM
+ * ============================================================
+ */
+
+function rand(max) {
+    return Math.floor(Math.random() * max);
+}
+
+function choose(array) {
+    if (!array || !array.length)
+        return null;
+
+    return array[rand(array.length)];
 }
 
 
-function save()
-{
-    try {
+/*
+ * ============================================================
+ * PERSISTÊNCIA
+ * ============================================================
+ */
 
+function saveCandidate(candidate) {
+    try {
         localStorage.setItem(
-            STORAGE_KEY,
-            JSON.stringify({
-                version: "V24",
-                target: "PS4 13.52",
-                timestamp: Date.now(),
-                results: results
-            })
+            "ps4_webcore_v25_last_candidate",
+            JSON.stringify(candidate)
         );
-
-    } catch (e) {}
-}
-
-
-function add(
-    component,
-    surface,
-    status,
-    probe
-)
-{
-    var item = {
-        component: component,
-        surface: surface,
-        status: status,
-        probe: probe
-    };
-
-    results.push(item);
-
-    render(item);
-
-    save();
-
-    updateSummary();
-}
-
-
-function render(item)
-{
-    var tr =
-        document.createElement("tr");
-
-    var td1 =
-        document.createElement("td");
-
-    var td2 =
-        document.createElement("td");
-
-    var td3 =
-        document.createElement("td");
-
-    var td4 =
-        document.createElement("td");
-
-    td1.textContent =
-        item.component;
-
-    td2.textContent =
-        item.surface;
-
-    td3.textContent =
-        item.status;
-
-    td4.textContent =
-        item.probe;
-
-    if (item.status === "FUNCTIONAL")
-        td3.className = "functional";
-
-    else if (item.status === "EXPOSED")
-        td3.className = "exposed";
-
-    else if (item.status === "PARTIAL")
-        td3.className = "partial";
-
-    else if (item.status === "UNSUPPORTED")
-        td3.className = "unsupported";
-
-    else
-        td3.className = "error";
-
-    tr.appendChild(td1);
-    tr.appendChild(td2);
-    tr.appendChild(td3);
-    tr.appendChild(td4);
-
-    tbody.appendChild(tr);
-}
-
-
-function updateSummary()
-{
-    var functional = 0;
-    var exposed = 0;
-    var partial = 0;
-    var unsupported = 0;
-    var error = 0;
-
-    for (var i = 0; i < results.length; i++) {
-
-        switch (results[i].status) {
-
-        case "FUNCTIONAL":
-            functional++;
-            break;
-
-        case "EXPOSED":
-            exposed++;
-            break;
-
-        case "PARTIAL":
-            partial++;
-            break;
-
-        case "UNSUPPORTED":
-            unsupported++;
-            break;
-
-        default:
-            error++;
-            break;
-        }
+    } catch (e) {
     }
-
-    summaryElement.textContent =
-        "TOTAL " + results.length +
-        " | FUNCTIONAL " + functional +
-        " | EXPOSED " + exposed +
-        " | PARTIAL " + partial +
-        " | UNSUPPORTED " + unsupported +
-        " | ERROR " + error;
-
-    exportButton.style.display =
-        results.length ?
-        "inline-block" :
-        "none";
 }
 
 
-function globalProbe(
-    component,
-    surface,
-    name
-)
-{
-    var exists =
-        typeof window[name] !== "undefined";
-
-    add(
-        component,
-        surface,
-        exists ?
-            "EXPOSED" :
-            "UNSUPPORTED",
-        "window." + name
-    );
-}
-
-
-function functionProbe(
-    component,
-    surface,
-    name
-)
-{
-    var exists =
-        typeof window[name] === "function";
-
-    add(
-        component,
-        surface,
-        exists ?
-            "EXPOSED" :
-            "UNSUPPORTED",
-        name + " function"
-    );
-}
-
-
-function runProbe(
-    component,
-    surface,
-    description,
-    fn
-)
-{
+function loadLastCandidate() {
     try {
-
-        var result = fn();
-
-        add(
-            component,
-            surface,
-            result === true ?
-                "FUNCTIONAL" :
-                result === false ?
-                "PARTIAL" :
-                "EXPOSED",
-            description
+        var data = localStorage.getItem(
+            "ps4_webcore_v25_last_candidate"
         );
+
+        if (data)
+            return JSON.parse(data);
 
     } catch (e) {
+    }
 
-        add(
-            component,
-            surface,
-            "ERROR",
-            description
-        );
+    return null;
+}
+
+
+/*
+ * ============================================================
+ * CAPABILITY DETECTION
+ * ============================================================
+ */
+
+function detectCapabilities() {
+
+    var c = {};
+
+    c.DOM =
+        !!document.createElement &&
+        !!document.createDocumentFragment;
+
+    c.Events =
+        !!window.Event &&
+        !!document.addEventListener;
+
+    c.Focus =
+        !!HTMLElement.prototype.focus;
+
+    c.Selection =
+        !!window.getSelection;
+
+    c.Range =
+        !!window.Range;
+
+    c.MutationObserver =
+        !!window.MutationObserver;
+
+    c.ResizeObserver =
+        !!window.ResizeObserver;
+
+    c.IntersectionObserver =
+        !!window.IntersectionObserver;
+
+    c.PerformanceObserver =
+        !!window.PerformanceObserver;
+
+    c.CSS =
+        !!window.getComputedStyle;
+
+    c.CSSStyleSheet =
+        !!window.CSSStyleSheet;
+
+    c.DOMParser =
+        !!window.DOMParser;
+
+    c.XMLSerializer =
+        !!window.XMLSerializer;
+
+    c.SVG =
+        !!document.createElementNS;
+
+    c.Canvas2D =
+        !!document.createElement("canvas").getContext;
+
+    c.History =
+        !!window.history &&
+        !!history.pushState;
+
+    c.Animation =
+        !!window.Animation ||
+        !!HTMLElement.prototype.animate;
+
+    c.Fonts =
+        !!document.fonts;
+
+    c.Image =
+        !!window.Image;
+
+    c.ImageBitmap =
+        !!window.createImageBitmap;
+
+    c.Fetch =
+        !!window.fetch;
+
+    c.Blob =
+        !!window.Blob;
+
+    c.FileReader =
+        !!window.FileReader;
+
+    c.URL =
+        !!window.URL;
+
+    c.ReadableStream =
+        !!window.ReadableStream;
+
+    c.TransformStream =
+        !!window.TransformStream;
+
+    c.WebSocket =
+        !!window.WebSocket;
+
+    c.Worker =
+        !!window.Worker;
+
+    c.SharedWorker =
+        !!window.SharedWorker;
+
+    c.MessageChannel =
+        !!window.MessageChannel;
+
+    c.BroadcastChannel =
+        !!window.BroadcastChannel;
+
+    c.DataTransfer =
+        !!window.DataTransfer;
+
+    c.HTMLForms =
+        !!window.HTMLFormElement;
+
+    c.Template =
+        "content" in document.createElement("template");
+
+    c.Text =
+        !!window.Text;
+
+    c.CharacterData =
+        !!window.CharacterData;
+
+    return c;
+}
+
+
+/*
+ * ============================================================
+ * SANDBOX
+ * ============================================================
+ */
+
+function createRoot() {
+
+    var root = document.createElement("div");
+
+    root.style.position = "relative";
+    root.style.width = (100 + rand(500)) + "px";
+    root.style.height = (50 + rand(300)) + "px";
+    root.style.overflow = choose([
+        "visible",
+        "hidden",
+        "scroll",
+        "auto"
+    ]);
+
+    sandbox.appendChild(root);
+
+    return root;
+}
+
+
+function destroyRoot(root) {
+
+    try {
+
+        if (root && root.parentNode)
+            root.parentNode.removeChild(root);
+
+    } catch (e) {
     }
 }
 
 
 /*
-================================================================
- DOM
-================================================================
-*/
+ * ============================================================
+ * ELEMENT FACTORY
+ * ============================================================
+ */
 
-function testDOM()
-{
-    var c = "DOM";
+function createRandomElement() {
 
-    runProbe(
-        c,
-        "Node",
-        "createElement + appendChild",
-        function () {
+    var tags = [
+        "div",
+        "span",
+        "p",
+        "section",
+        "article",
+        "button",
+        "input",
+        "textarea",
+        "select",
+        "option",
+        "table",
+        "tbody",
+        "tr",
+        "td",
+        "canvas",
+        "iframe"
+    ];
 
-            var a =
-                document.createElement("div");
+    var tag = choose(tags);
 
-            var b =
-                document.createElement("span");
+    var element = document.createElement(tag);
 
-            a.appendChild(b);
+    element.className = "v25_" + rand(1000000);
 
-            return a.firstChild === b;
+    element.textContent =
+        "node_" + rand(1000000);
+
+    if (tag === "input") {
+        element.type = choose([
+            "text",
+            "number",
+            "checkbox",
+            "range"
+        ]);
+    }
+
+    if (tag === "iframe") {
+        element.src = "about:blank";
+        element.className = "hidden-frame";
+    }
+
+    return element;
+}
+
+
+/*
+ * ============================================================
+ * DOM
+ * ============================================================
+ */
+
+function opDOM(root) {
+
+    var parent = root;
+    var nodes = [];
+
+    var count = 2 + rand(CONFIG.maxNodesPerCase);
+
+    for (var i = 0; i < count; i++) {
+
+        var node = createRandomElement();
+
+        nodes.push(node);
+
+        if (rand(2)) {
+            parent.appendChild(node);
+            parent = node;
+        } else {
+            root.appendChild(node);
         }
+    }
+
+    if (nodes.length) {
+
+        var victim = choose(nodes);
+
+        try {
+            if (victim.parentNode)
+                victim.parentNode.removeChild(victim);
+        } catch (e) {
+        }
+
+        try {
+            root.appendChild(victim);
+        } catch (e2) {
+        }
+    }
+}
+
+
+/*
+ * ============================================================
+ * DOCUMENT FRAGMENT
+ * ============================================================
+ */
+
+function opFragment(root) {
+
+    var fragment =
+        document.createDocumentFragment();
+
+    var nodes = [];
+
+    for (var i = 0; i < 3 + rand(8); i++) {
+
+        var node = createRandomElement();
+
+        nodes.push(node);
+
+        fragment.appendChild(node);
+    }
+
+    root.appendChild(fragment);
+
+    if (nodes.length && rand(2)) {
+
+        var victim = choose(nodes);
+
+        try {
+            root.removeChild(victim);
+        } catch (e) {
+        }
+    }
+}
+
+
+/*
+ * ============================================================
+ * TEMPLATE / PARSER
+ * ============================================================
+ */
+
+function opTemplate(root) {
+
+    if (!state.capabilities.Template)
+        return;
+
+    var template =
+        document.createElement("template");
+
+    template.innerHTML =
+        "<div><span>A</span><b>B</b><i>C</i></div>";
+
+    var clone =
+        document.importNode(template.content, true);
+
+    root.appendChild(clone);
+
+    if (rand(2)) {
+
+        try {
+            template.innerHTML =
+                "<section><input><textarea></textarea></section>";
+        } catch (e) {
+        }
+    }
+}
+
+
+/*
+ * ============================================================
+ * DOMPARSER / XML
+ * ============================================================
+ */
+
+function opParser(root) {
+
+    if (!state.capabilities.DOMParser)
+        return;
+
+    var parser = new DOMParser();
+
+    var doc = parser.parseFromString(
+        "<div><span>x</span><p>y</p></div>",
+        "text/html"
     );
 
+    if (doc && doc.body) {
 
-    runProbe(
-        c,
-        "DocumentFragment",
-        "fragment append/remove",
-        function () {
+        var imported =
+            document.importNode(doc.body, true);
 
-            var f =
-                document.createDocumentFragment();
+        root.appendChild(imported);
+    }
+}
 
-            var d =
-                document.createElement("div");
 
-            f.appendChild(d);
+function opXML(root) {
 
-            return f.firstChild === d;
+    if (!state.capabilities.XMLSerializer)
+        return;
+
+    var serializer = new XMLSerializer();
+
+    try {
+        var text = serializer.serializeToString(root);
+
+        if (text.length > 0 && rand(2)) {
+            root.setAttribute(
+                "data-v25",
+                String(text.length)
+            );
         }
+    } catch (e) {
+    }
+}
+
+
+/*
+ * ============================================================
+ * EVENTS
+ * ============================================================
+ */
+
+function opEvents(root) {
+
+    var target =
+        document.createElement("button");
+
+    root.appendChild(target);
+
+    function handler() {
+
+        if (rand(2)) {
+            try {
+                target.parentNode.removeChild(target);
+            } catch (e) {
+            }
+        }
+
+        if (rand(2)) {
+            try {
+                root.appendChild(
+                    document.createElement("span")
+                );
+            } catch (e2) {
+            }
+        }
+    }
+
+    target.addEventListener(
+        "click",
+        handler
     );
 
+    try {
+        target.dispatchEvent(
+            new Event("click", {
+                bubbles: true
+            })
+        );
+    } catch (e) {
+    }
 
-    runProbe(
-        c,
-        "TreeWalker",
-        "createTreeWalker",
-        function () {
+    try {
+        target.removeEventListener(
+            "click",
+            handler
+        );
+    } catch (e2) {
+    }
+}
 
-            if (!document.createTreeWalker)
-                return false;
 
-            var w =
-                document.createTreeWalker(
-                    document.body,
-                    1,
-                    null,
-                    false
+/*
+ * ============================================================
+ * FOCUS / SELECTION / RANGE
+ * ============================================================
+ */
+
+function opFocusSelection(root) {
+
+    var input =
+        document.createElement("input");
+
+    input.type = "text";
+    input.value = "PS4_V25_" + rand(999999);
+
+    root.appendChild(input);
+
+    try {
+        input.focus();
+    } catch (e) {
+    }
+
+    if (state.capabilities.Selection &&
+        state.capabilities.Range) {
+
+        try {
+
+            var text =
+                document.createTextNode(
+                    "selection_" + rand(9999)
                 );
 
-            return !!w;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "NodeIterator",
-        "createNodeIterator",
-        function () {
-
-            if (!document.createNodeIterator)
-                return false;
-
-            var n =
-                document.createNodeIterator(
-                    document.body,
-                    1,
-                    null,
-                    false
-                );
-
-            return !!n;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "HTMLCollection",
-        "getElementsByTagName",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.innerHTML =
-                "<span></span><span></span>";
-
-            return
-                d.getElementsByTagName(
-                    "span"
-                ).length === 2;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "NodeList",
-        "querySelectorAll",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.innerHTML =
-                "<span></span><span></span>";
-
-            return
-                d.querySelectorAll(
-                    "span"
-                ).length === 2;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "DOMTokenList",
-        "DOMTokenList"
-    );
-
-
-    globalProbe(
-        c,
-        "NamedNodeMap",
-        "NamedNodeMap"
-    );
-
-
-    globalProbe(
-        c,
-        "MutationObserver",
-        "MutationObserver"
-    );
-
-
-    globalProbe(
-        c,
-        "DOMParser",
-        "DOMParser"
-    );
-
-
-    globalProbe(
-        c,
-        "XMLSerializer",
-        "XMLSerializer"
-    );
-
-
-    globalProbe(
-        c,
-        "Range",
-        "Range"
-    );
-
-
-    globalProbe(
-        c,
-        "Selection",
-        "Selection"
-    );
-
-
-    globalProbe(
-        c,
-        "CustomEvent",
-        "CustomEvent"
-    );
-
-
-    globalProbe(
-        c,
-        "EventTarget",
-        "EventTarget"
-    );
-}
-
-
-/*
-================================================================
- SHADOW DOM / TREE SCOPE
-================================================================
-*/
-
-function testShadow()
-{
-    var c = "DOM/Shadow";
-
-    runProbe(
-        c,
-        "ShadowRoot",
-        "attachShadow + append",
-        function () {
-
-            var host =
-                document.createElement("div");
-
-            if (!host.attachShadow)
-                return false;
-
-            var root =
-                host.attachShadow({
-                    mode: "open"
-                });
-
-            var span =
-                document.createElement("span");
-
-            root.appendChild(span);
-
-            return root.firstChild === span;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "ShadowRoot",
-        "ShadowRoot"
-    );
-
-
-    runProbe(
-        c,
-        "slot",
-        "slot assignment",
-        function () {
-
-            var host =
-                document.createElement("div");
-
-            if (!host.attachShadow)
-                return false;
-
-            var root =
-                host.attachShadow({
-                    mode: "open"
-                });
-
-            var slot =
-                document.createElement("slot");
-
-            root.appendChild(slot);
-
-            var child =
-                document.createElement("span");
-
-            host.appendChild(child);
-
-            return root.querySelector(
-                "slot"
-            ) !== null;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "HTMLSlotElement",
-        "HTMLSlotElement"
-    );
-
-
-    globalProbe(
-        c,
-        "HTMLTemplateElement",
-        "HTMLTemplateElement"
-    );
-}
-
-
-/*
-================================================================
- EVENTS
-================================================================
-*/
-
-function testEvents()
-{
-    var c = "Events";
-
-    globalProbe(
-        c,
-        "Event",
-        "Event"
-    );
-
-    globalProbe(
-        c,
-        "UIEvent",
-        "UIEvent"
-    );
-
-    globalProbe(
-        c,
-        "MouseEvent",
-        "MouseEvent"
-    );
-
-    globalProbe(
-        c,
-        "KeyboardEvent",
-        "KeyboardEvent"
-    );
-
-    globalProbe(
-        c,
-        "FocusEvent",
-        "FocusEvent"
-    );
-
-    globalProbe(
-        c,
-        "WheelEvent",
-        "WheelEvent"
-    );
-
-    globalProbe(
-        c,
-        "DragEvent",
-        "DragEvent"
-    );
-
-    globalProbe(
-        c,
-        "PointerEvent",
-        "PointerEvent"
-    );
-
-    globalProbe(
-        c,
-        "TouchEvent",
-        "TouchEvent"
-    );
-
-
-    runProbe(
-        c,
-        "dispatch",
-        "capture + bubble",
-        function () {
-
-            var parent =
-                document.createElement("div");
-
-            var child =
-                document.createElement("button");
-
-            parent.appendChild(child);
-
-            var capture = false;
-            var bubble = false;
-
-            parent.addEventListener(
-                "v24",
-                function () {
-                    capture = true;
-                },
-                true
-            );
-
-            parent.addEventListener(
-                "v24",
-                function () {
-                    bubble = true;
-                },
-                false
-            );
-
-            var e =
-                document.createEvent("Event");
-
-            e.initEvent(
-                "v24",
-                true,
-                true
-            );
-
-            child.dispatchEvent(e);
-
-            return capture && bubble;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "focus",
-        "focus + blur",
-        function () {
-
-            var input =
-                document.createElement("input");
-
-            document.body.appendChild(input);
-
-            input.focus();
-            input.blur();
-
-            input.parentNode.removeChild(input);
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "Pointer Capture",
-        "setPointerCapture presence",
-        function () {
-
-            return
-                typeof Element.prototype
-                    .setPointerCapture ===
-                "function";
-        }
-    );
-}
-
-
-/*
-================================================================
- FOCUS / SELECTION / EDITING
-================================================================
-*/
-
-function testEditing()
-{
-    var c = "Focus/Selection/Editing";
-
-    globalProbe(
-        c,
-        "Selection",
-        "getSelection"
-    );
-
-    globalProbe(
-        c,
-        "Range",
-        "Range"
-    );
-
-    globalProbe(
-        c,
-        "InputEvent",
-        "InputEvent"
-    );
-
-    globalProbe(
-        c,
-        "BeforeInputEvent",
-        "InputEvent"
-    );
-
-
-    runProbe(
-        c,
-        "Range",
-        "selectNodeContents",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.textContent = "v24";
+            root.appendChild(text);
 
             var range =
                 document.createRange();
 
-            range.selectNodeContents(d);
+            range.selectNodeContents(text);
 
-            var fragment =
-                range.cloneContents();
+            var selection =
+                window.getSelection();
 
-            return
-                fragment.textContent === "v24";
+            selection.removeAllRanges();
+            selection.addRange(range);
+
+            if (rand(2)) {
+
+                try {
+                    text.parentNode.removeChild(text);
+                } catch (e2) {
+                }
+            }
+
+            selection.removeAllRanges();
+
+        } catch (e3) {
         }
-    );
+    }
 
-
-    runProbe(
-        c,
-        "contenteditable",
-        "editing state",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.contentEditable = "true";
-
-            return
-                d.contentEditable === "true";
-        }
-    );
-
-
-    runProbe(
-        c,
-        "execCommand",
-        "document.execCommand",
-        function () {
-
-            return
-                typeof document.execCommand ===
-                "function";
-        }
-    );
+    try {
+        input.blur();
+    } catch (e4) {
+    }
 }
 
 
 /*
-================================================================
- PAGE / DOCUMENT / FRAME
-================================================================
-*/
+ * ============================================================
+ * CSS / STYLE
+ * ============================================================
+ */
 
-function testPage()
-{
-    var c = "Page/Document/Frame";
+function opCSS(root) {
 
-    globalProbe(
-        c,
-        "Navigator",
-        "Navigator"
-    );
-
-    globalProbe(
-        c,
-        "Location",
-        "Location"
-    );
-
-    globalProbe(
-        c,
-        "History",
-        "History"
-    );
-
-
-    runProbe(
-        c,
-        "iframe",
-        "iframe contentDocument",
-        function () {
-
-            var frame =
-                document.createElement("iframe");
-
-            frame.src = "about:blank";
-
-            document.body.appendChild(frame);
-
-            var ok =
-                !!frame.contentDocument &&
-                !!frame.contentWindow;
-
-            frame.parentNode.removeChild(frame);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "nested iframe",
-        "frame inside frame",
-        function () {
-
-            var outer =
-                document.createElement("iframe");
-
-            outer.src = "about:blank";
-
-            document.body.appendChild(outer);
-
-            if (!outer.contentDocument)
-                return false;
-
-            var inner =
-                outer.contentDocument
-                    .createElement("iframe");
-
-            inner.src = "about:blank";
-
-            outer.contentDocument.body
-                .appendChild(inner);
-
-            var ok =
-                !!inner.contentDocument;
-
-            outer.parentNode.removeChild(outer);
-
-            return ok;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "Window",
-        "Window"
-    );
-
-    globalProbe(
-        c,
-        "WindowProxy",
-        "WindowProxy"
-    );
-
-
-    globalProbe(
-        c,
-        "Page Visibility",
-        "onvisibilitychange"
-    );
-
-
-    globalProbe(
-        c,
-        "beforeunload",
-        "onbeforeunload"
-    );
-
-    globalProbe(
-        c,
-        "pagehide",
-        "onpagehide"
-    );
-
-    globalProbe(
-        c,
-        "pageshow",
-        "onpageshow"
-    );
-}
-
-
-/*
-================================================================
- HISTORY
-================================================================
-*/
-
-function testHistory()
-{
-    var c = "History";
-
-    runProbe(
-        c,
-        "pushState",
-        "history.pushState",
-        function () {
-
-            if (!history.pushState)
-                return false;
-
-            history.pushState(
-                {
-                    v24: true
-                },
-                "",
-                location.href
-            );
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "replaceState",
-        "history.replaceState",
-        function () {
-
-            if (!history.replaceState)
-                return false;
-
-            history.replaceState(
-                {
-                    v24: true
-                },
-                "",
-                location.href
-            );
-
-            return true;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "PopStateEvent",
-        "PopStateEvent"
-    );
-
-
-    globalProbe(
-        c,
-        "HashChangeEvent",
-        "HashChangeEvent"
-    );
-}
-
-
-/*
-================================================================
- CSSOM / CSS PARSER / STYLE
-================================================================
-*/
-
-function testCSS()
-{
-    var c = "CSS/Style";
-
-    globalProbe(
-        c,
-        "CSS",
-        "CSS"
-    );
-
-    globalProbe(
-        c,
-        "CSSRule",
-        "CSSRule"
-    );
-
-    globalProbe(
-        c,
-        "CSSStyleRule",
-        "CSSStyleRule"
-    );
-
-    globalProbe(
-        c,
-        "CSSStyleSheet",
-        "CSSStyleSheet"
-    );
-
-    globalProbe(
-        c,
-        "CSSMediaRule",
-        "CSSMediaRule"
-    );
-
-    globalProbe(
-        c,
-        "CSSKeyframesRule",
-        "CSSKeyframesRule"
-    );
-
-    globalProbe(
-        c,
-        "CSSKeyframeRule",
-        "CSSKeyframeRule"
-    );
-
-    globalProbe(
-        c,
-        "CSSSupportsRule",
-        "CSSSupportsRule"
-    );
-
-    globalProbe(
-        c,
-        "CSSNamespaceRule",
-        "CSSNamespaceRule"
-    );
-
-
-    runProbe(
-        c,
-        "style element",
-        "dynamic stylesheet",
-        function () {
-
-            var style =
-                document.createElement("style");
-
-            style.textContent =
-                ".v24-css-test { width:10px; }";
-
-            document.head.appendChild(style);
-
-            var ok =
-                !!style.sheet;
-
-            style.parentNode.removeChild(style);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "CSSOM",
-        "insertRule",
-        function () {
-
-            var style =
-                document.createElement("style");
-
-            document.head.appendChild(style);
-
-            style.sheet.insertRule(
-                ".v24-rule { display:block; }",
-                0
-            );
-
-            var ok =
-                style.sheet.cssRules.length === 1;
-
-            style.parentNode.removeChild(style);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "computed style",
-        "getComputedStyle",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.style.display = "block";
-
-            document.body.appendChild(d);
-
-            var s =
-                getComputedStyle(d);
-
-            var ok =
-                s.display === "block";
-
-            d.parentNode.removeChild(d);
-
-            return ok;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "CSS Typed OM",
-        "CSSUnitValue"
-    );
-
-    globalProbe(
-        c,
-        "CSS Typed OM",
-        "CSSNumericValue"
-    );
-
-    globalProbe(
-        c,
-        "CSS Typed OM",
-        "CSSTransformValue"
-    );
-}
-
-
-/*
-================================================================
- LAYOUT
-================================================================
-*/
-
-function testLayout()
-{
-    var c = "Layout";
-
-    var d =
+    var node =
         document.createElement("div");
 
-    d.style.cssText =
-        "display:block;" +
-        "position:relative;" +
-        "width:120px;" +
-        "height:60px;" +
-        "overflow:auto;";
-
-    document.body.appendChild(d);
-
-
-    runProbe(
-        c,
-        "block formatting",
-        "block offset geometry",
-        function () {
-
-            return
-                d.offsetWidth >= 0 &&
-                d.offsetHeight >= 0;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "inline formatting",
-        "inline child",
-        function () {
-
-            var span =
-                document.createElement("span");
-
-            span.textContent = "v24";
-
-            d.appendChild(span);
-
-            return
-                span.offsetWidth >= 0;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "inline-block",
-        "display:inline-block",
-        function () {
-
-            d.style.display =
-                "inline-block";
-
-            void d.offsetWidth;
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "position",
-        "absolute positioning",
-        function () {
-
-            d.style.position =
-                "absolute";
-
-            void d.offsetWidth;
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "overflow",
-        "overflow mutation",
-        function () {
-
-            d.style.overflow =
-                "hidden";
-
-            void d.offsetWidth;
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "flex",
-        "display:flex",
-        function () {
-
-            d.style.display = "flex";
-
-            void d.offsetWidth;
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "grid",
-        "display:grid",
-        function () {
-
-            d.style.display = "grid";
-
-            void d.offsetWidth;
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "table",
-        "table formatting",
-        function () {
-
-            var table =
-                document.createElement("div");
-
-            table.style.display =
-                "table";
-
-            var cell =
-                document.createElement("div");
-
-            cell.style.display =
-                "table-cell";
-
-            table.appendChild(cell);
-
-            document.body.appendChild(table);
-
-            var ok =
-                table.offsetWidth >= 0;
-
-            table.parentNode.removeChild(table);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "float",
-        "float layout",
-        function () {
-
-            d.style.display = "block";
-            d.style.cssFloat = "left";
-
-            void d.offsetWidth;
-
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "ruby",
-        "ruby markup",
-        function () {
-
-            var ruby =
-                document.createElement("ruby");
-
-            ruby.innerHTML =
-                "A<rt>B</rt>";
-
-            document.body.appendChild(ruby);
-
-            var ok =
-                ruby.offsetWidth >= 0;
-
-            ruby.parentNode.removeChild(ruby);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "text layout",
-        "text geometry",
-        function () {
-
-            var span =
-                document.createElement("span");
-
-            span.textContent =
-                "WebCore V24";
-
-            document.body.appendChild(span);
-
-            var ok =
-                span.offsetWidth >= 0;
-
-            span.parentNode.removeChild(span);
-
-            return ok;
-        }
-    );
-
-
-    d.parentNode.removeChild(d);
-}
-
-
-/*
-================================================================
- SCROLLING
-================================================================
-*/
-
-function testScrolling()
-{
-    var c = "Scrolling";
-
-    runProbe(
-        c,
-        "scrollTop",
-        "scroll container",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.style.cssText =
-                "width:20px;" +
-                "height:20px;" +
-                "overflow:scroll;";
-
-            var child =
-                document.createElement("div");
-
-            child.style.cssText =
-                "width:200px;height:200px;";
-
-            d.appendChild(child);
-
-            document.body.appendChild(d);
-
-            d.scrollTop = 10;
-            d.scrollLeft = 10;
-
-            var ok =
-                d.scrollTop >= 0;
-
-            d.parentNode.removeChild(d);
-
-            return ok;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "ScrollToOptions",
-        "ScrollToOptions"
-    );
-
-
-    globalProbe(
-        c,
-        "ScrollTimeline",
-        "ScrollTimeline"
-    );
-
-
-    globalProbe(
-        c,
-        "ViewTimeline",
-        "ViewTimeline"
-    );
-}
-
-
-/*
-================================================================
- RENDERING
-================================================================
-*/
-
-function testRendering()
-{
-    var c = "Rendering";
-
-    runProbe(
-        c,
-        "Render geometry",
-        "getBoundingClientRect",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            document.body.appendChild(d);
-
-            var r =
-                d.getBoundingClientRect();
-
-            var ok =
-                typeof r.width !== "undefined";
-
-            d.parentNode.removeChild(d);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "style invalidation",
-        "class mutation + layout",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.className =
-                "v24-render";
-
-            document.body.appendChild(d);
-
-            d.style.display = "none";
-
-            void d.offsetWidth;
-
-            d.style.display = "block";
-
-            void d.offsetWidth;
-
-            d.parentNode.removeChild(d);
-
-            return true;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "ResizeObserver",
-        "ResizeObserver"
-    );
-}
-
-
-/*
-================================================================
- HTML FORMS
-================================================================
-*/
-
-function testForms()
-{
-    var c = "HTML/Forms";
-
-    globalProbe(
-        c,
-        "HTMLInputElement",
-        "HTMLInputElement"
-    );
-
-    globalProbe(
-        c,
-        "HTMLTextAreaElement",
-        "HTMLTextAreaElement"
-    );
-
-    globalProbe(
-        c,
-        "HTMLSelectElement",
-        "HTMLSelectElement"
-    );
-
-    globalProbe(
-        c,
-        "HTMLOptionElement",
-        "HTMLOptionElement"
-    );
-
-    globalProbe(
-        c,
-        "HTMLFormElement",
-        "HTMLFormElement"
-    );
-
-    globalProbe(
-        c,
-        "HTMLDataListElement",
-        "HTMLDataListElement"
-    );
-
-
-    runProbe(
-        c,
-        "input type state",
-        "text/search/number transition",
-        function () {
-
-            var input =
-                document.createElement("input");
-
-            input.type = "text";
-            input.type = "search";
-            input.type = "number";
-
-            return input.type === "number";
-        }
-    );
-
-
-    runProbe(
-        c,
-        "datalist",
-        "input[list] association",
-        function () {
-
-            var input =
-                document.createElement("input");
-
-            var list =
-                document.createElement("datalist");
-
-            list.id = "v24-list";
-
-            input.setAttribute(
-                "list",
-                "v24-list"
+    root.appendChild(node);
+
+    var styles = [
+        ["display", "block"],
+        ["display", "inline-block"],
+        ["position", "absolute"],
+        ["position", "relative"],
+        ["overflow", "hidden"],
+        ["overflow", "scroll"],
+        ["float", "left"],
+        ["float", "right"],
+        ["width", (1 + rand(500)) + "px"],
+        ["height", (1 + rand(300)) + "px"]
+    ];
+
+    for (var i = 0; i < 4 + rand(6); i++) {
+
+        var entry = choose(styles);
+
+        try {
+            node.style.setProperty(
+                entry[0],
+                entry[1]
             );
-
-            var option =
-                document.createElement("option");
-
-            option.value = "v24";
-
-            list.appendChild(option);
-
-            return list.options.length === 1;
+        } catch (e) {
         }
-    );
+    }
 
+    try {
+        void node.offsetWidth;
+        void node.offsetHeight;
+        window.getComputedStyle(node).display;
+    } catch (e2) {
+    }
 
-    runProbe(
-        c,
-        "form validation",
-        "required + checkValidity",
-        function () {
+    if (rand(2)) {
 
-            var input =
-                document.createElement("input");
-
-            input.required = true;
-
-            return
-                typeof input.checkValidity ===
-                "function";
+        try {
+            node.style.cssText = "";
+        } catch (e3) {
         }
-    );
+    }
 }
 
 
 /*
-================================================================
- HTML PARSER
-================================================================
-*/
+ * ============================================================
+ * LAYOUT
+ * ============================================================
+ */
 
-function testParser()
-{
-    var c = "HTML Parser";
+function opLayout(root) {
 
-    runProbe(
-        c,
-        "innerHTML",
-        "fragment parsing",
-        function () {
+    var outer =
+        document.createElement("div");
 
-            var d =
-                document.createElement("div");
+    var inner =
+        document.createElement("div");
 
-            d.innerHTML =
-                "<div><span>v24</span></div>";
+    outer.style.position =
+        choose([
+            "relative",
+            "absolute"
+        ]);
 
-            return
-                d.firstChild &&
-                d.firstChild.firstChild;
-        }
-    );
+    inner.style.display =
+        choose([
+            "block",
+            "inline-block",
+            "table"
+        ]);
 
+    inner.style.width =
+        (10 + rand(500)) + "px";
 
-    runProbe(
-        c,
-        "outerHTML",
-        "serialization",
-        function () {
+    inner.style.height =
+        (10 + rand(500)) + "px";
 
-            var d =
-                document.createElement("div");
+    outer.appendChild(inner);
+    root.appendChild(outer);
 
-            d.innerHTML =
-                "<span>v24</span>";
+    try {
+        void outer.offsetWidth;
+        void outer.offsetHeight;
 
-            return
-                d.firstChild.outerHTML
-                    .indexOf("span") >= 0;
-        }
-    );
+        inner.style.width =
+            (10 + rand(500)) + "px";
 
+        void inner.offsetWidth;
 
-    runProbe(
-        c,
-        "insertAdjacentHTML",
-        "fragment insertion",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.insertAdjacentHTML(
-                "beforeend",
-                "<span>v24</span>"
-            );
-
-            return d.children.length === 1;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "template parser",
-        "template.content",
-        function () {
-
-            var t =
-                document.createElement("template");
-
-            t.innerHTML =
-                "<span>v24</span>";
-
-            return
-                t.content.firstChild !== null;
-        }
-    );
+    } catch (e) {
+    }
 }
 
 
 /*
-================================================================
- XML
-================================================================
-*/
+ * ============================================================
+ * SVG
+ * ============================================================
+ */
 
-function testXML()
-{
-    var c = "XML";
+function opSVG(root) {
 
-    globalProbe(
-        c,
-        "DOMParser",
-        "DOMParser"
-    );
+    if (!state.capabilities.SVG)
+        return;
 
-    globalProbe(
-        c,
-        "XMLSerializer",
-        "XMLSerializer"
-    );
+    var ns =
+        "http://www.w3.org/2000/svg";
 
+    var svg =
+        document.createElementNS(ns, "svg");
 
-    runProbe(
-        c,
-        "XML parser",
-        "DOMParser text/xml",
-        function () {
+    var rect =
+        document.createElementNS(ns, "rect");
 
-            var parser =
-                new DOMParser();
+    svg.setAttribute("width", "200");
+    svg.setAttribute("height", "100");
 
-            var doc =
-                parser.parseFromString(
-                    "<root><child/></root>",
-                    "text/xml"
-                );
+    rect.setAttribute("x", "10");
+    rect.setAttribute("y", "10");
+    rect.setAttribute("width", "80");
+    rect.setAttribute("height", "50");
 
-            return
-                !!doc &&
-                !!doc.documentElement;
+    svg.appendChild(rect);
+    root.appendChild(svg);
+
+    try {
+
+        rect.setAttribute(
+            "width",
+            String(10 + rand(150))
+        );
+
+        if (rect.getBoundingClientRect)
+            rect.getBoundingClientRect();
+
+    } catch (e) {
+    }
+
+    if (rand(2)) {
+
+        try {
+            svg.removeChild(rect);
+        } catch (e2) {
         }
-    );
-
-
-    runProbe(
-        c,
-        "XML serializer",
-        "serializeToString",
-        function () {
-
-            var parser =
-                new DOMParser();
-
-            var doc =
-                parser.parseFromString(
-                    "<root/>",
-                    "text/xml"
-                );
-
-            var serializer =
-                new XMLSerializer();
-
-            return
-                serializer.serializeToString(
-                    doc
-                ).indexOf("root") >= 0;
-        }
-    );
+    }
 }
 
 
 /*
-================================================================
- SVG
-================================================================
-*/
+ * ============================================================
+ * FORMS
+ * ============================================================
+ */
 
-function testSVG()
-{
-    var c = "SVG";
+function opForms(root) {
 
-    globalProbe(
-        c,
-        "SVGElement",
-        "SVGElement"
-    );
+    var form =
+        document.createElement("form");
 
-    globalProbe(
-        c,
-        "SVGSVGElement",
-        "SVGSVGElement"
-    );
+    var input =
+        document.createElement("input");
 
-    globalProbe(
-        c,
-        "SVGRectElement",
-        "SVGRectElement"
-    );
+    var select =
+        document.createElement("select");
 
-    globalProbe(
-        c,
-        "SVGPathElement",
-        "SVGPathElement"
-    );
+    var option =
+        document.createElement("option");
 
-    globalProbe(
-        c,
-        "SVGGraphicsElement",
-        "SVGGraphicsElement"
-    );
+    option.textContent = "A";
 
+    select.appendChild(option);
 
-    runProbe(
-        c,
-        "SVG tree",
-        "svg/g/rect",
-        function () {
+    form.appendChild(input);
+    form.appendChild(select);
 
-            var svg =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "svg"
-                );
+    root.appendChild(form);
 
-            var g =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "g"
-                );
+    try {
+        input.value = "x" + rand(99999);
+        input.focus();
+        input.blur();
+    } catch (e) {
+    }
 
-            var rect =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "rect"
-                );
+    if (rand(2)) {
 
-            rect.setAttribute(
-                "width",
-                "20"
-            );
-
-            rect.setAttribute(
-                "height",
-                "20"
-            );
-
-            g.appendChild(rect);
-            svg.appendChild(g);
-
-            return
-                svg.firstChild === g;
+        try {
+            form.reset();
+        } catch (e2) {
         }
-    );
+    }
 
+    try {
 
-    runProbe(
-        c,
-        "SVG geometry",
-        "getBoundingClientRect",
-        function () {
+        if (form.parentNode)
+            form.parentNode.removeChild(form);
 
-            var svg =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "svg"
-                );
-
-            svg.setAttribute(
-                "width",
-                "40"
-            );
-
-            svg.setAttribute(
-                "height",
-                "40"
-            );
-
-            document.body.appendChild(svg);
-
-            var rect =
-                svg.getBoundingClientRect();
-
-            var ok =
-                typeof rect.width !==
-                "undefined";
-
-            svg.parentNode.removeChild(svg);
-
-            return ok;
-        }
-    );
+    } catch (e3) {
+    }
 }
 
 
 /*
-================================================================
- MATHML
-================================================================
-*/
+ * ============================================================
+ * HISTORY
+ * ============================================================
+ */
 
-function testMathML()
-{
-    var c = "MathML";
+function opHistory(root) {
 
-    runProbe(
-        c,
-        "MathML namespace",
-        "create MathML element",
-        function () {
+    if (!state.capabilities.History)
+        return;
 
-            var math =
-                document.createElementNS(
-                    "http://www.w3.org/1998/Math/MathML",
-                    "math"
-                );
+    try {
 
-            return
-                math.namespaceURI ===
-                "http://www.w3.org/1998/Math/MathML";
-        }
-    );
+        history.pushState(
+            {
+                v25: state.sequence,
+                value: rand(999999)
+            },
+            "",
+            "#v25_" + state.sequence
+        );
 
-
-    runProbe(
-        c,
-        "MathML layout",
-        "append math element",
-        function () {
-
-            var math =
-                document.createElementNS(
-                    "http://www.w3.org/1998/Math/MathML",
-                    "math"
-                );
-
-            math.innerHTML =
-                "<mi>x</mi>";
-
-            document.body.appendChild(math);
-
-            var ok =
-                math.offsetWidth >= 0;
-
-            math.parentNode.removeChild(math);
-
-            return ok;
-        }
-    );
+    } catch (e) {
+    }
 }
 
 
 /*
-================================================================
- CANVAS
-================================================================
-*/
+ * ============================================================
+ * ANIMATION
+ * ============================================================
+ */
 
-function testCanvas()
-{
-    var c = "Canvas";
+function opAnimation(root) {
 
-    runProbe(
-        c,
-        "Canvas 2D",
-        "getContext(2d)",
-        function () {
+    var node =
+        document.createElement("div");
 
-            var canvas =
-                document.createElement("canvas");
+    node.style.width = "20px";
+    node.style.height = "20px";
 
-            canvas.width = 16;
-            canvas.height = 16;
+    root.appendChild(node);
 
-            var ctx =
-                canvas.getContext("2d");
+    if (node.animate) {
 
-            if (!ctx)
-                return false;
+        try {
+
+            var animation =
+                node.animate(
+                    [
+                        {
+                            transform:
+                                "translateX(0px)"
+                        },
+                        {
+                            transform:
+                                "translateX(10px)"
+                        }
+                    ],
+                    {
+                        duration: 20
+                    }
+                );
+
+            if (rand(2))
+                animation.cancel();
+
+        } catch (e) {
+        }
+    }
+}
+
+
+/*
+ * ============================================================
+ * MUTATION OBSERVER
+ * ============================================================
+ */
+
+function opMutationObserver(root) {
+
+    if (!state.capabilities.MutationObserver)
+        return;
+
+    var observer =
+        new MutationObserver(function () {
+
+            try {
+
+                if (rand(3) === 0 &&
+                    root.firstChild) {
+
+                    root.removeChild(
+                        root.firstChild
+                    );
+                }
+
+            } catch (e) {
+            }
+        });
+
+    try {
+
+        observer.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true
+        });
+
+        var node =
+            document.createElement("div");
+
+        root.appendChild(node);
+
+        node.setAttribute(
+            "data-x",
+            String(rand(999))
+        );
+
+        if (rand(2))
+            root.removeChild(node);
+
+    } catch (e2) {
+    }
+
+    try {
+        observer.disconnect();
+    } catch (e3) {
+    }
+}
+
+
+/*
+ * ============================================================
+ * RESIZE OBSERVER
+ * ============================================================
+ */
+
+function opResizeObserver(root) {
+
+    if (!state.capabilities.ResizeObserver)
+        return;
+
+    var node =
+        document.createElement("div");
+
+    root.appendChild(node);
+
+    try {
+
+        var observer =
+            new ResizeObserver(function () {
+
+                try {
+                    void node.offsetWidth;
+                } catch (e) {
+                }
+            });
+
+        observer.observe(node);
+
+        node.style.width =
+            (20 + rand(200)) + "px";
+
+        node.style.height =
+            (20 + rand(200)) + "px";
+
+        observer.disconnect();
+
+    } catch (e2) {
+    }
+}
+
+
+/*
+ * ============================================================
+ * INTERSECTION OBSERVER
+ * ============================================================
+ */
+
+function opIntersectionObserver(root) {
+
+    if (!state.capabilities.IntersectionObserver)
+        return;
+
+    var node =
+        document.createElement("div");
+
+    node.style.width = "30px";
+    node.style.height = "30px";
+
+    root.appendChild(node);
+
+    try {
+
+        var observer =
+            new IntersectionObserver(function () {
+
+                try {
+                    node.getBoundingClientRect();
+                } catch (e) {
+                }
+            });
+
+        observer.observe(node);
+
+        observer.disconnect();
+
+    } catch (e2) {
+    }
+}
+
+
+/*
+ * ============================================================
+ * CANVAS 2D
+ * ============================================================
+ */
+
+function opCanvas(root) {
+
+    if (!state.capabilities.Canvas2D)
+        return;
+
+    var canvas =
+        document.createElement("canvas");
+
+    canvas.width =
+        16 + rand(256);
+
+    canvas.height =
+        16 + rand(256);
+
+    root.appendChild(canvas);
+
+    try {
+
+        var ctx =
+            canvas.getContext("2d");
+
+        if (ctx) {
 
             ctx.fillRect(
                 0,
                 0,
-                4,
-                4
+                10,
+                10
             );
 
-            return true;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "ImageData",
-        "createImageData",
-        function () {
-
-            var canvas =
-                document.createElement("canvas");
-
-            var ctx =
-                canvas.getContext("2d");
-
-            if (!ctx)
-                return false;
-
-            var data =
-                ctx.createImageData(
-                    2,
-                    2
-                );
-
-            return
-                data.data.length === 16;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "OffscreenCanvas",
-        "OffscreenCanvas"
-    );
-
-
-    globalProbe(
-        c,
-        "WebGL",
-        "WebGLRenderingContext"
-    );
-
-
-    globalProbe(
-        c,
-        "WebGL2",
-        "WebGL2RenderingContext"
-    );
-}
-
-
-/*
-================================================================
- IMAGES
-================================================================
-*/
-
-function testImages()
-{
-    var c = "Images";
-
-    globalProbe(
-        c,
-        "HTMLImageElement",
-        "HTMLImageElement"
-    );
-
-    globalProbe(
-        c,
-        "Image",
-        "Image"
-    );
-
-    globalProbe(
-        c,
-        "ImageBitmap",
-        "ImageBitmap"
-    );
-
-    functionProbe(
-        c,
-        "createImageBitmap",
-        "createImageBitmap"
-    );
-
-
-    runProbe(
-        c,
-        "picture",
-        "picture/source/img",
-        function () {
-
-            var picture =
-                document.createElement("picture");
-
-            var source =
-                document.createElement("source");
-
-            var img =
-                document.createElement("img");
-
-            picture.appendChild(source);
-            picture.appendChild(img);
-
-            return picture.children.length === 2;
-        }
-    );
-}
-
-
-/*
-================================================================
- TEXT / FONTS
-================================================================
-*/
-
-function testTextFonts()
-{
-    var c = "Text/Fonts";
-
-    globalProbe(
-        c,
-        "Text",
-        "Text"
-    );
-
-    globalProbe(
-        c,
-        "CharacterData",
-        "CharacterData"
-    );
-
-    globalProbe(
-        c,
-        "FontFace",
-        "FontFace"
-    );
-
-
-    runProbe(
-        c,
-        "Text layout",
-        "text node + geometry",
-        function () {
-
-            var span =
-                document.createElement("span");
-
-            span.textContent =
-                "WebCore V24";
-
-            document.body.appendChild(span);
-
-            var ok =
-                span.offsetWidth >= 0;
-
-            span.parentNode.removeChild(span);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "font CSS",
-        "font-family + font-size",
-        function () {
-
-            var span =
-                document.createElement("span");
-
-            span.style.fontFamily =
-                "serif";
-
-            span.style.fontSize =
-                "16px";
-
-            span.textContent = "V24";
-
-            document.body.appendChild(span);
-
-            var ok =
-                span.offsetWidth >= 0;
-
-            span.parentNode.removeChild(span);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "document.fonts",
-        "FontFaceSet",
-        function () {
-
-            return
-                !!document.fonts;
-        }
-    );
-}
-
-
-/*
-================================================================
- ANIMATION / TRANSITION
-================================================================
-*/
-
-function testAnimation()
-{
-    var c = "Animation";
-
-    globalProbe(
-        c,
-        "Animation",
-        "Animation"
-    );
-
-    globalProbe(
-        c,
-        "KeyframeEffect",
-        "KeyframeEffect"
-    );
-
-    globalProbe(
-        c,
-        "AnimationEvent",
-        "AnimationEvent"
-    );
-
-    globalProbe(
-        c,
-        "TransitionEvent",
-        "TransitionEvent"
-    );
-
-
-    runProbe(
-        c,
-        "CSS transition",
-        "transition style",
-        function () {
-
-            var d =
-                document.createElement("div");
-
-            d.style.transition =
-                "width 1ms";
-
-            d.style.width =
-                "10px";
-
-            document.body.appendChild(d);
-
-            d.style.width =
-                "20px";
-
-            void d.offsetWidth;
-
-            d.parentNode.removeChild(d);
-
-            return true;
-        }
-    );
-}
-
-
-/*
-================================================================
- OBSERVERS
-================================================================
-*/
-
-function testObservers()
-{
-    var c = "Observers";
-
-    globalProbe(
-        c,
-        "MutationObserver",
-        "MutationObserver"
-    );
-
-    globalProbe(
-        c,
-        "ResizeObserver",
-        "ResizeObserver"
-    );
-
-    globalProbe(
-        c,
-        "IntersectionObserver",
-        "IntersectionObserver"
-    );
-
-    globalProbe(
-        c,
-        "PerformanceObserver",
-        "PerformanceObserver"
-    );
-
-
-    runProbe(
-        c,
-        "MutationObserver operation",
-        "observe + mutation",
-        function () {
-
-            if (!window.MutationObserver)
-                return false;
-
-            var d =
-                document.createElement("div");
-
-            var called = false;
-
-            var observer =
-                new MutationObserver(
-                    function () {
-                        called = true;
-                    }
-                );
-
-            observer.observe(
-                d,
-                {
-                    childList: true
-                }
-            );
-
-            d.appendChild(
-                document.createElement("span")
-            );
-
-            observer.disconnect();
-
-            return true;
-        }
-    );
-}
-
-
-/*
-================================================================
- LOADER / FETCH / RESOURCE
-================================================================
-*/
-
-function testLoader()
-{
-    var c = "Loader/Resources";
-
-    globalProbe(
-        c,
-        "fetch",
-        "fetch"
-    );
-
-    globalProbe(
-        c,
-        "Request",
-        "Request"
-    );
-
-    globalProbe(
-        c,
-        "Response",
-        "Response"
-    );
-
-    globalProbe(
-        c,
-        "Headers",
-        "Headers"
-    );
-
-    globalProbe(
-        c,
-        "URL",
-        "URL"
-    );
-
-    globalProbe(
-        c,
-        "URLSearchParams",
-        "URLSearchParams"
-    );
-
-
-    runProbe(
-        c,
-        "URL parser",
-        "new URL",
-        function () {
-
-            var u =
-                new URL(
-                    "https://example.com/v24?a=1"
-                );
-
-            return
-                u.hostname ===
-                "example.com";
-        }
-    );
-
-
-    runProbe(
-        c,
-        "Headers",
-        "append/get",
-        function () {
-
-            var h =
-                new Headers();
-
-            h.append(
-                "X-V24",
-                "1"
-            );
-
-            return h.get("X-V24") === "1";
-        }
-    );
-
-
-    runProbe(
-        c,
-        "Blob",
-        "Blob construction",
-        function () {
-
-            var b =
-                new Blob(
-                    ["v24"],
-                    {
-                        type: "text/plain"
-                    }
-                );
-
-            return b.size === 3;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "File",
-        "File"
-    );
-
-
-    globalProbe(
-        c,
-        "FileReader",
-        "FileReader"
-    );
-
-
-    globalProbe(
-        c,
-        "URL.createObjectURL",
-        "URL"
-    );
-}
-
-
-/*
-================================================================
- STREAMS
-================================================================
-*/
-
-function testStreams()
-{
-    var c = "Streams";
-
-    globalProbe(
-        c,
-        "ReadableStream",
-        "ReadableStream"
-    );
-
-    globalProbe(
-        c,
-        "WritableStream",
-        "WritableStream"
-    );
-
-    globalProbe(
-        c,
-        "TransformStream",
-        "TransformStream"
-    );
-
-
-    runProbe(
-        c,
-        "ReadableStream operation",
-        "construct stream",
-        function () {
-
-            if (!window.ReadableStream)
-                return false;
-
-            var stream =
-                new ReadableStream();
-
-            return !!stream;
-        }
-    );
-}
-
-
-/*
-================================================================
- WEBSOCKET
-================================================================
-*/
-
-function testWebSocket()
-{
-    var c = "WebSockets";
-
-    globalProbe(
-        c,
-        "WebSocket",
-        "WebSocket"
-    );
-
-
-    runProbe(
-        c,
-        "WebSocket interface",
-        "constructor + constants",
-        function () {
-
-            if (!window.WebSocket)
-                return false;
-
-            return
-                typeof WebSocket.CONNECTING ===
-                "number" &&
-                typeof WebSocket.CLOSED ===
-                "number";
-        }
-    );
-}
-
-
-/*
-================================================================
- WORKERS
-================================================================
-*/
-
-function testWorkers()
-{
-    var c = "Workers";
-
-    globalProbe(
-        c,
-        "Worker",
-        "Worker"
-    );
-
-    globalProbe(
-        c,
-        "SharedWorker",
-        "SharedWorker"
-    );
-
-    globalProbe(
-        c,
-        "MessageChannel",
-        "MessageChannel"
-    );
-
-    globalProbe(
-        c,
-        "MessagePort",
-        "MessagePort"
-    );
-
-    globalProbe(
-        c,
-        "BroadcastChannel",
-        "BroadcastChannel"
-    );
-
-
-    runProbe(
-        c,
-        "MessageChannel operation",
-        "construct ports",
-        function () {
-
-            if (!window.MessageChannel)
-                return false;
-
-            var channel =
-                new MessageChannel();
-
-            return
-                !!channel.port1 &&
-                !!channel.port2;
-        }
-    );
-}
-
-
-/*
-================================================================
- SERVICE WORKER
-================================================================
-*/
-
-function testServiceWorker()
-{
-    var c = "Service Worker";
-
-    runProbe(
-        c,
-        "navigator.serviceWorker",
-        "service worker exposure",
-        function () {
-
-            return
-                !!navigator.serviceWorker;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "ServiceWorker",
-        "ServiceWorker"
-    );
-
-
-    globalProbe(
-        c,
-        "ServiceWorkerRegistration",
-        "ServiceWorkerRegistration"
-    );
-}
-
-
-/*
-================================================================
- STORAGE
-================================================================
-*/
-
-function testStorage()
-{
-    var c = "Storage";
-
-    runProbe(
-        c,
-        "localStorage",
-        "set/get/remove",
-        function () {
-
-            var key =
-                "__v24__";
-
-            localStorage.setItem(
-                key,
-                "1"
-            );
-
-            var ok =
-                localStorage.getItem(key) === "1";
-
-            localStorage.removeItem(key);
-
-            return ok;
-        }
-    );
-
-
-    runProbe(
-        c,
-        "sessionStorage",
-        "set/get/remove",
-        function () {
-
-            var key =
-                "__v24__";
-
-            sessionStorage.setItem(
-                key,
-                "1"
-            );
-
-            var ok =
-                sessionStorage.getItem(key) === "1";
-
-            sessionStorage.removeItem(key);
-
-            return ok;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "indexedDB",
-        "indexedDB"
-    );
-
-
-    globalProbe(
-        c,
-        "StorageEvent",
-        "StorageEvent"
-    );
-}
-
-
-/*
-================================================================
- CRYPTO
-================================================================
-*/
-
-function testCrypto()
-{
-    var c = "Crypto";
-
-    runProbe(
-        c,
-        "crypto",
-        "crypto.getRandomValues",
-        function () {
-
-            if (!window.crypto)
-                return false;
-
-            if (!crypto.getRandomValues)
-                return false;
-
-            var array =
-                new Uint8Array(8);
-
-            crypto.getRandomValues(array);
-
-            return array.length === 8;
-        }
-    );
-
-
-    globalProbe(
-        c,
-        "SubtleCrypto",
-        "SubtleCrypto"
-    );
-
-
-    globalProbe(
-        c,
-        "CryptoKey",
-        "CryptoKey"
-    );
-}
-
-
-/*
-================================================================
- MEDIA
-================================================================
-*/
-
-function testMedia()
-{
-    var c = "Media";
-
-    globalProbe(
-        c,
-        "HTMLMediaElement",
-        "HTMLMediaElement"
-    );
-
-    globalProbe(
-        c,
-        "HTMLVideoElement",
-        "HTMLVideoElement"
-    );
-
-    globalProbe(
-        c,
-        "HTMLAudioElement",
-        "HTMLAudioElement"
-    );
-
-    globalProbe(
-        c,
-        "TextTrack",
-        "TextTrack"
-    );
-
-    globalProbe(
-        c,
-        "MediaSource",
-        "MediaSource"
-    );
-
-    globalProbe(
-        c,
-        "SourceBuffer",
-        "SourceBuffer"
-    );
-
-    globalProbe(
-        c,
-        "MediaRecorder",
-        "MediaRecorder"
-    );
-
-
-    runProbe(
-        c,
-        "video",
-        "video element",
-        function () {
-
-            var v =
-                document.createElement("video");
-
-            return
-                typeof v.play === "function";
-        }
-    );
-}
-
-
-/*
-================================================================
- FILE / BLOB
-================================================================
-*/
-
-function testFileAPI()
-{
-    var c = "File API";
-
-    globalProbe(
-        c,
-        "Blob",
-        "Blob"
-    );
-
-    globalProbe(
-        c,
-        "File",
-        "File"
-    );
-
-    globalProbe(
-        c,
-        "FileReader",
-        "FileReader"
-    );
-
-    globalProbe(
-        c,
-        "FileList",
-        "FileList"
-    );
-
-    globalProbe(
-        c,
-        "FormData",
-        "FormData"
-    );
-
-
-    runProbe(
-        c,
-        "FormData",
-        "append/get",
-        function () {
-
-            if (!window.FormData)
-                return false;
-
-            var fd =
-                new FormData();
-
-            fd.append(
-                "v24",
-                "test"
-            );
-
-            return
-                typeof fd.get ===
-                "function";
-        }
-    );
-}
-
-
-/*
-================================================================
- CLIPBOARD / PERMISSIONS / NOTIFICATIONS
-================================================================
-*/
-
-function testOptionalModules()
-{
-    var c = "Optional Modules";
-
-    globalProbe(
-        c,
-        "Clipboard",
-        "Clipboard"
-    );
-
-    globalProbe(
-        c,
-        "ClipboardEvent",
-        "ClipboardEvent"
-    );
-
-    globalProbe(
-        c,
-        "Permissions",
-        "Permissions"
-    );
-
-    globalProbe(
-        c,
-        "Notification",
-        "Notification"
-    );
-
-    globalProbe(
-        c,
-        "Geolocation",
-        "Geolocation"
-    );
-
-    globalProbe(
-        c,
-        "Gamepad",
-        "Gamepad"
-    );
-
-    globalProbe(
-        c,
-        "RTCPeerConnection",
-        "RTCPeerConnection"
-    );
-
-    globalProbe(
-        c,
-        "PaymentRequest",
-        "PaymentRequest"
-    );
-
-    globalProbe(
-        c,
-        "WebXR",
-        "XR"
-    );
-
-    globalProbe(
-        c,
-        "WebGPU",
-        "GPU"
-    );
-}
-
-
-/*
-================================================================
- FULLSCREEN / POINTER LOCK
-================================================================
-*/
-
-function testInteraction()
-{
-    var c = "Interaction";
-
-    globalProbe(
-        c,
-        "Fullscreen",
-        "fullscreenEnabled"
-    );
-
-    functionProbe(
-        c,
-        "requestFullscreen",
-        "Element.prototype.requestFullscreen"
-    );
-
-
-    functionProbe(
-        c,
-        "exitFullscreen",
-        "Document.prototype.exitFullscreen"
-    );
-
-
-    globalProbe(
-        c,
-        "PointerLock",
-        "onpointerlockchange"
-    );
-
-
-    functionProbe(
-        c,
-        "requestPointerLock",
-        "Element.prototype.requestPointerLock"
-    );
-
-
-    globalProbe(
-        c,
-        "DataTransfer",
-        "DataTransfer"
-    );
-}
-
-
-/*
-================================================================
- TIMERS / EVENT LOOP
-================================================================
-*/
-
-function testTimers()
-{
-    var c = "Event Loop";
-
-    functionProbe(
-        c,
-        "setTimeout",
-        "setTimeout"
-    );
-
-    functionProbe(
-        c,
-        "setInterval",
-        "setInterval"
-    );
-
-    functionProbe(
-        c,
-        "requestAnimationFrame",
-        "requestAnimationFrame"
-    );
-
-    functionProbe(
-        c,
-        "cancelAnimationFrame",
-        "cancelAnimationFrame"
-    );
-
-
-    globalProbe(
-        c,
-        "IdleDeadline",
-        "IdleDeadline"
-    );
-
-
-    functionProbe(
-        c,
-        "requestIdleCallback",
-        "requestIdleCallback"
-    );
-}
-
-
-/*
-================================================================
- WEBKIT / LEGACY
-================================================================
-*/
-
-function testWebKitLegacy()
-{
-    var c = "WebKit/Legacy";
-
-    globalProbe(
-        c,
-        "webkitURL",
-        "webkitURL"
-    );
-
-    functionProbe(
-        c,
-        "webkitRequestAnimationFrame",
-        "webkitRequestAnimationFrame"
-    );
-
-    functionProbe(
-        c,
-        "webkitCancelAnimationFrame",
-        "webkitCancelAnimationFrame"
-    );
-
-    globalProbe(
-        c,
-        "webkitAudioContext",
-        "webkitAudioContext"
-    );
-
-    globalProbe(
-        c,
-        "webkitSpeechRecognition",
-        "webkitSpeechRecognition"
-    );
-}
-
-
-/*
-================================================================
- EXPLICITLY TRACKED APIs KNOWN/EXPECTED TO BE ABSENT
-================================================================
-*/
-
-function testKnownRestricted()
-{
-    var c = "Tracked APIs";
-
-    globalProbe(
-        c,
-        "Trusted Types",
-        "trustedTypes"
-    );
-
-    globalProbe(
-        c,
-        "Navigation API",
-        "navigation"
-    );
-
-    globalProbe(
-        c,
-        "IndexedDB",
-        "indexedDB"
-    );
-
-    globalProbe(
-        c,
-        "WebAudio",
-        "AudioContext"
-    );
-
-    globalProbe(
-        c,
-        "OfflineAudio",
-        "OfflineAudioContext"
-    );
-
-    globalProbe(
-        c,
-        "WebGL",
-        "WebGLRenderingContext"
-    );
-
-    globalProbe(
-        c,
-        "WebGL2",
-        "WebGL2RenderingContext"
-    );
-}
-
-
-/*
-================================================================
- EXTRA WEB PLATFORM MODULES
-================================================================
-*/
-
-function testExtraModules()
-{
-    var c = "Additional WebCore Modules";
-
-    globalProbe(
-        c,
-        "ReadableStream",
-        "ReadableStream"
-    );
-
-    globalProbe(
-        c,
-        "URLPattern",
-        "URLPattern"
-    );
-
-    globalProbe(
-        c,
-        "CompressionStream",
-        "CompressionStream"
-    );
-
-    globalProbe(
-        c,
-        "DecompressionStream",
-        "DecompressionStream"
-    );
-
-    globalProbe(
-        c,
-        "Web Locks",
-        "LockManager"
-    );
-
-    globalProbe(
-        c,
-        "BroadcastChannel",
-        "BroadcastChannel"
-    );
-
-    globalProbe(
-        c,
-        "Cache API",
-        "caches"
-    );
-
-    globalProbe(
-        c,
-        "ReportingObserver",
-        "ReportingObserver"
-    );
-
-    globalProbe(
-        c,
-        "PerformanceObserver",
-        "PerformanceObserver"
-    );
-
-    globalProbe(
-        c,
-        "IntersectionObserver",
-        "IntersectionObserver"
-    );
-
-    globalProbe(
-        c,
-        "ResizeObserver",
-        "ResizeObserver"
-    );
-}
-
-
-/*
-================================================================
- TEST ORDER
-================================================================
-*/
-
-var TESTS = [
-
-    testDOM,
-    testShadow,
-    testEvents,
-    testEditing,
-    testPage,
-    testHistory,
-    testCSS,
-    testLayout,
-    testScrolling,
-    testRendering,
-    testForms,
-    testParser,
-    testXML,
-    testSVG,
-    testMathML,
-    testCanvas,
-    testImages,
-    testTextFonts,
-    testAnimation,
-    testObservers,
-    testLoader,
-    testStreams,
-    testWebSocket,
-    testWorkers,
-    testServiceWorker,
-    testStorage,
-    testCrypto,
-    testMedia,
-    testFileAPI,
-    testOptionalModules,
-    testInteraction,
-    testTimers,
-    testWebKitLegacy,
-    testKnownRestricted,
-    testExtraModules
-
-];
-
-
-/*
-================================================================
- RUNNER
-================================================================
-*/
-
-function runMatrix()
-{
-    if (running)
-        return;
-
-    running = true;
-
-    results = [];
-
-    tbody.innerHTML = "";
-
-    var index = 0;
-
-
-    function next()
-    {
-        if (index >= TESTS.length) {
-
-            running = false;
-
-            updateSummary();
-
-            save();
-
-            statusText(
-                "V24 COMPLETE"
-            );
-
-            return;
-        }
-
-
-        statusText(
-            "V24 category " +
-            (index + 1) +
-            " / " +
-            TESTS.length
-        );
-
-
-        try {
-
-            TESTS[index]();
-
-        } catch (e) {
-
-            add(
-                "Runner",
-                "category " + index,
-                "ERROR",
-                "category execution"
+            canvas.width =
+                16 + rand(256);
+
+            ctx.fillRect(
+                1,
+                1,
+                5,
+                5
             );
         }
 
-
-        index++;
-
-
-        setTimeout(
-            next,
-            25
-        );
+    } catch (e) {
     }
 
+    try {
 
-    next();
+        if (canvas.parentNode)
+            canvas.parentNode.removeChild(canvas);
+
+    } catch (e2) {
+    }
 }
 
 
 /*
-================================================================
- RESTORE
-================================================================
-*/
+ * ============================================================
+ * TEXT / CHARACTER DATA
+ * ============================================================
+ */
 
-function restore()
-{
+function opText(root) {
+
+    var text =
+        document.createTextNode(
+            "AAAA_" + rand(999999)
+        );
+
+    root.appendChild(text);
+
     try {
 
-        var raw =
-            localStorage.getItem(
-                STORAGE_KEY
-            );
+        text.data =
+            "BBBB_" + rand(999999);
 
-        if (!raw)
-            return;
+        if (rand(2))
+            text.splitText(2);
 
-        var data =
-            JSON.parse(raw);
+    } catch (e) {
+    }
 
-        if (!data.results)
-            return;
+    if (rand(2)) {
 
-        results =
-            data.results;
-
-        tbody.innerHTML = "";
-
-        for (
-            var i = 0;
-            i < results.length;
-            i++
-        ) {
-
-            render(results[i]);
+        try {
+            root.removeChild(text);
+        } catch (e2) {
         }
-
-        updateSummary();
-
-        statusText(
-            "Previous V24 matrix restored"
-        );
-
-    } catch (e) {}
+    }
 }
 
 
 /*
-================================================================
- CLEAR
-================================================================
-*/
+ * ============================================================
+ * FETCH / BLOB / FILEREADER
+ * ============================================================
+ */
 
-document.getElementById(
-    "clear"
-).onclick = function ()
-{
-    results = [];
+function opBlob(root) {
 
-    tbody.innerHTML = "";
+    if (!state.capabilities.Blob)
+        return;
 
     try {
-        localStorage.removeItem(
-            STORAGE_KEY
-        );
-    } catch (e) {}
-
-    updateSummary();
-
-    statusText("CLEARED");
-};
-
-
-/*
-================================================================
- EXPORT
-================================================================
-*/
-
-exportButton.onclick = function ()
-{
-    try {
-
-        var json =
-            JSON.stringify(
-                {
-                    version: "V24",
-                    target: "PS4 13.52",
-                    timestamp: Date.now(),
-                    results: results
-                },
-                null,
-                2
-            );
 
         var blob =
             new Blob(
-                [json],
+                [
+                    "PS4_V25_" +
+                    rand(999999)
+                ],
                 {
-                    type:
-                        "application/json"
+                    type: "text/plain"
                 }
             );
 
-        var url =
-            URL.createObjectURL(blob);
+        if (state.capabilities.FileReader) {
 
-        var a =
-            document.createElement("a");
+            var reader =
+                new FileReader();
 
-        a.href = url;
-        a.download =
-            "PS4-13.52-WebCore-V24-Matrix.json";
+            reader.onload =
+                function () {};
 
-        document.body.appendChild(a);
-
-        a.click();
-
-        document.body.removeChild(a);
-
-        setTimeout(
-            function () {
-                URL.revokeObjectURL(url);
-            },
-            1000
-        );
+            reader.readAsText(blob);
+        }
 
     } catch (e) {
-
-        statusText(
-            "Export unavailable"
-        );
     }
-};
+}
 
 
 /*
-================================================================
- START
-================================================================
-*/
+ * ============================================================
+ * STREAMS
+ * ============================================================
+ */
 
-document.getElementById(
-    "run"
-).onclick =
-    runMatrix;
+function opStreams(root) {
+
+    if (!state.capabilities.ReadableStream)
+        return;
+
+    try {
+
+        var stream =
+            new ReadableStream({
+
+                start: function (controller) {
+
+                    controller.enqueue(
+                        "v25_" +
+                        rand(99999)
+                    );
+
+                    controller.close();
+                }
+            });
+
+        var reader =
+            stream.getReader();
+
+        reader.read().then(
+            function () {
+                try {
+                    reader.releaseLock();
+                } catch (e) {
+                }
+            }
+        );
+
+    } catch (e2) {
+    }
+}
 
 
-restore();
+/*
+ * ============================================================
+ * MESSAGE CHANNEL
+ * ============================================================
+ */
+
+function opMessageChannel(root) {
+
+    if (!state.capabilities.MessageChannel)
+        return;
+
+    try {
+
+        var channel =
+            new MessageChannel();
+
+        channel.port1.onmessage =
+            function () {};
+
+        channel.port2.postMessage(
+            {
+                id: rand(999999)
+            }
+        );
+
+        channel.port1.close();
+        channel.port2.close();
+
+    } catch (e) {
+    }
+}
+
+
+/*
+ * ============================================================
+ * DATA TRANSFER
+ * ============================================================
+ */
+
+function opDataTransfer(root) {
+
+    if (!state.capabilities.DataTransfer)
+        return;
+
+    try {
+
+        var data =
+            new DataTransfer();
+
+        var event =
+            new Event("change");
+
+        root.dispatchEvent(event);
+
+        void data;
+
+    } catch (e) {
+    }
+}
+
+
+/*
+ * ============================================================
+ * IFRAME
+ * ============================================================
+ */
+
+function opFrame(root) {
+
+    var frame =
+        document.createElement("iframe");
+
+    frame.src = "about:blank";
+
+    root.appendChild(frame);
+
+    try {
+
+        if (frame.contentDocument) {
+
+            var body =
+                frame.contentDocument.body;
+
+            if (body) {
+
+                var div =
+                    frame.contentDocument.createElement(
+                        "div"
+                    );
+
+                body.appendChild(div);
+
+                if (rand(2))
+                    body.removeChild(div);
+            }
+        }
+
+    } catch (e) {
+    }
+
+    if (rand(2)) {
+
+        try {
+            root.removeChild(frame);
+        } catch (e2) {
+        }
+    }
+}
+
+
+/*
+ * ============================================================
+ * OPERAÇÕES DISPONÍVEIS
+ * ============================================================
+ */
+
+function buildOperations() {
+
+    var operations = [];
+
+    function add(name, capability, fn) {
+
+        if (capability)
+            operations.push({
+                name: name,
+                run: fn
+            });
+    }
+
+    add(
+        "DOM",
+        state.capabilities.DOM,
+        opDOM
+    );
+
+    add(
+        "Fragment",
+        state.capabilities.DOM,
+        opFragment
+    );
+
+    add(
+        "Template",
+        state.capabilities.Template,
+        opTemplate
+    );
+
+    add(
+        "DOMParser",
+        state.capabilities.DOMParser,
+        opParser
+    );
+
+    add(
+        "XMLSerializer",
+        state.capabilities.XMLSerializer,
+        opXML
+    );
+
+    add(
+        "Events",
+        state.capabilities.Events,
+        opEvents
+    );
+
+    add(
+        "FocusSelection",
+        state.capabilities.Focus,
+        opFocusSelection
+    );
+
+    add(
+        "CSS",
+        state.capabilities.CSS,
+        opCSS
+    );
+
+    add(
+        "Layout",
+        state.capabilities.CSS,
+        opLayout
+    );
+
+    add(
+        "SVG",
+        state.capabilities.SVG,
+        opSVG
+    );
+
+    add(
+        "Forms",
+        state.capabilities.HTMLForms,
+        opForms
+    );
+
+    add(
+        "History",
+        state.capabilities.History,
+        opHistory
+    );
+
+    add(
+        "Animation",
+        state.capabilities.Animation,
+        opAnimation
+    );
+
+    add(
+        "MutationObserver",
+        state.capabilities.MutationObserver,
+        opMutationObserver
+    );
+
+    add(
+        "ResizeObserver",
+        state.capabilities.ResizeObserver,
+        opResizeObserver
+    );
+
+    add(
+        "IntersectionObserver",
+        state.capabilities.IntersectionObserver,
+        opIntersectionObserver
+    );
+
+    add(
+        "Canvas2D",
+        state.capabilities.Canvas2D,
+        opCanvas
+    );
+
+    add(
+        "Text",
+        state.capabilities.Text,
+        opText
+    );
+
+    add(
+        "Blob",
+        state.capabilities.Blob,
+        opBlob
+    );
+
+    add(
+        "Streams",
+        state.capabilities.ReadableStream,
+        opStreams
+    );
+
+    add(
+        "MessageChannel",
+        state.capabilities.MessageChannel,
+        opMessageChannel
+    );
+
+    add(
+        "DataTransfer",
+        state.capabilities.DataTransfer,
+        opDataTransfer
+    );
+
+    add(
+        "Frame",
+        true,
+        opFrame
+    );
+
+    return operations;
+}
+
+
+/*
+ * ============================================================
+ * CANDIDATE GENERATOR
+ * ============================================================
+ */
+
+function generateCandidate(operations) {
+
+    var length =
+        2 + rand(5);
+
+    var sequence = [];
+
+    for (var i = 0; i < length; i++) {
+
+        var operation =
+            choose(operations);
+
+        if (operation)
+            sequence.push(operation);
+    }
+
+    return sequence;
+}
+
+
+/*
+ * ============================================================
+ * EXECUÇÃO
+ * ============================================================
+ */
+
+function executeCandidate(candidate) {
+
+    var root = createRoot();
+
+    for (
+        var i = 0;
+        i < candidate.length;
+        i++
+    ) {
+
+        try {
+            candidate[i].run(root);
+        } catch (e) {
+        }
+    }
+
+    /*
+     * Pequeno ponto de sincronização de layout.
+     */
+
+    try {
+        void root.offsetWidth;
+        void root.offsetHeight;
+    } catch (e2) {
+    }
+
+    destroyRoot(root);
+}
+
+
+/*
+ * ============================================================
+ * LOOP PRINCIPAL
+ * ============================================================
+ */
+
+function runNext() {
+
+    if (!state.running)
+        return;
+
+    state.sequence++;
+
+    var operations =
+        buildOperations();
+
+    var candidate =
+        generateCandidate(operations);
+
+    var names = [];
+
+    for (var i = 0; i < candidate.length; i++)
+        names.push(candidate[i].name);
+
+    var record = {
+        version: "V25",
+        id: state.sequence,
+        timestamp: Date.now(),
+        operations: names
+    };
+
+    /*
+     * CRÍTICO:
+     * salva ANTES da execução.
+     */
+
+    saveCandidate(record);
+
+    state.currentCandidate = record;
+
+    state.currentSurface =
+        names.join(" -> ");
+
+    statusElement.textContent =
+        "STATUS: RUNNING";
+
+    infoElement.textContent =
+        "Sequence #" +
+        state.sequence +
+        " | " +
+        state.currentSurface;
+
+    try {
+        executeCandidate(candidate);
+    } catch (e) {
+    }
+
+    setTimeout(
+        runNext,
+        CONFIG.delay
+    );
+}
+
+
+/*
+ * ============================================================
+ * START
+ * ============================================================
+ */
+
+function start() {
+
+    if (state.running)
+        return;
+
+    state.capabilities =
+        detectCapabilities();
+
+    state.running = true;
+
+    startButton.style.display =
+        "none";
+
+    var count = 0;
+
+    for (var key in state.capabilities) {
+        if (state.capabilities[key])
+            count++;
+    }
+
+    statusElement.textContent =
+        "STATUS: INITIALIZING";
+
+    infoElement.textContent =
+        "Capabilities enabled: " + count;
+
+    setTimeout(
+        runNext,
+        500
+    );
+}
+
+
+startButton.addEventListener(
+    "click",
+    start
+);
+
+
+/*
+ * ============================================================
+ * RECUPERAÇÃO VISUAL DO ÚLTIMO CANDIDATO
+ * ============================================================
+ */
+
+var last =
+    loadLastCandidate();
+
+if (last) {
+
+    infoElement.textContent =
+        "Last saved candidate #" +
+        last.id +
+        " | " +
+        last.operations.join(" -> ");
+}
 
 })();
 </script>
