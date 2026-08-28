@@ -2,7 +2,8 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>PS4 13.52 - Silent Crash Hunter V21</title>
+
+<title>V22 WebCore State Lifetime Crash Hunter</title>
 
 <style>
 html, body {
@@ -10,2509 +11,2355 @@ html, body {
     padding: 0;
     background: #111;
     color: #ddd;
-    font-family: sans-serif;
+    font-family: Arial, sans-serif;
 }
 
-body {
+#ui {
     padding: 12px;
+    border-bottom: 1px solid #333;
+    background: #181818;
 }
 
-#start {
-    width: 100%;
-    padding: 16px;
-    font-size: 20px;
+button {
+    padding: 10px 18px;
+    margin-right: 8px;
+    font-size: 16px;
 }
 
 #status {
-    margin-top: 10px;
-    padding: 10px;
-    border: 1px solid #444;
-    background: #181818;
-    font-family: monospace;
+    margin-top: 8px;
+    font-size: 13px;
 }
 
-#recovery {
-    margin-top: 10px;
-    padding: 10px;
-    border: 1px solid #444;
-    background: #181818;
-    font-family: monospace;
+#fixture {
+    position: relative;
+    width: 100%;
+    min-height: 700px;
+    overflow: hidden;
+}
+
+.v22-host {
+    position: relative;
+}
+
+.block {
+    display: block;
+}
+
+.inline {
+    display: inline;
+}
+
+.inlineblock {
+    display: inline-block;
+}
+
+.positioned {
+    position: relative;
+}
+
+.absolute {
+    position: absolute;
+}
+
+.overflow {
+    overflow: auto;
+}
+
+.hidden {
     display: none;
+}
+
+.clipped {
+    overflow: hidden;
+}
+
+.sized {
+    width: 120px;
+    height: 50px;
+}
+
+.transform {
+    transform: translateZ(0);
+}
+
+.box {
+    width: 100px;
+    height: 40px;
+    margin: 3px;
+    border: 1px solid #777;
+    padding: 3px;
+}
+
+.deep {
+    position: relative;
+}
+
+#shadow-container {
+    position: relative;
+}
+
+svg {
+    display: block;
+}
+
+#image-zone {
+    position: relative;
+}
+
+textarea {
+    width: 180px;
+    height: 50px;
 }
 </style>
 </head>
 
 <body>
 
-<button id="start">START</button>
+<div id="ui">
+    <button id="startButton">START V22</button>
+    <button id="stopButton">STOP</button>
 
-<div id="status">READY</div>
+    <div id="status">
+        V22 idle
+    </div>
+</div>
 
-<div id="recovery"></div>
-
-<div id="root"></div>
+<div id="fixture"></div>
 
 <script>
-(function () {
-
-"use strict";
 
 /*
-============================================================
- V21 — SILENT CRASH HUNTER
- Target: PS4 13.52 WebKit
+ ================================================================
+ V22 WebCore State / Lifetime Crash Hunter
+ ================================================================
 
- PRINCIPLES
- ----------
- 1. No live logging.
- 2. No console logging.
- 3. No score.
- 4. No corpus.
- 5. No adaptive feedback.
- 6. Only the current test is persisted.
- 7. The checkpoint is overwritten continuously.
- 8. If execution stops unexpectedly, the last case
-    remains available after reload.
+ Design:
 
- The JavaScript cannot prove that a crash was a UAF.
- It only preserves the last executing sequence so that
- the resulting browser crash can be investigated externally.
-============================================================
+   STATIC FIXTURE
+        |
+        v
+   STATE CREATION
+        |
+        v
+   REENTRANT OPERATION
+        |
+        v
+   MUTATION / TEARDOWN
+        |
+        v
+   CONTINUATION
+
+ No exploit primitives.
+ No memory disclosure.
+ No arbitrary code execution.
+ No JIT/WebGL/WebAudio/IndexedDB/TrustedTypes/Navigation API.
+
+ The JavaScript side only observes whether execution continues.
+ ================================================================
 */
 
+(function () {
 
-/* ============================================================
- CONFIG
-============================================================ */
+    "use strict";
 
-var CONFIG = {
+    var VERSION = "V22";
 
-    operationDelay: 16,
+    var STORAGE_KEY = "V22_LAST_CHECKPOINT";
 
-    asyncDelay: 60,
+    var running = false;
+    var stopRequested = false;
 
-    caseDelay: 25,
+    var globalCase = 0;
 
-    maxOperations: 34
+    var MAX_CASES = 250;
 
-};
+    /*
+     * Keep individual mutations small.
+     * The objective is lifetime/reentrancy coverage,
+     * not resource exhaustion.
+     */
+    var MAX_MUTATIONS_PER_CASE = 12;
+
+    var fixture;
+    var shadowHost;
+    var shadowRootRef;
+
+    var statusElement;
+
+    /*
+     ================================================================
+     * Deterministic PRNG
+     * ================================================================
+     */
+
+    function PRNG(seed) {
+
+        this.state = seed >>> 0;
+
+        this.next = function () {
+
+            var x = this.state;
+
+            x ^= x << 13;
+            x ^= x >>> 17;
+            x ^= x << 5;
+
+            this.state = x >>> 0;
+
+            return this.state;
+        };
+
+        this.range = function (n) {
+
+            if (n <= 0)
+                return 0;
+
+            return this.next() % n;
+        };
+
+        this.pick = function (array) {
+
+            if (!array || !array.length)
+                return null;
+
+            return array[this.range(array.length)];
+        };
+
+        this.bool = function () {
+            return (this.next() & 1) !== 0;
+        };
+    }
 
 
-/* ============================================================
- STORAGE
-============================================================ */
+    /*
+     ================================================================
+     * UI
+     ================================================================
+     */
 
-var STORAGE_KEY =
-    "PS4_1352_V21_LAST_CASE";
+    function setStatus(text) {
 
-
-function saveCase(data)
-{
-    try {
-
-        localStorage.setItem(
-            STORAGE_KEY,
-            JSON.stringify(data)
-        );
-
-    } catch (e) {}
-}
+        if (statusElement)
+            statusElement.innerHTML = text;
+    }
 
 
-function loadCase()
-{
-    try {
+    /*
+     ================================================================
+     * Checkpoint
+     *
+     * Written BEFORE an operation.
+     * This is intentional: if the browser disappears during the
+     * operation, the last checkpoint identifies the candidate.
+     * ================================================================
+     */
 
-        var raw =
-            localStorage.getItem(
-                STORAGE_KEY
+    function checkpoint(data) {
+
+        try {
+
+            localStorage.setItem(
+                STORAGE_KEY,
+                JSON.stringify(data)
             );
 
-        if (!raw)
+        } catch (e) {
+            /*
+             * localStorage is diagnostic only.
+             * Never allow it to affect the test.
+             */
+        }
+    }
+
+
+    function loadCheckpoint() {
+
+        try {
+
+            var value =
+                localStorage.getItem(STORAGE_KEY);
+
+            if (!value)
+                return null;
+
+            return JSON.parse(value);
+
+        } catch (e) {
+
             return null;
-
-        return JSON.parse(
-            raw
-        );
-
-    } catch (e) {
-
-        return null;
-    }
-}
-
-
-/* ============================================================
- RNG
-============================================================ */
-
-var RNG = {
-
-    seed: 1,
-    state: 1
-
-};
-
-
-function setSeed(seed)
-{
-    seed =
-        (seed >>> 0) || 1;
-
-    RNG.seed =
-        seed;
-
-    RNG.state =
-        seed;
-}
-
-
-function random()
-{
-    RNG.state =
-        (
-            RNG.state * 1664525 +
-            1013904223
-        ) >>> 0;
-
-    return RNG.state /
-        4294967296;
-}
-
-
-function integer(max)
-{
-    if (max <= 0)
-        return 0;
-
-    return Math.floor(
-        random() * max
-    );
-}
-
-
-function pick(array)
-{
-    return array[
-        integer(
-            array.length
-        )
-    ];
-}
-
-
-function newSeed()
-{
-    var seed =
-        (
-            Date.now() ^
-            integer(
-                0x7fffffff
-            )
-        ) >>> 0;
-
-    if (!seed)
-        seed = 1;
-
-    return seed;
-}
-
-
-/* ============================================================
- STATE
-============================================================ */
-
-var state = {
-
-    running: false,
-
-    caseId: 0,
-
-    seed: 0,
-
-    pattern: "",
-
-    layers: [],
-
-    sequence: [],
-
-    index: 0,
-
-    nodes: {},
-
-    frames: {},
-
-    svgs: {}
-
-};
-
-
-/* ============================================================
- MINIMAL STATUS
-============================================================ */
-
-function setStatus(text)
-{
-    document.getElementById(
-        "status"
-    ).textContent =
-        text;
-}
-
-
-/* ============================================================
- RESET
-============================================================ */
-
-function resetDOM()
-{
-    state.nodes = {};
-    state.frames = {};
-    state.svgs = {};
-
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    while (
-        root.firstChild
-    ) {
-
-        root.removeChild(
-            root.firstChild
-        );
-    }
-}
-
-
-/* ============================================================
- CHECKPOINT
-============================================================ */
-
-function checkpoint()
-{
-    saveCase({
-
-        version: "V21",
-
-        target: "PS4 13.52",
-
-        caseId:
-            state.caseId,
-
-        seed:
-            state.seed,
-
-        pattern:
-            state.pattern,
-
-        layers:
-            state.layers.slice(),
-
-        sequence:
-            JSON.parse(
-                JSON.stringify(
-                    state.sequence
-                )
-            ),
-
-        index:
-            state.index,
-
-        operation:
-            state.sequence[
-                state.index
-            ] || null,
-
-        timestamp:
-            Date.now()
-
-    });
-}
-
-
-/* ============================================================
- LAYER
-============================================================ */
-
-function layer(name)
-{
-    if (
-        state.layers.indexOf(
-            name
-        ) === -1
-    ) {
-
-        state.layers.push(
-            name
-        );
-    }
-}
-
-
-/* ============================================================
- DOM NODE
-============================================================ */
-
-function createNode(
-    id,
-    tag
-)
-{
-    var node =
-        document.createElement(
-            tag || "div"
-        );
-
-    node.setAttribute(
-        "data-v21",
-        id
-    );
-
-    node.style.display =
-        "block";
-
-    node.style.position =
-        "relative";
-
-    node.textContent =
-        "V21-" + id;
-
-    state.nodes[id] =
-        node;
-
-    return node;
-}
-
-
-function getNode(id)
-{
-    return state.nodes[id] ||
-        null;
-}
-
-
-/* ============================================================
- PATTERN 1
- DOM -> EVENTS -> DOCUMENT -> FOCUS
-============================================================ */
-
-function patternDOMEvents()
-{
-    state.pattern =
-        "DOM_EVENTS_DOCUMENT_FOCUS";
-
-    layer("DOM");
-    layer("Events");
-    layer("Document");
-    layer("FocusController");
-
-    return [
-
-        {t:"CREATE", id:"A", tag:"button"},
-        {t:"ATTACH", id:"A"},
-        {t:"LISTENER", id:"A"},
-        {t:"FOCUS", id:"A"},
-        {t:"DISPATCH", id:"A"},
-        {t:"MUTATE", id:"A"},
-        {t:"REMOVE", id:"A"},
-        {t:"DISPATCH", id:"A"},
-        {t:"CONTINUE", id:"A"},
-        {t:"LAYOUT", id:"A"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 2
- FOCUS -> BLUR -> FRAME -> DOCUMENT
-============================================================ */
-
-function patternFocusFrame()
-{
-    state.pattern =
-        "FOCUS_BLUR_FRAME_DOCUMENT";
-
-    layer("FocusController");
-    layer("Events");
-    layer("Frame");
-    layer("Document");
-    layer("DOM");
-
-    return [
-
-        {t:"FRAME_CREATE", id:"A"},
-        {t:"FRAME_LOAD", id:"A"},
-        {t:"FRAME_INPUT", id:"A"},
-        {t:"FRAME_LISTENER", id:"A"},
-        {t:"FRAME_FOCUS", id:"A"},
-        {t:"FRAME_BLUR", id:"A"},
-        {t:"FRAME_MUTATE", id:"A"},
-        {t:"FRAME_REMOVE", id:"A"},
-        {t:"FRAME_ACCESS", id:"A"},
-        {t:"DOCUMENT_LAYOUT"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 3
- DOM -> TRAVERSAL -> MUTATION
-============================================================ */
-
-function patternIterator()
-{
-    state.pattern =
-        "DOM_ITERATOR_MUTATION";
-
-    layer("DOM");
-    layer("Events");
-    layer("Document");
-
-    return [
-
-        {t:"CREATE", id:"A"},
-        {t:"CREATE", id:"B"},
-        {t:"CREATE", id:"C"},
-        {t:"CREATE", id:"D"},
-
-        {t:"ATTACH", id:"A"},
-        {t:"ATTACH", id:"B"},
-        {t:"ATTACH", id:"C"},
-        {t:"ATTACH", id:"D"},
-
-        {t:"TRAVERSE_BEGIN"},
-        {t:"TRAVERSE_CALLBACK"},
-        {t:"COLLECTION_ADD"},
-        {t:"COLLECTION_REMOVE"},
-        {t:"TRAVERSE_CONTINUE"},
-        {t:"LAYOUT"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 4
- CSS -> STYLE -> RENDER TREE -> LAYOUT
-============================================================ */
-
-function patternStyleLayout()
-{
-    state.pattern =
-        "CSS_STYLE_RENDER_LAYOUT";
-
-    layer("CSS");
-    layer("StyleResolver");
-    layer("RenderTree");
-    layer("Layout");
-    layer("DOM");
-
-    return [
-
-        {t:"CREATE", id:"A"},
-        {t:"ATTACH", id:"A"},
-        {t:"STYLE", id:"A"},
-        {t:"LAYOUT", id:"A"},
-        {t:"STYLE_REENTER", id:"A"},
-        {t:"LAYOUT_NESTED", id:"A"},
-        {t:"MUTATE", id:"A"},
-        {t:"STYLE", id:"A"},
-        {t:"LAYOUT", id:"A"},
-        {t:"REMOVE", id:"A"},
-        {t:"LAYOUT", id:"A"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 5
- SVG -> RENDER TREE -> LAYOUT -> TEARDOWN
-============================================================ */
-
-function patternSVG()
-{
-    state.pattern =
-        "SVG_RENDER_LAYOUT_TEARDOWN";
-
-    layer("SVG");
-    layer("DOM");
-    layer("CSS");
-    layer("RenderTree");
-    layer("Layout");
-
-    return [
-
-        {t:"SVG_CREATE", id:"A"},
-        {t:"SVG_ATTACH", id:"A"},
-        {t:"SVG_STYLE", id:"A"},
-        {t:"SVG_LAYOUT", id:"A"},
-        {t:"SVG_NESTED_LAYOUT", id:"A"},
-        {t:"SVG_MUTATE", id:"A"},
-        {t:"SVG_LAYOUT", id:"A"},
-        {t:"SVG_REMOVE", id:"A"},
-        {t:"SVG_ACCESS", id:"A"},
-        {t:"DOCUMENT_LAYOUT"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 6
- EDITING -> FORMS -> EVENTS -> FOCUS
-============================================================ */
-
-function patternEditing()
-{
-    state.pattern =
-        "EDITING_FORMS_EVENTS_FOCUS";
-
-    layer("Editing");
-    layer("Forms");
-    layer("Events");
-    layer("FocusController");
-    layer("DOM");
-
-    return [
-
-        {t:"TEXTAREA", id:"A"},
-        {t:"ATTACH", id:"A"},
-        {t:"LISTENER", id:"A"},
-        {t:"FOCUS", id:"A"},
-        {t:"EDIT", id:"A"},
-        {t:"SELECTION", id:"A"},
-        {t:"INPUT_EVENT", id:"A"},
-        {t:"TYPE_CHANGE", id:"A"},
-        {t:"MUTATE", id:"A"},
-        {t:"BLUR", id:"A"},
-        {t:"REMOVE", id:"A"},
-        {t:"EDIT_ACCESS", id:"A"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 7
- TEXT -> FONTS -> CSS -> LAYOUT
-============================================================ */
-
-function patternFonts()
-{
-    state.pattern =
-        "TEXT_FONTS_CSS_LAYOUT";
-
-    layer("Text");
-    layer("Fonts");
-    layer("CSS");
-    layer("StyleResolver");
-    layer("RenderTree");
-    layer("Layout");
-
-    return [
-
-        {t:"TEXT_CREATE", id:"A"},
-        {t:"ATTACH", id:"A"},
-        {t:"FONT_CHANGE", id:"A"},
-        {t:"LAYOUT", id:"A"},
-        {t:"TEXT_MUTATE", id:"A"},
-        {t:"FONT_CHANGE", id:"A"},
-        {t:"LAYOUT_NESTED", id:"A"},
-        {t:"REMOVE", id:"A"},
-        {t:"LAYOUT", id:"A"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 8
- HISTORY -> DOCUMENT -> FRAME
-============================================================ */
-
-function patternHistory()
-{
-    state.pattern =
-        "HISTORY_DOCUMENT_FRAME";
-
-    layer("History");
-    layer("Document");
-    layer("Frame");
-    layer("DOM");
-    layer("Events");
-
-    return [
-
-        {t:"HISTORY_PUSH"},
-        {t:"HISTORY_LISTENER"},
-        {t:"HISTORY_FRAME"},
-        {t:"HISTORY_MUTATE"},
-        {t:"HISTORY_BACK"},
-        {t:"HISTORY_REMOVE_FRAME"},
-        {t:"HISTORY_CONTINUE"},
-        {t:"DOCUMENT_LAYOUT"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 9
- HTML PARSER -> STYLE -> LAYOUT
-============================================================ */
-
-function patternParser()
-{
-    state.pattern =
-        "HTML_PARSER_STYLE_LAYOUT";
-
-    layer("HTML parser");
-    layer("DOM");
-    layer("CSS");
-    layer("StyleResolver");
-    layer("RenderTree");
-    layer("Layout");
-
-    return [
-
-        {t:"PARSE"},
-        {t:"PARSE_STYLE"},
-        {t:"PARSE_LAYOUT"},
-        {t:"PARSE_MUTATE"},
-        {t:"PARSE_REMOVE"},
-        {t:"PARSE_STYLE"},
-        {t:"PARSE_LAYOUT"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 10
- DOCUMENT -> ASYNC -> TEARDOWN
-============================================================ */
-
-function patternAsync()
-{
-    state.pattern =
-        "DOCUMENT_ASYNC_TEARDOWN";
-
-    layer("Document");
-    layer("DOM");
-    layer("Events");
-    layer("Frame");
-    layer("Layout");
-
-    return [
-
-        {t:"CREATE", id:"A"},
-        {t:"ATTACH", id:"A"},
-        {t:"LISTENER", id:"A"},
-        {t:"ASYNC_SCHEDULE", id:"A"},
-        {t:"MUTATE", id:"A"},
-        {t:"REMOVE", id:"A"},
-        {t:"ASYNC_LATE", id:"A"},
-        {t:"LAYOUT", id:"A"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 11
- CROSS-LAYER
-============================================================ */
-
-function patternCross()
-{
-    state.pattern =
-        "CROSS_LAYER_LIFETIME_CHAIN";
-
-    layer("DOM");
-    layer("Events");
-    layer("FocusController");
-    layer("Document");
-    layer("Frame");
-    layer("Editing");
-    layer("Forms");
-    layer("CSS");
-    layer("StyleResolver");
-    layer("RenderTree");
-    layer("Layout");
-    layer("Text");
-    layer("Fonts");
-    layer("SVG");
-    layer("History");
-
-    return [
-
-        {t:"TEXTAREA", id:"A"},
-        {t:"ATTACH", id:"A"},
-        {t:"LISTENER", id:"A"},
-        {t:"FOCUS", id:"A"},
-        {t:"EDIT", id:"A"},
-        {t:"STYLE", id:"A"},
-        {t:"LAYOUT", id:"A"},
-        {t:"ASYNC_SCHEDULE", id:"A"},
-        {t:"DISPATCH", id:"A"},
-        {t:"MUTATE", id:"A"},
-        {t:"FONT_CHANGE", id:"A"},
-        {t:"LAYOUT_NESTED", id:"A"},
-        {t:"BLUR", id:"A"},
-        {t:"REMOVE", id:"A"},
-        {t:"ASYNC_LATE", id:"A"},
-        {t:"LAYOUT"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN 12
- FRAME -> STYLE -> EVENT
-============================================================ */
-
-function patternFrameStyle()
-{
-    state.pattern =
-        "FRAME_STYLE_EVENT";
-
-    layer("Frame");
-    layer("Document");
-    layer("Events");
-    layer("CSS");
-    layer("StyleResolver");
-    layer("RenderTree");
-    layer("Layout");
-
-    return [
-
-        {t:"FRAME_CREATE", id:"A"},
-        {t:"FRAME_INPUT", id:"A"},
-        {t:"FRAME_LISTENER", id:"A"},
-        {t:"FRAME_FOCUS", id:"A"},
-        {t:"FRAME_MUTATE", id:"A"},
-        {t:"DOCUMENT_LAYOUT"},
-        {t:"FRAME_BLUR", id:"A"},
-        {t:"FRAME_REMOVE", id:"A"},
-        {t:"FRAME_ACCESS", id:"A"},
-        {t:"DOCUMENT_LAYOUT"}
-
-    ];
-}
-
-
-/* ============================================================
- PATTERN TABLE
-============================================================ */
-
-var PATTERNS = [
-
-    patternDOMEvents,
-    patternFocusFrame,
-    patternIterator,
-    patternStyleLayout,
-    patternSVG,
-    patternEditing,
-    patternFonts,
-    patternHistory,
-    patternParser,
-    patternAsync,
-    patternCross,
-    patternFrameStyle
-
-];
-
-
-/* ============================================================
- STRUCTURAL MUTATION
-============================================================ */
-
-function mutateSequence(sequence)
-{
-    var result =
-        JSON.parse(
-            JSON.stringify(
-                sequence
-            )
-        );
-
-    if (!result.length)
-        return result;
-
-    var mode =
-        integer(6);
-
-    if (
-        mode === 0 &&
-        result.length < CONFIG.maxOperations
-    ) {
-
-        result.splice(
-            integer(
-                result.length + 1
-            ),
-            0,
-            JSON.parse(
-                JSON.stringify(
-                    pick(result)
-                )
-            )
-        );
-
-    } else if (
-        mode === 1 &&
-        result.length > 8
-    ) {
-
-        result.splice(
-            integer(
-                result.length
-            ),
-            1
-        );
-
-    } else if (
-        mode === 2
-    ) {
-
-        var ops = [
-
-            {t:"MUTATE", id:"A"},
-            {t:"LAYOUT", id:"A"},
-            {t:"REMOVE", id:"A"},
-            {t:"ASYNC_LATE", id:"A"},
-            {t:"DISPATCH", id:"A"}
-
-        ];
-
-        result.splice(
-            integer(
-                result.length + 1
-            ),
-            0,
-            pick(ops)
-        );
-
-    } else if (
-        mode === 3 &&
-        result.length > 10
-    ) {
-
-        var start =
-            integer(
-                result.length - 3
-            );
-
-        result.splice(
-            start,
-            2
-        );
-
-    } else if (
-        mode === 4
-    ) {
-
-        var transition = [
-
-            {t:"STYLE", id:"A"},
-            {t:"LAYOUT", id:"A"},
-            {t:"MUTATE", id:"A"}
-
-        ];
-
-        result.splice.apply(
-            result,
-            [
-                integer(
-                    result.length + 1
-                ),
-                0
-            ].concat(
-                transition
-            )
-        );
-
-    } else {
-
-        result.push({
-            t:"LAYOUT"
-        });
-    }
-
-    while (
-        result.length >
-        CONFIG.maxOperations
-    ) {
-
-        result.pop();
-    }
-
-    return result;
-}
-
-
-/* ============================================================
- DOM EXECUTION
-============================================================ */
-
-function executeDOM(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    try {
-
-        if (
-            op.t === "CREATE"
-        ) {
-
-            createNode(
-                op.id,
-                op.tag
-            );
-
-            return;
         }
+    }
 
-        if (
-            op.t === "TEXTAREA"
-        ) {
 
-            createNode(
-                op.id,
-                "textarea"
-            );
+    /*
+     ================================================================
+     * DOM utilities
+     * ================================================================
+     */
 
-            return;
-        }
-
-        if (
-            op.t === "TEXT_CREATE"
-        ) {
-
-            var text =
-                createNode(
-                    op.id,
-                    "div"
-                );
-
-            text.textContent =
-                "V21 text";
-
-            return;
-        }
-
-        var node =
-            getNode(
-                op.id
-            );
+    function safeRemove(node) {
 
         if (!node)
             return;
 
-        if (
-            op.t === "ATTACH"
-        ) {
+        if (node.parentNode)
+            node.parentNode.removeChild(node);
+    }
 
-            root.appendChild(
-                node
-            );
 
-            return;
+    function childrenOf(node) {
+
+        var result = [];
+
+        if (!node)
+            return result;
+
+        var children = node.childNodes;
+
+        for (var i = 0; i < children.length; i++)
+            result.push(children[i]);
+
+        return result;
+    }
+
+
+    function allElements(root) {
+
+        var result = [];
+
+        if (!root)
+            return result;
+
+        if (root.nodeType === 1)
+            result.push(root);
+
+        var list = root.getElementsByTagName("*");
+
+        for (var i = 0; i < list.length; i++)
+            result.push(list[i]);
+
+        return result;
+    }
+
+
+    function randomElement(prng, root) {
+
+        var list = allElements(root);
+
+        if (!list.length)
+            return null;
+
+        return prng.pick(list);
+    }
+
+
+    /*
+     ================================================================
+     * Fixture construction
+     *
+     * Important difference from V21:
+     *
+     * The DOM is NOT generated from scratch for each mutation.
+     *
+     * We establish WebCore state first.
+     * ================================================================
+     */
+
+    function buildFixture(seed) {
+
+        fixture.innerHTML = "";
+
+        /*
+         ------------------------------------------------------------
+         * Main document tree
+         * ------------------------------------------------------------
+         */
+
+        var root =
+            document.createElement("div");
+
+        root.id = "v22-root";
+        root.className =
+            "v22-host block positioned overflow";
+
+        fixture.appendChild(root);
+
+
+        /*
+         ------------------------------------------------------------
+         * Focus fixture
+         * ------------------------------------------------------------
+         */
+
+        var focusZone =
+            document.createElement("div");
+
+        focusZone.id = "focus-zone";
+        focusZone.className =
+            "block positioned sized";
+
+        var inputA =
+            document.createElement("input");
+
+        inputA.id = "focus-input-a";
+        inputA.type = "text";
+
+        var inputB =
+            document.createElement("input");
+
+        inputB.id = "focus-input-b";
+        inputB.type = "search";
+
+        var button =
+            document.createElement("button");
+
+        button.id = "focus-button";
+        button.innerHTML = "focus";
+
+        focusZone.appendChild(inputA);
+        focusZone.appendChild(inputB);
+        focusZone.appendChild(button);
+
+        root.appendChild(focusZone);
+
+
+        /*
+         ------------------------------------------------------------
+         * Forms fixture
+         * ------------------------------------------------------------
+         */
+
+        var form =
+            document.createElement("form");
+
+        form.id = "form-zone";
+
+        var text =
+            document.createElement("input");
+
+        text.id = "form-text";
+        text.type = "text";
+
+        var search =
+            document.createElement("input");
+
+        search.id = "form-search";
+        search.type = "search";
+
+        var email =
+            document.createElement("input");
+
+        email.id = "form-email";
+        email.type = "email";
+
+        var list =
+            document.createElement("input");
+
+        list.id = "form-list";
+        list.setAttribute("list", "v22-list");
+
+        var datalist =
+            document.createElement("datalist");
+
+        datalist.id = "v22-list";
+
+        for (var d = 0; d < 4; d++) {
+
+            var option =
+                document.createElement("option");
+
+            option.value = "value-" + d;
+
+            datalist.appendChild(option);
         }
 
-        if (
-            op.t === "REMOVE"
-        ) {
+        form.appendChild(text);
+        form.appendChild(search);
+        form.appendChild(email);
+        form.appendChild(list);
+        form.appendChild(datalist);
 
-            if (
-                node.parentNode
-            ) {
+        root.appendChild(form);
 
-                node.parentNode
-                    .removeChild(
-                        node
-                    );
+
+        /*
+         ------------------------------------------------------------
+         * Shadow DOM fixture
+         * ------------------------------------------------------------
+         */
+
+        shadowHost =
+            document.createElement("div");
+
+        shadowHost.id =
+            "shadow-container";
+
+        root.appendChild(shadowHost);
+
+        shadowRootRef = null;
+
+        try {
+
+            if (shadowHost.attachShadow) {
+
+                shadowRootRef =
+                    shadowHost.attachShadow({
+                        mode: "open"
+                    });
+
+                var shadowWrapper =
+                    document.createElement("div");
+
+                shadowWrapper.className =
+                    "block positioned";
+
+                var slot =
+                    document.createElement("slot");
+
+                slot.name = "v22-slot";
+
+                shadowWrapper.appendChild(slot);
+
+                var shadowInner =
+                    document.createElement("span");
+
+                shadowInner.className =
+                    "box inlineblock";
+
+                shadowInner.innerHTML =
+                    "shadow";
+
+                shadowWrapper.appendChild(
+                    shadowInner
+                );
+
+                shadowRootRef.appendChild(
+                    shadowWrapper
+                );
+
+                var slotted =
+                    document.createElement("span");
+
+                slotted.slot =
+                    "v22-slot";
+
+                slotted.innerHTML =
+                    "slotted";
+
+                shadowHost.appendChild(
+                    slotted
+                );
             }
 
-            return;
+        } catch (e) {
         }
 
-        if (
-            op.t === "MUTATE"
-        ) {
 
-            node.textContent =
-                "M-" +
-                integer(
-                    1000000
-                );
+        /*
+         ------------------------------------------------------------
+         * Range / text fixture
+         * ------------------------------------------------------------
+         */
 
-            node.setAttribute(
-                "data-state",
-                String(
-                    integer(
-                        100000
-                    )
-                )
+        var textZone =
+            document.createElement("div");
+
+        textZone.id = "range-zone";
+
+        var textOne =
+            document.createTextNode(
+                "alpha "
             );
 
-            return;
-        }
+        var spanOne =
+            document.createElement("span");
 
-        if (
-            op.t === "STYLE"
-        ) {
+        spanOne.innerHTML =
+            "beta";
 
-            node.style.width =
-                (10 + integer(180)) +
-                "px";
+        var spanTwo =
+            document.createElement("span");
 
-            node.style.height =
-                (10 + integer(100)) +
-                "px";
+        spanTwo.innerHTML =
+            "gamma";
 
-            node.style.position =
-                "relative";
-
-            return;
-        }
-
-        if (
-            op.t === "STYLE_REENTER"
-        ) {
-
-            node.style.width =
-                (20 + integer(120)) +
-                "px";
-
-            void node.offsetWidth;
-
-            node.style.height =
-                (20 + integer(100)) +
-                "px";
-
-            void node.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "LAYOUT"
-        ) {
-
-            void node.offsetWidth;
-
-            void node.scrollTop;
-
-            node.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "LAYOUT_NESTED"
-        ) {
-
-            void node.offsetWidth;
-
-            node.style.width =
-                (10 + integer(150)) +
-                "px";
-
-            void node.offsetWidth;
-
-            node.style.height =
-                (10 + integer(100)) +
-                "px";
-
-            node.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "LISTENER"
-        ) {
-
-            node.addEventListener(
-                "v21",
-                function () {
-
-                    try {
-
-                        node.setAttribute(
-                            "data-event",
-                            "1"
-                        );
-
-                        if (
-                            random() < 0.25 &&
-                            node.parentNode
-                        ) {
-
-                            node.parentNode
-                                .removeChild(
-                                    node
-                                );
-                        }
-
-                    } catch (e) {}
-
-                },
-                false
+        var textTwo =
+            document.createTextNode(
+                " delta"
             );
 
-            return;
-        }
+        textZone.appendChild(textOne);
+        textZone.appendChild(spanOne);
+        textZone.appendChild(spanTwo);
+        textZone.appendChild(textTwo);
 
-        if (
-            op.t === "DISPATCH"
-        ) {
+        root.appendChild(textZone);
 
-            var event =
-                document.createEvent(
-                    "Event"
-                );
 
-            event.initEvent(
-                "v21",
-                true,
-                true
+        /*
+         ------------------------------------------------------------
+         * Render tree fixture
+         * ------------------------------------------------------------
+         */
+
+        var renderZone =
+            document.createElement("div");
+
+        renderZone.id = "render-zone";
+
+        renderZone.className =
+            "block positioned overflow";
+
+        for (var r = 0; r < 8; r++) {
+
+            var box =
+                document.createElement("div");
+
+            box.className =
+                "box " +
+                (r % 2 ?
+                    "inlineblock" :
+                    "block");
+
+            box.setAttribute(
+                "data-index",
+                String(r)
             );
 
-            node.dispatchEvent(
-                event
+            renderZone.appendChild(box);
+        }
+
+        root.appendChild(renderZone);
+
+
+        /*
+         ------------------------------------------------------------
+         * Deep subtree
+         * ------------------------------------------------------------
+         */
+
+        var deep =
+            document.createElement("div");
+
+        deep.id = "deep-zone";
+        deep.className = "deep";
+
+        var current = deep;
+
+        for (var level = 0; level < 7; level++) {
+
+            var child =
+                document.createElement("div");
+
+            child.className =
+                "box positioned";
+
+            child.setAttribute(
+                "data-depth",
+                String(level)
             );
 
-            return;
+            current.appendChild(child);
+
+            current = child;
         }
 
-        if (
-            op.t === "FOCUS"
-        ) {
+        root.appendChild(deep);
 
-            if (
-                node.focus
-            )
-                node.focus();
 
-            return;
-        }
+        /*
+         ------------------------------------------------------------
+         * SVG fixture
+         * ------------------------------------------------------------
+         */
 
-        if (
-            op.t === "BLUR"
-        ) {
-
-            if (
-                node.blur
-            )
-                node.blur();
-
-            return;
-        }
-
-        if (
-            op.t === "EDIT"
-        ) {
-
-            if (
-                typeof node.value ===
-                "string"
-            ) {
-
-                node.value =
-                    "edit-" +
-                    integer(
-                        100000
-                    );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "SELECTION"
-        ) {
-
-            if (
-                node.setSelectionRange
-            ) {
-
-                try {
-
-                    node.setSelectionRange(
-                        0,
-                        0
-                    );
-
-                } catch (e) {}
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "INPUT_EVENT"
-        ) {
-
-            var inputEvent =
-                document.createEvent(
-                    "Event"
-                );
-
-            inputEvent.initEvent(
-                "input",
-                true,
-                true
+        var svg =
+            document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "svg"
             );
 
-            node.dispatchEvent(
-                inputEvent
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "TYPE_CHANGE"
-        ) {
-
-            if (
-                node.tagName &&
-                node.tagName.toLowerCase() ===
-                "input"
-            ) {
-
-                node.type =
-                    pick([
-                        "text",
-                        "search",
-                        "email",
-                        "number"
-                    ]);
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "EDIT_ACCESS"
-        ) {
-
-            void node.value;
-            void node.selectionStart;
-            void node.selectionEnd;
-
-            return;
-        }
-
-        if (
-            op.t === "FONT_CHANGE"
-        ) {
-
-            node.style.fontFamily =
-                pick([
-                    "serif",
-                    "sans-serif",
-                    "monospace"
-                ]);
-
-            node.style.fontSize =
-                (8 + integer(30)) +
-                "px";
-
-            return;
-        }
-
-        if (
-            op.t === "TEXT_MUTATE"
-        ) {
-
-            node.textContent =
-                "text-" +
-                integer(
-                    1000000
-                );
-
-            return;
-        }
-
-        if (
-            op.t === "SHADOW"
-        ) {
-
-            if (
-                node.attachShadow
-            ) {
-
-                try {
-
-                    var shadow =
-                        node.attachShadow({
-                            mode:"open"
-                        });
-
-                    shadow.innerHTML =
-                        "<span>V21</span>";
-
-                } catch (e) {}
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "ASYNC_SCHEDULE"
-        ) {
-
-            (function (reference) {
-
-                setTimeout(
-                    function () {
-
-                        try {
-
-                            void reference.parentNode;
-                            void reference.textContent;
-
-                        } catch (e) {}
-
-                    },
-                    CONFIG.asyncDelay
-                );
-
-            })(node);
-
-            return;
-        }
-
-        if (
-            op.t === "ASYNC_LATE"
-        ) {
-
-            (function (reference) {
-
-                setTimeout(
-                    function () {
-
-                        try {
-
-                            void reference.parentNode;
-                            void reference.firstChild;
-                            void reference.textContent;
-                            void reference.offsetWidth;
-
-                            reference
-                                .getBoundingClientRect();
-
-                        } catch (e) {}
-
-                    },
-                    CONFIG.asyncDelay
-                );
-
-            })(node);
-
-            return;
-        }
-
-        if (
-            op.t === "CONTINUE"
-        ) {
-
-            void node.parentNode;
-            void node.firstChild;
-            void node.textContent;
-            void node.offsetWidth;
-
-            return;
-        }
-
-    } catch (e) {}
-}
-
-
-/* ============================================================
- FRAME EXECUTION
-============================================================ */
-
-function executeFrame(op)
-{
-    var root =
-        document.getElementById(
-            "root"
+        svg.setAttribute(
+            "width",
+            "240"
         );
 
-    try {
+        svg.setAttribute(
+            "height",
+            "120"
+        );
 
-        if (
-            op.t === "FRAME_CREATE"
-        ) {
+        svg.id = "svg-zone";
 
-            var frame =
-                document.createElement(
-                    "iframe"
-                );
-
-            frame.src =
-                "about:blank";
-
-            frame.width =
-                "4";
-
-            frame.height =
-                "4";
-
-            root.appendChild(
-                frame
+        var group =
+            document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "g"
             );
 
-            state.frames[
-                op.id
-            ] =
-                frame;
+        var rect =
+            document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "rect"
+            );
 
+        rect.setAttribute("x", "5");
+        rect.setAttribute("y", "5");
+        rect.setAttribute("width", "80");
+        rect.setAttribute("height", "40");
+
+        var circle =
+            document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle"
+            );
+
+        circle.setAttribute("cx", "130");
+        circle.setAttribute("cy", "30");
+        circle.setAttribute("r", "20");
+
+        group.appendChild(rect);
+        group.appendChild(circle);
+        svg.appendChild(group);
+
+        root.appendChild(svg);
+
+
+        /*
+         ------------------------------------------------------------
+         * Image / picture fixture
+         * ------------------------------------------------------------
+         */
+
+        var imageZone =
+            document.createElement("div");
+
+        imageZone.id =
+            "image-zone";
+
+        var picture =
+            document.createElement("picture");
+
+        var source =
+            document.createElement("source");
+
+        source.setAttribute(
+            "media",
+            "(min-width: 1px)"
+        );
+
+        /*
+         * Intentionally invalid/non-network-dependent source.
+         * We are interested in lifecycle handling, not network
+         * access.
+         */
+
+        source.setAttribute(
+            "srcset",
+            "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+        );
+
+        var img =
+            document.createElement("img");
+
+        img.id = "v22-image";
+
+        img.src =
+            "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
+        picture.appendChild(source);
+        picture.appendChild(img);
+
+        imageZone.appendChild(picture);
+
+        root.appendChild(imageZone);
+
+
+        /*
+         ------------------------------------------------------------
+         * Textarea
+         * ------------------------------------------------------------
+         */
+
+        var textarea =
+            document.createElement("textarea");
+
+        textarea.id =
+            "v22-textarea";
+
+        textarea.value =
+            "v22 text";
+
+        root.appendChild(textarea);
+
+
+        /*
+         ------------------------------------------------------------
+         * Event handlers
+         *
+         * These are deliberately lightweight.
+         * The interesting mutation happens while dispatch is active.
+         * ------------------------------------------------------------
+         */
+
+        inputA.onclick = function () {
+
+            mutateInputType(
+                inputA,
+                seed
+            );
+
+        };
+
+        inputB.onfocus = function () {
+
+            mutateFocusZone(
+                focusZone
+            );
+
+        };
+
+        button.onclick = function () {
+
+            mutateFocusZone(
+                focusZone
+            );
+
+        };
+
+        img.onload = function () {
+
+            mutateImageZone(
+                imageZone
+            );
+
+        };
+
+        img.onerror = function () {
+
+            mutateImageZone(
+                imageZone
+            );
+
+        };
+
+
+        return root;
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: State Replacement During Active Event Dispatch
+     * ================================================================
+     */
+
+    function mutateInputType(input, seed) {
+
+        if (!input)
             return;
+
+        try {
+
+            var oldType =
+                input.type;
+
+            input.type =
+                oldType === "text" ?
+                    "search" :
+                    "text";
+
+            input.setAttribute(
+                "data-v22-transition",
+                String(seed)
+            );
+
+            /*
+             * Force a modest read after state replacement.
+             */
+            void input.offsetWidth;
+
+        } catch (e) {
         }
+    }
 
-        var frame =
-            state.frames[
-                op.id
-            ];
 
-        if (!frame)
+    /*
+     ================================================================
+     * Pattern: Focus -> mutation
+     * ================================================================
+     */
+
+    function mutateFocusZone(zone) {
+
+        if (!zone)
             return;
 
-        if (
-            op.t === "FRAME_LOAD"
-        ) {
+        try {
 
-            frame.src =
-                "about:blank";
-
-            return;
-        }
-
-        if (
-            op.t === "FRAME_INPUT"
-        ) {
-
-            var doc =
-                frame.contentDocument;
-
-            if (
-                !doc ||
-                !doc.body
-            )
-                return;
-
-            var input =
-                doc.createElement(
+            var list =
+                zone.getElementsByTagName(
                     "input"
                 );
 
-            input.type =
-                "text";
+            if (list.length) {
 
-            doc.body.appendChild(
-                input
-            );
+                var target =
+                    list[0];
 
-            state.frames[
-                op.id + "_input"
-            ] =
-                input;
+                target.className =
+                    target.className ===
+                    "hidden" ?
+                    "sized" :
+                    "hidden";
 
-            return;
+                /*
+                 * Read immediately after state transition.
+                 */
+                void target.offsetWidth;
+            }
+
+        } catch (e) {
         }
+    }
 
-        if (
-            op.t === "FRAME_LISTENER"
-        ) {
 
-            var target =
-                state.frames[
-                    op.id + "_input"
-                ];
+    /*
+     ================================================================
+     * Pattern: Shadow slot mutation
+     * ================================================================
+     */
 
-            if (!target)
+    function mutateShadow(prng) {
+
+        if (!shadowHost)
+            return;
+
+        try {
+
+            var children =
+                childrenOf(shadowHost);
+
+            if (!children.length)
                 return;
 
-            target.addEventListener(
-                "blur",
-                function () {
+            var child =
+                prng.pick(children);
 
-                    try {
+            if (!child)
+                return;
 
-                        target.setAttribute(
-                            "data-blur",
-                            "1"
-                        );
+            /*
+             * Change slot assignment.
+             */
+            if (child.nodeType === 1) {
 
-                    } catch (e) {}
+                if (
+                    child.getAttribute("slot")
+                    === "v22-slot"
+                ) {
 
-                },
-                false
+                    child.removeAttribute(
+                        "slot"
+                    );
+
+                } else {
+
+                    child.setAttribute(
+                        "slot",
+                        "v22-slot"
+                    );
+                }
+            }
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: Style state transition
+     * ================================================================
+     */
+
+    function mutateStyle(prng, root) {
+
+        var element =
+            randomElement(
+                prng,
+                root
             );
 
+        if (!element)
             return;
+
+        try {
+
+            var operation =
+                prng.range(8);
+
+            if (operation === 0) {
+
+                element.style.display =
+                    element.style.display ===
+                    "none" ?
+                    "block" :
+                    "none";
+
+            } else if (operation === 1) {
+
+                element.style.position =
+                    element.style.position ===
+                    "absolute" ?
+                    "relative" :
+                    "absolute";
+
+            } else if (operation === 2) {
+
+                element.style.overflow =
+                    element.style.overflow ===
+                    "hidden" ?
+                    "auto" :
+                    "hidden";
+
+            } else if (operation === 3) {
+
+                element.style.width =
+                    prng.range(180) + 20 + "px";
+
+            } else if (operation === 4) {
+
+                element.style.height =
+                    prng.range(100) + 20 + "px";
+
+            } else if (operation === 5) {
+
+                element.className =
+                    "box inlineblock";
+
+            } else if (operation === 6) {
+
+                element.className =
+                    "box positioned overflow";
+
+            } else {
+
+                element.className =
+                    "block";
+            }
+
+            /*
+             * Layout/style observation.
+             */
+            void element.offsetWidth;
+            void element.offsetHeight;
+
+        } catch (e) {
         }
+    }
 
-        if (
-            op.t === "FRAME_FOCUS"
-        ) {
 
-            var target2 =
-                state.frames[
-                    op.id + "_input"
+    /*
+     ================================================================
+     * Pattern: Renderer / iteration invalidation
+     * ================================================================
+     */
+
+    function mutateRenderTree(prng, root) {
+
+        var renderZone =
+            document.getElementById(
+                "render-zone"
+            );
+
+        if (!renderZone)
+            return;
+
+        try {
+
+            var list =
+                renderZone.children;
+
+            if (!list.length)
+                return;
+
+            var target =
+                list[
+                    prng.range(list.length)
                 ];
 
+            /*
+             * Mutation while style/layout information is active.
+             */
+            target.style.display =
+                target.style.display ===
+                "none" ?
+                "inline-block" :
+                "none";
+
+            void renderZone.offsetWidth;
+
+            /*
+             * Reparent one element.
+             */
             if (
-                target2 &&
-                target2.focus
-            )
-                target2.focus();
+                target.parentNode ===
+                renderZone
+            ) {
 
-            return;
+                renderZone.appendChild(
+                    target
+                );
+            }
+
+        } catch (e) {
         }
+    }
 
-        if (
-            op.t === "FRAME_BLUR"
-        ) {
 
-            var target3 =
-                state.frames[
-                    op.id + "_input"
-                ];
+    /*
+     ================================================================
+     * Pattern: Range + text mutation
+     * ================================================================
+     */
 
-            if (
-                target3 &&
-                target3.blur
-            )
-                target3.blur();
+    function mutateRange(prng) {
 
+        var zone =
+            document.getElementById(
+                "range-zone"
+            );
+
+        if (!zone)
             return;
-        }
 
-        if (
-            op.t === "FRAME_MUTATE"
-        ) {
+        try {
 
-            frame.setAttribute(
-                "data-v21",
-                String(
-                    integer(
-                        100000
-                    )
+            var range =
+                document.createRange();
+
+            var textNode =
+                zone.firstChild;
+
+            if (!textNode)
+                return;
+
+            range.setStart(
+                textNode,
+                0
+            );
+
+            range.setEnd(
+                textNode,
+                Math.min(
+                    3,
+                    textNode.length
                 )
             );
 
-            return;
-        }
+            /*
+             * Tree mutation while Range is alive.
+             */
+            if (prng.bool()) {
 
-        if (
-            op.t === "FRAME_REMOVE"
-        ) {
+                var extra =
+                    document.createTextNode(
+                        "x"
+                    );
 
-            if (
-                frame.parentNode
-            ) {
+                zone.insertBefore(
+                    extra,
+                    zone.firstChild
+                );
 
-                frame.parentNode
-                    .removeChild(
-                        frame
+            } else {
+
+                var first =
+                    zone.firstChild;
+
+                if (first)
+                    zone.removeChild(
+                        first
                     );
             }
 
-            return;
+            /*
+             * Continue using the Range.
+             */
+            try {
+                range.cloneContents();
+            } catch (e2) {
+            }
+
+        } catch (e) {
         }
-
-        if (
-            op.t === "FRAME_ACCESS"
-        ) {
-
-            void frame.contentWindow;
-            void frame.contentDocument;
-
-            return;
-        }
-
-    } catch (e) {}
-}
+    }
 
 
-/* ============================================================
- SVG EXECUTION
-============================================================ */
+    /*
+     ================================================================
+     * Pattern: SVG mutation
+     * ================================================================
+     */
 
-function executeSVG(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    try {
-
-        if (
-            op.t === "SVG_CREATE"
-        ) {
-
-            var svg =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "svg"
-                );
-
-            svg.setAttribute(
-                "width",
-                "80"
-            );
-
-            svg.setAttribute(
-                "height",
-                "60"
-            );
-
-            var rect =
-                document.createElementNS(
-                    "http://www.w3.org/2000/svg",
-                    "rect"
-                );
-
-            rect.setAttribute(
-                "width",
-                "40"
-            );
-
-            rect.setAttribute(
-                "height",
-                "30"
-            );
-
-            svg.appendChild(
-                rect
-            );
-
-            state.svgs[
-                op.id
-            ] =
-                svg;
-
-            return;
-        }
+    function mutateSVG(prng) {
 
         var svg =
-            state.svgs[
-                op.id
-            ];
+            document.getElementById(
+                "svg-zone"
+            );
 
         if (!svg)
             return;
 
-        if (
-            op.t === "SVG_ATTACH"
-        ) {
+        try {
 
-            root.appendChild(
-                svg
-            );
+            var elements =
+                svg.getElementsByTagName("*");
 
-            return;
-        }
+            if (!elements.length)
+                return;
 
-        if (
-            op.t === "SVG_STYLE"
-        ) {
-
-            svg.setAttribute(
-                "style",
-                "display:block;" +
-                "width:" +
-                (20 + integer(100)) +
-                "px;" +
-                "height:" +
-                (20 + integer(80)) +
-                "px;"
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_MUTATE"
-        ) {
-
-            svg.setAttribute(
-                "viewBox",
-                "0 0 " +
-                (20 + integer(100)) +
-                " " +
-                (20 + integer(80))
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_LAYOUT"
-        ) {
-
-            void svg.offsetWidth;
-
-            svg.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_NESTED_LAYOUT"
-        ) {
-
-            void svg.offsetWidth;
-
-            svg.setAttribute(
-                "viewBox",
-                "0 0 " +
-                (10 + integer(120)) +
-                " " +
-                (10 + integer(100))
-            );
-
-            void svg.offsetWidth;
-
-            svg.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_ACCESS"
-        ) {
-
-            void svg.offsetWidth;
-
-            svg.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "SVG_REMOVE"
-        ) {
-
-            if (
-                svg.parentNode
-            ) {
-
-                svg.parentNode
-                    .removeChild(
-                        svg
-                    );
-            }
-
-            return;
-        }
-
-    } catch (e) {}
-}
-
-
-/* ============================================================
- ITERATOR
-============================================================ */
-
-function executeIterator(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    try {
-
-        if (
-            op.t === "TRAVERSE_BEGIN"
-        ) {
-
-            state.traversalLength =
-                root.childNodes.length;
-
-            return;
-        }
-
-        if (
-            op.t === "TRAVERSE_CALLBACK"
-        ) {
-
-            var event =
-                document.createEvent(
-                    "Event"
-                );
-
-            event.initEvent(
-                "v21-traverse",
-                true,
-                true
-            );
-
-            root.dispatchEvent(
-                event
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "COLLECTION_ADD"
-        ) {
-
-            root.appendChild(
-                document.createElement(
-                    "div"
-                )
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "COLLECTION_REMOVE"
-        ) {
-
-            if (
-                root.firstChild
-            ) {
-
-                root.removeChild(
-                    root.firstChild
-                );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "TRAVERSE_CONTINUE"
-        ) {
-
-            var length =
-                root.childNodes.length;
-
-            var i;
-
-            for (
-                i = 0;
-                i < length;
-                i++
-            ) {
-
-                var child =
-                    root.childNodes[i];
-
-                if (child) {
-
-                    void child.nodeName;
-
-                    if (
-                        i === 0
-                    ) {
-
-                        child.appendChild(
-                            document.createElement(
-                                "span"
-                            )
-                        );
-                    }
-                }
-            }
-
-            return;
-        }
-
-    } catch (e) {}
-}
-
-
-/* ============================================================
- HISTORY
-============================================================ */
-
-function executeHistory(op)
-{
-    try {
-
-        if (
-            op.t === "HISTORY_PUSH"
-        ) {
-
-            if (
-                history.pushState
-            ) {
-
-                history.pushState(
-                    {
-                        v:
-                            integer(
-                                100000
-                            )
-                    },
-                    "",
-                    location.href
-                );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_LISTENER"
-        ) {
-
-            window.addEventListener(
-                "popstate",
-                function () {
-
-                    try {
-
-                        document
-                            .getElementById(
-                                "root"
-                            )
-                            .appendChild(
-                                document
-                                    .createElement(
-                                        "div"
-                                    )
-                            );
-
-                    } catch (e) {}
-
-                },
-                false
-            );
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_FRAME"
-        ) {
-
-            var frame =
-                document.createElement(
-                    "iframe"
-                );
-
-            frame.src =
-                "about:blank";
-
-            frame.width =
-                "4";
-
-            frame.height =
-                "4";
-
-            document
-                .getElementById(
-                    "root"
-                )
-                .appendChild(
-                    frame
-                );
-
-            state.frames.history =
-                frame;
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_MUTATE"
-        ) {
-
-            document
-                .getElementById(
-                    "root"
-                )
-                .appendChild(
-                    document.createElement(
-                        "div"
+            var target =
+                elements[
+                    prng.range(
+                        elements.length
                     )
-                );
+                ];
 
-            return;
+            target.setAttribute(
+                "transform",
+                "translate(" +
+                prng.range(30) +
+                "," +
+                prng.range(30) +
+                ")"
+            );
+
+            target.setAttribute(
+                "opacity",
+                String(
+                    (prng.range(10) + 1) /
+                    10
+                )
+            );
+
+            void svg.getBoundingClientRect();
+
+        } catch (e) {
         }
-
-        if (
-            op.t === "HISTORY_BACK"
-        ) {
-
-            if (
-                history.back
-            )
-                history.back();
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_REMOVE_FRAME"
-        ) {
-
-            var frame2 =
-                state.frames.history;
-
-            if (
-                frame2 &&
-                frame2.parentNode
-            ) {
-
-                frame2.parentNode
-                    .removeChild(
-                        frame2
-                    );
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "HISTORY_CONTINUE"
-        ) {
-
-            void document
-                .documentElement
-                .offsetWidth;
-
-            return;
-        }
-
-    } catch (e) {}
-}
-
-
-/* ============================================================
- PARSER
-============================================================ */
-
-function executeParser(op)
-{
-    var root =
-        document.getElementById(
-            "root"
-        );
-
-    try {
-
-        if (
-            op.t === "PARSE"
-        ) {
-
-            root.innerHTML =
-                "<div>" +
-                "<span>V21</span>" +
-                "<input type='text'>" +
-                "</div>";
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_STYLE"
-        ) {
-
-            var divs =
-                root.getElementsByTagName(
-                    "div"
-                );
-
-            if (
-                divs.length
-            ) {
-
-                divs[0].style.cssText =
-                    "display:block;" +
-                    "position:relative;" +
-                    "width:80px;" +
-                    "height:30px;";
-            }
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_LAYOUT"
-        ) {
-
-            void root.offsetWidth;
-
-            root.getBoundingClientRect();
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_MUTATE"
-        ) {
-
-            root.innerHTML +=
-                "<span>" +
-                integer(
-                    100000
-                ) +
-                "</span>";
-
-            return;
-        }
-
-        if (
-            op.t === "PARSE_REMOVE"
-        ) {
-
-            if (
-                root.lastChild
-            ) {
-
-                root.removeChild(
-                    root.lastChild
-                );
-            }
-
-            return;
-        }
-
-    } catch (e) {}
-}
-
-
-/* ============================================================
- GENERIC EXECUTION
-============================================================ */
-
-function execute(op)
-{
-    if (!op)
-        return;
-
-    if (
-        op.t.indexOf(
-            "FRAME_"
-        ) === 0
-    ) {
-
-        executeFrame(op);
-        return;
     }
 
-    if (
-        op.t.indexOf(
-            "SVG_"
-        ) === 0
-    ) {
 
-        executeSVG(op);
-        return;
-    }
+    /*
+     ================================================================
+     * Pattern: Image lifecycle
+     * ================================================================
+     */
 
-    if (
-        op.t.indexOf(
-            "HISTORY_"
-        ) === 0
-    ) {
+    function mutateImageZone(zone) {
 
-        executeHistory(op);
-        return;
-    }
-
-    if (
-        op.t.indexOf(
-            "PARSE"
-        ) === 0
-    ) {
-
-        executeParser(op);
-        return;
-    }
-
-    if (
-        op.t === "TRAVERSE_BEGIN" ||
-        op.t === "TRAVERSE_CALLBACK" ||
-        op.t === "COLLECTION_ADD" ||
-        op.t === "COLLECTION_REMOVE" ||
-        op.t === "TRAVERSE_CONTINUE"
-    ) {
-
-        executeIterator(op);
-        return;
-    }
-
-    if (
-        op.t === "DOCUMENT_LAYOUT"
-    ) {
+        if (!zone)
+            return;
 
         try {
 
-            void document
-                .documentElement
-                .offsetWidth;
+            var image =
+                document.getElementById(
+                    "v22-image"
+                );
 
-            document
-                .documentElement
-                .getBoundingClientRect();
+            if (!image)
+                return;
 
-        } catch (e) {}
+            /*
+             * Modify attributes during image lifecycle.
+             */
+            image.width =
+                image.width === 1 ?
+                2 :
+                1;
 
-        return;
-    }
+            image.height =
+                image.height === 1 ?
+                2 :
+                1;
 
-    executeDOM(op);
-}
-
-
-/* ============================================================
- BUILD CASE
-============================================================ */
-
-function buildCase()
-{
-    state.layers =
-        [];
-
-    var builder =
-        pick(
-            PATTERNS
-        );
-
-    var sequence =
-        builder();
-
-    if (
-        random() < 0.80
-    ) {
-
-        sequence =
-            mutateSequence(
-                sequence
+            image.setAttribute(
+                "data-state",
+                String(
+                    Date.now()
+                )
             );
+
+        } catch (e) {
+        }
     }
 
-    if (
-        random() < 0.30 &&
-        sequence.length <
-        CONFIG.maxOperations - 3
-    ) {
-
-        sequence =
-            mutateSequence(
-                sequence
-            );
-    }
-
-    while (
-        sequence.length >
-        CONFIG.maxOperations
-    ) {
-
-        sequence.pop();
-    }
-
-    return sequence;
-}
-
-
-/* ============================================================
- EXECUTE CASE
-============================================================ */
-
-function executeCase(
-    sequence,
-    finished
-)
-{
-    resetDOM();
-
-    state.sequence =
-        sequence;
-
-    state.index =
-        0;
 
     /*
-     * IMPORTANT:
-     * Save BEFORE executing every operation.
-     *
-     * If the browser disappears during execute(),
-     * the last checkpoint identifies the operation
-     * that was about to execute.
+     ================================================================
+     * Pattern: Reparent
+     * ================================================================
      */
 
-    function next()
-    {
-        if (
-            state.index >=
-            state.sequence.length
+    function mutateReparent(prng, root) {
+
+        var elements =
+            allElements(root);
+
+        if (elements.length < 4)
+            return;
+
+        try {
+
+            var a =
+                prng.pick(elements);
+
+            var b =
+                prng.pick(elements);
+
+            if (!a || !b || a === b)
+                return;
+
+            if (
+                a === root ||
+                b === root
+            )
+                return;
+
+            /*
+             * Avoid obvious ancestor cycles.
+             */
+            if (
+                a.contains &&
+                a.contains(b)
+            )
+                return;
+
+            b.appendChild(a);
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: remove/reinsert subtree
+     * ================================================================
+     */
+
+    function mutateDetachAttach(prng, root) {
+
+        var elements =
+            allElements(root);
+
+        if (elements.length < 3)
+            return;
+
+        try {
+
+            var target =
+                prng.pick(elements);
+
+            if (!target || target === root)
+                return;
+
+            var parent =
+                target.parentNode;
+
+            if (!parent)
+                return;
+
+            var next =
+                target.nextSibling;
+
+            parent.removeChild(
+                target
+            );
+
+            /*
+             * Immediate reinsertion gives us a
+             * detach/reattach transition without
+             * uncontrolled resource accumulation.
+             */
+
+            if (next && next.parentNode === parent)
+                parent.insertBefore(
+                    target,
+                    next
+                );
+            else
+                parent.appendChild(
+                    target
+                );
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: subtree replacement
+     * ================================================================
+     */
+
+    function mutateReplace(prng, root) {
+
+        var elements =
+            allElements(root);
+
+        if (elements.length < 3)
+            return;
+
+        try {
+
+            var target =
+                prng.pick(elements);
+
+            if (!target ||
+                target === root ||
+                !target.parentNode)
+                return;
+
+            var replacement =
+                document.createElement(
+                    target.tagName
+                );
+
+            replacement.className =
+                target.className;
+
+            replacement.setAttribute(
+                "data-replacement",
+                "v22"
+            );
+
+            target.parentNode.replaceChild(
+                replacement,
+                target
+            );
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: attribute state transition
+     * ================================================================
+     */
+
+    function mutateAttributes(prng, root) {
+
+        var element =
+            randomElement(
+                prng,
+                root
+            );
+
+        if (!element)
+            return;
+
+        try {
+
+            var operation =
+                prng.range(6);
+
+            if (operation === 0) {
+
+                element.setAttribute(
+                    "class",
+                    "hidden"
+                );
+
+            } else if (operation === 1) {
+
+                element.removeAttribute(
+                    "class"
+                );
+
+            } else if (operation === 2) {
+
+                element.setAttribute(
+                    "data-v22",
+                    String(prng.next())
+                );
+
+            } else if (operation === 3) {
+
+                element.removeAttribute(
+                    "data-v22"
+                );
+
+            } else if (operation === 4) {
+
+                element.setAttribute(
+                    "tabindex",
+                    "0"
+                );
+
+            } else {
+
+                element.removeAttribute(
+                    "tabindex"
+                );
+            }
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: DOM iteration + mutation
+     * ================================================================
+     */
+
+    function mutateDuringIteration(prng, root) {
+
+        try {
+
+            var list =
+                root.getElementsByTagName("*");
+
+            for (
+                var i = 0;
+                i < list.length;
+                i++
+            ) {
+
+                var element =
+                    list[i];
+
+                if (!element)
+                    continue;
+
+                /*
+                 * Small mutation inside traversal.
+                 */
+                if (
+                    i ===
+                    prng.range(
+                        Math.max(
+                            1,
+                            list.length
+                        )
+                    )
+                ) {
+
+                    element.setAttribute(
+                        "data-iter",
+                        String(i)
+                    );
+
+                    if (
+                        element.parentNode &&
+                        prng.bool()
+                    ) {
+
+                        element.parentNode
+                            .appendChild(
+                                element
+                            );
+                    }
+
+                    break;
+                }
+            }
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: focus / blur / DOM mutation
+     * ================================================================
+     */
+
+    function mutateFocusBlur(prng) {
+
+        try {
+
+            var inputs =
+                document.querySelectorAll(
+                    "#focus-zone input"
+                );
+
+            if (!inputs.length)
+                return;
+
+            var target =
+                inputs[
+                    prng.range(
+                        inputs.length
+                    )
+                ];
+
+            target.focus();
+
+            /*
+             * Mutation occurs immediately after focus.
+             */
+            if (prng.bool()) {
+
+                target.className =
+                    "hidden";
+
+            } else {
+
+                target.className =
+                    "sized";
+            }
+
+            target.blur();
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: form state replacement
+     * ================================================================
+     */
+
+    function mutateForm(prng) {
+
+        try {
+
+            var form =
+                document.getElementById(
+                    "form-zone"
+                );
+
+            if (!form)
+                return;
+
+            var inputs =
+                form.getElementsByTagName(
+                    "input"
+                );
+
+            if (!inputs.length)
+                return;
+
+            var target =
+                inputs[
+                    prng.range(
+                        inputs.length
+                    )
+                ];
+
+            /*
+             * The important transition:
+             *
+             * active element state
+             *       ->
+             * input type replacement
+             */
+            var types = [
+                "text",
+                "search",
+                "email",
+                "number"
+            ];
+
+            target.type =
+                types[
+                    prng.range(
+                        types.length
+                    )
+                ];
+
+            target.setAttribute(
+                "data-type-transition",
+                "1"
+            );
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern: Document/subtree teardown
+     *
+     * We do NOT navigate away.
+     * Instead we exercise local subtree teardown.
+     * ================================================================
+     */
+
+    function mutateSubtreeTeardown(prng, root) {
+
+        var candidates = [
+            "focus-zone",
+            "form-zone",
+            "range-zone",
+            "render-zone",
+            "deep-zone",
+            "svg-zone",
+            "image-zone"
+        ];
+
+        try {
+
+            var id =
+                prng.pick(candidates);
+
+            var target =
+                document.getElementById(
+                    id
+                );
+
+            if (!target)
+                return;
+
+            var parent =
+                target.parentNode;
+
+            if (!parent)
+                return;
+
+            /*
+             * Remove and immediately replace with
+             * a fresh equivalent container.
+             */
+            parent.removeChild(
+                target
+            );
+
+            var replacement =
+                document.createElement(
+                    "div"
+                );
+
+            replacement.id = id;
+
+            replacement.className =
+                "block positioned";
+
+            parent.appendChild(
+                replacement
+            );
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Compound patterns
+     * ================================================================
+     */
+
+    function patternFocus(prng, root) {
+
+        mutateFocusBlur(prng);
+        mutateStyle(prng, root);
+    }
+
+
+    function patternForm(prng, root) {
+
+        mutateForm(prng);
+        mutateAttributes(prng, root);
+    }
+
+
+    function patternShadow(prng, root) {
+
+        mutateShadow(prng);
+        mutateStyle(prng, root);
+    }
+
+
+    function patternRender(prng, root) {
+
+        mutateRenderTree(prng, root);
+        mutateStyle(prng, root);
+    }
+
+
+    function patternRange(prng, root) {
+
+        mutateRange(prng);
+        mutateAttributes(prng, root);
+    }
+
+
+    function patternLifetime(prng, root) {
+
+        mutateDetachAttach(prng, root);
+        mutateReparent(prng, root);
+    }
+
+
+    function patternEventReplacement(prng, root) {
+
+        var input =
+            document.getElementById(
+                "focus-input-a"
+            );
+
+        if (!input)
+            return;
+
+        try {
+
+            input.onclick =
+                function () {
+
+                    mutateInputType(
+                        input,
+                        prng.next()
+                    );
+
+                    mutateStyle(
+                        prng,
+                        root
+                    );
+                };
+
+            input.click();
+
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     ================================================================
+     * Pattern table
+     * ================================================================
+     */
+
+    var PATTERNS = [
+
+        {
+            name:
+                "FOCUS_BLUR_MUTATION",
+
+            run:
+                patternFocus
+        },
+
+        {
+            name:
+                "FORM_STATE_REPLACEMENT",
+
+            run:
+                patternForm
+        },
+
+        {
+            name:
+                "SHADOW_SLOT_MUTATION",
+
+            run:
+                patternShadow
+        },
+
+        {
+            name:
+                "RENDER_STYLE_INVALIDATION",
+
+            run:
+                patternRender
+        },
+
+        {
+            name:
+                "RANGE_TEXT_MUTATION",
+
+            run:
+                patternRange
+        },
+
+        {
+            name:
+                "LIFETIME_REPARENT",
+
+            run:
+                patternLifetime
+        },
+
+        {
+            name:
+                "EVENT_STATE_REPLACEMENT",
+
+            run:
+                patternEventReplacement
+        },
+
+        {
+            name:
+                "SVG_RENDERER_MUTATION",
+
+            run:
+                function (
+                    prng,
+                    root
+                ) {
+
+                    mutateSVG(prng);
+                    mutateStyle(
+                        prng,
+                        root
+                    );
+                }
+        },
+
+        {
+            name:
+                "IMAGE_LIFETIME",
+
+            run:
+                function (
+                    prng,
+                    root
+                ) {
+
+                    mutateImageZone(
+                        document.getElementById(
+                            "image-zone"
+                        )
+                    );
+
+                    mutateAttributes(
+                        prng,
+                        root
+                    );
+                }
+        },
+
+        {
+            name:
+                "DOM_ITERATION_MUTATION",
+
+            run:
+                function (
+                    prng,
+                    root
+                ) {
+
+                    mutateDuringIteration(
+                        prng,
+                        root
+                    );
+                }
+        },
+
+        {
+            name:
+                "SUBTREE_TEARDOWN",
+
+            run:
+                function (
+                    prng,
+                    root
+                ) {
+
+                    mutateSubtreeTeardown(
+                        prng,
+                        root
+                    );
+                }
+        },
+
+        {
+            name:
+                "STYLE_ATTRIBUTE_TRANSITION",
+
+            run:
+                function (
+                    prng,
+                    root
+                ) {
+
+                    mutateStyle(
+                        prng,
+                        root
+                    );
+
+                    mutateAttributes(
+                        prng,
+                        root
+                    );
+                }
+        }
+    ];
+
+
+    /*
+     ================================================================
+     * Case execution
+     * ================================================================
+     */
+
+    function runCase(caseId, seed) {
+
+        var prng =
+            new PRNG(seed);
+
+        /*
+         * Rebuild the state before every case.
+         *
+         * This prevents one pathological case from contaminating
+         * the next case.
+         */
+        var root =
+            buildFixture(seed);
+
+        var pattern =
+            prng.pick(
+                PATTERNS
+            );
+
+        var sequence = [];
+
+        var mutationCount =
+            2 +
+            prng.range(
+                MAX_MUTATIONS_PER_CASE - 1
+            );
+
+        for (
+            var i = 0;
+            i < mutationCount;
+            i++
         ) {
 
-            setTimeout(
-                finished,
-                CONFIG.asyncDelay
+            if (stopRequested)
+                break;
+
+            /*
+             * Occasionally switch to another pattern.
+             * This creates compound state transitions.
+             */
+            var selected =
+                pattern;
+
+            if (
+                i > 0 &&
+                prng.range(4) === 0
+            ) {
+
+                selected =
+                    prng.pick(
+                        PATTERNS
+                    );
+            }
+
+            sequence.push(
+                selected.name
+            );
+
+            /*
+             * CHECKPOINT BEFORE OPERATION.
+             */
+            checkpoint({
+
+                version:
+                    VERSION,
+
+                caseId:
+                    caseId,
+
+                seed:
+                    seed,
+
+                pattern:
+                    pattern.name,
+
+                activePattern:
+                    selected.name,
+
+                sequence:
+                    sequence.slice(),
+
+                index:
+                    i,
+
+                operation:
+                    "BEFORE_" +
+                    selected.name,
+
+                timestamp:
+                    Date.now()
+            });
+
+            /*
+             * Execute pattern.
+             */
+            try {
+
+                selected.run(
+                    prng,
+                    root
+                );
+
+            } catch (e) {
+                /*
+                 * JS exceptions are not the target.
+                 */
+            }
+
+            /*
+             * Lightweight continuation.
+             *
+             * If WebCore survived the mutation, we deliberately
+             * continue touching the fixture.
+             */
+            try {
+
+                if (root) {
+
+                    void root.offsetWidth;
+
+                    void root.offsetHeight;
+
+                    root.getBoundingClientRect();
+
+                }
+
+            } catch (e2) {
+            }
+        }
+
+        /*
+         * Final checkpoint.
+         */
+        checkpoint({
+
+            version:
+                VERSION,
+
+            caseId:
+                caseId,
+
+            seed:
+                seed,
+
+            pattern:
+                pattern.name,
+
+            sequence:
+                sequence,
+
+            index:
+                mutationCount,
+
+            operation:
+                "CASE_COMPLETE",
+
+            timestamp:
+                Date.now()
+        });
+    }
+
+
+    /*
+     ================================================================
+     * Main loop
+     * ================================================================
+     */
+
+    function start() {
+
+        if (running)
+            return;
+
+        running = true;
+        stopRequested = false;
+
+        globalCase = 0;
+
+        setStatus(
+            "V22 running..."
+        );
+
+        runNext();
+    }
+
+
+    function runNext() {
+
+        if (!running)
+            return;
+
+        if (stopRequested) {
+
+            running = false;
+
+            setStatus(
+                "V22 stopped"
             );
 
             return;
         }
 
-        checkpoint();
-
-        var operation =
-            state.sequence[
-                state.index
-            ];
-
-        execute(
-            operation
-        );
-
-        state.index++;
-
-        setTimeout(
-            next,
-            CONFIG.operationDelay
-        );
-    }
-
-    next();
-}
-
-
-/* ============================================================
- FUZZ LOOP
-============================================================ */
-
-function start()
-{
-    if (
-        state.running
-    )
-        return;
-
-    state.running =
-        true;
-
-    setStatus(
-        "RUNNING"
-    );
-
-    function nextCase()
-    {
         if (
-            !state.running
-        )
+            globalCase >=
+            MAX_CASES
+        ) {
+
+            running = false;
+
+            setStatus(
+                "V22 completed"
+            );
+
             return;
+        }
 
-        state.caseId++;
-
-        state.seed =
-            newSeed();
-
-        setSeed(
-            state.seed
-        );
-
-        var sequence =
-            buildCase();
+        globalCase++;
 
         /*
-         * Persist the complete case BEFORE execution.
+         * Deterministic but changing seed.
          */
+        var seed =
+            (
+                0x9E3779B9 ^
+                (
+                    globalCase *
+                    0x45D9F3B
+                )
+            ) >>> 0;
 
-        state.sequence =
-            sequence;
+        /*
+         * Update UI only between cases.
+         */
+        setStatus(
+            "V22 case " +
+            globalCase +
+            " / " +
+            MAX_CASES
+        );
 
-        state.index =
-            0;
-
-        checkpoint();
-
-        executeCase(
-            sequence,
+        /*
+         * Use a timer boundary to introduce a real event-loop
+         * transition between cases.
+         */
+        setTimeout(
             function () {
 
-                setTimeout(
-                    nextCase,
-                    CONFIG.caseDelay
+                if (!running)
+                    return;
+
+                runCase(
+                    globalCase,
+                    seed
                 );
 
-            }
+                setTimeout(
+                    runNext,
+                    0
+                );
+
+            },
+            0
         );
     }
 
-    nextCase();
-}
+
+    function stop() {
+
+        stopRequested = true;
+
+        running = false;
+
+        setStatus(
+            "V22 stopped"
+        );
+    }
 
 
-/* ============================================================
- RECOVERY
-============================================================ */
+    /*
+     ================================================================
+     * Recovery information
+     * ================================================================
+     */
 
-var previousCase =
-    loadCase();
+    function showRecovery() {
 
-if (
-    previousCase
-) {
+        var previous =
+            loadCheckpoint();
 
-    var recovery =
+        if (!previous)
+            return;
+
+        /*
+         * Do not automatically display the full checkpoint.
+         * It remains available in localStorage for diagnosis.
+         */
+    }
+
+
+    /*
+     ================================================================
+     * Initialization
+     * ================================================================
+     */
+
+    function init() {
+
+        fixture =
+            document.getElementById(
+                "fixture"
+            );
+
+        statusElement =
+            document.getElementById(
+                "status"
+            );
+
         document.getElementById(
-            "recovery"
+            "startButton"
+        ).onclick =
+            start;
+
+        document.getElementById(
+            "stopButton"
+        ).onclick =
+            stop;
+
+        showRecovery();
+
+        setStatus(
+            "V22 ready"
+        );
+    }
+
+
+    if (
+        document.readyState ===
+        "loading"
+    ) {
+
+        document.addEventListener(
+            "DOMContentLoaded",
+            init
         );
 
-    recovery.style.display =
-        "block";
+    } else {
 
-    recovery.textContent =
-        "LAST CASE: " +
-        previousCase.caseId +
-        " | " +
-        previousCase.pattern +
-        " | seed=" +
-        previousCase.seed +
-        " | operation=" +
-        previousCase.index +
-        "/" +
-        previousCase.sequence.length;
-}
-
-
-/* ============================================================
- START BUTTON
-============================================================ */
-
-document
-    .getElementById(
-        "start"
-    )
-    .addEventListener(
-        "click",
-        function () {
-
-            start();
-
-        },
-        false
-    );
-
+        init();
+    }
 
 })();
+
 </script>
 
 </body>
