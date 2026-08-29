@@ -3,2433 +3,1193 @@
 <html>
 <head>
 <meta charset="utf-8">
-
-<title>PS4 WebKit UAF Lifecycle Fuzzer v2</title>
+<title>PS4 WebKit Silent State Transition Crash Hunter V28</title>
 
 <style>
 html, body {
     margin: 0;
     padding: 0;
-    min-height: 100%;
-    background: #06122a;
-    color: #d7e7ff;
-    font-family: monospace;
-    font-size: 15px;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
 }
 
-body {
-    padding: 18px;
-}
-
-h1 {
-    margin: 0 0 15px 0;
-    color: #ffffff;
-}
-
-button {
-    background: #164d88;
-    color: #ffffff;
-    border: 2px solid #79b7f2;
-    padding: 12px 18px;
-    margin-right: 8px;
-    margin-bottom: 12px;
-    font-family: monospace;
-    font-weight: bold;
-    font-size: 15px;
-}
-
-#status {
-    border: 1px solid #70aee8;
-    background: #0b2348;
-    padding: 12px;
-    margin-bottom: 12px;
-}
-
-#log {
-    border: 1px solid #70aee8;
-    background: #030918;
-    padding: 12px;
-    min-height: 650px;
-    white-space: pre-wrap;
-    overflow-wrap: break-word;
-}
-
-.pass { color: #70e6ad; }
-.fail { color: #ff7474; }
-.info { color: #a9cbff; }
-.warn { color: #ffd27a; }
-.section { color: #ffffff; font-weight: bold; }
-.hit { color: #ffb347; font-weight: bold; }
-
-/*
- * Arena visível apenas para permitir layout real.
- * O conteúdo fica fora da área principal.
- */
 #arena {
     position: absolute;
-    left: -6000px;
-    top: 0;
-    width: 1200px;
-    min-height: 1200px;
-    overflow: visible;
+    left: -10000px;
+    top: -10000px;
+    width: 1600px;
+    min-height: 1600px;
 }
 
-#dynamicStyleHost {
+#style-host {
     display: none;
 }
 </style>
-
 </head>
 
 <body>
 
-<h1>PS4 WebKit UAF Lifecycle Fuzzer v2</h1>
-
-<button onclick="startFuzzer()">RUN FUZZER v2</button>
-<button onclick="stopFuzzer()">STOP</button>
-<button onclick="clearLog()">CLEAR</button>
-
-<div id="status">
-Ready
-</div>
-
-<div id="log"></div>
-
-<div id="dynamicStyleHost"></div>
+<div id="style-host"></div>
 <div id="arena"></div>
 
 <script>
+(function () {
+"use strict";
 
 /*
  * ============================================================
- * PS4 WEBKIT UAF LIFECYCLE FUZZER v2
- * ============================================================
+ * PS4 WEBKIT SILENT STATE-TRANSITION CRASH HUNTER
+ * V28
  *
- * Objetivo:
+ * SILENT MODE
  *
- * Exercitar sequências compostas semelhantes a testes de
- * regressão do WebKit:
+ * Persistência:
+ *   localStorage["ps4_uaf_last_candidate"]
  *
- *   Build DOM
- *      ↓
- *   Force Style
- *      ↓
- *   Force Layout
- *      ↓
- *   Install observer/listener
- *      ↓
- *   Structural mutation
- *      ↓
- *   Reentrant operation
- *      ↓
- *   Owner/subtree/frame teardown
- *      ↓
- *   Pending callback
- *      ↓
- *   Additional style/layout/DOM work
- *
- * Não usa:
- *
- * - JIT exploitation
- * - memory spraying
- * - address disclosure
- * - arbitrary memory access
- * - Worker storms
- * - resource exhaustion
- *
+ * O registro é gravado ANTES de cada candidato.
+ * Se o navegador/processo cair, o último candidato permanece.
  * ============================================================
  */
-
-
-/* ============================================================
- * CONFIGURATION
- * ============================================================
- */
-
-var running = false;
-
-var round = 0;
-var currentTest = 0;
-
-var passCount = 0;
-var failCount = 0;
-var skipCount = 0;
-var totalExecutions = 0;
-
-var MAX_ROUNDS = 12;
-var DELAY_BETWEEN_TESTS = 40;
 
 var arena = document.getElementById("arena");
-var logBox = document.getElementById("log");
-var statusBox = document.getElementById("status");
-var styleHost = document.getElementById("dynamicStyleHost");
+var styleHost = document.getElementById("style-host");
 
+var running = true;
+var candidateCounter = 0;
 
 /* ============================================================
- * DETERMINISTIC PRNG
- *
- * Permite repetir uma sequência.
+ * CONFIGURAÇÃO
  * ============================================================
  */
 
-var seed = 0x13572468;
+var CONFIG = {
+    delay: 20,
+    maxNodes: 180,
+    burstMin: 12,
+    burstMax: 40,
+    cleanupDelay: 10
+};
 
-function random32() {
+/* ============================================================
+ * PRNG
+ * ============================================================
+ */
 
-    seed =
-        (
-            (seed * 1664525) +
-            1013904223
-        ) >>> 0;
+var seed = (Date.now() ^ 0x5A17C0DE) >>> 0;
 
+function rnd32() {
+    seed = ((seed * 1664525) + 1013904223) >>> 0;
     return seed;
 }
 
-
-function randomRange(min, max) {
-
-    return min +
-        (
-            random32() %
-            (max - min + 1)
-        );
-
+function rnd(min, max) {
+    return min + (rnd32() % (max - min + 1));
 }
 
+function pick(array) {
+    if (!array.length)
+        return null;
+    return array[rnd(0, array.length - 1)];
+}
 
 /* ============================================================
- * LOGGING
+ * PERSISTÊNCIA
  * ============================================================
  */
 
-function log(message, type) {
+function saveCandidate(family, variant, operations) {
+    candidateCounter++;
 
-    var line = document.createElement("div");
+    var data = {
+        id: candidateCounter,
+        seed: seed >>> 0,
+        family: family,
+        variant: variant,
+        operations: operations,
+        time: Date.now()
+    };
 
-    line.className = type || "info";
-
-    line.textContent = message;
-
-    logBox.appendChild(line);
-
+    try {
+        localStorage.setItem(
+            "ps4_uaf_last_candidate",
+            JSON.stringify(data)
+        );
+    } catch (e) {
+    }
 }
-
-
-function section(name) {
-
-    log("");
-    log("==============================================================", "section");
-    log(name, "section");
-    log("==============================================================", "section");
-
-}
-
-
-function updateStatus() {
-
-    statusBox.textContent =
-        "Round: " + round +
-        " | Test: " + currentTest +
-        " | PASS: " + passCount +
-        " | FAIL: " + failCount +
-        " | SKIP: " + skipCount +
-        " | Total: " + totalExecutions +
-        " | Seed: 0x" + seed.toString(16);
-
-}
-
-
-function clearLog() {
-
-    logBox.innerHTML = "";
-
-}
-
-
-function stopFuzzer() {
-
-    running = false;
-
-    log("[STOP] Execution stopped by user", "warn");
-
-    updateStatus();
-
-}
-
 
 /* ============================================================
  * CLEANUP
  * ============================================================
  */
 
-function cleanupArena() {
-
+function cleanup() {
     while (arena.firstChild)
         arena.removeChild(arena.firstChild);
 
     while (styleHost.firstChild)
         styleHost.removeChild(styleHost.firstChild);
-
 }
 
-
 /* ============================================================
- * LAYOUT FLUSH HELPERS
- *
- * Alterna diferentes caminhos que normalmente consultam
- * StyleResolver / RenderTree / Layout.
+ * STYLE / LAYOUT FLUSH
  * ============================================================
  */
 
-function forceStyle(element) {
-
-    if (!element)
+function flushStyle(node) {
+    if (!node)
         return;
 
     try {
-
-        window.getComputedStyle(element).display;
-        window.getComputedStyle(element).position;
-        window.getComputedStyle(element).width;
-        window.getComputedStyle(element).fontSize;
-
+        getComputedStyle(node).display;
+        getComputedStyle(node).position;
+        getComputedStyle(node).fontSize;
+        getComputedStyle(node).direction;
+        getComputedStyle(node).width;
     } catch (e) {
     }
-
 }
 
-
-function forceLayout(element) {
-
-    if (!element)
+function flushLayout(node) {
+    if (!node)
         return;
 
     try {
-
-        element.offsetWidth;
-        element.offsetHeight;
-
-        element.clientWidth;
-        element.clientHeight;
-
-        element.scrollWidth;
-        element.scrollHeight;
-
-        element.getBoundingClientRect();
-
+        node.offsetWidth;
+        node.offsetHeight;
+        node.clientWidth;
+        node.clientHeight;
+        node.scrollWidth;
+        node.scrollHeight;
+        node.getBoundingClientRect();
     } catch (e) {
     }
-
 }
 
-
-function forceStyleAndLayout(element) {
-
-    forceStyle(element);
-    forceLayout(element);
-
+function flush(node) {
+    flushStyle(node);
+    flushLayout(node);
 }
-
 
 /* ============================================================
- * DYNAMIC STYLE SHEET
+ * DYNAMIC STYLE
  * ============================================================
  */
 
-function installDynamicStyleSheet(id) {
-
+function installStyle(id) {
     var style = document.createElement("style");
 
-    style.type = "text/css";
-
-    style.id = id;
-
     style.textContent =
-        "." + id + "-root {" +
+        "." + id + "_root{" +
             "display:block;" +
             "position:relative;" +
-            "width:720px;" +
+            "width:900px;" +
+            "min-height:400px;" +
             "font-size:13px;" +
             "line-height:17px;" +
-            "direction:ltr;" +
         "}" +
 
-        "." + id + "-inline {" +
-            "display:inline;" +
-            "padding:1px;" +
-        "}" +
-
-        "." + id + "-block {" +
+        "." + id + "_block{" +
             "display:block;" +
             "position:relative;" +
-            "min-height:8px;" +
+            "min-height:4px;" +
         "}" +
 
-        "." + id + "-float {" +
-            "float:left;" +
-            "width:12px;" +
-            "height:12px;" +
+        "." + id + "_inline{" +
+            "display:inline;" +
         "}" +
 
-        "." + id + "-abs {" +
+        "." + id + "_relative{" +
+            "position:relative;" +
+            "left:1px;" +
+        "}" +
+
+        "." + id + "_absolute{" +
             "position:absolute;" +
-            "left:4px;" +
-            "top:4px;" +
+            "left:3px;" +
+            "top:2px;" +
         "}" +
 
-        "." + id + "-hidden {" +
-            "display:none;" +
+        "." + id + "_float{" +
+            "float:left;" +
+            "width:10px;" +
+            "height:10px;" +
         "}" +
 
-        "." + id + "-rtl {" +
+        "." + id + "_rtl{" +
             "direction:rtl;" +
         "}" +
 
-        "." + id + "-big {" +
-            "font-size:22px;" +
-            "line-height:27px;" +
+        "." + id + "_big{" +
+            "font-size:27px;" +
+            "line-height:33px;" +
         "}" +
 
-        "." + id + "-relative {" +
-            "position:relative;" +
-            "left:2px;" +
+        "." + id + "_hidden{" +
+            "display:none;" +
+        "}" +
+
+        "." + id + "_flex{" +
+            "display:flex;" +
         "}";
 
     styleHost.appendChild(style);
-
-    return style;
-
 }
 
-
 /* ============================================================
- * COMPLEX DOM BUILDER
- *
- * Aqui a diferença principal para v1:
- * vários elementos reais são inseridos antes da mutação.
+ * COMPLEX TREE BUILDER
  * ============================================================
  */
 
-function buildComplexTree(id, depth, width) {
-
+function buildTree(id) {
     var root = document.createElement("div");
 
-    root.className = id + "-root";
+    root.className = id + "_root";
 
-    root.setAttribute("data-root", id);
-
-    var stack = [];
-
-    stack.push({
+    var queue = [{
         node: root,
-        level: 0
-    });
+        depth: 0
+    }];
 
-    var total = 0;
+    var created = 1;
 
-    while (stack.length) {
+    while (queue.length && created < CONFIG.maxNodes) {
+        var entry = queue.shift();
 
-        var entry = stack.shift();
-
-        if (entry.level >= depth)
+        if (entry.depth > 4)
             continue;
+
+        var width = rnd(2, 6);
 
         for (var i = 0; i < width; i++) {
+            if (created >= CONFIG.maxNodes)
+                break;
 
-            var child;
+            var type = rnd(0, 9);
+            var node;
 
-            var selector =
-                (i + entry.level + total) % 6;
-
-            if (selector === 0) {
-
-                child = document.createElement("div");
-                child.className =
-                    id + "-block";
-
-            } else if (selector === 1) {
-
-                child = document.createElement("span");
-                child.className =
-                    id + "-inline";
-
-            } else if (selector === 2) {
-
-                child = document.createElement("span");
-                child.className =
-                    id + "-float";
-
-            } else if (selector === 3) {
-
-                child = document.createElement("b");
-                child.className =
-                    id + "-inline";
-
-            } else if (selector === 4) {
-
-                child = document.createElement("i");
-                child.className =
-                    id + "-relative";
-
-            } else {
-
-                child = document.createElement("span");
-                child.className =
-                    id + "-inline";
-            }
-
-            child.setAttribute(
-                "data-node",
-                total
-            );
-
-            child.appendChild(
-                document.createTextNode(
-                    "N" + total + " "
-                )
-            );
-
-            entry.node.appendChild(child);
-
-            total++;
-
-            if (
-                entry.level + 1 < depth &&
-                total < 120
-            ) {
-
-                stack.push({
-                    node: child,
-                    level: entry.level + 1
-                });
-
-            }
-
-        }
-
-    }
-
-    return root;
-
-}
-
-
-/* ============================================================
- * STRUCTURAL MUTATIONS
- * ============================================================
- */
-
-function mutateTree(root, id) {
-
-    var nodes =
-        root.getElementsByTagName("*");
-
-    var count = nodes.length;
-
-    if (!count)
-        return;
-
-    var iterations =
-        Math.min(
-            randomRange(8, 22),
-            count
-        );
-
-    for (var i = 0; i < iterations; i++) {
-
-        var node =
-            nodes[
-                randomRange(
-                    0,
-                    nodes.length - 1
-                )
-            ];
-
-        if (!node)
-            continue;
-
-        switch (i % 7) {
-
+            switch (type) {
             case 0:
-                node.className =
-                    id + "-big";
+                node = document.createElement("div");
+                node.className = id + "_block";
                 break;
 
             case 1:
-                node.className =
-                    id + "-rtl";
+                node = document.createElement("span");
+                node.className = id + "_inline";
                 break;
 
             case 2:
-                node.style.display =
-                    "inline";
+                node = document.createElement("b");
+                node.className = id + "_relative";
                 break;
 
             case 3:
-                node.style.position =
-                    "relative";
+                node = document.createElement("i");
+                node.className = id + "_inline";
                 break;
 
             case 4:
-                node.style.left =
-                    randomRange(-5, 8) + "px";
+                node = document.createElement("em");
+                node.className = id + "_rtl";
                 break;
 
             case 5:
-                node.style.fontSize =
-                    randomRange(8, 28) + "px";
+                node = document.createElement("strong");
+                node.className = id + "_big";
                 break;
 
             case 6:
-                node.setAttribute(
-                    "data-mutated",
-                    i
-                );
+                node = document.createElement("span");
+                node.className = id + "_float";
                 break;
-        }
 
+            case 7:
+                node = document.createElement("p");
+                node.className = id + "_block";
+                break;
+
+            case 8:
+                node = document.createElement("section");
+                node.className = id + "_block";
+                break;
+
+            default:
+                node = document.createElement("article");
+                node.className = id + "_relative";
+                break;
+            }
+
+            node.setAttribute("data-n", created);
+            node.appendChild(
+                document.createTextNode("n" + created + " ")
+            );
+
+            entry.node.appendChild(node);
+
+            if (rnd(0, 100) < 70) {
+                queue.push({
+                    node: node,
+                    depth: entry.depth + 1
+                });
+            }
+
+            created++;
+        }
     }
 
+    return root;
 }
 
-
-/* ============================================================
- * RUNNER
- * ============================================================
- */
-
-function runTest(name, fn, done) {
-
-    if (!running) {
-        done();
-        return;
-    }
-
-    currentTest++;
-
-    updateStatus();
+function elements(root) {
+    var result = [];
 
     try {
+        var list = root.getElementsByTagName("*");
 
-        var result = fn();
-
-        if (result === "SKIP") {
-
-            skipCount++;
-
-            log(
-                "[SKIP] " + name,
-                "warn"
-            );
-
-        } else {
-
-            passCount++;
-
-            log(
-                "[PASS] " + name,
-                "pass"
-            );
-
-        }
-
+        for (var i = 0; i < list.length; i++)
+            result.push(list[i]);
     } catch (e) {
-
-        failCount++;
-
-        log(
-            "[FAIL] " +
-            name +
-            " -> " +
-            e.name +
-            ": " +
-            e.message,
-            "fail"
-        );
-
     }
 
-    totalExecutions++;
-
-    updateStatus();
-
-    setTimeout(done, DELAY_BETWEEN_TESTS);
-
+    return result;
 }
 
-
 /* ============================================================
- * TEST FAMILY 1
+ * MUTATION PRIMITIVES
  *
- * EVENT DISPATCH
- * → mutation
- * → removal
- * → reentrant dispatch
+ * Cada burst escolhe operações diferentes.
  * ============================================================
  */
 
-function testEventReentrancyVariant(variant) {
+function opClass(root, id) {
+    var n = pick(elements(root));
+    if (!n)
+        return;
 
-    var id = "evt" + variant;
+    n.className = pick([
+        id + "_block",
+        id + "_inline",
+        id + "_relative",
+        id + "_absolute",
+        id + "_float",
+        id + "_rtl",
+        id + "_big",
+        id + "_hidden",
+        id + "_flex"
+    ]);
+}
 
-    installDynamicStyleSheet(id);
+function opAttribute(root) {
+    var n = pick(elements(root));
+    if (!n)
+        return;
 
-    var root =
-        buildComplexTree(
-            id,
-            3,
-            4
+    n.setAttribute(
+        "data-m" + rnd(0, 8),
+        String(rnd32())
+    );
+}
+
+function opStyle(root) {
+    var n = pick(elements(root));
+    if (!n)
+        return;
+
+    switch (rnd(0, 8)) {
+    case 0:
+        n.style.display = "block";
+        break;
+    case 1:
+        n.style.display = "inline";
+        break;
+    case 2:
+        n.style.display = "none";
+        break;
+    case 3:
+        n.style.position = "relative";
+        break;
+    case 4:
+        n.style.position = "static";
+        break;
+    case 5:
+        n.style.fontSize = rnd(8, 36) + "px";
+        break;
+    case 6:
+        n.style.direction = rnd(0, 1) ? "rtl" : "ltr";
+        break;
+    case 7:
+        n.style.left = rnd(-20, 20) + "px";
+        break;
+    default:
+        n.style.lineHeight = rnd(10, 42) + "px";
+        break;
+    }
+}
+
+function opAppend(root, id) {
+    var parent = pick(elements(root));
+    if (!parent)
+        parent = root;
+
+    var child = document.createElement(
+        rnd(0, 1) ? "span" : "div"
+    );
+
+    child.className = pick([
+        id + "_block",
+        id + "_inline",
+        id + "_relative",
+        id + "_big"
+    ]);
+
+    child.appendChild(
+        document.createTextNode("x" + rnd32())
+    );
+
+    try {
+        parent.appendChild(child);
+    } catch (e) {
+    }
+}
+
+function opRemove(root) {
+    var all = elements(root);
+    var n = pick(all);
+
+    if (!n || n === root || !n.parentNode)
+        return;
+
+    try {
+        n.parentNode.removeChild(n);
+    } catch (e) {
+    }
+}
+
+function opMove(root) {
+    var all = elements(root);
+
+    var node = pick(all);
+    var parent = pick(all);
+
+    if (!node || !parent)
+        return;
+
+    if (node === parent)
+        return;
+
+    try {
+        parent.appendChild(node);
+    } catch (e) {
+    }
+}
+
+function opReplace(root, id) {
+    var all = elements(root);
+    var oldNode = pick(all);
+
+    if (!oldNode || !oldNode.parentNode)
+        return;
+
+    var replacement = document.createElement("div");
+
+    replacement.className = id + "_block";
+
+    var amount = rnd(2, 7);
+
+    for (var i = 0; i < amount; i++) {
+        var s = document.createElement("span");
+
+        s.className = id + "_inline";
+        s.appendChild(
+            document.createTextNode("r" + i)
         );
+
+        replacement.appendChild(s);
+    }
+
+    try {
+        oldNode.parentNode.replaceChild(
+            replacement,
+            oldNode
+        );
+    } catch (e) {
+    }
+}
+
+function opInnerHTML(root, id) {
+    var n = pick(elements(root));
+    if (!n)
+        return;
+
+    try {
+        n.innerHTML =
+            "<div class='" + id + "_block'>" +
+                "<span class='" + id + "_inline'>a</span>" +
+                "<b class='" + id + "_relative'>b</b>" +
+                "<i class='" + id + "_rtl'>c</i>" +
+            "</div>";
+    } catch (e) {
+    }
+}
+
+function opText(root) {
+    var all = elements(root);
+    var n = pick(all);
+
+    if (!n)
+        return;
+
+    try {
+        n.appendChild(
+            document.createTextNode(
+                " t" + rnd32()
+            )
+        );
+    } catch (e) {
+    }
+}
+
+/* ============================================================
+ * MUTATION BURST
+ * ============================================================
+ */
+
+function mutationBurst(root, id, count) {
+    var operations = [
+        function () { opClass(root, id); },
+        function () { opAttribute(root); },
+        function () { opStyle(root); },
+        function () { opAppend(root, id); },
+        function () { opRemove(root); },
+        function () { opMove(root); },
+        function () { opReplace(root, id); },
+        function () { opInnerHTML(root, id); },
+        function () { opText(root); }
+    ];
+
+    count = count || rnd(
+        CONFIG.burstMin,
+        CONFIG.burstMax
+    );
+
+    for (var i = 0; i < count; i++) {
+        pick(operations)();
+
+        if ((i % rnd(3, 7)) === 0)
+            flush(root);
+    }
+
+    flush(root);
+}
+
+/* ============================================================
+ * FAMILY A
+ * EVENT DISPATCH → REENTRANCY → MUTATION BURSTS
+ * ============================================================
+ */
+
+function familyEvent(id, variant) {
+    var root = buildTree(id);
 
     arena.appendChild(root);
 
-    forceStyleAndLayout(root);
+    flush(root);
+    mutationBurst(root, id, rnd(15, 35));
 
-    var target =
-        root.getElementsByTagName("*")[8];
+    var target = pick(elements(root)) || root;
 
-    if (!target)
-        return;
+    function nestedHandler() {
+        mutationBurst(root, id, rnd(10, 30));
 
-    var parent = target.parentNode;
-
-    target.addEventListener(
-        "ps4-uaf-event",
-        function() {
-
-            mutateTree(root, id);
-
-            forceStyleAndLayout(root);
-
-            if (variant % 2 === 0) {
-
-                if (
-                    target.parentNode
-                ) {
-
-                    target.parentNode.removeChild(target);
-
-                }
-
-            } else {
-
+        if (variant % 2 === 0) {
+            try {
                 root.innerHTML =
-                    "<div class='" +
-                    id +
-                    "-block'>" +
-                    "replacement" +
-                    "<span class='" +
-                    id +
-                    "-inline'>X</span>" +
-                    "</div>";
-
+                    "<div class='" + id + "_block'></div>";
+            } catch (e) {
             }
+        } else {
+            opRemove(root);
+            opReplace(root, id);
+        }
 
-            forceStyleAndLayout(root);
-
-            if (variant % 3 === 0) {
-
-                var nested =
-                    document.createEvent("Event");
-
-                nested.initEvent(
-                    "ps4-nested",
-                    true,
-                    false
-                );
-
-                root.dispatchEvent(nested);
-
-            }
-
-        },
-        false
-    );
+        flush(root);
+    }
 
     root.addEventListener(
-        "ps4-nested",
-        function() {
+        "nested-" + id,
+        nestedHandler,
+        false
+    );
 
-            mutateTree(root, id);
+    target.addEventListener(
+        "trigger-" + id,
+        function () {
+            mutationBurst(root, id, rnd(15, 40));
 
-            forceStyleAndLayout(root);
+            var ev = document.createEvent("Event");
+            ev.initEvent(
+                "nested-" + id,
+                true,
+                false
+            );
 
+            root.dispatchEvent(ev);
+
+            mutationBurst(root, id, rnd(8, 25));
+
+            flush(root);
         },
         false
     );
 
-    var event =
-        document.createEvent("Event");
+    var event = document.createEvent("Event");
 
     event.initEvent(
-        "ps4-uaf-event",
+        "trigger-" + id,
         true,
         false
     );
 
     target.dispatchEvent(event);
-
-    forceStyleAndLayout(root);
-
 }
 
-
 /* ============================================================
- * TEST FAMILY 2
- *
- * MUTATIONOBSERVER
- * → mutation
- * → observer callback
- * → subtree teardown
- * → additional mutation
+ * FAMILY B
+ * MUTATION OBSERVER → SECONDARY TRANSITION
  * ============================================================
  */
 
-function testMutationReentrancyVariant(variant) {
-
+function familyObserver(id, variant) {
     if (!window.MutationObserver)
-        return "SKIP";
-
-    var id = "mo" + variant;
-
-    installDynamicStyleSheet(id);
-
-    var root =
-        buildComplexTree(
-            id,
-            3,
-            5
-        );
-
-    arena.appendChild(root);
-
-    forceStyleAndLayout(root);
-
-    var observer =
-        new MutationObserver(
-            function(records) {
-
-                if (!records.length)
-                    return;
-
-                mutateTree(root, id);
-
-                forceStyleAndLayout(root);
-
-                if (variant % 2 === 0) {
-
-                    while (
-                        root.firstChild
-                    ) {
-
-                        root.removeChild(
-                            root.firstChild
-                        );
-
-                    }
-
-                } else {
-
-                    root.innerHTML =
-                        "<div class='" +
-                        id +
-                        "-block'>" +
-                        "<span>A</span>" +
-                        "<span>B</span>" +
-                        "<span>C</span>" +
-                        "</div>";
-
-                }
-
-                forceStyleAndLayout(root);
-
-            }
-        );
-
-    observer.observe(
-        root,
-        {
-            childList: true,
-            subtree: true,
-            attributes: true
-        }
-    );
-
-    var node =
-        root.getElementsByTagName("*")[5];
-
-    if (node) {
-
-        node.setAttribute(
-            "data-trigger",
-            "1"
-        );
-
-        node.className =
-            id + "-big";
-
-    }
-
-    observer.disconnect();
-
-}
-
-
-/* ============================================================
- * TEST FAMILY 3
- *
- * RANGE / SELECTION
- * → style/layout
- * → structural replacement
- * ============================================================
- */
-
-function testRangeVariant(variant) {
-
-    var id = "range" + variant;
-
-    installDynamicStyleSheet(id);
-
-    var root =
-        buildComplexTree(
-            id,
-            3,
-            4
-        );
-
-    arena.appendChild(root);
-
-    forceStyleAndLayout(root);
-
-    var elements =
-        root.getElementsByTagName("*");
-
-    if (elements.length < 8)
         return;
 
-    var first = elements[2];
-    var last =
-        elements[
-            elements.length - 2
-        ];
-
-    var range =
-        document.createRange();
-
-    try {
-
-        range.setStartBefore(first);
-        range.setEndAfter(last);
-
-    } catch (e) {
-
-        range.selectNodeContents(root);
-
-    }
-
-    forceStyleAndLayout(root);
-
-    if (variant % 2 === 0) {
-
-        root.innerHTML =
-            "<div class='" +
-            id +
-            "-block'>" +
-            "<span>replacement-A</span>" +
-            "<span>replacement-B</span>" +
-            "</div>";
-
-    } else {
-
-        var victim =
-            elements[4];
-
-        if (
-            victim &&
-            victim.parentNode
-        ) {
-
-            victim.parentNode.removeChild(victim);
-
-        }
-
-        mutateTree(root, id);
-
-    }
-
-    forceStyleAndLayout(root);
-
-    range.toString();
-
-    if (
-        window.getSelection &&
-        variant % 3 === 0
-    ) {
-
-        var selection =
-            window.getSelection();
-
-        selection.removeAllRanges();
-
-        try {
-            selection.addRange(range);
-        } catch (e2) {
-        }
-
-        selection.removeAllRanges();
-
-    }
-
-}
-
-
-/* ============================================================
- * TEST FAMILY 4
- *
- * TREEWALKER / NODEITERATOR
- * → mutation during traversal
- * ============================================================
- */
-
-function testTraversalVariant(variant) {
-
-    var id = "trav" + variant;
-
-    installDynamicStyleSheet(id);
-
-    var root =
-        buildComplexTree(
-            id,
-            3,
-            5
-        );
+    var root = buildTree(id);
 
     arena.appendChild(root);
 
-    forceStyleAndLayout(root);
+    flush(root);
 
-    if (variant % 2 === 0) {
+    var observer = new MutationObserver(function () {
+        mutationBurst(root, id, rnd(12, 32));
 
-        var walker =
-            document.createTreeWalker(
-                root,
-                NodeFilter.SHOW_ELEMENT,
-                null,
-                false
-            );
-
-        var step = 0;
-        var node;
-
-        while (
-            (node = walker.nextNode()) &&
-            step < 15
-        ) {
-
-            if (step === 4) {
-
-                mutateTree(root, id);
-
-                forceStyleAndLayout(root);
-
-            }
-
-            if (
-                step === 8 &&
-                node.parentNode
-            ) {
-
-                node.parentNode.removeChild(node);
-
-            }
-
-            step++;
-
+        if (variant % 2 === 0) {
+            while (root.firstChild)
+                root.removeChild(root.firstChild);
+        } else {
+            opInnerHTML(root, id);
+            mutationBurst(root, id, rnd(8, 22));
         }
 
-    } else {
+        flush(root);
+    });
 
-        var iterator =
-            document.createNodeIterator(
-                root,
-                NodeFilter.SHOW_ELEMENT,
-                null,
-                false
-            );
+    observer.observe(root, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        characterData: true
+    });
 
-        var current;
-        var count = 0;
+    mutationBurst(root, id, rnd(20, 45));
 
-        while (
-            (current = iterator.nextNode()) &&
-            count < 15
-        ) {
-
-            if (count === 3) {
-
-                mutateTree(root, id);
-
-                forceStyleAndLayout(root);
-
-            }
-
-            if (count === 7) {
-
-                root.innerHTML =
-                    "<div class='" +
-                    id +
-                    "-block'>" +
-                    "replaced traversal tree" +
-                    "</div>";
-
-            }
-
-            count++;
-
-        }
-
-    }
-
+    observer.disconnect();
 }
 
-
 /* ============================================================
- * TEST FAMILY 5
- *
- * SHADOW DOM
- * → slot/content mutation
- * → host teardown
+ * FAMILY C
+ * SHADOW TREE TRANSITIONS
  * ============================================================
  */
 
-function testShadowVariant(variant) {
-
+function familyShadow(id, variant) {
     if (!document.createElement("div").attachShadow)
-        return "SKIP";
+        return;
 
-    var id = "shadow" + variant;
+    var host = document.createElement("div");
 
-    installDynamicStyleSheet(id);
-
-    var host =
-        document.createElement("div");
-
-    host.className =
-        id + "-root";
+    host.className = id + "_root";
 
     arena.appendChild(host);
 
-    var shadow =
-        host.attachShadow({
-            mode: "open"
-        });
+    var shadow = host.attachShadow({
+        mode: "open"
+    });
 
-    var container =
-        buildComplexTree(
-            id,
-            2,
-            5
-        );
+    var internal = buildTree(id);
 
-    var slot =
-        document.createElement("slot");
+    shadow.appendChild(internal);
 
-    shadow.appendChild(container);
-    shadow.appendChild(slot);
+    for (var i = 0; i < 12; i++) {
+        var light = document.createElement("span");
 
-    for (var i = 0; i < 8; i++) {
-
-        var light =
-            document.createElement("span");
-
-        light.textContent =
-            "light-" + i;
-
-        light.className =
-            id + "-inline";
+        light.className = id + "_inline";
+        light.textContent = "L" + i;
 
         host.appendChild(light);
-
     }
 
-    forceStyleAndLayout(host);
+    flush(host);
 
-    mutateTree(container, id);
-
-    forceStyleAndLayout(host);
+    mutationBurst(internal, id, rnd(20, 45));
 
     if (variant % 2 === 0) {
-
-        host.innerHTML = "";
-
-    } else {
-
         while (host.firstChild)
             host.removeChild(host.firstChild);
 
+        mutationBurst(internal, id, rnd(8, 20));
+    } else {
+        host.innerHTML = "";
+        mutationBurst(internal, id, rnd(8, 20));
     }
 
-    forceStyleAndLayout(host);
-
-    if (
-        host.parentNode &&
-        variant % 3 === 0
-    ) {
-
-        host.parentNode.removeChild(host);
-
-    }
-
+    flush(host);
 }
 
-
 /* ============================================================
- * TEST FAMILY 6
- *
- * STYLE / LAYOUT
- *
- * Vários elementos já existentes.
- * Alterna:
- *
- * display
- * position
- * float
- * direction
- * font
- * structural replacement
- *
+ * FAMILY D
+ * STYLE INVALIDATION / STRUCTURAL REPLACEMENT
  * ============================================================
  */
 
-function testStyleLayoutVariant(variant) {
-
-    var id = "style" + variant;
-
-    installDynamicStyleSheet(id);
-
-    var root =
-        buildComplexTree(
-            id,
-            4,
-            4
-        );
+function familyStyleLayout(id, variant) {
+    var root = buildTree(id);
 
     arena.appendChild(root);
 
-    forceStyleAndLayout(root);
+    for (var phase = 0; phase < 5; phase++) {
+        mutationBurst(root, id, rnd(15, 38));
 
-    var nodes =
-        root.getElementsByTagName("*");
+        flush(root);
 
-    var count =
-        Math.min(
-            nodes.length,
-            55
-        );
-
-    for (var i = 0; i < count; i++) {
-
-        var node = nodes[i];
-
-        if (!node)
-            continue;
-
-        switch (
-            (i + variant) % 9
-        ) {
-
-            case 0:
-                node.style.display =
-                    "block";
-                break;
-
-            case 1:
-                node.style.display =
-                    "inline";
-                break;
-
-            case 2:
-                node.style.position =
-                    "relative";
-                break;
-
-            case 3:
-                node.style.position =
-                    "static";
-                break;
-
-            case 4:
-                node.style.fontSize =
-                    (10 + (i % 16)) +
-                    "px";
-                break;
-
-            case 5:
-                node.style.direction =
-                    "rtl";
-                break;
-
-            case 6:
-                node.style.float =
-                    "left";
-                break;
-
-            case 7:
-                node.style.display =
-                    "none";
-                break;
-
-            case 8:
-                node.className =
-                    id + "-big";
-                break;
+        if (variant % 3 === 0) {
+            opReplace(root, id);
+        } else if (variant % 3 === 1) {
+            opMove(root);
+            opRemove(root);
+            opAppend(root, id);
+        } else {
+            opInnerHTML(root, id);
         }
 
-        if (
-            i % 7 === 0
-        ) {
+        flush(root);
+    }
+}
 
-            forceStyleAndLayout(root);
+/* ============================================================
+ * FAMILY E
+ * RANGE / SELECTION DURING STRUCTURAL TRANSITIONS
+ * ============================================================
+ */
 
+function familyRange(id, variant) {
+    var root = buildTree(id);
+
+    arena.appendChild(root);
+
+    flush(root);
+
+    var all = elements(root);
+
+    if (all.length < 3)
+        return;
+
+    var range = document.createRange();
+
+    try {
+        range.setStartBefore(all[0]);
+        range.setEndAfter(all[all.length - 1]);
+    } catch (e) {
+        try {
+            range.selectNodeContents(root);
+        } catch (e2) {
         }
-
     }
 
-    forceStyleAndLayout(root);
-
-    /*
-     * Structural mutation após múltiplos
-     * style/layout flushes.
-     */
+    mutationBurst(root, id, rnd(20, 42));
 
     if (variant % 2 === 0) {
-
-        var replacement =
-            buildComplexTree(
-                id,
-                2,
-                4
-            );
-
-        if (root.firstChild)
-            root.replaceChild(
-                replacement,
-                root.firstChild
-            );
-
+        root.innerHTML =
+            "<div class='" + id + "_block'>" +
+            "<span>a</span><span>b</span>" +
+            "</div>";
     } else {
-
-        var removeCount =
-            Math.min(
-                8,
-                root.childNodes.length
-            );
-
-        for (
-            var r = 0;
-            r < removeCount;
-            r++
-        ) {
-
-            if (root.firstChild)
-                root.removeChild(
-                    root.firstChild
-                );
-
-        }
-
+        for (var i = 0; i < 6; i++)
+            opRemove(root);
     }
 
-    forceStyleAndLayout(root);
+    mutationBurst(root, id, rnd(10, 30));
 
+    try {
+        range.toString();
+    } catch (e3) {
+    }
+
+    flush(root);
 }
 
-
 /* ============================================================
- * TEST FAMILY 7
- *
- * IMAGE EVENT
- * → event handler
- * → DOM/style mutation
- * → owner removal
- *
- * Data URI evita dependência de rede.
+ * FAMILY F
+ * FORMS STRUCTURAL TRANSITIONS
  * ============================================================
  */
 
-function testImageLifecycleVariant(variant) {
+function familyForms(id, variant) {
+    var root = buildTree(id);
 
-    var id = "img" + variant;
+    var form = document.createElement("form");
+    var input = document.createElement("input");
+    var datalist = document.createElement("datalist");
 
-    installDynamicStyleSheet(id);
+    var listId = "dl_" + id;
 
-    var root =
-        buildComplexTree(
-            id,
-            2,
-            5
-        );
+    datalist.id = listId;
 
-    var image =
-        document.createElement("img");
+    input.setAttribute("list", listId);
+    input.type = "text";
 
-    image.width = 8;
-    image.height = 8;
-
-    root.appendChild(image);
-
-    arena.appendChild(root);
-
-    forceStyleAndLayout(root);
-
-    var fired = false;
-
-    function imageCallback() {
-
-        if (fired)
-            return;
-
-        fired = true;
-
-        mutateTree(root, id);
-
-        forceStyleAndLayout(root);
-
-        if (
-            variant % 2 === 0
-        ) {
-
-            if (
-                image.parentNode
-            ) {
-
-                image.parentNode.removeChild(image);
-
-            }
-
-        } else {
-
-            if (
-                root.parentNode
-            ) {
-
-                root.parentNode.removeChild(root);
-
-            }
-
-        }
-
-        setTimeout(
-            function() {
-
-                try {
-
-                    if (root)
-                        forceStyleAndLayout(root);
-
-                } catch (e) {
-                }
-
-            },
-            0
-        );
-
-    }
-
-    image.addEventListener(
-        "load",
-        imageCallback,
-        false
-    );
-
-    image.addEventListener(
-        "error",
-        imageCallback,
-        false
-    );
-
-    if (
-        variant % 3 === 0
-    ) {
-
-        image.src =
-            "data:image/gif;base64," +
-            "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
-
-    } else {
-
-        image.src =
-            "data:image/gif;base64,invalid";
-
-    }
-
-}
-
-
-/* ============================================================
- * TEST FAMILY 8
- *
- * IFRAME / DOCUMENT / FRAME TEARDOWN
- *
- * Sem navegação externa.
- * ============================================================
- */
-
-function testFrameLifecycleVariant(variant) {
-
-    var id = "frame" + variant;
-
-    installDynamicStyleSheet(id);
-
-    var root =
-        buildComplexTree(
-            id,
-            2,
-            5
-        );
-
-    var frame =
-        document.createElement("iframe");
-
-    frame.width = "20";
-    frame.height = "20";
-
-    root.appendChild(frame);
-
-    arena.appendChild(root);
-
-    forceStyleAndLayout(root);
-
-    frame.addEventListener(
-        "load",
-        function() {
-
-            try {
-
-                if (
-                    frame.contentDocument &&
-                    frame.contentDocument.body
-                ) {
-
-                    frame.contentDocument.body.innerHTML =
-                        "<div>A<span>B</span></div>";
-
-                }
-
-            } catch (e) {
-            }
-
-            mutateTree(root, id);
-
-            forceStyleAndLayout(root);
-
-            if (
-                variant % 2 === 0
-            ) {
-
-                if (
-                    frame.parentNode
-                ) {
-
-                    frame.parentNode.removeChild(frame);
-
-                }
-
-            } else {
-
-                if (
-                    root.parentNode
-                ) {
-
-                    root.parentNode.removeChild(root);
-
-                }
-
-            }
-
-        },
-        false
-    );
-
-    frame.src =
-        "about:blank";
-
-}
-
-
-/* ============================================================
- * TEST FAMILY 9
- *
- * SVG
- * → geometry/style
- * → subtree mutation
- * → detach
- * ============================================================
- */
-
-function testSVGVariant(variant) {
-
-    var ns =
-        "http://www.w3.org/2000/svg";
-
-    var svg =
-        document.createElementNS(
-            ns,
-            "svg"
-        );
-
-    svg.setAttribute(
-        "width",
-        "300"
-    );
-
-    svg.setAttribute(
-        "height",
-        "200"
-    );
-
-    for (
-        var i = 0;
-        i < 30;
-        i++
-    ) {
-
-        var group =
-            document.createElementNS(
-                ns,
-                "g"
-            );
-
-        var rect =
-            document.createElementNS(
-                ns,
-                "rect"
-            );
-
-        rect.setAttribute(
-            "x",
-            i * 2
-        );
-
-        rect.setAttribute(
-            "y",
-            i
-        );
-
-        rect.setAttribute(
-            "width",
-            10 + (i % 10)
-        );
-
-        rect.setAttribute(
-            "height",
-            8 + (i % 7)
-        );
-
-        group.appendChild(rect);
-
-        svg.appendChild(group);
-
-    }
-
-    arena.appendChild(svg);
-
-    forceStyleAndLayout(svg);
-
-    var rects =
-        svg.getElementsByTagName("rect");
-
-    for (
-        var r = 0;
-        r < rects.length;
-        r++
-    ) {
-
-        if (
-            r % 4 === 0
-        ) {
-
-            rects[r].setAttribute(
-                "width",
-                20 + r
-            );
-
-        }
-
-        if (
-            r % 6 === 0
-        ) {
-
-            rects[r].setAttribute(
-                "transform",
-                "translate(" +
-                r +
-                ",1)"
-            );
-
-        }
-
-    }
-
-    forceStyleAndLayout(svg);
-
-    if (
-        variant % 2 === 0
-    ) {
-
-        while (
-            svg.firstChild
-        ) {
-
-            svg.removeChild(
-                svg.firstChild
-            );
-
-        }
-
-    } else {
-
-        if (
-            svg.parentNode
-        ) {
-
-            svg.parentNode.removeChild(svg);
-
-        }
-
-    }
-
-    forceStyleAndLayout(svg);
-
-}
-
-
-/* ============================================================
- * TEST FAMILY 10
- *
- * FORMS
- * → focus/event
- * → type mutation
- * → subtree mutation
- *
- * Não depende de internals.
- * ============================================================
- */
-
-function testFormsVariant(variant) {
-
-    var id = "form" + variant;
-
-    installDynamicStyleSheet(id);
-
-    var root =
-        buildComplexTree(
-            id,
-            2,
-            4
-        );
-
-    var form =
-        document.createElement("form");
-
-    var input =
-        document.createElement("input");
-
-    input.type =
-        variant % 2 ?
-        "text" :
-        "search";
-
-    input.value =
-        "PS4";
-
-    var list =
-        document.createElement("datalist");
-
-    var listId =
-        "ps4-list-" + variant;
-
-    list.id = listId;
-
-    input.setAttribute(
-        "list",
-        listId
-    );
-
-    for (
-        var i = 0;
-        i < 12;
-        i++
-    ) {
-
-        var option =
-            document.createElement("option");
-
-        option.value =
-            "value-" + i;
-
-        list.appendChild(option);
-
+    for (var i = 0; i < 16; i++) {
+        var option = document.createElement("option");
+        option.value = "v" + i;
+        datalist.appendChild(option);
     }
 
     form.appendChild(input);
-    form.appendChild(list);
+    form.appendChild(datalist);
 
     root.appendChild(form);
 
     arena.appendChild(root);
 
-    forceStyleAndLayout(root);
+    flush(root);
 
-    input.addEventListener(
-        "focus",
-        function() {
+    input.addEventListener("focus", function () {
+        mutationBurst(root, id, rnd(15, 35));
 
-            mutateTree(root, id);
+        try {
+            input.type = pick([
+                "text",
+                "search",
+                "number",
+                "button",
+                "checkbox"
+            ]);
+        } catch (e) {
+        }
 
-            forceStyleAndLayout(root);
+        mutationBurst(root, id, rnd(10, 28));
 
-        },
-        false
-    );
+        if (variant % 2 === 0) {
+            try {
+                form.innerHTML =
+                    "<input type='text'>" +
+                    "<input type='checkbox'>";
+            } catch (e2) {
+            }
+        } else if (form.parentNode) {
+            form.parentNode.removeChild(form);
+        }
+
+        flush(root);
+    });
 
     try {
         input.focus();
-    } catch (e) {
+    } catch (e3) {
     }
 
-    /*
-     * Mudança estrutural de estado do form control.
-     */
+    mutationBurst(root, id, rnd(10, 30));
 
-    if (
-        variant % 3 === 0
-    ) {
-
-        input.type =
-            "number";
-
-    } else if (
-        variant % 3 === 1
-    ) {
-
-        input.type =
-            "button";
-
-    } else {
-
-        input.type =
-            "text";
-
-    }
-
-    forceStyleAndLayout(root);
-
-    if (
-        variant % 2 === 0
-    ) {
-
-        form.innerHTML =
-            "<input type='text'>" +
-            "<input type='checkbox'>";
-
-    } else {
-
-        if (
-            form.parentNode
-        ) {
-
-            form.parentNode.removeChild(form);
-
-        }
-
-    }
-
-    forceStyleAndLayout(root);
-
+    flush(root);
 }
 
-
 /* ============================================================
- * TEST FAMILY 11
- *
- * HISTORY / DOCUMENT STATE
- *
- * Controlado:
- * pushState / replaceState
- * sem navigation storm.
+ * FAMILY G
+ * SVG TREE MUTATION
  * ============================================================
  */
 
-function testHistoryVariant(variant) {
+function familySVG(id, variant) {
+    var ns = "http://www.w3.org/2000/svg";
 
-    var id = "hist" + variant;
+    var svg = document.createElementNS(ns, "svg");
 
-    installDynamicStyleSheet(id);
+    svg.setAttribute("width", "800");
+    svg.setAttribute("height", "400");
 
-    var root =
-        buildComplexTree(
-            id,
-            2,
-            5
-        );
+    for (var i = 0; i < 60; i++) {
+        var group = document.createElementNS(ns, "g");
+        var rect = document.createElementNS(ns, "rect");
 
-    arena.appendChild(root);
+        rect.setAttribute("x", String(i * 3));
+        rect.setAttribute("y", String(i));
+        rect.setAttribute("width", String(10 + (i % 20)));
+        rect.setAttribute("height", String(10 + (i % 15)));
 
-    forceStyleAndLayout(root);
-
-    if (
-        !window.history ||
-        !history.pushState
-    ) {
-
-        return "SKIP";
-
+        group.appendChild(rect);
+        svg.appendChild(group);
     }
 
-    var state = {
-        id: variant,
-        nodes:
-            root.getElementsByTagName("*").length,
-        nested: {
-            value:
-                "PS4-" + variant
-        }
-    };
+    arena.appendChild(svg);
 
-    history.replaceState(
-        state,
-        "",
-        location.href
-    );
+    flush(svg);
 
-    mutateTree(root, id);
+    for (var phase = 0; phase < 4; phase++) {
+        var rects = svg.getElementsByTagName("rect");
 
-    forceStyleAndLayout(root);
-
-    history.replaceState(
-        {
-            id: variant,
-            phase: "after-layout"
-        },
-        "",
-        location.href
-    );
-
-    if (
-        variant % 2 === 0
-    ) {
-
-        root.innerHTML =
-            "<div>history mutation</div>";
-
-    } else {
-
-        while (
-            root.firstChild
-        ) {
-
-            root.removeChild(
-                root.firstChild
-            );
-
-        }
-
-    }
-
-    forceStyleAndLayout(root);
-
-}
-
-
-/* ============================================================
- * TEST FAMILY 12
- *
- * ASYNC CALLBACK
- * → layout
- * → DOM replacement
- * → teardown
- *
- * requestAnimationFrame quando disponível.
- * ============================================================
- */
-
-function testAsyncLifecycleVariant(variant) {
-
-    var id = "async" + variant;
-
-    installDynamicStyleSheet(id);
-
-    var root =
-        buildComplexTree(
-            id,
-            3,
-            4
-        );
-
-    arena.appendChild(root);
-
-    forceStyleAndLayout(root);
-
-    var callback =
-        function() {
-
-            try {
-
-                mutateTree(root, id);
-
-                forceStyleAndLayout(root);
-
-                if (
-                    variant % 2 === 0
-                ) {
-
-                    root.innerHTML =
-                        "<div class='" +
-                        id +
-                        "-block'>" +
-                        "<span>async replacement</span>" +
-                        "</div>";
-
-                } else {
-
-                    if (
-                        root.parentNode
-                    ) {
-
-                        root.parentNode.removeChild(root);
-
-                    }
-
-                }
-
-                forceStyleAndLayout(root);
-
-            } catch (e) {
+        for (var j = 0; j < rects.length; j++) {
+            if ((j + phase) % 3 === 0) {
+                rects[j].setAttribute(
+                    "width",
+                    String(rnd(1, 80))
+                );
             }
 
+            if ((j + phase) % 5 === 0) {
+                rects[j].setAttribute(
+                    "transform",
+                    "translate(" +
+                    rnd(-10, 10) + "," +
+                    rnd(-10, 10) + ")"
+                );
+            }
+        }
+
+        flush(svg);
+
+        if (variant % 2 === 0) {
+            var child = svg.firstChild;
+
+            if (child)
+                svg.removeChild(child);
+        } else {
+            var g = document.createElementNS(ns, "g");
+            svg.appendChild(g);
+        }
+    }
+
+    flush(svg);
+}
+
+/* ============================================================
+ * FAMILY H
+ * ASYNC CALLBACK + TEARDOWN
+ * ============================================================
+ */
+
+function familyAsync(id, variant) {
+    var root = buildTree(id);
+
+    arena.appendChild(root);
+
+    flush(root);
+
+    mutationBurst(root, id, rnd(20, 40));
+
+    var callback = function () {
+        mutationBurst(root, id, rnd(15, 40));
+
+        if (variant % 2 === 0) {
+            root.innerHTML =
+                "<div class='" + id + "_block'>" +
+                "<span>x</span>" +
+                "<span>y</span>" +
+                "</div>";
+
+            mutationBurst(root, id, rnd(8, 22));
+        } else {
+            if (root.parentNode)
+                root.parentNode.removeChild(root);
+        }
+
+        flush(root);
+    };
+
+    if (window.requestAnimationFrame) {
+        requestAnimationFrame(callback);
+    } else if (window.webkitRequestAnimationFrame) {
+        window.webkitRequestAnimationFrame(callback);
+    } else {
+        setTimeout(callback, 0);
+    }
+
+    mutationBurst(root, id, rnd(12, 35));
+
+    flush(root);
+}
+
+/* ============================================================
+ * FAMILY I
+ * CUSTOM ELEMENT CONSTRUCTION / REPARENTING
+ *
+ * Executado somente quando Custom Elements existe.
+ * ============================================================
+ */
+
+function familyCustomElement(id, variant) {
+    if (!window.customElements || !window.customElements.define)
+        return;
+
+    var tag = "x-ps4-" + id.toLowerCase();
+
+    try {
+        function XPS4() {
+            return Reflect.construct(HTMLElement, [], XPS4);
+        }
+
+        Object.setPrototypeOf(
+            XPS4.prototype,
+            HTMLElement.prototype
+        );
+
+        Object.setPrototypeOf(
+            XPS4,
+            HTMLElement
+        );
+
+        XPS4.prototype.connectedCallback = function () {
+            var parent = this.parentNode;
+
+            if (parent && variant % 2 === 0) {
+                try {
+                    parent.removeChild(this);
+                    arena.appendChild(this);
+                } catch (e) {
+                }
+            }
         };
 
-    if (
-        window.requestAnimationFrame
-    ) {
-
-        window.requestAnimationFrame(
-            callback
-        );
-
-    } else if (
-        window.webkitRequestAnimationFrame
-    ) {
-
-        window.webkitRequestAnimationFrame(
-            callback
-        );
-
-    } else {
-
-        setTimeout(
-            callback,
-            0
-        );
-
+        customElements.define(tag, XPS4);
+    } catch (e) {
+        return;
     }
 
-    /*
-     * Mutação antes do callback.
-     */
+    var root = buildTree(id);
 
-    mutateTree(root, id);
+    arena.appendChild(root);
 
-    forceStyleAndLayout(root);
+    flush(root);
 
+    var element;
+
+    try {
+        element = document.createElement(tag);
+        root.appendChild(element);
+    } catch (e2) {
+        return;
+    }
+
+    mutationBurst(root, id, rnd(20, 40));
+
+    flush(root);
 }
 
-
 /* ============================================================
- * TEST MATRIX
- *
- * 12 famílias
- * × 4 variantes
- *
- * 48 sequências por round.
+ * CANDIDATE MATRIX
  * ============================================================
  */
 
-var tests = [];
-
-
-function addVariants(
-    prefix,
-    callback,
-    count
-) {
-
-    for (
-        var i = 0;
-        i < count;
-        i++
-    ) {
-
-        (function(index) {
-
-            tests.push({
-
-                name:
-                    prefix +
-                    " v" +
-                    index,
-
-                fn:
-                    function() {
-
-                        return callback(
-                            index
-                        );
-
-                    }
-
-            });
-
-        })(i);
-
+var families = [
+    {
+        name: "event-reentrancy",
+        fn: familyEvent
+    },
+    {
+        name: "mutation-observer",
+        fn: familyObserver
+    },
+    {
+        name: "shadow-transition",
+        fn: familyShadow
+    },
+    {
+        name: "style-layout-transition",
+        fn: familyStyleLayout
+    },
+    {
+        name: "range-structural-transition",
+        fn: familyRange
+    },
+    {
+        name: "forms-lifecycle",
+        fn: familyForms
+    },
+    {
+        name: "svg-tree-transition",
+        fn: familySVG
+    },
+    {
+        name: "async-teardown",
+        fn: familyAsync
+    },
+    {
+        name: "custom-element-transition",
+        fn: familyCustomElement
     }
-
-}
-
-
-addVariants(
-    "EVENT reentrancy/lifecycle",
-    testEventReentrancyVariant,
-    4
-);
-
-addVariants(
-    "MUTATIONOBSERVER reentrancy",
-    testMutationReentrancyVariant,
-    4
-);
-
-addVariants(
-    "RANGE / SELECTION replacement",
-    testRangeVariant,
-    4
-);
-
-addVariants(
-    "TREE traversal + mutation",
-    testTraversalVariant,
-    4
-);
-
-addVariants(
-    "SHADOW DOM lifecycle",
-    testShadowVariant,
-    4
-);
-
-addVariants(
-    "STYLE / LAYOUT complex mutation",
-    testStyleLayoutVariant,
-    4
-);
-
-addVariants(
-    "IMAGE event + teardown",
-    testImageLifecycleVariant,
-    4
-);
-
-addVariants(
-    "FRAME / DOCUMENT lifecycle",
-    testFrameLifecycleVariant,
-    4
-);
-
-addVariants(
-    "SVG geometry + teardown",
-    testSVGVariant,
-    4
-);
-
-addVariants(
-    "FORMS lifecycle mutation",
-    testFormsVariant,
-    4
-);
-
-addVariants(
-    "HISTORY + DOM lifecycle",
-    testHistoryVariant,
-    4
-);
-
-addVariants(
-    "ASYNC callback lifecycle",
-    testAsyncLifecycleVariant,
-    4
-);
-
+];
 
 /* ============================================================
- * ROUND EXECUTION
+ * MAIN LOOP
  * ============================================================
  */
 
-function runRound() {
-
+function runCandidate() {
     if (!running)
         return;
 
-    round++;
+    cleanup();
 
-    currentTest = 0;
+    var family = pick(families);
+    var variant = rnd(0, 11);
 
-    cleanupArena();
-
-    section(
-        "ROUND " +
-        round +
-        " / " +
-        MAX_ROUNDS
+    /*
+     * IMPORTANTE:
+     * Persistir antes de executar.
+     */
+    saveCandidate(
+        family.name,
+        variant,
+        "state-transition-burst"
     );
 
-    var index = 0;
+    var id =
+        "c" +
+        candidateCounter +
+        "_" +
+        (seed >>> 0).toString(16);
 
+    try {
+        installStyle(id);
 
-    function next() {
-
-        if (!running)
-            return;
-
-        cleanupArena();
-
-        if (
-            index >= tests.length
-        ) {
-
-            if (
-                round >= MAX_ROUNDS
-            ) {
-
-                finishFuzzer();
-
-                return;
-
-            }
-
-            setTimeout(
-                runRound,
-                150
-            );
-
-            return;
-
-        }
-
-        var test =
-            tests[index++];
-
-        runTest(
-            test.name,
-            test.fn,
-            next
-        );
-
+        family.fn(id, variant);
+    } catch (e) {
+        /*
+         * Intencionalmente silencioso.
+         * JavaScript exceptions não são relevantes
+         * para o objetivo do crash hunter.
+         */
     }
 
-    next();
+    setTimeout(function () {
+        cleanup();
 
+        setTimeout(
+            runCandidate,
+            CONFIG.delay
+        );
+    }, CONFIG.cleanupDelay);
 }
-
 
 /* ============================================================
  * START
  * ============================================================
  */
 
-function startFuzzer() {
+setTimeout(runCandidate, 100);
 
-    if (running) {
-
-        log(
-            "[INFO] Fuzzer already running",
-            "warn"
-        );
-
-        return;
-
-    }
-
-    running = true;
-
-    round = 0;
-    currentTest = 0;
-
-    passCount = 0;
-    failCount = 0;
-    skipCount = 0;
-    totalExecutions = 0;
-
-    seed = 0x13572468;
-
-    clearLog();
-
-    section(
-        "PS4 WEBKIT UAF LIFECYCLE FUZZER v2"
-    );
-
-    log(
-        "[INFO] Tests per round: " +
-        tests.length,
-        "info"
-    );
-
-    log(
-        "[INFO] Max rounds: " +
-        MAX_ROUNDS,
-        "info"
-    );
-
-    log(
-        "[INFO] Focus: reentrancy / callbacks / teardown / style / layout",
-        "info"
-    );
-
-    log(
-        "[INFO] Complex DOM trees enabled",
-        "info"
-    );
-
-    log(
-        "[INFO] Repeated style/layout flushes enabled",
-        "info"
-    );
-
-    log(
-        "[INFO] No Worker storm",
-        "warn"
-    );
-
-    log(
-        "[INFO] No deliberate resource exhaustion",
-        "warn"
-    );
-
-    updateStatus();
-
-    setTimeout(
-        runRound,
-        100
-    );
-
-}
-
-
-/* ============================================================
- * FINISH
- * ============================================================
- */
-
-function finishFuzzer() {
-
-    running = false;
-
-    cleanupArena();
-
-    section(
-        "V2 MATRIX COMPLETE"
-    );
-
-    log(
-        "Total executions: " +
-        totalExecutions,
-        "info"
-    );
-
-    log(
-        "PASS: " +
-        passCount,
-        "pass"
-    );
-
-    log(
-        "FAIL: " +
-        failCount,
-        failCount ?
-        "fail" :
-        "info"
-    );
-
-    log(
-        "SKIP: " +
-        skipCount,
-        "warn"
-    );
-
-    log(
-        "Final seed: 0x" +
-        seed.toString(16),
-        "info"
-    );
-
-    log(
-        "[DONE] Controlled lifecycle matrix completed",
-        "section"
-    );
-
-    updateStatus();
-
-}
-
-
-/* ============================================================
- * GLOBAL ERRORS
- * ============================================================
- */
-
-window.onerror =
-    function(
-        message,
-        source,
-        line,
-        column,
-        error
-    ) {
-
-        failCount++;
-
-        log(
-            "[UNCAUGHT] " +
-            message +
-            " | line " +
-            line,
-            "fail"
-        );
-
-        updateStatus();
-
-    };
-
-
-window.addEventListener(
-    "unhandledrejection",
-    function(event) {
-
-        failCount++;
-
-        log(
-            "[PROMISE REJECTION] " +
-            event.reason,
-            "fail"
-        );
-
-        updateStatus();
-
-    },
-    false
-);
-
+})();
 </script>
 
 </body>
