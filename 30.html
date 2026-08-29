@@ -2,855 +2,1732 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8">
 
-<title>PS4 WebCore Capability Crash Hunter V25</title>
+<title>PS4 WebKit UAF Lifecycle Fuzzer v2</title>
 
 <style>
 html, body {
     margin: 0;
     padding: 0;
-    background: #10131a;
-    color: #e8e8e8;
-    font-family: Arial, sans-serif;
-    overflow: hidden;
+    min-height: 100%;
+    background: #06122a;
+    color: #d7e7ff;
+    font-family: monospace;
+    font-size: 15px;
 }
 
-#ui {
-    position: fixed;
-    z-index: 999999;
-    top: 0;
-    left: 0;
-    right: 0;
+body {
     padding: 18px;
-    background: #181d27;
-    border-bottom: 1px solid #3b4354;
 }
 
 h1 {
-    margin: 0 0 12px 0;
-    font-size: 22px;
-}
-
-#status {
-    font-size: 16px;
-    margin-bottom: 8px;
-}
-
-#info {
-    font-size: 13px;
-    color: #aeb8c8;
+    margin: 0 0 15px 0;
+    color: #ffffff;
 }
 
 button {
-    margin-top: 12px;
-    padding: 10px 28px;
-    font-size: 17px;
-    background: #2c6bed;
-    color: white;
-    border: 0;
-    border-radius: 4px;
+    background: #164d88;
+    color: #ffffff;
+    border: 2px solid #79b7f2;
+    padding: 12px 18px;
+    margin-right: 8px;
+    margin-bottom: 12px;
+    font-family: monospace;
+    font-weight: bold;
+    font-size: 15px;
 }
 
-#sandbox {
+#status {
+    border: 1px solid #70aee8;
+    background: #0b2348;
+    padding: 12px;
+    margin-bottom: 12px;
+}
+
+#log {
+    border: 1px solid #70aee8;
+    background: #030918;
+    padding: 12px;
+    min-height: 650px;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+
+.pass { color: #70e6ad; }
+.fail { color: #ff7474; }
+.info { color: #a9cbff; }
+.warn { color: #ffd27a; }
+.section { color: #ffffff; font-weight: bold; }
+.hit { color: #ffb347; font-weight: bold; }
+
+/*
+ * Arena visível apenas para permitir layout real.
+ * O conteúdo fica fora da área principal.
+ */
+#arena {
     position: absolute;
-    top: 130px;
-    left: -10000px;
-    width: 2000px;
-    min-height: 2000px;
+    left: -6000px;
+    top: 0;
+    width: 1200px;
+    min-height: 1200px;
+    overflow: visible;
 }
 
-.hidden-frame {
-    width: 200px;
-    height: 120px;
-    border: 0;
+#dynamicStyleHost {
+    display: none;
 }
 </style>
+
 </head>
 
 <body>
 
-<div id="ui">
-    <h1>PS4 WebCore Capability Crash Hunter V25</h1>
+<h1>PS4 WebKit UAF Lifecycle Fuzzer v2</h1>
 
-    <div id="status">
-        STATUS: IDLE
-    </div>
+<button onclick="startFuzzer()">RUN FUZZER v2</button>
+<button onclick="stopFuzzer()">STOP</button>
+<button onclick="clearLog()">CLEAR</button>
 
-    <div id="info">
-        Capability-driven lifecycle stress matrix
-    </div>
-
-    <button id="startButton">
-        INICIAR
-    </button>
+<div id="status">
+Ready
 </div>
 
-<div id="sandbox"></div>
+<div id="log"></div>
+
+<div id="dynamicStyleHost"></div>
+<div id="arena"></div>
 
 <script>
-(function () {
-"use strict";
-
 
 /*
  * ============================================================
- * CONFIGURAÇÃO
+ * PS4 WEBKIT UAF LIFECYCLE FUZZER v2
+ * ============================================================
+ *
+ * Objetivo:
+ *
+ * Exercitar sequências compostas semelhantes a testes de
+ * regressão do WebKit:
+ *
+ *   Build DOM
+ *      ↓
+ *   Force Style
+ *      ↓
+ *   Force Layout
+ *      ↓
+ *   Install observer/listener
+ *      ↓
+ *   Structural mutation
+ *      ↓
+ *   Reentrant operation
+ *      ↓
+ *   Owner/subtree/frame teardown
+ *      ↓
+ *   Pending callback
+ *      ↓
+ *   Additional style/layout/DOM work
+ *
+ * Não usa:
+ *
+ * - JIT exploitation
+ * - memory spraying
+ * - address disclosure
+ * - arbitrary memory access
+ * - Worker storms
+ * - resource exhaustion
+ *
  * ============================================================
  */
 
-var CONFIG = {
-    delay: 40,
-    batchSize: 1,
-    maxHistoryEntries: 20,
-    maxNodesPerCase: 12,
-    maxIterationsBeforeYield: 50
-};
 
-
-/*
- * ============================================================
- * ESTADO
+/* ============================================================
+ * CONFIGURATION
  * ============================================================
  */
 
-var state = {
-    running: false,
-    sequence: 0,
-    currentSurface: "",
-    currentCandidate: null,
-    capabilities: {},
-    observers: [],
-    sandbox: null
-};
+var running = false;
+
+var round = 0;
+var currentTest = 0;
+
+var passCount = 0;
+var failCount = 0;
+var skipCount = 0;
+var totalExecutions = 0;
+
+var MAX_ROUNDS = 12;
+var DELAY_BETWEEN_TESTS = 40;
+
+var arena = document.getElementById("arena");
+var logBox = document.getElementById("log");
+var statusBox = document.getElementById("status");
+var styleHost = document.getElementById("dynamicStyleHost");
 
 
-var sandbox = document.getElementById("sandbox");
-var statusElement = document.getElementById("status");
-var infoElement = document.getElementById("info");
-var startButton = document.getElementById("startButton");
-
-
-/*
- * ============================================================
- * RANDOM
+/* ============================================================
+ * DETERMINISTIC PRNG
+ *
+ * Permite repetir uma sequência.
  * ============================================================
  */
 
-function rand(max) {
-    return Math.floor(Math.random() * max);
+var seed = 0x13572468;
+
+function random32() {
+
+    seed =
+        (
+            (seed * 1664525) +
+            1013904223
+        ) >>> 0;
+
+    return seed;
 }
 
-function choose(array) {
-    if (!array || !array.length)
-        return null;
 
-    return array[rand(array.length)];
-}
+function randomRange(min, max) {
 
-
-/*
- * ============================================================
- * PERSISTÊNCIA
- * ============================================================
- */
-
-function saveCandidate(candidate) {
-    try {
-        localStorage.setItem(
-            "ps4_webcore_v25_last_candidate",
-            JSON.stringify(candidate)
+    return min +
+        (
+            random32() %
+            (max - min + 1)
         );
+
+}
+
+
+/* ============================================================
+ * LOGGING
+ * ============================================================
+ */
+
+function log(message, type) {
+
+    var line = document.createElement("div");
+
+    line.className = type || "info";
+
+    line.textContent = message;
+
+    logBox.appendChild(line);
+
+}
+
+
+function section(name) {
+
+    log("");
+    log("==============================================================", "section");
+    log(name, "section");
+    log("==============================================================", "section");
+
+}
+
+
+function updateStatus() {
+
+    statusBox.textContent =
+        "Round: " + round +
+        " | Test: " + currentTest +
+        " | PASS: " + passCount +
+        " | FAIL: " + failCount +
+        " | SKIP: " + skipCount +
+        " | Total: " + totalExecutions +
+        " | Seed: 0x" + seed.toString(16);
+
+}
+
+
+function clearLog() {
+
+    logBox.innerHTML = "";
+
+}
+
+
+function stopFuzzer() {
+
+    running = false;
+
+    log("[STOP] Execution stopped by user", "warn");
+
+    updateStatus();
+
+}
+
+
+/* ============================================================
+ * CLEANUP
+ * ============================================================
+ */
+
+function cleanupArena() {
+
+    while (arena.firstChild)
+        arena.removeChild(arena.firstChild);
+
+    while (styleHost.firstChild)
+        styleHost.removeChild(styleHost.firstChild);
+
+}
+
+
+/* ============================================================
+ * LAYOUT FLUSH HELPERS
+ *
+ * Alterna diferentes caminhos que normalmente consultam
+ * StyleResolver / RenderTree / Layout.
+ * ============================================================
+ */
+
+function forceStyle(element) {
+
+    if (!element)
+        return;
+
+    try {
+
+        window.getComputedStyle(element).display;
+        window.getComputedStyle(element).position;
+        window.getComputedStyle(element).width;
+        window.getComputedStyle(element).fontSize;
+
     } catch (e) {
     }
+
 }
 
 
-function loadLastCandidate() {
-    try {
-        var data = localStorage.getItem(
-            "ps4_webcore_v25_last_candidate"
-        );
+function forceLayout(element) {
 
-        if (data)
-            return JSON.parse(data);
+    if (!element)
+        return;
+
+    try {
+
+        element.offsetWidth;
+        element.offsetHeight;
+
+        element.clientWidth;
+        element.clientHeight;
+
+        element.scrollWidth;
+        element.scrollHeight;
+
+        element.getBoundingClientRect();
 
     } catch (e) {
     }
 
-    return null;
 }
 
 
-/*
- * ============================================================
- * CAPABILITY DETECTION
- * ============================================================
- */
+function forceStyleAndLayout(element) {
 
-function detectCapabilities() {
+    forceStyle(element);
+    forceLayout(element);
 
-    var c = {};
-
-    c.DOM =
-        !!document.createElement &&
-        !!document.createDocumentFragment;
-
-    c.Events =
-        !!window.Event &&
-        !!document.addEventListener;
-
-    c.Focus =
-        !!HTMLElement.prototype.focus;
-
-    c.Selection =
-        !!window.getSelection;
-
-    c.Range =
-        !!window.Range;
-
-    c.MutationObserver =
-        !!window.MutationObserver;
-
-    c.ResizeObserver =
-        !!window.ResizeObserver;
-
-    c.IntersectionObserver =
-        !!window.IntersectionObserver;
-
-    c.PerformanceObserver =
-        !!window.PerformanceObserver;
-
-    c.CSS =
-        !!window.getComputedStyle;
-
-    c.CSSStyleSheet =
-        !!window.CSSStyleSheet;
-
-    c.DOMParser =
-        !!window.DOMParser;
-
-    c.XMLSerializer =
-        !!window.XMLSerializer;
-
-    c.SVG =
-        !!document.createElementNS;
-
-    c.Canvas2D =
-        !!document.createElement("canvas").getContext;
-
-    c.History =
-        !!window.history &&
-        !!history.pushState;
-
-    c.Animation =
-        !!window.Animation ||
-        !!HTMLElement.prototype.animate;
-
-    c.Fonts =
-        !!document.fonts;
-
-    c.Image =
-        !!window.Image;
-
-    c.ImageBitmap =
-        !!window.createImageBitmap;
-
-    c.Fetch =
-        !!window.fetch;
-
-    c.Blob =
-        !!window.Blob;
-
-    c.FileReader =
-        !!window.FileReader;
-
-    c.URL =
-        !!window.URL;
-
-    c.ReadableStream =
-        !!window.ReadableStream;
-
-    c.TransformStream =
-        !!window.TransformStream;
-
-    c.WebSocket =
-        !!window.WebSocket;
-
-    c.Worker =
-        !!window.Worker;
-
-    c.SharedWorker =
-        !!window.SharedWorker;
-
-    c.MessageChannel =
-        !!window.MessageChannel;
-
-    c.BroadcastChannel =
-        !!window.BroadcastChannel;
-
-    c.DataTransfer =
-        !!window.DataTransfer;
-
-    c.HTMLForms =
-        !!window.HTMLFormElement;
-
-    c.Template =
-        "content" in document.createElement("template");
-
-    c.Text =
-        !!window.Text;
-
-    c.CharacterData =
-        !!window.CharacterData;
-
-    return c;
 }
 
 
-/*
- * ============================================================
- * SANDBOX
+/* ============================================================
+ * DYNAMIC STYLE SHEET
  * ============================================================
  */
 
-function createRoot() {
+function installDynamicStyleSheet(id) {
+
+    var style = document.createElement("style");
+
+    style.type = "text/css";
+
+    style.id = id;
+
+    style.textContent =
+        "." + id + "-root {" +
+            "display:block;" +
+            "position:relative;" +
+            "width:720px;" +
+            "font-size:13px;" +
+            "line-height:17px;" +
+            "direction:ltr;" +
+        "}" +
+
+        "." + id + "-inline {" +
+            "display:inline;" +
+            "padding:1px;" +
+        "}" +
+
+        "." + id + "-block {" +
+            "display:block;" +
+            "position:relative;" +
+            "min-height:8px;" +
+        "}" +
+
+        "." + id + "-float {" +
+            "float:left;" +
+            "width:12px;" +
+            "height:12px;" +
+        "}" +
+
+        "." + id + "-abs {" +
+            "position:absolute;" +
+            "left:4px;" +
+            "top:4px;" +
+        "}" +
+
+        "." + id + "-hidden {" +
+            "display:none;" +
+        "}" +
+
+        "." + id + "-rtl {" +
+            "direction:rtl;" +
+        "}" +
+
+        "." + id + "-big {" +
+            "font-size:22px;" +
+            "line-height:27px;" +
+        "}" +
+
+        "." + id + "-relative {" +
+            "position:relative;" +
+            "left:2px;" +
+        "}";
+
+    styleHost.appendChild(style);
+
+    return style;
+
+}
+
+
+/* ============================================================
+ * COMPLEX DOM BUILDER
+ *
+ * Aqui a diferença principal para v1:
+ * vários elementos reais são inseridos antes da mutação.
+ * ============================================================
+ */
+
+function buildComplexTree(id, depth, width) {
 
     var root = document.createElement("div");
 
-    root.style.position = "relative";
-    root.style.width = (100 + rand(500)) + "px";
-    root.style.height = (50 + rand(300)) + "px";
-    root.style.overflow = choose([
-        "visible",
-        "hidden",
-        "scroll",
-        "auto"
-    ]);
+    root.className = id + "-root";
 
-    sandbox.appendChild(root);
+    root.setAttribute("data-root", id);
+
+    var stack = [];
+
+    stack.push({
+        node: root,
+        level: 0
+    });
+
+    var total = 0;
+
+    while (stack.length) {
+
+        var entry = stack.shift();
+
+        if (entry.level >= depth)
+            continue;
+
+        for (var i = 0; i < width; i++) {
+
+            var child;
+
+            var selector =
+                (i + entry.level + total) % 6;
+
+            if (selector === 0) {
+
+                child = document.createElement("div");
+                child.className =
+                    id + "-block";
+
+            } else if (selector === 1) {
+
+                child = document.createElement("span");
+                child.className =
+                    id + "-inline";
+
+            } else if (selector === 2) {
+
+                child = document.createElement("span");
+                child.className =
+                    id + "-float";
+
+            } else if (selector === 3) {
+
+                child = document.createElement("b");
+                child.className =
+                    id + "-inline";
+
+            } else if (selector === 4) {
+
+                child = document.createElement("i");
+                child.className =
+                    id + "-relative";
+
+            } else {
+
+                child = document.createElement("span");
+                child.className =
+                    id + "-inline";
+            }
+
+            child.setAttribute(
+                "data-node",
+                total
+            );
+
+            child.appendChild(
+                document.createTextNode(
+                    "N" + total + " "
+                )
+            );
+
+            entry.node.appendChild(child);
+
+            total++;
+
+            if (
+                entry.level + 1 < depth &&
+                total < 120
+            ) {
+
+                stack.push({
+                    node: child,
+                    level: entry.level + 1
+                });
+
+            }
+
+        }
+
+    }
 
     return root;
+
 }
 
 
-function destroyRoot(root) {
+/* ============================================================
+ * STRUCTURAL MUTATIONS
+ * ============================================================
+ */
+
+function mutateTree(root, id) {
+
+    var nodes =
+        root.getElementsByTagName("*");
+
+    var count = nodes.length;
+
+    if (!count)
+        return;
+
+    var iterations =
+        Math.min(
+            randomRange(8, 22),
+            count
+        );
+
+    for (var i = 0; i < iterations; i++) {
+
+        var node =
+            nodes[
+                randomRange(
+                    0,
+                    nodes.length - 1
+                )
+            ];
+
+        if (!node)
+            continue;
+
+        switch (i % 7) {
+
+            case 0:
+                node.className =
+                    id + "-big";
+                break;
+
+            case 1:
+                node.className =
+                    id + "-rtl";
+                break;
+
+            case 2:
+                node.style.display =
+                    "inline";
+                break;
+
+            case 3:
+                node.style.position =
+                    "relative";
+                break;
+
+            case 4:
+                node.style.left =
+                    randomRange(-5, 8) + "px";
+                break;
+
+            case 5:
+                node.style.fontSize =
+                    randomRange(8, 28) + "px";
+                break;
+
+            case 6:
+                node.setAttribute(
+                    "data-mutated",
+                    i
+                );
+                break;
+        }
+
+    }
+
+}
+
+
+/* ============================================================
+ * RUNNER
+ * ============================================================
+ */
+
+function runTest(name, fn, done) {
+
+    if (!running) {
+        done();
+        return;
+    }
+
+    currentTest++;
+
+    updateStatus();
 
     try {
 
-        if (root && root.parentNode)
-            root.parentNode.removeChild(root);
+        var result = fn();
+
+        if (result === "SKIP") {
+
+            skipCount++;
+
+            log(
+                "[SKIP] " + name,
+                "warn"
+            );
+
+        } else {
+
+            passCount++;
+
+            log(
+                "[PASS] " + name,
+                "pass"
+            );
+
+        }
 
     } catch (e) {
+
+        failCount++;
+
+        log(
+            "[FAIL] " +
+            name +
+            " -> " +
+            e.name +
+            ": " +
+            e.message,
+            "fail"
+        );
+
     }
+
+    totalExecutions++;
+
+    updateStatus();
+
+    setTimeout(done, DELAY_BETWEEN_TESTS);
+
 }
 
 
-/*
- * ============================================================
- * ELEMENT FACTORY
+/* ============================================================
+ * TEST FAMILY 1
+ *
+ * EVENT DISPATCH
+ * → mutation
+ * → removal
+ * → reentrant dispatch
  * ============================================================
  */
 
-function createRandomElement() {
+function testEventReentrancyVariant(variant) {
 
-    var tags = [
-        "div",
-        "span",
-        "p",
-        "section",
-        "article",
-        "button",
-        "input",
-        "textarea",
-        "select",
-        "option",
-        "table",
-        "tbody",
-        "tr",
-        "td",
-        "canvas",
-        "iframe"
-    ];
+    var id = "evt" + variant;
 
-    var tag = choose(tags);
+    installDynamicStyleSheet(id);
 
-    var element = document.createElement(tag);
+    var root =
+        buildComplexTree(
+            id,
+            3,
+            4
+        );
 
-    element.className = "v25_" + rand(1000000);
+    arena.appendChild(root);
 
-    element.textContent =
-        "node_" + rand(1000000);
+    forceStyleAndLayout(root);
 
-    if (tag === "input") {
-        element.type = choose([
-            "text",
-            "number",
-            "checkbox",
-            "range"
-        ]);
-    }
+    var target =
+        root.getElementsByTagName("*")[8];
 
-    if (tag === "iframe") {
-        element.src = "about:blank";
-        element.className = "hidden-frame";
-    }
+    if (!target)
+        return;
 
-    return element;
+    var parent = target.parentNode;
+
+    target.addEventListener(
+        "ps4-uaf-event",
+        function() {
+
+            mutateTree(root, id);
+
+            forceStyleAndLayout(root);
+
+            if (variant % 2 === 0) {
+
+                if (
+                    target.parentNode
+                ) {
+
+                    target.parentNode.removeChild(target);
+
+                }
+
+            } else {
+
+                root.innerHTML =
+                    "<div class='" +
+                    id +
+                    "-block'>" +
+                    "replacement" +
+                    "<span class='" +
+                    id +
+                    "-inline'>X</span>" +
+                    "</div>";
+
+            }
+
+            forceStyleAndLayout(root);
+
+            if (variant % 3 === 0) {
+
+                var nested =
+                    document.createEvent("Event");
+
+                nested.initEvent(
+                    "ps4-nested",
+                    true,
+                    false
+                );
+
+                root.dispatchEvent(nested);
+
+            }
+
+        },
+        false
+    );
+
+    root.addEventListener(
+        "ps4-nested",
+        function() {
+
+            mutateTree(root, id);
+
+            forceStyleAndLayout(root);
+
+        },
+        false
+    );
+
+    var event =
+        document.createEvent("Event");
+
+    event.initEvent(
+        "ps4-uaf-event",
+        true,
+        false
+    );
+
+    target.dispatchEvent(event);
+
+    forceStyleAndLayout(root);
+
 }
 
 
-/*
- * ============================================================
- * DOM
+/* ============================================================
+ * TEST FAMILY 2
+ *
+ * MUTATIONOBSERVER
+ * → mutation
+ * → observer callback
+ * → subtree teardown
+ * → additional mutation
  * ============================================================
  */
 
-function opDOM(root) {
+function testMutationReentrancyVariant(variant) {
 
-    var parent = root;
-    var nodes = [];
+    if (!window.MutationObserver)
+        return "SKIP";
 
-    var count = 2 + rand(CONFIG.maxNodesPerCase);
+    var id = "mo" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            3,
+            5
+        );
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    var observer =
+        new MutationObserver(
+            function(records) {
+
+                if (!records.length)
+                    return;
+
+                mutateTree(root, id);
+
+                forceStyleAndLayout(root);
+
+                if (variant % 2 === 0) {
+
+                    while (
+                        root.firstChild
+                    ) {
+
+                        root.removeChild(
+                            root.firstChild
+                        );
+
+                    }
+
+                } else {
+
+                    root.innerHTML =
+                        "<div class='" +
+                        id +
+                        "-block'>" +
+                        "<span>A</span>" +
+                        "<span>B</span>" +
+                        "<span>C</span>" +
+                        "</div>";
+
+                }
+
+                forceStyleAndLayout(root);
+
+            }
+        );
+
+    observer.observe(
+        root,
+        {
+            childList: true,
+            subtree: true,
+            attributes: true
+        }
+    );
+
+    var node =
+        root.getElementsByTagName("*")[5];
+
+    if (node) {
+
+        node.setAttribute(
+            "data-trigger",
+            "1"
+        );
+
+        node.className =
+            id + "-big";
+
+    }
+
+    observer.disconnect();
+
+}
+
+
+/* ============================================================
+ * TEST FAMILY 3
+ *
+ * RANGE / SELECTION
+ * → style/layout
+ * → structural replacement
+ * ============================================================
+ */
+
+function testRangeVariant(variant) {
+
+    var id = "range" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            3,
+            4
+        );
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    var elements =
+        root.getElementsByTagName("*");
+
+    if (elements.length < 8)
+        return;
+
+    var first = elements[2];
+    var last =
+        elements[
+            elements.length - 2
+        ];
+
+    var range =
+        document.createRange();
+
+    try {
+
+        range.setStartBefore(first);
+        range.setEndAfter(last);
+
+    } catch (e) {
+
+        range.selectNodeContents(root);
+
+    }
+
+    forceStyleAndLayout(root);
+
+    if (variant % 2 === 0) {
+
+        root.innerHTML =
+            "<div class='" +
+            id +
+            "-block'>" +
+            "<span>replacement-A</span>" +
+            "<span>replacement-B</span>" +
+            "</div>";
+
+    } else {
+
+        var victim =
+            elements[4];
+
+        if (
+            victim &&
+            victim.parentNode
+        ) {
+
+            victim.parentNode.removeChild(victim);
+
+        }
+
+        mutateTree(root, id);
+
+    }
+
+    forceStyleAndLayout(root);
+
+    range.toString();
+
+    if (
+        window.getSelection &&
+        variant % 3 === 0
+    ) {
+
+        var selection =
+            window.getSelection();
+
+        selection.removeAllRanges();
+
+        try {
+            selection.addRange(range);
+        } catch (e2) {
+        }
+
+        selection.removeAllRanges();
+
+    }
+
+}
+
+
+/* ============================================================
+ * TEST FAMILY 4
+ *
+ * TREEWALKER / NODEITERATOR
+ * → mutation during traversal
+ * ============================================================
+ */
+
+function testTraversalVariant(variant) {
+
+    var id = "trav" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            3,
+            5
+        );
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    if (variant % 2 === 0) {
+
+        var walker =
+            document.createTreeWalker(
+                root,
+                NodeFilter.SHOW_ELEMENT,
+                null,
+                false
+            );
+
+        var step = 0;
+        var node;
+
+        while (
+            (node = walker.nextNode()) &&
+            step < 15
+        ) {
+
+            if (step === 4) {
+
+                mutateTree(root, id);
+
+                forceStyleAndLayout(root);
+
+            }
+
+            if (
+                step === 8 &&
+                node.parentNode
+            ) {
+
+                node.parentNode.removeChild(node);
+
+            }
+
+            step++;
+
+        }
+
+    } else {
+
+        var iterator =
+            document.createNodeIterator(
+                root,
+                NodeFilter.SHOW_ELEMENT,
+                null,
+                false
+            );
+
+        var current;
+        var count = 0;
+
+        while (
+            (current = iterator.nextNode()) &&
+            count < 15
+        ) {
+
+            if (count === 3) {
+
+                mutateTree(root, id);
+
+                forceStyleAndLayout(root);
+
+            }
+
+            if (count === 7) {
+
+                root.innerHTML =
+                    "<div class='" +
+                    id +
+                    "-block'>" +
+                    "replaced traversal tree" +
+                    "</div>";
+
+            }
+
+            count++;
+
+        }
+
+    }
+
+}
+
+
+/* ============================================================
+ * TEST FAMILY 5
+ *
+ * SHADOW DOM
+ * → slot/content mutation
+ * → host teardown
+ * ============================================================
+ */
+
+function testShadowVariant(variant) {
+
+    if (!document.createElement("div").attachShadow)
+        return "SKIP";
+
+    var id = "shadow" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var host =
+        document.createElement("div");
+
+    host.className =
+        id + "-root";
+
+    arena.appendChild(host);
+
+    var shadow =
+        host.attachShadow({
+            mode: "open"
+        });
+
+    var container =
+        buildComplexTree(
+            id,
+            2,
+            5
+        );
+
+    var slot =
+        document.createElement("slot");
+
+    shadow.appendChild(container);
+    shadow.appendChild(slot);
+
+    for (var i = 0; i < 8; i++) {
+
+        var light =
+            document.createElement("span");
+
+        light.textContent =
+            "light-" + i;
+
+        light.className =
+            id + "-inline";
+
+        host.appendChild(light);
+
+    }
+
+    forceStyleAndLayout(host);
+
+    mutateTree(container, id);
+
+    forceStyleAndLayout(host);
+
+    if (variant % 2 === 0) {
+
+        host.innerHTML = "";
+
+    } else {
+
+        while (host.firstChild)
+            host.removeChild(host.firstChild);
+
+    }
+
+    forceStyleAndLayout(host);
+
+    if (
+        host.parentNode &&
+        variant % 3 === 0
+    ) {
+
+        host.parentNode.removeChild(host);
+
+    }
+
+}
+
+
+/* ============================================================
+ * TEST FAMILY 6
+ *
+ * STYLE / LAYOUT
+ *
+ * Vários elementos já existentes.
+ * Alterna:
+ *
+ * display
+ * position
+ * float
+ * direction
+ * font
+ * structural replacement
+ *
+ * ============================================================
+ */
+
+function testStyleLayoutVariant(variant) {
+
+    var id = "style" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            4,
+            4
+        );
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    var nodes =
+        root.getElementsByTagName("*");
+
+    var count =
+        Math.min(
+            nodes.length,
+            55
+        );
 
     for (var i = 0; i < count; i++) {
 
-        var node = createRandomElement();
+        var node = nodes[i];
 
-        nodes.push(node);
+        if (!node)
+            continue;
 
-        if (rand(2)) {
-            parent.appendChild(node);
-            parent = node;
-        } else {
-            root.appendChild(node);
+        switch (
+            (i + variant) % 9
+        ) {
+
+            case 0:
+                node.style.display =
+                    "block";
+                break;
+
+            case 1:
+                node.style.display =
+                    "inline";
+                break;
+
+            case 2:
+                node.style.position =
+                    "relative";
+                break;
+
+            case 3:
+                node.style.position =
+                    "static";
+                break;
+
+            case 4:
+                node.style.fontSize =
+                    (10 + (i % 16)) +
+                    "px";
+                break;
+
+            case 5:
+                node.style.direction =
+                    "rtl";
+                break;
+
+            case 6:
+                node.style.float =
+                    "left";
+                break;
+
+            case 7:
+                node.style.display =
+                    "none";
+                break;
+
+            case 8:
+                node.className =
+                    id + "-big";
+                break;
         }
-    }
 
-    if (nodes.length) {
+        if (
+            i % 7 === 0
+        ) {
 
-        var victim = choose(nodes);
+            forceStyleAndLayout(root);
 
-        try {
-            if (victim.parentNode)
-                victim.parentNode.removeChild(victim);
-        } catch (e) {
         }
 
-        try {
-            root.appendChild(victim);
-        } catch (e2) {
-        }
-    }
-}
-
-
-/*
- * ============================================================
- * DOCUMENT FRAGMENT
- * ============================================================
- */
-
-function opFragment(root) {
-
-    var fragment =
-        document.createDocumentFragment();
-
-    var nodes = [];
-
-    for (var i = 0; i < 3 + rand(8); i++) {
-
-        var node = createRandomElement();
-
-        nodes.push(node);
-
-        fragment.appendChild(node);
     }
 
-    root.appendChild(fragment);
+    forceStyleAndLayout(root);
 
-    if (nodes.length && rand(2)) {
+    /*
+     * Structural mutation após múltiplos
+     * style/layout flushes.
+     */
 
-        var victim = choose(nodes);
+    if (variant % 2 === 0) {
 
-        try {
-            root.removeChild(victim);
-        } catch (e) {
-        }
-    }
-}
-
-
-/*
- * ============================================================
- * TEMPLATE / PARSER
- * ============================================================
- */
-
-function opTemplate(root) {
-
-    if (!state.capabilities.Template)
-        return;
-
-    var template =
-        document.createElement("template");
-
-    template.innerHTML =
-        "<div><span>A</span><b>B</b><i>C</i></div>";
-
-    var clone =
-        document.importNode(template.content, true);
-
-    root.appendChild(clone);
-
-    if (rand(2)) {
-
-        try {
-            template.innerHTML =
-                "<section><input><textarea></textarea></section>";
-        } catch (e) {
-        }
-    }
-}
-
-
-/*
- * ============================================================
- * DOMPARSER / XML
- * ============================================================
- */
-
-function opParser(root) {
-
-    if (!state.capabilities.DOMParser)
-        return;
-
-    var parser = new DOMParser();
-
-    var doc = parser.parseFromString(
-        "<div><span>x</span><p>y</p></div>",
-        "text/html"
-    );
-
-    if (doc && doc.body) {
-
-        var imported =
-            document.importNode(doc.body, true);
-
-        root.appendChild(imported);
-    }
-}
-
-
-function opXML(root) {
-
-    if (!state.capabilities.XMLSerializer)
-        return;
-
-    var serializer = new XMLSerializer();
-
-    try {
-        var text = serializer.serializeToString(root);
-
-        if (text.length > 0 && rand(2)) {
-            root.setAttribute(
-                "data-v25",
-                String(text.length)
+        var replacement =
+            buildComplexTree(
+                id,
+                2,
+                4
             );
+
+        if (root.firstChild)
+            root.replaceChild(
+                replacement,
+                root.firstChild
+            );
+
+    } else {
+
+        var removeCount =
+            Math.min(
+                8,
+                root.childNodes.length
+            );
+
+        for (
+            var r = 0;
+            r < removeCount;
+            r++
+        ) {
+
+            if (root.firstChild)
+                root.removeChild(
+                    root.firstChild
+                );
+
         }
-    } catch (e) {
+
     }
+
+    forceStyleAndLayout(root);
+
 }
 
 
-/*
- * ============================================================
- * EVENTS
- * ============================================================
- */
-
-function opEvents(root) {
-
-    var target =
-        document.createElement("button");
-
-    root.appendChild(target);
-
-    function handler() {
-
-        if (rand(2)) {
-            try {
-                target.parentNode.removeChild(target);
-            } catch (e) {
-            }
-        }
-
-        if (rand(2)) {
-            try {
-                root.appendChild(
-                    document.createElement("span")
-                );
-            } catch (e2) {
-            }
-        }
-    }
-
-    target.addEventListener(
-        "click",
-        handler
-    );
-
-    try {
-        target.dispatchEvent(
-            new Event("click", {
-                bubbles: true
-            })
-        );
-    } catch (e) {
-    }
-
-    try {
-        target.removeEventListener(
-            "click",
-            handler
-        );
-    } catch (e2) {
-    }
-}
-
-
-/*
- * ============================================================
- * FOCUS / SELECTION / RANGE
+/* ============================================================
+ * TEST FAMILY 7
+ *
+ * IMAGE EVENT
+ * → event handler
+ * → DOM/style mutation
+ * → owner removal
+ *
+ * Data URI evita dependência de rede.
  * ============================================================
  */
 
-function opFocusSelection(root) {
+function testImageLifecycleVariant(variant) {
 
-    var input =
-        document.createElement("input");
+    var id = "img" + variant;
 
-    input.type = "text";
-    input.value = "PS4_V25_" + rand(999999);
+    installDynamicStyleSheet(id);
 
-    root.appendChild(input);
+    var root =
+        buildComplexTree(
+            id,
+            2,
+            5
+        );
 
-    try {
-        input.focus();
-    } catch (e) {
-    }
+    var image =
+        document.createElement("img");
 
-    if (state.capabilities.Selection &&
-        state.capabilities.Range) {
+    image.width = 8;
+    image.height = 8;
 
-        try {
+    root.appendChild(image);
 
-            var text =
-                document.createTextNode(
-                    "selection_" + rand(9999)
-                );
+    arena.appendChild(root);
 
-            root.appendChild(text);
+    forceStyleAndLayout(root);
 
-            var range =
-                document.createRange();
+    var fired = false;
 
-            range.selectNodeContents(text);
+    function imageCallback() {
 
-            var selection =
-                window.getSelection();
+        if (fired)
+            return;
 
-            selection.removeAllRanges();
-            selection.addRange(range);
+        fired = true;
 
-            if (rand(2)) {
+        mutateTree(root, id);
+
+        forceStyleAndLayout(root);
+
+        if (
+            variant % 2 === 0
+        ) {
+
+            if (
+                image.parentNode
+            ) {
+
+                image.parentNode.removeChild(image);
+
+            }
+
+        } else {
+
+            if (
+                root.parentNode
+            ) {
+
+                root.parentNode.removeChild(root);
+
+            }
+
+        }
+
+        setTimeout(
+            function() {
 
                 try {
-                    text.parentNode.removeChild(text);
-                } catch (e2) {
+
+                    if (root)
+                        forceStyleAndLayout(root);
+
+                } catch (e) {
                 }
+
+            },
+            0
+        );
+
+    }
+
+    image.addEventListener(
+        "load",
+        imageCallback,
+        false
+    );
+
+    image.addEventListener(
+        "error",
+        imageCallback,
+        false
+    );
+
+    if (
+        variant % 3 === 0
+    ) {
+
+        image.src =
+            "data:image/gif;base64," +
+            "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
+    } else {
+
+        image.src =
+            "data:image/gif;base64,invalid";
+
+    }
+
+}
+
+
+/* ============================================================
+ * TEST FAMILY 8
+ *
+ * IFRAME / DOCUMENT / FRAME TEARDOWN
+ *
+ * Sem navegação externa.
+ * ============================================================
+ */
+
+function testFrameLifecycleVariant(variant) {
+
+    var id = "frame" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            2,
+            5
+        );
+
+    var frame =
+        document.createElement("iframe");
+
+    frame.width = "20";
+    frame.height = "20";
+
+    root.appendChild(frame);
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    frame.addEventListener(
+        "load",
+        function() {
+
+            try {
+
+                if (
+                    frame.contentDocument &&
+                    frame.contentDocument.body
+                ) {
+
+                    frame.contentDocument.body.innerHTML =
+                        "<div>A<span>B</span></div>";
+
+                }
+
+            } catch (e) {
             }
 
-            selection.removeAllRanges();
+            mutateTree(root, id);
 
-        } catch (e3) {
-        }
-    }
+            forceStyleAndLayout(root);
 
-    try {
-        input.blur();
-    } catch (e4) {
-    }
+            if (
+                variant % 2 === 0
+            ) {
+
+                if (
+                    frame.parentNode
+                ) {
+
+                    frame.parentNode.removeChild(frame);
+
+                }
+
+            } else {
+
+                if (
+                    root.parentNode
+                ) {
+
+                    root.parentNode.removeChild(root);
+
+                }
+
+            }
+
+        },
+        false
+    );
+
+    frame.src =
+        "about:blank";
+
 }
 
 
-/*
- * ============================================================
- * CSS / STYLE
- * ============================================================
- */
-
-function opCSS(root) {
-
-    var node =
-        document.createElement("div");
-
-    root.appendChild(node);
-
-    var styles = [
-        ["display", "block"],
-        ["display", "inline-block"],
-        ["position", "absolute"],
-        ["position", "relative"],
-        ["overflow", "hidden"],
-        ["overflow", "scroll"],
-        ["float", "left"],
-        ["float", "right"],
-        ["width", (1 + rand(500)) + "px"],
-        ["height", (1 + rand(300)) + "px"]
-    ];
-
-    for (var i = 0; i < 4 + rand(6); i++) {
-
-        var entry = choose(styles);
-
-        try {
-            node.style.setProperty(
-                entry[0],
-                entry[1]
-            );
-        } catch (e) {
-        }
-    }
-
-    try {
-        void node.offsetWidth;
-        void node.offsetHeight;
-        window.getComputedStyle(node).display;
-    } catch (e2) {
-    }
-
-    if (rand(2)) {
-
-        try {
-            node.style.cssText = "";
-        } catch (e3) {
-        }
-    }
-}
-
-
-/*
- * ============================================================
- * LAYOUT
- * ============================================================
- */
-
-function opLayout(root) {
-
-    var outer =
-        document.createElement("div");
-
-    var inner =
-        document.createElement("div");
-
-    outer.style.position =
-        choose([
-            "relative",
-            "absolute"
-        ]);
-
-    inner.style.display =
-        choose([
-            "block",
-            "inline-block",
-            "table"
-        ]);
-
-    inner.style.width =
-        (10 + rand(500)) + "px";
-
-    inner.style.height =
-        (10 + rand(500)) + "px";
-
-    outer.appendChild(inner);
-    root.appendChild(outer);
-
-    try {
-        void outer.offsetWidth;
-        void outer.offsetHeight;
-
-        inner.style.width =
-            (10 + rand(500)) + "px";
-
-        void inner.offsetWidth;
-
-    } catch (e) {
-    }
-}
-
-
-/*
- * ============================================================
+/* ============================================================
+ * TEST FAMILY 9
+ *
  * SVG
+ * → geometry/style
+ * → subtree mutation
+ * → detach
  * ============================================================
  */
 
-function opSVG(root) {
-
-    if (!state.capabilities.SVG)
-        return;
+function testSVGVariant(variant) {
 
     var ns =
         "http://www.w3.org/2000/svg";
 
     var svg =
-        document.createElementNS(ns, "svg");
+        document.createElementNS(
+            ns,
+            "svg"
+        );
 
-    var rect =
-        document.createElementNS(ns, "rect");
+    svg.setAttribute(
+        "width",
+        "300"
+    );
 
-    svg.setAttribute("width", "200");
-    svg.setAttribute("height", "100");
+    svg.setAttribute(
+        "height",
+        "200"
+    );
 
-    rect.setAttribute("x", "10");
-    rect.setAttribute("y", "10");
-    rect.setAttribute("width", "80");
-    rect.setAttribute("height", "50");
+    for (
+        var i = 0;
+        i < 30;
+        i++
+    ) {
 
-    svg.appendChild(rect);
-    root.appendChild(svg);
+        var group =
+            document.createElementNS(
+                ns,
+                "g"
+            );
 
-    try {
+        var rect =
+            document.createElementNS(
+                ns,
+                "rect"
+            );
+
+        rect.setAttribute(
+            "x",
+            i * 2
+        );
+
+        rect.setAttribute(
+            "y",
+            i
+        );
 
         rect.setAttribute(
             "width",
-            String(10 + rand(150))
+            10 + (i % 10)
         );
 
-        if (rect.getBoundingClientRect)
-            rect.getBoundingClientRect();
+        rect.setAttribute(
+            "height",
+            8 + (i % 7)
+        );
 
-    } catch (e) {
+        group.appendChild(rect);
+
+        svg.appendChild(group);
+
     }
 
-    if (rand(2)) {
+    arena.appendChild(svg);
 
-        try {
-            svg.removeChild(rect);
-        } catch (e2) {
+    forceStyleAndLayout(svg);
+
+    var rects =
+        svg.getElementsByTagName("rect");
+
+    for (
+        var r = 0;
+        r < rects.length;
+        r++
+    ) {
+
+        if (
+            r % 4 === 0
+        ) {
+
+            rects[r].setAttribute(
+                "width",
+                20 + r
+            );
+
         }
+
+        if (
+            r % 6 === 0
+        ) {
+
+            rects[r].setAttribute(
+                "transform",
+                "translate(" +
+                r +
+                ",1)"
+            );
+
+        }
+
     }
+
+    forceStyleAndLayout(svg);
+
+    if (
+        variant % 2 === 0
+    ) {
+
+        while (
+            svg.firstChild
+        ) {
+
+            svg.removeChild(
+                svg.firstChild
+            );
+
+        }
+
+    } else {
+
+        if (
+            svg.parentNode
+        ) {
+
+            svg.parentNode.removeChild(svg);
+
+        }
+
+    }
+
+    forceStyleAndLayout(svg);
+
 }
 
 
-/*
- * ============================================================
+/* ============================================================
+ * TEST FAMILY 10
+ *
  * FORMS
+ * → focus/event
+ * → type mutation
+ * → subtree mutation
+ *
+ * Não depende de internals.
  * ============================================================
  */
 
-function opForms(root) {
+function testFormsVariant(variant) {
+
+    var id = "form" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            2,
+            4
+        );
 
     var form =
         document.createElement("form");
@@ -858,900 +1735,701 @@ function opForms(root) {
     var input =
         document.createElement("input");
 
-    var select =
-        document.createElement("select");
+    input.type =
+        variant % 2 ?
+        "text" :
+        "search";
 
-    var option =
-        document.createElement("option");
+    input.value =
+        "PS4";
 
-    option.textContent = "A";
+    var list =
+        document.createElement("datalist");
 
-    select.appendChild(option);
+    var listId =
+        "ps4-list-" + variant;
 
-    form.appendChild(input);
-    form.appendChild(select);
+    list.id = listId;
 
-    root.appendChild(form);
-
-    try {
-        input.value = "x" + rand(99999);
-        input.focus();
-        input.blur();
-    } catch (e) {
-    }
-
-    if (rand(2)) {
-
-        try {
-            form.reset();
-        } catch (e2) {
-        }
-    }
-
-    try {
-
-        if (form.parentNode)
-            form.parentNode.removeChild(form);
-
-    } catch (e3) {
-    }
-}
-
-
-/*
- * ============================================================
- * HISTORY
- * ============================================================
- */
-
-function opHistory(root) {
-
-    if (!state.capabilities.History)
-        return;
-
-    try {
-
-        history.pushState(
-            {
-                v25: state.sequence,
-                value: rand(999999)
-            },
-            "",
-            "#v25_" + state.sequence
-        );
-
-    } catch (e) {
-    }
-}
-
-
-/*
- * ============================================================
- * ANIMATION
- * ============================================================
- */
-
-function opAnimation(root) {
-
-    var node =
-        document.createElement("div");
-
-    node.style.width = "20px";
-    node.style.height = "20px";
-
-    root.appendChild(node);
-
-    if (node.animate) {
-
-        try {
-
-            var animation =
-                node.animate(
-                    [
-                        {
-                            transform:
-                                "translateX(0px)"
-                        },
-                        {
-                            transform:
-                                "translateX(10px)"
-                        }
-                    ],
-                    {
-                        duration: 20
-                    }
-                );
-
-            if (rand(2))
-                animation.cancel();
-
-        } catch (e) {
-        }
-    }
-}
-
-
-/*
- * ============================================================
- * MUTATION OBSERVER
- * ============================================================
- */
-
-function opMutationObserver(root) {
-
-    if (!state.capabilities.MutationObserver)
-        return;
-
-    var observer =
-        new MutationObserver(function () {
-
-            try {
-
-                if (rand(3) === 0 &&
-                    root.firstChild) {
-
-                    root.removeChild(
-                        root.firstChild
-                    );
-                }
-
-            } catch (e) {
-            }
-        });
-
-    try {
-
-        observer.observe(root, {
-            childList: true,
-            subtree: true,
-            attributes: true
-        });
-
-        var node =
-            document.createElement("div");
-
-        root.appendChild(node);
-
-        node.setAttribute(
-            "data-x",
-            String(rand(999))
-        );
-
-        if (rand(2))
-            root.removeChild(node);
-
-    } catch (e2) {
-    }
-
-    try {
-        observer.disconnect();
-    } catch (e3) {
-    }
-}
-
-
-/*
- * ============================================================
- * RESIZE OBSERVER
- * ============================================================
- */
-
-function opResizeObserver(root) {
-
-    if (!state.capabilities.ResizeObserver)
-        return;
-
-    var node =
-        document.createElement("div");
-
-    root.appendChild(node);
-
-    try {
-
-        var observer =
-            new ResizeObserver(function () {
-
-                try {
-                    void node.offsetWidth;
-                } catch (e) {
-                }
-            });
-
-        observer.observe(node);
-
-        node.style.width =
-            (20 + rand(200)) + "px";
-
-        node.style.height =
-            (20 + rand(200)) + "px";
-
-        observer.disconnect();
-
-    } catch (e2) {
-    }
-}
-
-
-/*
- * ============================================================
- * INTERSECTION OBSERVER
- * ============================================================
- */
-
-function opIntersectionObserver(root) {
-
-    if (!state.capabilities.IntersectionObserver)
-        return;
-
-    var node =
-        document.createElement("div");
-
-    node.style.width = "30px";
-    node.style.height = "30px";
-
-    root.appendChild(node);
-
-    try {
-
-        var observer =
-            new IntersectionObserver(function () {
-
-                try {
-                    node.getBoundingClientRect();
-                } catch (e) {
-                }
-            });
-
-        observer.observe(node);
-
-        observer.disconnect();
-
-    } catch (e2) {
-    }
-}
-
-
-/*
- * ============================================================
- * CANVAS 2D
- * ============================================================
- */
-
-function opCanvas(root) {
-
-    if (!state.capabilities.Canvas2D)
-        return;
-
-    var canvas =
-        document.createElement("canvas");
-
-    canvas.width =
-        16 + rand(256);
-
-    canvas.height =
-        16 + rand(256);
-
-    root.appendChild(canvas);
-
-    try {
-
-        var ctx =
-            canvas.getContext("2d");
-
-        if (ctx) {
-
-            ctx.fillRect(
-                0,
-                0,
-                10,
-                10
-            );
-
-            canvas.width =
-                16 + rand(256);
-
-            ctx.fillRect(
-                1,
-                1,
-                5,
-                5
-            );
-        }
-
-    } catch (e) {
-    }
-
-    try {
-
-        if (canvas.parentNode)
-            canvas.parentNode.removeChild(canvas);
-
-    } catch (e2) {
-    }
-}
-
-
-/*
- * ============================================================
- * TEXT / CHARACTER DATA
- * ============================================================
- */
-
-function opText(root) {
-
-    var text =
-        document.createTextNode(
-            "AAAA_" + rand(999999)
-        );
-
-    root.appendChild(text);
-
-    try {
-
-        text.data =
-            "BBBB_" + rand(999999);
-
-        if (rand(2))
-            text.splitText(2);
-
-    } catch (e) {
-    }
-
-    if (rand(2)) {
-
-        try {
-            root.removeChild(text);
-        } catch (e2) {
-        }
-    }
-}
-
-
-/*
- * ============================================================
- * FETCH / BLOB / FILEREADER
- * ============================================================
- */
-
-function opBlob(root) {
-
-    if (!state.capabilities.Blob)
-        return;
-
-    try {
-
-        var blob =
-            new Blob(
-                [
-                    "PS4_V25_" +
-                    rand(999999)
-                ],
-                {
-                    type: "text/plain"
-                }
-            );
-
-        if (state.capabilities.FileReader) {
-
-            var reader =
-                new FileReader();
-
-            reader.onload =
-                function () {};
-
-            reader.readAsText(blob);
-        }
-
-    } catch (e) {
-    }
-}
-
-
-/*
- * ============================================================
- * STREAMS
- * ============================================================
- */
-
-function opStreams(root) {
-
-    if (!state.capabilities.ReadableStream)
-        return;
-
-    try {
-
-        var stream =
-            new ReadableStream({
-
-                start: function (controller) {
-
-                    controller.enqueue(
-                        "v25_" +
-                        rand(99999)
-                    );
-
-                    controller.close();
-                }
-            });
-
-        var reader =
-            stream.getReader();
-
-        reader.read().then(
-            function () {
-                try {
-                    reader.releaseLock();
-                } catch (e) {
-                }
-            }
-        );
-
-    } catch (e2) {
-    }
-}
-
-
-/*
- * ============================================================
- * MESSAGE CHANNEL
- * ============================================================
- */
-
-function opMessageChannel(root) {
-
-    if (!state.capabilities.MessageChannel)
-        return;
-
-    try {
-
-        var channel =
-            new MessageChannel();
-
-        channel.port1.onmessage =
-            function () {};
-
-        channel.port2.postMessage(
-            {
-                id: rand(999999)
-            }
-        );
-
-        channel.port1.close();
-        channel.port2.close();
-
-    } catch (e) {
-    }
-}
-
-
-/*
- * ============================================================
- * DATA TRANSFER
- * ============================================================
- */
-
-function opDataTransfer(root) {
-
-    if (!state.capabilities.DataTransfer)
-        return;
-
-    try {
-
-        var data =
-            new DataTransfer();
-
-        var event =
-            new Event("change");
-
-        root.dispatchEvent(event);
-
-        void data;
-
-    } catch (e) {
-    }
-}
-
-
-/*
- * ============================================================
- * IFRAME
- * ============================================================
- */
-
-function opFrame(root) {
-
-    var frame =
-        document.createElement("iframe");
-
-    frame.src = "about:blank";
-
-    root.appendChild(frame);
-
-    try {
-
-        if (frame.contentDocument) {
-
-            var body =
-                frame.contentDocument.body;
-
-            if (body) {
-
-                var div =
-                    frame.contentDocument.createElement(
-                        "div"
-                    );
-
-                body.appendChild(div);
-
-                if (rand(2))
-                    body.removeChild(div);
-            }
-        }
-
-    } catch (e) {
-    }
-
-    if (rand(2)) {
-
-        try {
-            root.removeChild(frame);
-        } catch (e2) {
-        }
-    }
-}
-
-
-/*
- * ============================================================
- * OPERAÇÕES DISPONÍVEIS
- * ============================================================
- */
-
-function buildOperations() {
-
-    var operations = [];
-
-    function add(name, capability, fn) {
-
-        if (capability)
-            operations.push({
-                name: name,
-                run: fn
-            });
-    }
-
-    add(
-        "DOM",
-        state.capabilities.DOM,
-        opDOM
+    input.setAttribute(
+        "list",
+        listId
     );
-
-    add(
-        "Fragment",
-        state.capabilities.DOM,
-        opFragment
-    );
-
-    add(
-        "Template",
-        state.capabilities.Template,
-        opTemplate
-    );
-
-    add(
-        "DOMParser",
-        state.capabilities.DOMParser,
-        opParser
-    );
-
-    add(
-        "XMLSerializer",
-        state.capabilities.XMLSerializer,
-        opXML
-    );
-
-    add(
-        "Events",
-        state.capabilities.Events,
-        opEvents
-    );
-
-    add(
-        "FocusSelection",
-        state.capabilities.Focus,
-        opFocusSelection
-    );
-
-    add(
-        "CSS",
-        state.capabilities.CSS,
-        opCSS
-    );
-
-    add(
-        "Layout",
-        state.capabilities.CSS,
-        opLayout
-    );
-
-    add(
-        "SVG",
-        state.capabilities.SVG,
-        opSVG
-    );
-
-    add(
-        "Forms",
-        state.capabilities.HTMLForms,
-        opForms
-    );
-
-    add(
-        "History",
-        state.capabilities.History,
-        opHistory
-    );
-
-    add(
-        "Animation",
-        state.capabilities.Animation,
-        opAnimation
-    );
-
-    add(
-        "MutationObserver",
-        state.capabilities.MutationObserver,
-        opMutationObserver
-    );
-
-    add(
-        "ResizeObserver",
-        state.capabilities.ResizeObserver,
-        opResizeObserver
-    );
-
-    add(
-        "IntersectionObserver",
-        state.capabilities.IntersectionObserver,
-        opIntersectionObserver
-    );
-
-    add(
-        "Canvas2D",
-        state.capabilities.Canvas2D,
-        opCanvas
-    );
-
-    add(
-        "Text",
-        state.capabilities.Text,
-        opText
-    );
-
-    add(
-        "Blob",
-        state.capabilities.Blob,
-        opBlob
-    );
-
-    add(
-        "Streams",
-        state.capabilities.ReadableStream,
-        opStreams
-    );
-
-    add(
-        "MessageChannel",
-        state.capabilities.MessageChannel,
-        opMessageChannel
-    );
-
-    add(
-        "DataTransfer",
-        state.capabilities.DataTransfer,
-        opDataTransfer
-    );
-
-    add(
-        "Frame",
-        true,
-        opFrame
-    );
-
-    return operations;
-}
-
-
-/*
- * ============================================================
- * CANDIDATE GENERATOR
- * ============================================================
- */
-
-function generateCandidate(operations) {
-
-    var length =
-        2 + rand(5);
-
-    var sequence = [];
-
-    for (var i = 0; i < length; i++) {
-
-        var operation =
-            choose(operations);
-
-        if (operation)
-            sequence.push(operation);
-    }
-
-    return sequence;
-}
-
-
-/*
- * ============================================================
- * EXECUÇÃO
- * ============================================================
- */
-
-function executeCandidate(candidate) {
-
-    var root = createRoot();
 
     for (
         var i = 0;
-        i < candidate.length;
+        i < 12;
         i++
     ) {
 
-        try {
-            candidate[i].run(root);
-        } catch (e) {
-        }
+        var option =
+            document.createElement("option");
+
+        option.value =
+            "value-" + i;
+
+        list.appendChild(option);
+
     }
 
-    /*
-     * Pequeno ponto de sincronização de layout.
-     */
+    form.appendChild(input);
+    form.appendChild(list);
+
+    root.appendChild(form);
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    input.addEventListener(
+        "focus",
+        function() {
+
+            mutateTree(root, id);
+
+            forceStyleAndLayout(root);
+
+        },
+        false
+    );
 
     try {
-        void root.offsetWidth;
-        void root.offsetHeight;
-    } catch (e2) {
-    }
-
-    destroyRoot(root);
-}
-
-
-/*
- * ============================================================
- * LOOP PRINCIPAL
- * ============================================================
- */
-
-function runNext() {
-
-    if (!state.running)
-        return;
-
-    state.sequence++;
-
-    var operations =
-        buildOperations();
-
-    var candidate =
-        generateCandidate(operations);
-
-    var names = [];
-
-    for (var i = 0; i < candidate.length; i++)
-        names.push(candidate[i].name);
-
-    var record = {
-        version: "V25",
-        id: state.sequence,
-        timestamp: Date.now(),
-        operations: names
-    };
-
-    /*
-     * CRÍTICO:
-     * salva ANTES da execução.
-     */
-
-    saveCandidate(record);
-
-    state.currentCandidate = record;
-
-    state.currentSurface =
-        names.join(" -> ");
-
-    statusElement.textContent =
-        "STATUS: RUNNING";
-
-    infoElement.textContent =
-        "Sequence #" +
-        state.sequence +
-        " | " +
-        state.currentSurface;
-
-    try {
-        executeCandidate(candidate);
+        input.focus();
     } catch (e) {
     }
 
-    setTimeout(
-        runNext,
-        CONFIG.delay
-    );
+    /*
+     * Mudança estrutural de estado do form control.
+     */
+
+    if (
+        variant % 3 === 0
+    ) {
+
+        input.type =
+            "number";
+
+    } else if (
+        variant % 3 === 1
+    ) {
+
+        input.type =
+            "button";
+
+    } else {
+
+        input.type =
+            "text";
+
+    }
+
+    forceStyleAndLayout(root);
+
+    if (
+        variant % 2 === 0
+    ) {
+
+        form.innerHTML =
+            "<input type='text'>" +
+            "<input type='checkbox'>";
+
+    } else {
+
+        if (
+            form.parentNode
+        ) {
+
+            form.parentNode.removeChild(form);
+
+        }
+
+    }
+
+    forceStyleAndLayout(root);
+
 }
 
 
-/*
+/* ============================================================
+ * TEST FAMILY 11
+ *
+ * HISTORY / DOCUMENT STATE
+ *
+ * Controlado:
+ * pushState / replaceState
+ * sem navigation storm.
  * ============================================================
+ */
+
+function testHistoryVariant(variant) {
+
+    var id = "hist" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            2,
+            5
+        );
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    if (
+        !window.history ||
+        !history.pushState
+    ) {
+
+        return "SKIP";
+
+    }
+
+    var state = {
+        id: variant,
+        nodes:
+            root.getElementsByTagName("*").length,
+        nested: {
+            value:
+                "PS4-" + variant
+        }
+    };
+
+    history.replaceState(
+        state,
+        "",
+        location.href
+    );
+
+    mutateTree(root, id);
+
+    forceStyleAndLayout(root);
+
+    history.replaceState(
+        {
+            id: variant,
+            phase: "after-layout"
+        },
+        "",
+        location.href
+    );
+
+    if (
+        variant % 2 === 0
+    ) {
+
+        root.innerHTML =
+            "<div>history mutation</div>";
+
+    } else {
+
+        while (
+            root.firstChild
+        ) {
+
+            root.removeChild(
+                root.firstChild
+            );
+
+        }
+
+    }
+
+    forceStyleAndLayout(root);
+
+}
+
+
+/* ============================================================
+ * TEST FAMILY 12
+ *
+ * ASYNC CALLBACK
+ * → layout
+ * → DOM replacement
+ * → teardown
+ *
+ * requestAnimationFrame quando disponível.
+ * ============================================================
+ */
+
+function testAsyncLifecycleVariant(variant) {
+
+    var id = "async" + variant;
+
+    installDynamicStyleSheet(id);
+
+    var root =
+        buildComplexTree(
+            id,
+            3,
+            4
+        );
+
+    arena.appendChild(root);
+
+    forceStyleAndLayout(root);
+
+    var callback =
+        function() {
+
+            try {
+
+                mutateTree(root, id);
+
+                forceStyleAndLayout(root);
+
+                if (
+                    variant % 2 === 0
+                ) {
+
+                    root.innerHTML =
+                        "<div class='" +
+                        id +
+                        "-block'>" +
+                        "<span>async replacement</span>" +
+                        "</div>";
+
+                } else {
+
+                    if (
+                        root.parentNode
+                    ) {
+
+                        root.parentNode.removeChild(root);
+
+                    }
+
+                }
+
+                forceStyleAndLayout(root);
+
+            } catch (e) {
+            }
+
+        };
+
+    if (
+        window.requestAnimationFrame
+    ) {
+
+        window.requestAnimationFrame(
+            callback
+        );
+
+    } else if (
+        window.webkitRequestAnimationFrame
+    ) {
+
+        window.webkitRequestAnimationFrame(
+            callback
+        );
+
+    } else {
+
+        setTimeout(
+            callback,
+            0
+        );
+
+    }
+
+    /*
+     * Mutação antes do callback.
+     */
+
+    mutateTree(root, id);
+
+    forceStyleAndLayout(root);
+
+}
+
+
+/* ============================================================
+ * TEST MATRIX
+ *
+ * 12 famílias
+ * × 4 variantes
+ *
+ * 48 sequências por round.
+ * ============================================================
+ */
+
+var tests = [];
+
+
+function addVariants(
+    prefix,
+    callback,
+    count
+) {
+
+    for (
+        var i = 0;
+        i < count;
+        i++
+    ) {
+
+        (function(index) {
+
+            tests.push({
+
+                name:
+                    prefix +
+                    " v" +
+                    index,
+
+                fn:
+                    function() {
+
+                        return callback(
+                            index
+                        );
+
+                    }
+
+            });
+
+        })(i);
+
+    }
+
+}
+
+
+addVariants(
+    "EVENT reentrancy/lifecycle",
+    testEventReentrancyVariant,
+    4
+);
+
+addVariants(
+    "MUTATIONOBSERVER reentrancy",
+    testMutationReentrancyVariant,
+    4
+);
+
+addVariants(
+    "RANGE / SELECTION replacement",
+    testRangeVariant,
+    4
+);
+
+addVariants(
+    "TREE traversal + mutation",
+    testTraversalVariant,
+    4
+);
+
+addVariants(
+    "SHADOW DOM lifecycle",
+    testShadowVariant,
+    4
+);
+
+addVariants(
+    "STYLE / LAYOUT complex mutation",
+    testStyleLayoutVariant,
+    4
+);
+
+addVariants(
+    "IMAGE event + teardown",
+    testImageLifecycleVariant,
+    4
+);
+
+addVariants(
+    "FRAME / DOCUMENT lifecycle",
+    testFrameLifecycleVariant,
+    4
+);
+
+addVariants(
+    "SVG geometry + teardown",
+    testSVGVariant,
+    4
+);
+
+addVariants(
+    "FORMS lifecycle mutation",
+    testFormsVariant,
+    4
+);
+
+addVariants(
+    "HISTORY + DOM lifecycle",
+    testHistoryVariant,
+    4
+);
+
+addVariants(
+    "ASYNC callback lifecycle",
+    testAsyncLifecycleVariant,
+    4
+);
+
+
+/* ============================================================
+ * ROUND EXECUTION
+ * ============================================================
+ */
+
+function runRound() {
+
+    if (!running)
+        return;
+
+    round++;
+
+    currentTest = 0;
+
+    cleanupArena();
+
+    section(
+        "ROUND " +
+        round +
+        " / " +
+        MAX_ROUNDS
+    );
+
+    var index = 0;
+
+
+    function next() {
+
+        if (!running)
+            return;
+
+        cleanupArena();
+
+        if (
+            index >= tests.length
+        ) {
+
+            if (
+                round >= MAX_ROUNDS
+            ) {
+
+                finishFuzzer();
+
+                return;
+
+            }
+
+            setTimeout(
+                runRound,
+                150
+            );
+
+            return;
+
+        }
+
+        var test =
+            tests[index++];
+
+        runTest(
+            test.name,
+            test.fn,
+            next
+        );
+
+    }
+
+    next();
+
+}
+
+
+/* ============================================================
  * START
  * ============================================================
  */
 
-function start() {
+function startFuzzer() {
 
-    if (state.running)
+    if (running) {
+
+        log(
+            "[INFO] Fuzzer already running",
+            "warn"
+        );
+
         return;
 
-    state.capabilities =
-        detectCapabilities();
-
-    state.running = true;
-
-    startButton.style.display =
-        "none";
-
-    var count = 0;
-
-    for (var key in state.capabilities) {
-        if (state.capabilities[key])
-            count++;
     }
 
-    statusElement.textContent =
-        "STATUS: INITIALIZING";
+    running = true;
 
-    infoElement.textContent =
-        "Capabilities enabled: " + count;
+    round = 0;
+    currentTest = 0;
+
+    passCount = 0;
+    failCount = 0;
+    skipCount = 0;
+    totalExecutions = 0;
+
+    seed = 0x13572468;
+
+    clearLog();
+
+    section(
+        "PS4 WEBKIT UAF LIFECYCLE FUZZER v2"
+    );
+
+    log(
+        "[INFO] Tests per round: " +
+        tests.length,
+        "info"
+    );
+
+    log(
+        "[INFO] Max rounds: " +
+        MAX_ROUNDS,
+        "info"
+    );
+
+    log(
+        "[INFO] Focus: reentrancy / callbacks / teardown / style / layout",
+        "info"
+    );
+
+    log(
+        "[INFO] Complex DOM trees enabled",
+        "info"
+    );
+
+    log(
+        "[INFO] Repeated style/layout flushes enabled",
+        "info"
+    );
+
+    log(
+        "[INFO] No Worker storm",
+        "warn"
+    );
+
+    log(
+        "[INFO] No deliberate resource exhaustion",
+        "warn"
+    );
+
+    updateStatus();
 
     setTimeout(
-        runNext,
-        500
+        runRound,
+        100
     );
+
 }
 
 
-startButton.addEventListener(
-    "click",
-    start
-);
-
-
-/*
- * ============================================================
- * RECUPERAÇÃO VISUAL DO ÚLTIMO CANDIDATO
+/* ============================================================
+ * FINISH
  * ============================================================
  */
 
-var last =
-    loadLastCandidate();
+function finishFuzzer() {
 
-if (last) {
+    running = false;
 
-    infoElement.textContent =
-        "Last saved candidate #" +
-        last.id +
-        " | " +
-        last.operations.join(" -> ");
+    cleanupArena();
+
+    section(
+        "V2 MATRIX COMPLETE"
+    );
+
+    log(
+        "Total executions: " +
+        totalExecutions,
+        "info"
+    );
+
+    log(
+        "PASS: " +
+        passCount,
+        "pass"
+    );
+
+    log(
+        "FAIL: " +
+        failCount,
+        failCount ?
+        "fail" :
+        "info"
+    );
+
+    log(
+        "SKIP: " +
+        skipCount,
+        "warn"
+    );
+
+    log(
+        "Final seed: 0x" +
+        seed.toString(16),
+        "info"
+    );
+
+    log(
+        "[DONE] Controlled lifecycle matrix completed",
+        "section"
+    );
+
+    updateStatus();
+
 }
 
-})();
+
+/* ============================================================
+ * GLOBAL ERRORS
+ * ============================================================
+ */
+
+window.onerror =
+    function(
+        message,
+        source,
+        line,
+        column,
+        error
+    ) {
+
+        failCount++;
+
+        log(
+            "[UNCAUGHT] " +
+            message +
+            " | line " +
+            line,
+            "fail"
+        );
+
+        updateStatus();
+
+    };
+
+
+window.addEventListener(
+    "unhandledrejection",
+    function(event) {
+
+        failCount++;
+
+        log(
+            "[PROMISE REJECTION] " +
+            event.reason,
+            "fail"
+        );
+
+        updateStatus();
+
+    },
+    false
+);
+
 </script>
 
 </body>
