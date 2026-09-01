@@ -1,127 +1,51 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>PS4 Popup Animation Lifecycle Test</title>
-</head>
-
-<body>
 <script>
-(function () {
-    var cycle = 0;
-    var maxCycles = 30;
 
-    function finish() {
-        document.body.textContent =
-            "PASS if no crash. Completed " + cycle + " cycles.";
+function runTest()
+{
+    const context = new webkitOfflineAudioContext(1, 48000 * 30, 48000);
+    const biquad = new BiquadFilterNode(context);
+    biquad.channelCountMode = 'explicit';
+    biquad.channelCount = 32;
+    biquad.connect(context.destination);
+
+    let last = biquad;
+    for (let i = 0; i < 50; ++i) {
+        const node = new BiquadFilterNode(context);
+        last.connect(node);
+        last = node;
     }
+    last.connect(context.destination);
 
-    function runCycle() {
-        if (cycle >= maxCycles) {
-            finish();
-            return;
+    context.startRendering();
+
+    const types = ['lowpass', 'highpass'];
+    const counts = [31, 32];
+    let k = 0;
+    const deadline = performance.now() + 2000;
+
+    function spin()
+    {
+        for (let outer = 0; outer < 200; ++outer) {
+            biquad.channelCount = counts[k & 1];
+            ++k;
+            for (let i = 0; i < 4000; ++i)
+                biquad.type = types[i & 1];
         }
-
-        cycle++;
-
-        /*
-         * Open a small same-origin/about:blank popup.
-         */
-        var popup = window.open(
-            "about:blank",
-            "",
-            "width=200,height=200"
-        );
-
-        /*
-         * Popup blocked or unsupported.
-         */
-        if (!popup) {
-            document.body.textContent =
-                "Popup could not be opened. Stopped at cycle " + cycle + ".";
-            return;
+        if (performance.now() < deadline)
+            setTimeout(spin, 0);
+        else {
+            document.getElementById('result').textContent = 'PASS: did not crash.';            
         }
-
-        /*
-         * Create the animated content.
-         */
-        try {
-            popup.document.open();
-            popup.document.write(
-                '<!DOCTYPE html>' +
-                '<html>' +
-                '<head>' +
-                '<meta charset="utf-8">' +
-                '<style>' +
-                '@keyframes spin {' +
-                'from { transform: rotate(0deg); }' +
-                'to { transform: rotate(360deg); }' +
-                '}' +
-                'body { margin: 0; overflow: hidden; }' +
-                '#box {' +
-                'width: 50px;' +
-                'height: 50px;' +
-                'animation: spin 10s linear infinite;' +
-                'will-change: transform;' +
-                '}' +
-                '</style>' +
-                '</head>' +
-                '<body>' +
-                '<div id="box"></div>' +
-                '</body>' +
-                '</html>'
-            );
-            popup.document.close();
-        } catch (e) {
-            try {
-                popup.close();
-            } catch (closeError) {
-            }
-
-            setTimeout(runCycle, 0);
-            return;
-        }
-
-        /*
-         * Same structure as the original LayoutTest:
-         * wait two animation frames before closing.
-         */
-        function afterFirstFrame() {
-            function afterSecondFrame() {
-
-                /*
-                 * Close the popup after it has had an opportunity
-                 * to initialize and animate.
-                 */
-                try {
-                    popup.close();
-                } catch (e) {
-                }
-
-                /*
-                 * Start the next lifecycle cycle asynchronously.
-                 */
-                setTimeout(runCycle, 0);
-            }
-
-            if (typeof window.requestAnimationFrame === "function")
-                window.requestAnimationFrame(afterSecondFrame);
-            else
-                setTimeout(afterSecondFrame, 16);
-        }
-
-        if (typeof window.requestAnimationFrame === "function")
-            window.requestAnimationFrame(afterFirstFrame);
-        else
-            setTimeout(afterFirstFrame, 16);
     }
-
-    /*
-     * Start from a user-visible page context.
-     */
-    setTimeout(runCycle, 0);
-
-})();
+    spin();
+}
 </script>
+</head>
+<body onload="runTest()">
+<p>This test passes if it does not crash when toggling BiquadFilterNode.type while the channel count changes on the audio thread.</p>
+<p id="result"></p>
 </body>
 </html>
