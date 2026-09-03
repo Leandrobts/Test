@@ -1,26 +1,62 @@
 <!DOCTYPE html>
+<html>
 <body>
-<title>Use-after-free when inserting implicit parent selector</title>
-<link rel="help" href="https://crbug.com/1380313">
-<style>
-:root {
-  :lang(en), :lang(en) {
-  }
-}
-</style>
-<div lang="en"></div>
-<script>function gc() {
+<p>This test passes if it does not crash.</p>
+<div id="host"></div>
+<div id="result"></div>
+<script>
+
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
+victim.focus();
+
+function gc() {
     function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+        if (n < 1)
+            return {};
+        var temp = {i: "ab" + i + (i / 100000)};
+        temp += "foo";
+        gcRec(n-1);
     }
     for (var i = 0; i < 10000; i++)
-    gcRec(10);
+        gcRec(10);
 }
 
-  // Allocate a large chunk of memory, to trigger a GC.
-  gc();
+async function runTest() {   
+    if (document.activeElement !== host ||
+        host.shadowRoot.activeElement !== victim) {
+        result.textContent = 'FAIL: victim is not focused';
+        return;
+    }   
+    let resolveBlur;
+
+    const blurPromise = new Promise((resolve) => {
+        resolveBlur = resolve;
+    });
+
+    document.addEventListener('blur', () => {
+        victim.remove();
+        victim = null;
+        gc();
+        resolveBlur();
+    }, true);
+
+    result.textContent =
+        '[Ready] victim focused — press PS to leave browser';
+    
+    await blurPromise;
+   
+    await new Promise((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+    });
+
+    result.textContent = 'PASS';
+}
+
+runTest();
 </script>
+</body>
+</html>

