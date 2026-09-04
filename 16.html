@@ -1,37 +1,130 @@
+<!DOCTYPE html>
 <html>
-<head>
-
-</head>
 <body>
-<!-- Test that compiling an XSL stylesheet with a still-loading import subresource does not
-     cause a use-after-free when the delayed subresource later arrives. -->
-<p>This test passes if it does not crash.</p>
-<iframe id="f" src="resources/xslt-import-delayed-subresource-target.xml"></iframe>
+<div id="result"></div>
+<div id="container">
+    <input id="input" type="password">
+</div>
+
 <script>
-// Wait for root.xsl and child.xsl to load (but not the delayed grandchild).
-// Then inject and immediately remove an embedded XSL processing instruction
-// to trigger scheduleToApplyXSLTransforms(), which will attempt to compile
-// the partially-loaded import chain.
-setTimeout(() => {
-    try {
-        const doc = document.getElementById('f').contentDocument;
-        // Create an embedded XSL PI (href="#x") which unconditionally calls
-        // scheduleToApplyXSLTransforms() via the embedded branch of
-        // ProcessingInstruction::checkStyleSheet().
-        const pi = doc.createProcessingInstruction("xml-stylesheet", 'type="text/xsl" href="#x"');
-        doc.insertBefore(pi, doc.firstChild);
-        pi.remove();
-    } catch (e) {
-        // Cross-origin or other access error is OK - test still verifies no crash.
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
+}
+
+(function() {
+
+    var result = document.getElementById("result");
+    var input = document.getElementById("input");
+    var hasInternals =
+        !!window.internals &&
+        typeof window.internals.setAutofillButtonType === "function" &&
+        typeof window.internals.shadowRoot === "function" &&
+        typeof window.internals.userAgentPart === "function";    
+    input.addEventListener("click", function() {
+    input.type = "button";       
+    gc();
+    }, { once: true });
+    
+    if (hasInternals) {
+
+        try {           
+            window.internals.setAutofillButtonType(
+                input,
+                "Credentials"
+            );
+
+            var shadowRoot = window.internals.shadowRoot(input);
+
+            if (!shadowRoot) {
+                result.textContent =
+                    "FAIL - internals.shadowRoot(input) returned null";
+                return;
+            }           
+            var autoFillButton = Array.from(
+                shadowRoot.querySelectorAll("div")
+            ).find(function(div) {
+                return window.internals.userAgentPart(div) ==
+                    "-webkit-credentials-auto-fill-button";
+            });
+
+            if (!autoFillButton) {
+                result.textContent =
+                    "FAIL - credentials AutoFillButtonElement not found";
+                return;
+            }           
+            if (window.UIHelper &&
+                typeof window.UIHelper.activateElement === "function") {
+
+                window.UIHelper.activateElement(autoFillButton);
+
+            } else if (window.eventSender) {
+               
+                var rect = autoFillButton.getBoundingClientRect();
+
+                var x = rect.left + rect.width / 2;
+                var y = rect.top + rect.height / 2;
+
+                eventSender.mouseMoveTo(x, y);
+                eventSender.mouseDown();
+                eventSender.mouseUp();
+
+            } else {
+
+                result.textContent =
+                    "FAIL - AutoFillButton found, but no activation API";
+                return;
+            }
+
+            setTimeout(function() {
+
+                result.textContent =
+                    "PASS - original AutoFillButton activation path completed";
+
+            }, 100);
+
+            return;
+
+        } catch (e) {
+           
+            result.textContent =
+                "FAIL - internal AutoFillButton path unavailable";
+
+            return;
+        }
     }
 
-    // Wait long enough for the delayed grandchild to arrive and trigger
-    // parseString() on the grandchild stylesheet. Without the fix, this
-    // dereferences a freed m_stylesheetDoc in the parent (child.xsl).
-    setTimeout(() => {
-        
-    }, 3000);
-}, 500);
+    setTimeout(function() {
+
+        try {
+            input.click();
+        } catch (e) {
+            result.textContent =
+                "FAIL - public activation threw";
+            return;
+        }
+
+        setTimeout(function() {
+
+           gc();
+
+            result.textContent =
+                "PASS - public fallback completed; "
+                + "AutoFillButtonElement was not directly reachable";
+
+        }, 100);
+
+    }, 100);
+
+})();
 </script>
+
 </body>
 </html>

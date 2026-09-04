@@ -1,62 +1,52 @@
-<!DOCTYPE html>
 <html>
 <body>
-<p>This test passes if it does not crash.</p>
-<div id="host"></div>
-<div id="result"></div>
+<script src="resources/testharness.js"></script>
+<script src="resources/testharnessreport.js"></script>
 <script>
+const WORKER_SOURCE = `
+self.onmessage = event => {
+    const processor = new MediaStreamTrackProcessor({ track: event.data });
 
-let shadowRoot = host.attachShadow({ mode: 'open' });
-let victim = document.createElement('div');
-victim.tabIndex = 0;
-victim.textContent = 'Focusable';
-shadowRoot.appendChild(victim);
-victim.focus();
-
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = {i: "ab" + i + (i / 100000)};
-        temp += "foo";
-        gcRec(n-1);
+    function overflowStack() {
+        try {
+            overflowStack();
+        } catch {
+            try {
+                processor.readable;
+            } catch {
+                self.postMessage("done");
+            }
+        }
     }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+
+    overflowStack();
+};
+`;
+
+const WORKER_URL = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
+
+async function sleep(ms) {
+    await new Promise(resolve => {
+        setTimeout(() => {
+            resolve();
+        }, ms);
+    });
 }
 
-async function runTest() {   
-    if (document.activeElement !== host ||
-        host.shadowRoot.activeElement !== victim) {
-        result.textContent = 'FAIL: victim is not focused';
-        return;
-    }   
-    let resolveBlur;
+promise_test(async () => {
+    const canvas = document.createElement('canvas');
+    const [track] = canvas.captureStream(30).getVideoTracks();
 
-    const blurPromise = new Promise((resolve) => {
-        resolveBlur = resolve;
-    });
+    const worker = new Worker(WORKER_URL);
 
-    document.addEventListener('blur', () => {
-        victim.remove();
-        victim = null;
-        gc();
-        resolveBlur();
-    }, true);
+    worker.postMessage(track);
 
-    result.textContent =
-        '[Ready] victim focused — press PS to leave browser';
-    
-    await blurPromise;
-   
-    await new Promise((resolve) => {
-        requestAnimationFrame(() => setTimeout(resolve, 0));
-    });
+    await new Promise(resolve => worker.onmessage = resolve);
 
-    result.textContent = 'PASS';
-}
+    worker.terminate();
 
-runTest();
+    sleep(100);
+});
 </script>
 </body>
 </html>
