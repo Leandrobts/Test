@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html>
 <body>
+<p>This test passes if it does not crash.</p>
+<div id="host"></div>
 <div id="result"></div>
 <script>
 function log(msg) {
@@ -9,46 +11,80 @@ function log(msg) {
     result.appendChild(d);
 }
 
-// Scan completo de APIs internas do JSC
-var candidates = [
-    'gc', '$vm', '$jsc', 'GCController',
-    'gcAndSweep', 'fullGC', 'edenGC',
-    'collectGarbage', 'jscTest', 'webkit',
-    'internals', 'testRunner', 'debug',
-    'jscOptions', 'jscStack'
-];
+// Pressão no heap JSC usando OBJETOS JS (não TypedArrays)
+function forceJSCGC() {
+    var survived = [];
 
-candidates.forEach(function(k) {
-    try {
-        var t = typeof window[k];
-        if (t !== 'undefined') {
-            log('[FOUND] ' + k + ' → ' + t);
-            if (t === 'function') {
-                log('  .toString: ' + window[k].toString().slice(0, 120));
-            }
+    // Fase 1: preenche o nursery e força promoção para old-gen
+    // Objetos que sobrevivem um eden-GC são promovidos para old-gen
+    for (var round = 0; round < 80; round++) {
+        var batch = [];
+        for (var i = 0; i < 3000; i++) {
+            // Objetos JS → JSC heap (NÃO nativo)
+            batch.push({
+                a: i,
+                b: new Array(8).fill(i),
+                c: { x: i, y: i * 2 }
+            });
         }
-    } catch(e) {
-        log('[ERR] ' + k + ': ' + e.message);
+        // Mantém 1 em cada 5 → força sobrevivência → promoção para old-gen
+        if (round % 5 === 0) survived.push(batch);
     }
+
+    // Fase 2: solta os sobreviventes → viram lixo em old-gen
+    survived = null;
+
+    // Fase 3: novo burst → old-gen cheio → full GC forçado
+    // É aqui que o JSElement do victim é coletado
+    for (var round = 0; round < 120; round++) {
+        var burst = [];
+        for (var i = 0; i < 3000; i++) {
+            burst.push({
+                fn: (function(x) { return function() { return x; }; })(i),
+                obj: { nested: { deep: i } }
+            });
+        }
+        // NÃO mantém referência → tudo vira lixo em sequência
+    }
+}
+
+// Setup
+var shadowRoot = host.attachShadow({ mode: 'open' });
+var victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
+victim.focus();
+
+log('[Setup] shadow.activeElement: ' + host.shadowRoot.activeElement?.tagName);
+log('[Setup] doc.activeElement: ' + document.activeElement?.tagName);
+log('[Ready] Botao PS -> XMB -> volte');
+
+document.addEventListener('blur', function onBlur(e) {
+    log('[Blur] target: ' + e.target.tagName);
+    log('[Before] shadow: ' + (host.shadowRoot.activeElement?.tagName || 'null'));
+    victim.remove();
+    log('[After remove] shadow: ' + (host.shadowRoot.activeElement?.tagName || 'null'));
+    victim = null;
+
+    // GC com pressão correta: heap JSC, não heap nativo
+    forceJSCGC();
+
+    log('[After GC]');
+    document.removeEventListener('blur', onBlur, true);
+}, true);
+
+window.addEventListener('blur', function() {
+    log('[Window] blur');
+    // Se chegou aqui sem crash: refcount não chegou a 0 durante GC
 });
 
-// Testa gc() diretamente (às vezes disponível sem aparecer no typeof window)
-try {
-    gc();
-    log('[gc()] EXISTE e executou sem erro');
-} catch(e) {
-    log('[gc()] nao disponivel: ' + e.message);
-}
-
-// Testa $vm (JSC internal - exposto em alguns WebKit internos)
-try {
-    var res = $vm.gc();
-    log('[$vm.gc()] EXECUTOU: ' + JSON.stringify(res));
-} catch(e) {
-    log('[$vm] nao disponivel: ' + e.message);
-}
-
-log('[Done] scan concluido');
+document.addEventListener('visibilitychange', function() {
+    log('[Visibility] ' + document.visibilityState);
+    if (document.visibilityState === 'visible') {
+        log(result.querySelectorAll('div').length > 5 ? 'PASS (sem crash)' : '??? (verificar)');
+    }
+});
 </script>
 </body>
 </html>
