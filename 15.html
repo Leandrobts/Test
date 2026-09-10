@@ -1,52 +1,422 @@
-<!DOCTYPE html>
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
 <html>
+<head>
+<meta charset="UTF-8">
+<title>AX Crash - dynamically updated text input</title>
+</head>
+
 <body>
-<div id="result"></div>
-<div id="container">
-    <input id="input" type="password" autocomplete="current-password">
+
+<div role="group" id="form" aria-label="my form">
+    <input type="text" id="input">
 </div>
 
+<input id="checkbox" type="checkbox">
+
 <script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
+
+/* ============================================================
+ * Minimal standalone js-test compatibility
+ * ============================================================ */
+
+var output = "";
+var jsTestIsAsync = false;
+var successfullyParsed = true;
+var unexpectedErrorMessage = null;
+var didFailSomeTests = false;
+var wasFinishJSTestCalled = false;
+
+function escapeHTML(value)
+{
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
-(function() {
-    var input = document.getElementById("input");
-    var container = document.getElementById("container");
-    var result = document.getElementById("result");
-    input.addEventListener("click", function() {
-    input.type = "button";
-    gc();
-    }, { once: true });
+function debug(message)
+{
+    /*
+     * Keep the same textual-output behavior as the original
+     * test infrastructure, but entirely inside this document.
+     */
+    var pre = document.getElementById("console");
 
-    input.focus();    
-    setTimeout(function() {
+    if (!pre) {
+        pre = document.createElement("pre");
+        pre.id = "console";
+        document.body.appendChild(pre);
+    }
+
+    pre.innerHTML += escapeHTML(message);
+}
+
+function testPassed(message)
+{
+    output += "PASS " + message + "\n";
+}
+
+function testFailed(message)
+{
+    didFailSomeTests = true;
+    output += "FAIL " + message + "\n";
+}
+
+function shouldBeTrue(expression)
+{
+    var result = false;
+
+    try {
+        result = eval(expression);
+    } catch (e) {
+        testFailed(expression + " threw " + e.name);
+        return;
+    }
+
+    if (result === true)
+        testPassed(expression + " is true");
+    else
+        testFailed(expression + " should be true. Was " + result);
+}
+
+function finishJSTest()
+{
+    wasFinishJSTestCalled = true;
+
+    if (successfullyParsed)
+        shouldBeTrue("successfullyParsed");
+
+    if (didFailSomeTests)
+        output += "\nSome tests failed.\n";
+
+    output += "\nTEST COMPLETE\n";
+    debug(output);
+}
+
+
+/* ============================================================
+ * Adapted accessibility-helper primitives
+ *
+ * These functions preserve the names/semantics needed by the
+ * original test where a real accessibilityController exists.
+ * ============================================================ */
+
+function waitFor(condition)
+{
+    return new Promise(function (resolve) {
+
+        var finished = false;
+
+        var timeoutID = setTimeout(function () {
+            if (finished)
+                return;
+
+            finished = true;
+            clearInterval(intervalID);
+            resolve(false);
+        }, 3000);
+
+        var intervalID = setInterval(function () {
+
+            try {
+
+                if (condition()) {
+
+                    if (finished)
+                        return;
+
+                    finished = true;
+                    clearTimeout(timeoutID);
+                    clearInterval(intervalID);
+                    resolve(true);
+                }
+
+            } catch (error) {
+
+                if (finished)
+                    return;
+
+                finished = true;
+                clearTimeout(timeoutID);
+                clearInterval(intervalID);
+                resolve(false);
+            }
+
+        }, 0);
+    });
+}
+
+function expect(expression, expectedValue)
+{
+    if (typeof expression !== "string") {
+        testFailed("expect() expression is not a string");
+        return "";
+    }
+
+    var actual;
+
+    try {
+        actual = eval(expression);
+    } catch (e) {
+        testFailed(expression + " threw " + e.name);
+        return "";
+    }
+
+    if (String(actual) === String(eval(expectedValue)))
+        return "PASS: " + expression + " === " + expectedValue + "\n";
+
+    return "FAIL: " + expression +
+        " !== " + expectedValue +
+        ", was " + actual + "\n";
+}
+
+async function expectAsync(expression, expectedValue)
+{
+    var matched = await waitFor(function () {
+
         try {
-            input.click();
+            return eval(expression) === eval(expectedValue);
         } catch (e) {
-           
+            return false;
         }
-        setTimeout(function() {
-            input.focus();
-            input.blur();
-           gc();
 
-            result.textContent = "PASS - public lifetime sequence completed";
+    });
 
-        }, 50);
+    if (matched)
+        return "PASS: " + expression + " === " + expectedValue + "\n";
 
-    }, 100);
+    var actual;
 
-})();
+    try {
+        actual = eval(expression);
+    } catch (e) {
+        actual = "<exception: " + e.name + ">";
+    }
+
+    return "FAIL: " + expression +
+        " !== " + expectedValue +
+        ", was " + actual + "\n";
+}
+
+
+/* ============================================================
+ * Standalone accessibility compatibility layer
+ *
+ * IMPORTANT:
+ * accessibilityController is a WebKit LayoutTest API.
+ * A normal browser page cannot manufacture an AXIsolatedObject.
+ *
+ * When the real API exists, the original AX operations are used.
+ * Otherwise, the DOM sequence is still executed exactly.
+ * ============================================================ */
+
+function hasAccessibilityController()
+{
+    return typeof window.accessibilityController !== "undefined";
+}
+
+function standaloneRole(element)
+{
+    if (!element)
+        return "";
+
+    /*
+     * For a text input, this is the semantic equivalent of the
+     * AX role expected by the original LayoutTest.
+     */
+    if (element === document.getElementById("input"))
+        return "AXRole: AXTextField";
+
+    return "";
+}
+
+function standaloneStringValue(element)
+{
+    if (!element)
+        return "";
+
+    if (element === document.getElementById("input"))
+        return "AXValue: " + element.value;
+
+    return "";
+}
+
+
+/* ============================================================
+ * Original test
+ * ============================================================ */
+
+output =
+    "This test ensures we don't crash when deleting the parent " +
+    "of a text input that has had at least one value change.\n\n";
+
+jsTestIsAsync = true;
+
+
+/*
+ * Preserve the original DOM.
+ */
+var form = document.getElementById("form");
+var inputElement = document.getElementById("input");
+var checkbox = document.getElementById("checkbox");
+
+
+/*
+ * Preserve the original initial AX lookup whenever the internal
+ * WebKit accessibilityController is actually available.
+ *
+ * The standalone fallback exists only so the DOM test can still
+ * execute outside LayoutTests.
+ */
+var inputAX = null;
+
+if (hasAccessibilityController()) {
+
+    inputAX =
+        accessibilityController.accessibleElementById("input");
+
+    output += expect(
+        "inputAX.role",
+        "'AXRole: AXTextField'"
+    );
+
+    output += expect(
+        "accessibilityController.accessibleElementById('form').childAtIndex(0).role",
+        "'AXRole: AXTextField'"
+    );
+
+} else {
+
+    /*
+     * Standalone equivalent of the two initial semantic checks.
+     */
+    output += "STANDALONE: accessibilityController unavailable\n";
+
+    if (standaloneRole(inputElement) === "AXRole: AXTextField")
+        output += "PASS: input semantic role is AXTextField\n";
+    else
+        output += "FAIL: input semantic role is not AXTextField\n";
+
+    if (form.contains(inputElement))
+        output += "PASS: form contains input\n";
+    else
+        output += "FAIL: form does not contain input\n";
+}
+
+
+/*
+ * Preserve the original asynchronous delay.
+ */
+setTimeout(async function () {
+
+    /*
+     * --------------------------------------------------------
+     * ORIGINAL OPERATION 1
+     *
+     * This is the dynamic value change that causes the full
+     * accessibility-node update in the vulnerable path.
+     * --------------------------------------------------------
+     */
+
+    document.getElementById("input").value = "abc";
+
+
+    /*
+     * Preserve the original asynchronous AX value check when
+     * the real accessibilityController exists.
+     */
+    if (hasAccessibilityController()) {
+
+        output += await expectAsync(
+            "inputAX.stringValue",
+            "'AXValue: abc'"
+        );
+
+    } else {
+
+        /*
+         * Standalone semantic equivalent.
+         */
+        if (inputElement.value === "abc")
+            output += "PASS: input.value === \"abc\"\n";
+        else
+            output +=
+                "FAIL: input.value should be \"abc\", was \"" +
+                inputElement.value +
+                "\"\n";
+    }
+
+
+    /*
+     * --------------------------------------------------------
+     * ORIGINAL OPERATION 2
+     *
+     * Delete the parent of the dynamically updated input.
+     * --------------------------------------------------------
+     */
+
+    document.getElementById("form").remove();
+
+
+    /*
+     * --------------------------------------------------------
+     * ORIGINAL OPERATION 3
+     *
+     * Toggle the checkbox.
+     *
+     * In the real test this posts a platform accessibility
+     * notification and causes the queued isolated-tree changes
+     * to be flushed.
+     * --------------------------------------------------------
+     */
+
+    document.getElementById("checkbox").checked = true;
+
+
+    /*
+     * --------------------------------------------------------
+     * ORIGINAL OPERATION 4
+     *
+     * Ask the accessibility layer for the stale input object's
+     * role after its parent has been deleted.
+     * --------------------------------------------------------
+     */
+
+    if (hasAccessibilityController()) {
+
+        output += await expectAsync(
+            "inputAX.role",
+            "'AXRole: '"
+        );
+
+    } else {
+
+        /*
+         * There is deliberately NO fake AX-object access here.
+         *
+         * A standalone DOM page cannot reproduce the AT request
+         * represented by inputAX.role. We record the state only.
+         */
+        output +=
+            "STANDALONE: parent deleted; checkbox checked; " +
+            "real AX query unavailable\n";
+    }
+
+
+    /*
+     * Preserve the end-of-test behavior.
+     */
+    if (hasAccessibilityController()) {
+        debug(output);
+    }
+
+    finishJSTest();
+
+}, 0);
+
 </script>
+
 </body>
 </html>

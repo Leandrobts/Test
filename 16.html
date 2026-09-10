@@ -1,130 +1,52 @@
-<!DOCTYPE html>
 <html>
 <body>
-<div id="result"></div>
-<div id="container">
-    <input id="input" type="password">
-</div>
-
+<script src="resources/testharness.js"></script>
+<script src="resources/testharnessreport.js"></script>
 <script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+const WORKER_SOURCE = `
+self.onmessage = event => {
+    const processor = new MediaStreamTrackProcessor({ track: event.data });
+
+    function overflowStack() {
+        try {
+            overflowStack();
+        } catch {
+            try {
+                processor.readable;
+            } catch {
+                self.postMessage("done");
+            }
+        }
     }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
+
+    overflowStack();
+};
+`;
+
+const WORKER_URL = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
+
+async function sleep(ms) {
+    await new Promise(resolve => {
+        setTimeout(() => {
+            resolve();
+        }, ms);
+    });
 }
 
-(function() {
+promise_test(async () => {
+    const canvas = document.createElement('canvas');
+    const [track] = canvas.captureStream(30).getVideoTracks();
 
-    var result = document.getElementById("result");
-    var input = document.getElementById("input");
-    var hasInternals =
-        !!window.internals &&
-        typeof window.internals.setAutofillButtonType === "function" &&
-        typeof window.internals.shadowRoot === "function" &&
-        typeof window.internals.userAgentPart === "function";    
-    input.addEventListener("click", function() {
-    input.type = "button";       
-    gc();
-    }, { once: true });
-    
-    if (hasInternals) {
+    const worker = new Worker(WORKER_URL);
 
-        try {           
-            window.internals.setAutofillButtonType(
-                input,
-                "Credentials"
-            );
+    worker.postMessage(track);
 
-            var shadowRoot = window.internals.shadowRoot(input);
+    await new Promise(resolve => worker.onmessage = resolve);
 
-            if (!shadowRoot) {
-                result.textContent =
-                    "FAIL - internals.shadowRoot(input) returned null";
-                return;
-            }           
-            var autoFillButton = Array.from(
-                shadowRoot.querySelectorAll("div")
-            ).find(function(div) {
-                return window.internals.userAgentPart(div) ==
-                    "-webkit-credentials-auto-fill-button";
-            });
+    worker.terminate();
 
-            if (!autoFillButton) {
-                result.textContent =
-                    "FAIL - credentials AutoFillButtonElement not found";
-                return;
-            }           
-            if (window.UIHelper &&
-                typeof window.UIHelper.activateElement === "function") {
-
-                window.UIHelper.activateElement(autoFillButton);
-
-            } else if (window.eventSender) {
-               
-                var rect = autoFillButton.getBoundingClientRect();
-
-                var x = rect.left + rect.width / 2;
-                var y = rect.top + rect.height / 2;
-
-                eventSender.mouseMoveTo(x, y);
-                eventSender.mouseDown();
-                eventSender.mouseUp();
-
-            } else {
-
-                result.textContent =
-                    "FAIL - AutoFillButton found, but no activation API";
-                return;
-            }
-
-            setTimeout(function() {
-
-                result.textContent =
-                    "PASS - original AutoFillButton activation path completed";
-
-            }, 100);
-
-            return;
-
-        } catch (e) {
-           
-            result.textContent =
-                "FAIL - internal AutoFillButton path unavailable";
-
-            return;
-        }
-    }
-
-    setTimeout(function() {
-
-        try {
-            input.click();
-        } catch (e) {
-            result.textContent =
-                "FAIL - public activation threw";
-            return;
-        }
-
-        setTimeout(function() {
-
-           gc();
-
-            result.textContent =
-                "PASS - public fallback completed; "
-                + "AutoFillButtonElement was not directly reachable";
-
-        }, 100);
-
-    }, 100);
-
-})();
+    sleep(100);
+});
 </script>
-
 </body>
 </html>
