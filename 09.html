@@ -1,67 +1,295 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="UTF-8">
+<title>PS4 WebKit RenderMenuList Lifetime V3</title>
+
+<style id="s0">
+select {
+    width: 260px;
+    height: 28px;
+    font-size: 16px;
+}
+option {
+    font-size: 16px;
+}
+</style>
+
+<style id="s1">
+.restyle {
+    font-size: 18px !important;
+    line-height: 24px !important;
+}
+.restyle option {
+    font-size: 14px !important;
+}
+</style>
+</head>
+
 <body>
-<svg id="s">
-  <rect id="r" x="10" width="50" height="50">
-    <animate id="a" attributeName="x" from="0" to="100" dur="1s" begin="0s"/>
-  </rect>
-</svg>
+
+<div id="host">
+<select id="select">
+    <option id="a">Alpha</option>
+    <option id="b" selected>Bravo</option>
+    <option id="c">Charlie</option>
+    <option id="d">Delta</option>
+</select>
+</div>
+
 <script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+(function () {
+"use strict";
+
+var host = document.getElementById("host");
+var select = document.getElementById("select");
+var a = document.getElementById("a");
+var b = document.getElementById("b");
+var c = document.getElementById("c");
+var d = document.getElementById("d");
+var style0 = document.getElementById("s0");
+var style1 = document.getElementById("s1");
+
+function nextFrame() {
+    return new Promise(function (resolve) {
+        requestAnimationFrame(function () {
+            resolve();
+        });
+    });
+}
+
+function delay0() {
+    return new Promise(function (resolve) {
+        setTimeout(resolve, 0);
+    });
+}
+
+function layout() {
+    void select.offsetWidth;
+    void select.offsetHeight;
+    void host.offsetHeight;
+    void document.body.offsetHeight;
+}
+
+function stylePass(n) {
+    select.className = (n & 1) ? "restyle" : "";
+
+    a.className = (n & 1) ? "restyle" : "";
+    b.className = (n & 2) ? "restyle" : "";
+    c.className = (n & 4) ? "restyle" : "";
+    d.className = (n & 8) ? "restyle" : "";
+
+    b.style.fontSize = (n & 1) ? "13px" : "21px";
+    c.style.fontWeight = (n & 2) ? "bold" : "normal";
+}
+
+function replaceRule() {
+    try {
+        var sheet = style0.sheet;
+
+        while (sheet.cssRules.length)
+            sheet.deleteRule(0);
+
+        sheet.insertRule(
+            "select { width:" +
+            (250 + Math.floor(Math.random() * 50)) +
+            "px; height:28px; font-size:16px; }",
+            0
+        );
+
+        sheet.insertRule(
+            "option { font-size:" +
+            (14 + Math.floor(Math.random() * 6)) +
+            "px; }",
+            1
+        );
+    } catch (e) {
     }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
 }
 
+function removeAndRestoreSelect() {
+    if (select.parentNode !== host)
+        return;
 
-let len;
-
-function grab()
-{
-    // Separate frame so intermediate wrappers are not pinned by a conservative stack scan.
-    return document.getElementById("r").x.animVal;
+    host.removeChild(select);
+    host.appendChild(select);
 }
 
-function step1()
-{
-    let s = document.getElementById("s");
-    let a = document.getElementById("a");
-    let r = document.getElementById("r");
+async function phase1() {
+    /*
+     * Direct transition:
+     * selected option -> multiple -> selectedIndex -> layout.
+     */
+    select.multiple = false;
+    select.selectedIndex = 1;
+    layout();
 
-    // Enter the active interval so stopAnimation() takes the m_animVal = nullptr branch.
-    s.pauseAnimations();
-    s.setCurrentTime(0.5);
+    select.multiple = true;
+    select.selectedIndex = 1;
+    layout();
 
-    len = grab();
-
-    // Reaches SVGAnimatedValueProperty::stopAnimation().
-    a.remove();
-    r.remove();
-    s.remove();
+    await nextFrame();
 }
 
-function step2()
-{
-    gc();
-    // SVGLength::valueForBindings -> SVGProperty::contextElement; m_owner must not dangle.
-    len.value;
-    document.body.textContent = "PASS if no crash.";
-    
+async function phase2() {
+    /*
+     * Reconstruct style state immediately before and after the
+     * multiple transition.
+     */
+    select.multiple = false;
+    stylePass(1);
+    layout();
+
+    select.multiple = true;
+    stylePass(2);
+    select.selectedIndex = 2;
+
+    layout();
+    await nextFrame();
 }
 
-window.onload = () => {
-    // Defer past Document::implicitClose so svgExtensions->startAnimations() has run.
-    setTimeout(() => {
-        step1();
-        setTimeout(step2, 0);
-    }, 0);
-};
+async function phase3() {
+    /*
+     * Exercise stylesheet mutation around the same renderer transition.
+     */
+    select.multiple = false;
+    select.selectedIndex = 0;
+    replaceRule();
+    layout();
+
+    select.multiple = true;
+    select.selectedIndex = 3;
+    replaceRule();
+
+    layout();
+    await nextFrame();
+}
+
+async function phase4() {
+    /*
+     * Renderer attachment transition. The select is detached and
+     * immediately restored between multiple/selection operations.
+     */
+    select.multiple = false;
+    select.selectedIndex = 1;
+    layout();
+
+    select.multiple = true;
+    select.selectedIndex = 2;
+
+    removeAndRestoreSelect();
+    layout();
+
+    select.selectedIndex = 0;
+    layout();
+
+    await nextFrame();
+}
+
+async function phase5() {
+    /*
+     * Mix option attribute/style changes with the RenderMenuList update.
+     */
+    select.multiple = false;
+
+    b.setAttribute("selected", "selected");
+    c.removeAttribute("selected");
+
+    stylePass(5);
+    select.selectedIndex = 1;
+    layout();
+
+    select.multiple = true;
+
+    b.removeAttribute("selected");
+    c.setAttribute("selected", "selected");
+    select.selectedIndex = 2;
+
+    stylePass(10);
+    layout();
+
+    await nextFrame();
+}
+
+async function phase6() {
+    /*
+     * Keep the number of iterations small. The goal is repeated
+     * renderer/state transitions, not resource exhaustion.
+     */
+    for (var i = 0; i < 12; ++i) {
+        select.multiple = false;
+        select.selectedIndex = i % 4;
+
+        stylePass(i);
+        if ((i & 1) === 0)
+            replaceRule();
+
+        layout();
+
+        select.multiple = true;
+        select.selectedIndex = (i + 1) % 4;
+
+        if ((i % 3) === 0)
+            removeAndRestoreSelect();
+
+        layout();
+        await nextFrame();
+    }
+}
+
+async function phase7() {
+    /*
+     * Final controlled transition. Leave the element in the same
+     * general state as the original test: a multiple select with
+     * a selected option.
+     */
+    select.multiple = false;
+    select.selectedIndex = 1;
+    stylePass(3);
+    layout();
+
+    select.multiple = true;
+    select.selectedIndex = 1;
+
+    replaceRule();
+    stylePass(12);
+    layout();
+
+    await nextFrame();
+    await delay0();
+
+    select.selectedIndex = 3;
+    layout();
+}
+
+async function run() {
+    await phase1();
+    await delay0();
+
+    await phase2();
+    await delay0();
+
+    await phase3();
+    await delay0();
+
+    await phase4();
+    await delay0();
+
+    await phase5();
+    await delay0();
+
+    await phase6();
+    await delay0();
+
+    await phase7();
+}
+
+window.addEventListener("load", function () {
+    run();
+});
+
+})();
 </script>
+
 </body>
 </html>
