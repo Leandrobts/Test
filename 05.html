@@ -1,17 +1,919 @@
-<style>
-    video {
-        mask-image: url(data:image/gif;base64,R0lGODlhEAAQAMQAAORHHOVSKudfOulrSOp3WOyDZu6QdvCchPGolfO0o/XBs/fNwfjZ0frl3/zy7////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACH5BAkAABAALAAAAAAQABAAAAVVICSOZGlCQAosJ6mu7fiyZeKqNKToQGDsM8hBADgUXoGAiqhSvp5QAnQKGIgUhwFUYLCVDFCrKUE1lBavAViFIDlTImbKC5Gm2hB0SlBCBMQiB0UjIQA7);
-        -webkit-box-reflect: below 10px;
-    }
-</style>
-<script>    
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebKit Lifecycle GC UAF V5</title>
 
-    function runTest()
-    {
-        document.getElementsByTagName('video')[0].src = "x";
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-height: 100%;
+}
+
+body {
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    overflow: auto;
+}
+
+#root {
+    position: relative;
+    width: 96%;
+    margin: 2%;
+    padding: 18px;
+    box-sizing: border-box;
+    contain: layout style;
+}
+
+.stage {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 420px;
+    padding: 12px;
+    margin-bottom: 18px;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid #999;
+    background: white;
+}
+
+.branch {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 150px;
+    padding: 10px;
+    margin: 8px 0;
+    box-sizing: border-box;
+    overflow: hidden;
+    transform: translateZ(0);
+    transform-origin: center center;
+}
+
+.branch.a {
+    direction: ltr;
+    writing-mode: horizontal-tb;
+    columns: 2;
+    column-gap: 12px;
+}
+
+.branch.b {
+    direction: rtl;
+    writing-mode: horizontal-tb;
+    columns: 3;
+    column-gap: 8px;
+}
+
+.branch.c {
+    position: relative;
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+}
+
+.node {
+    display: inline-block;
+    position: relative;
+    width: 72px;
+    height: 48px;
+    margin: 3px;
+    padding: 5px;
+    box-sizing: border-box;
+    vertical-align: top;
+    border: 1px solid #777;
+    background: #eee;
+}
+
+.node:nth-child(2n) {
+    position: relative;
+    top: 2px;
+    transform: scale(0.98);
+}
+
+.node:nth-child(3n) {
+    writing-mode: vertical-rl;
+}
+
+.node:focus {
+    outline: 2px solid black;
+}
+
+.node:focus-within {
+    outline: 1px dotted #555;
+}
+
+.positioned {
+    position: absolute;
+    left: 4px;
+    top: 4px;
+    width: 24px;
+    height: 24px;
+}
+
+.relative {
+    position: relative;
+    left: 2px;
+}
+
+.transformed {
+    transform: translate(1px, 1px) rotate(0.01deg);
+}
+
+.floatish {
+    float: left;
+    margin-right: 4px;
+}
+
+.clearer {
+    clear: both;
+}
+
+.layered {
+    position: relative;
+    z-index: 2;
+}
+
+.layered::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    height: 2px;
+}
+
+#frameHolderA,
+#frameHolderB {
+    position: relative;
+    width: 100%;
+    min-height: 150px;
+    margin-top: 12px;
+    padding: 8px;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid #666;
+    background: #fafafa;
+}
+
+iframe {
+    display: block;
+    width: 96%;
+    height: 130px;
+    margin: 5px auto;
+    border: 1px solid #555;
+    background: white;
+}
+
+#focusMain {
+    display: block;
+    width: 100px;
+    height: 30px;
+    margin: 8px;
+}
+
+#sink {
+    width: 10px;
+    height: 10px;
+    position: absolute;
+    left: -10000px;
+    top: -10000px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="root">
+
+    <div id="focusMain" tabindex="0">MAIN</div>
+
+    <div id="stageA" class="stage">
+        <div id="branchA" class="branch a">
+            <div class="node positioned" tabindex="0">A1</div>
+            <div class="node relative" tabindex="0">A2</div>
+            <div class="node transformed" tabindex="0">A3</div>
+            <div class="node layered" tabindex="0">A4</div>
+            <div class="node floatish" tabindex="0">A5</div>
+            <div class="node" tabindex="0">A6</div>
+            <div class="node" tabindex="0">A7</div>
+            <div class="node" tabindex="0">A8</div>
+            <div class="node" tabindex="0">A9</div>
+            <div class="node" tabindex="0">A10</div>
+            <div class="node" tabindex="0">A11</div>
+            <div class="node" tabindex="0">A12</div>
+            <div class="node clearer" tabindex="0">A13</div>
+            <div class="node" tabindex="0">A14</div>
+            <div class="node" tabindex="0">A15</div>
+            <div class="node" tabindex="0">A16</div>
+        </div>
+
+        <div id="frameHolderA">
+            <iframe id="frameA" name="frameA"></iframe>
+        </div>
+    </div>
+
+    <div id="stageB" class="stage">
+        <div id="branchB" class="branch b">
+            <div class="node" tabindex="0">B1</div>
+            <div class="node relative" tabindex="0">B2</div>
+            <div class="node transformed" tabindex="0">B3</div>
+            <div class="node layered" tabindex="0">B4</div>
+            <div class="node" tabindex="0">B5</div>
+            <div class="node" tabindex="0">B6</div>
+            <div class="node" tabindex="0">B7</div>
+            <div class="node" tabindex="0">B8</div>
+            <div class="node" tabindex="0">B9</div>
+            <div class="node" tabindex="0">B10</div>
+            <div class="node" tabindex="0">B11</div>
+            <div class="node" tabindex="0">B12</div>
+        </div>
+
+        <div id="frameHolderB">
+            <iframe id="frameB" name="frameB"></iframe>
+        </div>
+    </div>
+
+    <div id="sink"></div>
+
+</div>
+
+<script>
+(function () {
+
+    /*
+     * WebKit LayoutTests-style GC pressure helper.
+     *
+     * This does not claim to force a GC cycle.
+     * It deliberately creates temporary objects and strings so
+     * that eligible objects have an increased chance of collection.
+     */
+    function gc() {
+        function gcRec(n) {
+            if (n < 1)
+                return {};
+
+            var temp = {
+                i: "ab" + i + (i / 100000)
+            };
+
+            temp += "foo";
+            gcRec(n - 1);
+        }
+
+        for (var i = 0; i < 10000; i++)
+            gcRec(10);
     }
+
+
+    var root = document.getElementById("root");
+
+    var stageA = document.getElementById("stageA");
+    var stageB = document.getElementById("stageB");
+
+    var branchA = document.getElementById("branchA");
+    var branchB = document.getElementById("branchB");
+
+    var holderA = document.getElementById("frameHolderA");
+    var holderB = document.getElementById("frameHolderB");
+
+    var frameA = document.getElementById("frameA");
+    var frameB = document.getElementById("frameB");
+
+    var focusMain = document.getElementById("focusMain");
+
+    var oldDocumentA = null;
+    var oldBodyA = null;
+    var oldFocusA = null;
+
+    var oldDocumentB = null;
+    var oldBodyB = null;
+    var oldFocusB = null;
+
+
+    function forceLayout(element) {
+        try {
+            if (element)
+                element.offsetHeight;
+
+            if (root)
+                root.offsetHeight;
+
+            if (document.body)
+                document.body.offsetHeight;
+        } catch (e) {
+        }
+    }
+
+
+    function mutateStyleTree(element, round) {
+        if (!element)
+            return;
+
+        try {
+            element.style.display =
+                (round & 1) ? "block" : "flow-root";
+
+            element.style.position =
+                (round & 2) ? "relative" : "static";
+
+            element.style.overflow =
+                (round & 4) ? "auto" : "hidden";
+
+            element.style.transform =
+                (round & 8)
+                    ? "translate(0.25px, 0.25px)"
+                    : "translate(0, 0)";
+
+            element.style.direction =
+                (round & 16) ? "rtl" : "ltr";
+
+            element.style.writingMode =
+                (round & 32)
+                    ? "vertical-rl"
+                    : "horizontal-tb";
+
+            element.offsetHeight;
+        } catch (e) {
+        }
+    }
+
+
+    function mutateChildren(element, round) {
+        if (!element)
+            return;
+
+        try {
+            var children = element.children;
+
+            for (var i = 0; i < children.length; i++) {
+                var child = children[i];
+
+                if (!child)
+                    continue;
+
+                if ((i + round) & 1)
+                    child.className = "node relative transformed";
+                else
+                    child.className = "node layered";
+
+                child.style.marginLeft =
+                    ((i + round) % 5) + "px";
+
+                child.style.padding =
+                    ((i + round) % 4) + "px";
+            }
+
+            element.offsetHeight;
+        } catch (e) {
+        }
+    }
+
+
+    function populateFrame(frame, label) {
+        try {
+            var d = frame.contentDocument;
+
+            if (!d)
+                return;
+
+            var html =
+                '<!DOCTYPE html>' +
+                '<html>' +
+                '<head>' +
+                '<meta charset="UTF-8">' +
+                '<style>' +
+                'html,body{margin:0;padding:8px;}' +
+                'body{overflow:auto;font-family:Arial;}' +
+                '.outer{position:relative;display:block;min-height:90px;' +
+                    'padding:8px;overflow:hidden;' +
+                    'transform:translateZ(0);}' +
+                '.inner{position:relative;display:block;' +
+                    'columns:2;column-gap:8px;' +
+                    'writing-mode:horizontal-tb;' +
+                    'direction:ltr;}' +
+                '.item{display:inline-block;width:55px;height:35px;' +
+                    'margin:2px;padding:3px;box-sizing:border-box;' +
+                    'border:1px solid #777;}' +
+                '.item:focus{outline:2px solid black;}' +
+                '</style>' +
+                '</head>' +
+                '<body>' +
+                '<a id="nav" href="javascript:document.body.setAttribute(\'data-nav\',\'1\')">OPEN</a>' +
+                '<div id="outer" class="outer">' +
+                '<div id="inner" class="inner">' +
+                '<div id="f1" class="item" tabindex="0">' + label + '1</div>' +
+                '<div class="item" tabindex="0">' + label + '2</div>' +
+                '<div class="item" tabindex="0">' + label + '3</div>' +
+                '<div class="item" tabindex="0">' + label + '4</div>' +
+                '<div class="item" tabindex="0">' + label + '5</div>' +
+                '<div class="item" tabindex="0">' + label + '6</div>' +
+                '<div class="item" tabindex="0">' + label + '7</div>' +
+                '<div class="item" tabindex="0">' + label + '8</div>' +
+                '</div>' +
+                '</div>' +
+                '</body>' +
+                '</html>';
+
+            d.open();
+            d.write(html);
+            d.close();
+
+            frame.offsetHeight;
+        } catch (e) {
+        }
+    }
+
+
+    function captureFrameAReferences() {
+        try {
+            oldDocumentA = frameA.contentDocument;
+
+            if (oldDocumentA) {
+                oldBodyA = oldDocumentA.body;
+                oldFocusA = oldDocumentA.getElementById("f1");
+            }
+        } catch (e) {
+        }
+    }
+
+
+    function captureFrameBReferences() {
+        try {
+            oldDocumentB = frameB.contentDocument;
+
+            if (oldDocumentB) {
+                oldBodyB = oldDocumentB.body;
+                oldFocusB = oldDocumentB.getElementById("f1");
+            }
+        } catch (e) {
+        }
+    }
+
+
+    function operateOnOldReferencesA() {
+        try {
+            if (oldBodyA) {
+                oldBodyA.getAttribute("data-x");
+                oldBodyA.offsetHeight;
+            }
+        } catch (e) {
+        }
+
+        try {
+            if (oldFocusA) {
+                oldFocusA.getAttribute("tabindex");
+                oldFocusA.offsetHeight;
+            }
+        } catch (e) {
+        }
+
+        try {
+            if (oldDocumentA)
+                oldDocumentA.readyState;
+        } catch (e) {
+        }
+    }
+
+
+    function operateOnOldReferencesB() {
+        try {
+            if (oldBodyB) {
+                oldBodyB.getAttribute("data-x");
+                oldBodyB.offsetHeight;
+            }
+        } catch (e) {
+        }
+
+        try {
+            if (oldFocusB) {
+                oldFocusB.getAttribute("tabindex");
+                oldFocusB.offsetHeight;
+            }
+        } catch (e) {
+        }
+
+        try {
+            if (oldDocumentB)
+                oldDocumentB.readyState;
+        } catch (e) {
+        }
+    }
+
+
+    function focusFrameElement(frame, id) {
+        try {
+            var d = frame.contentDocument;
+
+            if (!d)
+                return;
+
+            var target = d.getElementById(id);
+
+            if (target)
+                target.focus();
+
+            if (target)
+                target.offsetHeight;
+        } catch (e) {
+        }
+    }
+
+
+    function navigateFrame(frame) {
+        try {
+            var d = frame.contentDocument;
+
+            if (!d)
+                return;
+
+            var link = d.getElementById("nav");
+
+            if (link)
+                link.click();
+        } catch (e) {
+        }
+    }
+
+
+    function detachAndRestoreFrameA() {
+        var parent = frameA.parentNode;
+
+        try {
+            if (parent)
+                parent.removeChild(frameA);
+        } catch (e) {
+        }
+
+        /*
+         * GC is deliberately placed after the object/frame lifetime
+         * transition and before the subsequent DOM/style operations.
+         */
+        gc();
+
+        try {
+            if (parent)
+                parent.appendChild(frameA);
+        } catch (e) {
+        }
+    }
+
+
+    function detachAndRestoreHolderA() {
+        var parent = holderA.parentNode;
+
+        try {
+            if (parent)
+                parent.removeChild(holderA);
+        } catch (e) {
+        }
+
+        gc();
+
+        try {
+            if (parent)
+                parent.appendChild(holderA);
+        } catch (e) {
+        }
+    }
+
+
+    function detachAndRestoreBranchA() {
+        var parent = branchA.parentNode;
+
+        try {
+            if (parent)
+                parent.removeChild(branchA);
+        } catch (e) {
+        }
+
+        gc();
+
+        try {
+            if (parent)
+                parent.appendChild(branchA);
+        } catch (e) {
+        }
+    }
+
+
+    function detachAndRestoreFrameB() {
+        var parent = frameB.parentNode;
+
+        try {
+            if (parent)
+                parent.removeChild(frameB);
+        } catch (e) {
+        }
+
+        gc();
+
+        try {
+            if (parent)
+                parent.appendChild(frameB);
+        } catch (e) {
+        }
+    }
+
+
+    function detachAndRestoreHolderB() {
+        var parent = holderB.parentNode;
+
+        try {
+            if (parent)
+                parent.removeChild(holderB);
+        } catch (e) {
+        }
+
+        gc();
+
+        try {
+            if (parent)
+                parent.appendChild(holderB);
+        } catch (e) {
+        }
+    }
+
+
+    function detachAndRestoreBranchB() {
+        var parent = branchB.parentNode;
+
+        try {
+            if (parent)
+                parent.removeChild(branchB);
+        } catch (e) {
+        }
+
+        gc();
+
+        try {
+            if (parent)
+                parent.appendChild(branchB);
+        } catch (e) {
+        }
+    }
+
+
+    /*
+     * Initial construction.
+     */
+    populateFrame(frameA, "A");
+    populateFrame(frameB, "B");
+
+    forceLayout(root);
+    forceLayout(branchA);
+    forceLayout(branchB);
+
+    mutateStyleTree(branchA, 63);
+    mutateStyleTree(branchB, 31);
+
+    mutateChildren(branchA, 1);
+    mutateChildren(branchB, 2);
+
+    forceLayout(root);
+
+
+    /*
+     * PATH A
+     *
+     * Focus inside iframe
+     * -> retain document/body/focus references
+     * -> mutate RenderTree
+     * -> navigate
+     * -> focus transfer
+     * -> detach
+     * -> GC pressure
+     * -> restore
+     * -> style/layout/focus/reference activity
+     */
+
+    captureFrameAReferences();
+
+    focusFrameElement(frameA, "f1");
+
+    mutateStyleTree(branchA, 63);
+    mutateChildren(branchA, 3);
+
+    forceLayout(frameHolderA);
+    forceLayout(frameA);
+
+    navigateFrame(frameA);
+
+    try {
+        focusMain.focus();
+    } catch (e) {
+    }
+
+    forceLayout(root);
+
+    detachAndRestoreFrameA();
+
+    operateOnOldReferencesA();
+
+    mutateStyleTree(branchA, 47);
+    mutateChildren(branchA, 5);
+
+    forceLayout(branchA);
+
+    focusFrameElement(frameA, "f1");
+
+    operateOnOldReferencesA();
+
+    forceLayout(root);
+
+
+    /*
+     * PATH A2
+     *
+     * Same retained references, but the containing holder itself
+     * is removed. This changes the destruction boundary from the
+     * iframe node to its embedding subtree.
+     */
+
+    captureFrameAReferences();
+
+    focusFrameElement(frameA, "f1");
+
+    mutateStyleTree(branchA, 55);
+    forceLayout(stageA);
+
+    detachAndRestoreHolderA();
+
+    operateOnOldReferencesA();
+
+    mutateStyleTree(branchA, 27);
+    mutateChildren(branchA, 7);
+
+    forceLayout(stageA);
+    focusMain.focus();
+
+    operateOnOldReferencesA();
+
+
+    /*
+     * PATH A3
+     *
+     * Remove the styled branch containing the frame holder.
+     */
+
+    captureFrameAReferences();
+
+    focusFrameElement(frameA, "f1");
+
+    mutateStyleTree(branchA, 63);
+    mutateChildren(branchA, 9);
+
+    forceLayout(stageA);
+
+    detachAndRestoreBranchA();
+
+    operateOnOldReferencesA();
+
+    forceLayout(stageA);
+
+    focusMain.focus();
+
+    focusFrameElement(frameA, "f1");
+
+    operateOnOldReferencesA();
+
+
+    /*
+     * PATH B
+     *
+     * Independent second frame / branch path.
+     */
+
+    captureFrameBReferences();
+
+    focusFrameElement(frameB, "f1");
+
+    mutateStyleTree(branchB, 63);
+    mutateChildren(branchB, 11);
+
+    forceLayout(frameHolderB);
+    forceLayout(frameB);
+
+    navigateFrame(frameB);
+
+    try {
+        focusMain.focus();
+    } catch (e) {
+    }
+
+    detachAndRestoreFrameB();
+
+    operateOnOldReferencesB();
+
+    mutateStyleTree(branchB, 47);
+    mutateChildren(branchB, 13);
+
+    forceLayout(branchB);
+
+    focusFrameElement(frameB, "f1");
+
+    operateOnOldReferencesB();
+
+
+    /*
+     * PATH B2
+     *
+     * Remove the containing holder.
+     */
+
+    captureFrameBReferences();
+
+    focusFrameElement(frameB, "f1");
+
+    mutateStyleTree(branchB, 55);
+    forceLayout(stageB);
+
+    detachAndRestoreHolderB();
+
+    operateOnOldReferencesB();
+
+    mutateStyleTree(branchB, 23);
+    mutateChildren(branchB, 15);
+
+    forceLayout(stageB);
+
+    focusMain.focus();
+
+    operateOnOldReferencesB();
+
+
+    /*
+     * PATH B3
+     *
+     * Remove the complete styled branch.
+     */
+
+    captureFrameBReferences();
+
+    focusFrameElement(frameB, "f1");
+
+    mutateStyleTree(branchB, 63);
+    mutateChildren(branchB, 17);
+
+    forceLayout(stageB);
+
+    detachAndRestoreBranchB();
+
+    operateOnOldReferencesB();
+
+    forceLayout(stageB);
+
+    focusMain.focus();
+
+    focusFrameElement(frameB, "f1");
+
+    operateOnOldReferencesB();
+
+
+    /*
+     * Final lifecycle churn.
+     *
+     * No history navigation and no persistent state.
+     * The document remains visually available while the engine
+     * has already gone through several lifetime transitions.
+     */
+
+    mutateStyleTree(branchA, 63);
+    mutateStyleTree(branchB, 63);
+
+    mutateChildren(branchA, 19);
+    mutateChildren(branchB, 21);
+
+    forceLayout(root);
+
+    try {
+        focusMain.focus();
+    } catch (e) {
+    }
+
+    forceLayout(root);
+
+    /*
+     * Final GC pressure followed by layout/focus activity.
+     */
+    gc();
+
+    mutateStyleTree(stageA, 31);
+    mutateStyleTree(stageB, 31);
+
+    forceLayout(stageA);
+    forceLayout(stageB);
+
+    focusFrameElement(frameA, "f1");
+    focusFrameElement(frameB, "f1");
+
+    forceLayout(root);
+
+})();
 </script>
-<body onload=runTest()>
-    <p>This test should not crash.</p>
-    <video controls="controls">
+
 </body>
+</html>
