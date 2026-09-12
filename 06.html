@@ -1,22 +1,984 @@
 <!DOCTYPE html>
 <html>
-<body>
-This test passes if it doesn't crash.
-    <button onclick="popupReloaded()">Trigger UAF</button><br><br>
-    
-    <iframe id="target_frame" width="100" height="100"></iframe>
-<script>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebKit RenderTree Lifecycle UAF V6</title>
 
-function popupReloaded(){
-    var frame = document.getElementById("target_frame");
-            if (!frame) return;
-            frame.webkitRequestFullscreen();
-            setTimeout(() => {
-                frame.remove();        
-            }, 15);
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-height: 100%;
 }
 
-open("resources/pending-requestAnimationFrame-upon-destruction-popup.html");
+body {
+    font-family: Arial, sans-serif;
+    overflow: auto;
+    background: #f4f4f4;
+}
+
+#root {
+    position: relative;
+    width: 96%;
+    margin: 2%;
+    padding: 14px;
+    box-sizing: border-box;
+}
+
+.stage {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 360px;
+    margin: 12px 0;
+    padding: 10px;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid #888;
+    background: white;
+}
+
+.host {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 130px;
+    padding: 8px;
+    margin: 8px 0;
+    box-sizing: border-box;
+    overflow: hidden;
+    transform: translateZ(0);
+}
+
+.host.columns {
+    columns: 3;
+    column-gap: 10px;
+}
+
+.host.vertical {
+    writing-mode: vertical-rl;
+}
+
+.host.rtl {
+    direction: rtl;
+}
+
+.subtree {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 90px;
+    padding: 6px;
+    margin: 5px 0;
+    box-sizing: border-box;
+    overflow: hidden;
+    transform-origin: center center;
+}
+
+.subtree.positioned {
+    position: relative;
+}
+
+.subtree.transformed {
+    transform: translate(0.25px, 0.25px) rotate(0.01deg);
+}
+
+.subtree.scroll {
+    overflow: auto;
+}
+
+.item {
+    display: inline-block;
+    position: relative;
+    width: 64px;
+    height: 42px;
+    margin: 3px;
+    padding: 4px;
+    box-sizing: border-box;
+    vertical-align: top;
+    border: 1px solid #777;
+    background: #ededed;
+}
+
+.item.absolute {
+    position: absolute;
+    left: 2px;
+    top: 2px;
+}
+
+.item.relative {
+    position: relative;
+    top: 2px;
+}
+
+.item.float {
+    float: left;
+}
+
+.item.clear {
+    clear: both;
+}
+
+.item.transform {
+    transform: scale(0.98) translateZ(0);
+}
+
+.item.vertical {
+    writing-mode: vertical-rl;
+}
+
+.item.focusable:focus {
+    outline: 2px solid black;
+}
+
+.layer {
+    position: relative;
+    z-index: 2;
+}
+
+.layer::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 2px;
+}
+
+#frameHostA,
+#frameHostB {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-height: 140px;
+    padding: 8px;
+    margin-top: 10px;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid #666;
+    background: #fafafa;
+}
+
+iframe {
+    display: block;
+    width: 96%;
+    height: 120px;
+    margin: 4px auto;
+    border: 1px solid #555;
+    background: white;
+}
+</style>
+</head>
+
+<body>
+
+<div id="root">
+
+    <div id="stageA" class="stage">
+
+        <div id="hostA1" class="host columns">
+            <div id="treeA" class="subtree positioned transformed">
+
+                <div class="item absolute">A1</div>
+                <div class="item relative">A2</div>
+                <div class="item transform">A3</div>
+                <div class="item layer">A4</div>
+                <div class="item float">A5</div>
+                <div class="item">A6</div>
+                <div class="item vertical">A7</div>
+                <div class="item">A8</div>
+
+                <div class="item clear">A9</div>
+                <div class="item">A10</div>
+                <div class="item transform">A11</div>
+                <div class="item layer">A12</div>
+
+            </div>
+        </div>
+
+        <div id="hostA2" class="host rtl">
+            <div id="treeA2" class="subtree scroll">
+
+                <div class="item">A13</div>
+                <div class="item relative">A14</div>
+                <div class="item transform">A15</div>
+                <div class="item">A16</div>
+                <div class="item layer">A17</div>
+                <div class="item vertical">A18</div>
+                <div class="item">A19</div>
+                <div class="item">A20</div>
+
+            </div>
+        </div>
+
+        <div id="frameHostA">
+            <iframe id="frameA" name="frameA"></iframe>
+        </div>
+
+    </div>
+
+
+    <div id="stageB" class="stage">
+
+        <div id="hostB1" class="host columns vertical">
+            <div id="treeB" class="subtree positioned transformed">
+
+                <div class="item">B1</div>
+                <div class="item relative">B2</div>
+                <div class="item transform">B3</div>
+                <div class="item layer">B4</div>
+                <div class="item float">B5</div>
+                <div class="item">B6</div>
+                <div class="item vertical">B7</div>
+                <div class="item">B8</div>
+
+            </div>
+        </div>
+
+        <div id="hostB2" class="host rtl">
+            <div id="treeB2" class="subtree scroll">
+
+                <div class="item">B9</div>
+                <div class="item relative">B10</div>
+                <div class="item transform">B11</div>
+                <div class="item layer">B12</div>
+                <div class="item">B13</div>
+                <div class="item vertical">B14</div>
+
+            </div>
+        </div>
+
+        <div id="frameHostB">
+            <iframe id="frameB" name="frameB"></iframe>
+        </div>
+
+    </div>
+
+</div>
+
+
+<script>
+(function () {
+
+    /*
+     * WebKit LayoutTests-style GC helper.
+     *
+     * Deliberately used only at selected lifecycle boundaries.
+     */
+    function gc() {
+        function gcRec(n) {
+            if (n < 1)
+                return {};
+
+            var temp = {
+                i: "ab" + i + (i / 100000)
+            };
+
+            temp += "foo";
+            gcRec(n - 1);
+        }
+
+        for (var i = 0; i < 10000; i++)
+            gcRec(10);
+    }
+
+
+    var root = document.getElementById("root");
+
+    var stageA = document.getElementById("stageA");
+    var stageB = document.getElementById("stageB");
+
+    var hostA1 = document.getElementById("hostA1");
+    var hostA2 = document.getElementById("hostA2");
+    var treeA = document.getElementById("treeA");
+    var treeA2 = document.getElementById("treeA2");
+
+    var hostB1 = document.getElementById("hostB1");
+    var hostB2 = document.getElementById("hostB2");
+    var treeB = document.getElementById("treeB");
+    var treeB2 = document.getElementById("treeB2");
+
+    var frameHostA = document.getElementById("frameHostA");
+    var frameHostB = document.getElementById("frameHostB");
+
+    var frameA = document.getElementById("frameA");
+    var frameB = document.getElementById("frameB");
+
+
+    function layout(node) {
+        try {
+            if (node)
+                node.offsetHeight;
+
+            root.offsetHeight;
+            document.body.offsetHeight;
+        } catch (e) {
+        }
+    }
+
+
+    function mutate(node, mode) {
+        if (!node)
+            return;
+
+        try {
+
+            if (mode & 1)
+                node.style.display = "block";
+            else
+                node.style.display = "flow-root";
+
+            if (mode & 2)
+                node.style.position = "relative";
+            else
+                node.style.position = "static";
+
+            if (mode & 4)
+                node.style.overflow = "auto";
+            else
+                node.style.overflow = "hidden";
+
+            if (mode & 8)
+                node.style.transform = "translate(0.25px,0.25px)";
+            else
+                node.style.transform = "translate(0,0)";
+
+            if (mode & 16)
+                node.style.direction = "rtl";
+            else
+                node.style.direction = "ltr";
+
+            if (mode & 32)
+                node.style.writingMode = "vertical-rl";
+            else
+                node.style.writingMode = "horizontal-tb";
+
+            if (mode & 64)
+                node.style.columns = "2";
+            else
+                node.style.columns = "auto";
+
+            node.offsetHeight;
+
+        } catch (e) {
+        }
+    }
+
+
+    function mutateChildren(node, mode) {
+        if (!node)
+            return;
+
+        try {
+            var children = node.children;
+
+            for (var i = 0; i < children.length; i++) {
+
+                var child = children[i];
+
+                if (!child)
+                    continue;
+
+                if ((i + mode) & 1)
+                    child.className = "item relative transform";
+                else
+                    child.className = "item layer";
+
+                child.style.marginLeft =
+                    ((i + mode) % 5) + "px";
+
+                child.style.marginTop =
+                    ((i + mode) % 4) + "px";
+
+                child.style.padding =
+                    ((i + mode) % 3) + "px";
+            }
+
+            node.offsetHeight;
+
+        } catch (e) {
+        }
+    }
+
+
+    function populateFrame(frame, prefix) {
+
+        try {
+
+            var d = frame.contentDocument;
+
+            if (!d)
+                return;
+
+            var markup =
+                '<!DOCTYPE html>' +
+                '<html>' +
+                '<head>' +
+                '<meta charset="UTF-8">' +
+                '<style>' +
+
+                'html,body{' +
+                    'margin:0;' +
+                    'padding:8px;' +
+                '}' +
+
+                'body{' +
+                    'overflow:auto;' +
+                    'font-family:Arial;' +
+                '}' +
+
+                '.outer{' +
+                    'position:relative;' +
+                    'display:block;' +
+                    'width:100%;' +
+                    'min-height:90px;' +
+                    'padding:6px;' +
+                    'box-sizing:border-box;' +
+                    'overflow:hidden;' +
+                    'transform:translateZ(0);' +
+                '}' +
+
+                '.inner{' +
+                    'position:relative;' +
+                    'display:block;' +
+                    'columns:2;' +
+                    'column-gap:8px;' +
+                    'direction:ltr;' +
+                    'writing-mode:horizontal-tb;' +
+                '}' +
+
+                '.item{' +
+                    'display:inline-block;' +
+                    'position:relative;' +
+                    'width:55px;' +
+                    'height:34px;' +
+                    'margin:2px;' +
+                    'padding:3px;' +
+                    'box-sizing:border-box;' +
+                    'border:1px solid #777;' +
+                '}' +
+
+                '.item.alt{' +
+                    'transform:translate(0.2px,0.2px);' +
+                '}' +
+
+                '.item.vertical{' +
+                    'writing-mode:vertical-rl;' +
+                '}' +
+
+                '</style>' +
+                '</head>' +
+
+                '<body>' +
+
+                '<div id="outer" class="outer">' +
+
+                '<div id="inner" class="inner">' +
+
+                '<div id="one" class="item"> ' + prefix + '1</div>' +
+                '<div class="item alt"> ' + prefix + '2</div>' +
+                '<div class="item"> ' + prefix + '3</div>' +
+                '<div class="item vertical"> ' + prefix + '4</div>' +
+                '<div class="item"> ' + prefix + '5</div>' +
+                '<div class="item alt"> ' + prefix + '6</div>' +
+                '<div class="item"> ' + prefix + '7</div>' +
+                '<div class="item"> ' + prefix + '8</div>' +
+
+                '</div>' +
+                '</div>' +
+
+                '</body>' +
+                '</html>';
+
+            d.open();
+            d.write(markup);
+            d.close();
+
+            frame.offsetHeight;
+
+        } catch (e) {
+        }
+    }
+
+
+    function frameLayout(frame) {
+        try {
+            if (!frame)
+                return;
+
+            frame.offsetHeight;
+
+            var d = frame.contentDocument;
+
+            if (d && d.body)
+                d.body.offsetHeight;
+
+        } catch (e) {
+        }
+    }
+
+
+    function mutateFrame(frame, mode) {
+
+        try {
+
+            var d = frame.contentDocument;
+
+            if (!d)
+                return;
+
+            var outer = d.getElementById("outer");
+            var inner = d.getElementById("inner");
+
+            mutate(outer, mode);
+            mutate(inner, mode ^ 31);
+
+            if (inner)
+                inner.offsetHeight;
+
+            if (outer)
+                outer.offsetHeight;
+
+        } catch (e) {
+        }
+    }
+
+
+    function removeAndReparent(node, oldParent, newParent) {
+
+        if (!node || !oldParent || !newParent)
+            return;
+
+        try {
+            oldParent.removeChild(node);
+        } catch (e) {
+        }
+
+        /*
+         * One controlled GC boundary.
+         *
+         * The important lifetime transition has already happened.
+         */
+        gc();
+
+        try {
+            newParent.appendChild(node);
+        } catch (e) {
+        }
+
+        layout(newParent);
+        layout(node);
+    }
+
+
+    function removeOnly(node) {
+
+        if (!node)
+            return;
+
+        try {
+            if (node.parentNode)
+                node.parentNode.removeChild(node);
+        } catch (e) {
+        }
+
+        layout(root);
+    }
+
+
+    function reparentWithoutGC(node, oldParent, newParent) {
+
+        if (!node || !oldParent || !newParent)
+            return;
+
+        try {
+            oldParent.removeChild(node);
+        } catch (e) {
+        }
+
+        try {
+            newParent.appendChild(node);
+        } catch (e) {
+        }
+
+        layout(newParent);
+        layout(node);
+    }
+
+
+    /*
+     * Initial layout construction.
+     */
+
+    populateFrame(frameA, "A");
+    populateFrame(frameB, "B");
+
+    layout(root);
+
+    mutate(hostA1, 127);
+    mutate(hostA2, 55);
+    mutate(treeA, 95);
+    mutate(treeA2, 47);
+
+    mutate(hostB1, 111);
+    mutate(hostB2, 63);
+    mutate(treeB, 79);
+    mutate(treeB2, 39);
+
+    mutateChildren(treeA, 1);
+    mutateChildren(treeA2, 3);
+    mutateChildren(treeB, 5);
+    mutateChildren(treeB2, 7);
+
+    frameLayout(frameA);
+    frameLayout(frameB);
+
+    layout(root);
+
+
+    /*
+     * ============================================================
+     * PATH A
+     * RenderTree mutation -> reparent -> layout
+     * ============================================================
+     */
+
+    mutate(treeA, 127);
+    mutateChildren(treeA, 9);
+
+    layout(treeA);
+
+    reparentWithoutGC(
+        treeA,
+        hostA1,
+        hostA2
+    );
+
+    mutate(treeA, 63);
+    mutateChildren(treeA, 11);
+
+    layout(hostA2);
+    layout(treeA);
+
+    reparentWithoutGC(
+        treeA,
+        hostA2,
+        hostA1
+    );
+
+    mutate(treeA, 31);
+    layout(treeA);
+
+
+    /*
+     * ============================================================
+     * PATH A2
+     * Remove subtree -> controlled GC -> reparent
+     * ============================================================
+     */
+
+    mutate(treeA, 127);
+    mutateChildren(treeA, 13);
+
+    layout(hostA1);
+
+    removeAndReparent(
+        treeA,
+        hostA1,
+        hostA2
+    );
+
+    mutate(treeA, 95);
+    mutateChildren(treeA, 15);
+
+    layout(hostA2);
+    layout(treeA);
+
+
+    /*
+     * Return tree to original host without GC.
+     */
+
+    reparentWithoutGC(
+        treeA,
+        hostA2,
+        hostA1
+    );
+
+    mutate(treeA, 63);
+    layout(hostA1);
+
+
+    /*
+     * ============================================================
+     * PATH A3
+     * Nested subtree destruction without retaining references
+     * to removed children.
+     * ============================================================
+     */
+
+    mutate(treeA2, 127);
+    mutateChildren(treeA2, 17);
+
+    layout(treeA2);
+
+    try {
+        var temporary = treeA2.children;
+
+        if (temporary && temporary.length > 2) {
+
+            var first = temporary[0];
+            var second = temporary[1];
+
+            treeA2.removeChild(first);
+
+            layout(treeA2);
+
+            treeA2.removeChild(second);
+
+            layout(treeA2);
+        }
+    } catch (e) {
+    }
+
+    mutate(treeA2, 55);
+    mutateChildren(treeA2, 19);
+
+    layout(hostA2);
+
+
+    /*
+     * ============================================================
+     * PATH A4
+     * iframe/document lifecycle.
+     *
+     * No explicit focus dependency.
+     * ============================================================
+     */
+
+    mutateFrame(frameA, 63);
+    frameLayout(frameA);
+
+    try {
+        var oldFrameDocumentA = frameA.contentDocument;
+
+        if (oldFrameDocumentA && oldFrameDocumentA.body)
+            oldFrameDocumentA.body.offsetHeight;
+
+    } catch (e) {
+    }
+
+    try {
+        frameA.src =
+            "about:blank";
+    } catch (e) {
+    }
+
+    layout(frameHostA);
+
+    /*
+     * Re-enter the embedding layout after navigation.
+     */
+    mutate(frameHostA, 31);
+    layout(frameHostA);
+
+
+    /*
+     * ============================================================
+     * PATH B
+     * Independent RenderTree/reparenting path.
+     * ============================================================
+     */
+
+    mutate(treeB, 127);
+    mutateChildren(treeB, 21);
+
+    layout(treeB);
+
+    reparentWithoutGC(
+        treeB,
+        hostB1,
+        hostB2
+    );
+
+    mutate(treeB, 47);
+    mutateChildren(treeB, 23);
+
+    layout(hostB2);
+    layout(treeB);
+
+    reparentWithoutGC(
+        treeB,
+        hostB2,
+        hostB1
+    );
+
+    mutate(treeB, 79);
+    layout(treeB);
+
+
+    /*
+     * ============================================================
+     * PATH B2
+     * Removal + GC + reparent.
+     * ============================================================
+     */
+
+    mutate(treeB, 127);
+    mutateChildren(treeB, 25);
+
+    layout(hostB1);
+
+    removeAndReparent(
+        treeB,
+        hostB1,
+        hostB2
+    );
+
+    mutate(treeB, 63);
+    mutateChildren(treeB, 27);
+
+    layout(hostB2);
+    layout(treeB);
+
+    reparentWithoutGC(
+        treeB,
+        hostB2,
+        hostB1
+    );
+
+
+    /*
+     * ============================================================
+     * PATH B3
+     * Ancestor-level removal.
+     * ============================================================
+     */
+
+    mutate(hostB2, 127);
+    mutate(treeB2, 31);
+
+    layout(hostB2);
+
+    try {
+        var parentB2 = hostB2.parentNode;
+
+        if (parentB2) {
+            parentB2.removeChild(hostB2);
+
+            layout(stageB);
+
+            parentB2.appendChild(hostB2);
+        }
+    } catch (e) {
+    }
+
+    mutate(hostB2, 55);
+    mutate(treeB2, 43);
+
+    layout(stageB);
+
+
+    /*
+     * ============================================================
+     * PATH B4
+     * iframe container lifecycle.
+     * ============================================================
+     */
+
+    mutateFrame(frameB, 63);
+    frameLayout(frameB);
+
+    try {
+        var oldFrameDocumentB = frameB.contentDocument;
+
+        if (oldFrameDocumentB && oldFrameDocumentB.body)
+            oldFrameDocumentB.body.offsetHeight;
+
+    } catch (e) {
+    }
+
+    try {
+        frameHostB.removeChild(frameB);
+    } catch (e) {
+    }
+
+    layout(frameHostB);
+
+    /*
+     * Reattach after the lifecycle transition.
+     * No GC here: this path intentionally differs from PATH A2/B2.
+     */
+    try {
+        frameHostB.appendChild(frameB);
+    } catch (e) {
+    }
+
+    frameLayout(frameB);
+
+
+    /*
+     * ============================================================
+     * FINAL STRUCTURAL CHURN
+     * ============================================================
+     */
+
+    mutate(hostA1, 127);
+    mutate(hostA2, 63);
+    mutate(hostB1, 111);
+    mutate(hostB2, 55);
+
+    mutate(treeA, 127);
+    mutate(treeA2, 63);
+    mutate(treeB, 111);
+    mutate(treeB2, 47);
+
+    mutateChildren(treeA, 29);
+    mutateChildren(treeA2, 31);
+    mutateChildren(treeB, 33);
+    mutateChildren(treeB2, 35);
+
+    layout(stageA);
+    layout(stageB);
+
+    /*
+     * Final cross-parent movement.
+     */
+
+    reparentWithoutGC(
+        treeA2,
+        hostA2,
+        hostA1
+    );
+
+    layout(stageA);
+
+    reparentWithoutGC(
+        treeB2,
+        hostB2,
+        hostB1
+    );
+
+    layout(stageB);
+
+    /*
+     * Final style/layout transition.
+     */
+
+    mutate(hostA1, 95);
+    mutate(hostB1, 79);
+
+    mutate(treeA, 55);
+    mutate(treeA2, 31);
+    mutate(treeB, 63);
+    mutate(treeB2, 47);
+
+    layout(root);
+
+})();
 </script>
+
 </body>
 </html>
