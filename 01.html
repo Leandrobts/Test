@@ -1,445 +1,55 @@
-<!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PS4 WebKit — Audio & Video API Analyzer</title>
-<style>
-body{font-family:Arial,sans-serif;background:#111;color:#eee;margin:0;padding:20px}
-h1,h2{margin:0 0 10px} h2{margin-top:28px}
-p{color:#bbb;line-height:1.45}
-button{padding:8px 12px;margin:4px;cursor:pointer}
-table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13px}
-th,td{border:1px solid #444;padding:6px;text-align:left;vertical-align:top}
-th{background:#222} .yes{color:#7CFC00}.no{color:#ff7070}.value{color:#9ecbff}
-.card{background:#181818;border:1px solid #333;border-radius:6px;padding:14px;margin:12px 0}
-pre{white-space:pre-wrap;word-break:break-word;background:#090909;padding:12px;border-radius:5px;max-height:420px;overflow:auto}
-.small{font-size:12px;color:#999}
-input{padding:7px;width:70%}
-#status{padding:10px;background:#202020;border-left:4px solid #888}
-</style>
-</head>
-<body>
-<h1>PS4 WebKit — Analisador de APIs de Áudio e Vídeo</h1>
-<p>
-Ferramenta independente, sem bibliotecas externas. Ela separa <b>existência da API</b>,
-<b>assinatura/propriedade</b> e alguns <b>testes funcionais seguros</b>. Também procura
-nomes históricos/prefixados de WebKit, para não classificar uma API como ausente apenas
-porque o navegador usa um nome antigo.
-</p>
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 
-<div id="status">Iniciando análise…</div>
+        <script src=resources/media-file.js></script>
+        <script src=resources/media-controls.js></script>
+        <script src=resources/video-test.js></script>
 
-<div class="card">
-<button onclick="runAll()">Executar análise novamente</button>
-<button onclick="runFunctionalTests()">Testes funcionais</button>
-<button onclick="downloadJSON()">Salvar resultado JSON</button>
-<button onclick="copyJSON()">Copiar JSON</button>
-</div>
+        <script>
+        function emptyVideoTextContent()
+        {
+                consoleWrite("");
+                consoleWrite("** Empty the contents of the video element when it is ready to play **");
+                video.textContent = "";
 
-<h2>1. Globais — Audio / Video / Media</h2>
-<div id="globals"></div>
+                consoleWrite("");
+                consoleWrite("** Text track should not be rendered anymore **");
+                try {
+                    var textTrackCueBox = textTrackDisplayElement(video, 'display');
+                } catch (e) {
+                    consoleWrite(e);
+                }
 
-<h2>2. HTMLMediaElement</h2>
-<div id="media"></div>
+                consoleWrite("");
+                consoleWrite("No crash. PASS.");
+                consoleWrite("");
 
-<h2>3. HTMLAudioElement</h2>
-<div id="audio"></div>
+                endTest();
+        }
 
-<h2>4. HTMLVideoElement</h2>
-<div id="video"></div>
+        function initElements()
+        {
+            consoleWrite("** Set the mode of the text track to showing **");
+            testTrack = document.querySelector('track');
+            testTrack.track.mode = "showing";
 
-<h2>5. Eventos de mídia</h2>
-<div id="events"></div>
+            consoleWrite("");
+            consoleWrite("** Initialize the video element **");
+            findMediaElement();
+            video.src = findMediaFile('video', 'resources/test');
 
-<h2>6. Web Audio API</h2>
-<div id="webaudio"></div>
+            video.play();
+            waitForEvent('canplaythrough', emptyVideoTextContent);
+        }
 
-<h2>7. Media Source / MSE</h2>
-<div id="mse"></div>
-
-<h2>8. Fullscreen relacionado a vídeo — incluindo nomes antigos</h2>
-<div id="fullscreen"></div>
-
-<h2>9. Codec / MIME probing</h2>
-<div id="codecs"></div>
-
-<h2>10. Testes funcionais</h2>
-<div id="functional"></div>
-
-<h2>11. JSON completo</h2>
-<pre id="json"></pre>
-
-<script>
-(function(){
-"use strict";
-
-var RESULT = {};
-var mediaProps = [
-"autoplay","controls","crossOrigin","currentSrc","currentTime","defaultMuted",
-"defaultPlaybackRate","duration","ended","error","loop","mediaGroup","muted",
-"networkState","paused","playbackRate","played","preload","readyState",
-"seekable","seeking","src","startDate","textTracks","volume",
-"buffered","audioTracks","videoTracks","controller","srcObject",
-"webkitPreservesPitch","webkitHasClosedCaptions","webkitClosedCaptionsVisible",
-"webkitCurrentPlaybackTargetIsWireless","webkitKeys"
-];
-
-var mediaMethods = [
-"load","play","pause","canPlayType","fastSeek","addTextTrack",
-"getStartDate","getVideoPlaybackQuality","setMediaKeys",
-"webkitSetMediaKeys","webkitShowPlaybackTargetPicker"
-];
-
-var audioProps = ["mozSampleRate","webkitPreservesPitch"];
-var audioMethods = [];
-
-var videoProps = [
-"width","height","videoWidth","videoHeight","poster","playsInline",
-"webkitSupportsFullscreen","webkitDisplayingFullscreen",
-"webkitWirelessVideoPlaybackDisabled","webkitSupportsPresentationMode",
-"webkitPresentationMode","webkitDecodedFrameCount","webkitDroppedFrameCount"
-];
-
-var videoMethods = [
-"webkitEnterFullscreen","webkitEnterFullScreen",
-"webkitExitFullscreen","webkitExitFullScreen",
-"webkitSetPresentationMode"
-];
-
-var legacyMedia = [
-"webkitAudioDecodedByteCount","webkitVideoDecodedByteCount",
-"webkitMediaSourceURL","webkitSourceAppend","webkitSourceEndOfStream",
-"webkitSourceState",
-"webkitGenerateKeyRequest","webkitAddKey","webkitCancelKeyRequest"
-];
-
-var webAudioGlobals = [
-"AudioContext","webkitAudioContext",
-"OfflineAudioContext","webkitOfflineAudioContext",
-"AudioNode","AudioParam","AudioBuffer","AudioBufferSourceNode",
-"GainNode","OscillatorNode","AnalyserNode","BiquadFilterNode",
-"DynamicsCompressorNode","DelayNode","ConvolverNode",
-"ChannelMergerNode","ChannelSplitterNode","PannerNode",
-"StereoPannerNode","WaveShaperNode","MediaElementAudioSourceNode",
-"MediaStreamAudioSourceNode","ScriptProcessorNode","AudioWorklet"
-];
-
-var webAudioContextMethods = [
-"createBuffer","createBufferSource","createGain","createGainNode",
-"createOscillator","createAnalyser","createBiquadFilter",
-"createDynamicsCompressor","createDelay","createConvolver",
-"createChannelMerger","createChannelSplitter","createPanner",
-"createStereoPanner","createWaveShaper","createMediaElementSource",
-"createMediaStreamSource","createScriptProcessor","decodeAudioData",
-"suspend","resume","close"
-];
-
-var webAudioNodeMethods = [
-"connect","disconnect"
-];
-
-var events = [
-"loadstart","durationchange","loadedmetadata","loadeddata","progress",
-"canplay","canplaythrough","suspend","abort","error","emptied","stalled",
-"play","pause","loadeddata","waiting","playing","seeking","seeked",
-"timeupdate","ended","ratechange","durationchange","volumechange",
-"encrypted","waitingforkey","emptied"
-];
-
-function esc(s){
- return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-  .replace(/"/g,"&quot;");
-}
-
-function exists(obj,name){
- try { return typeof obj[name] !== "undefined"; } catch(e){ return false; }
-}
-function typeOf(obj,name){
- try { return typeof obj[name]; } catch(e){ return "throws"; }
-}
-function protoHas(proto,name){
- try { return name in proto; } catch(e){ return false; }
-}
-function val(obj,name){
- try {
-   var v=obj[name];
-   if(typeof v==="function") return "[function]";
-   if(v===null) return "null";
-   if(typeof v==="undefined") return "undefined";
-   return String(v);
- } catch(e){ return "[throws: "+e.message+"]"; }
-}
-function row(name,present,type,value,extra){
- var cls=present?"yes":"no";
- return "<tr><td>"+esc(name)+"</td><td class='"+cls+"'>"+(present?"YES":"NO")+
-   "</td><td>"+esc(type||"")+"</td><td class='value'>"+esc(value||"")+
-   "</td><td>"+esc(extra||"")+"</td></tr>";
-}
-function table(headers,rows){
- return "<table><thead><tr>"+headers.map(function(x){return "<th>"+esc(x)+"</th>"}).join("")+
-   "</tr></thead><tbody>"+rows.join("")+"</tbody></table>";
-}
-
-function analyzeGlobals(){
- var names=[
- "HTMLMediaElement","HTMLAudioElement","HTMLVideoElement","TextTrack",
- "TextTrackList","AudioTrack","AudioTrackList","VideoTrack","VideoTrackList",
- "MediaSource","SourceBuffer","SourceBufferList","MediaRecorder",
- "MediaStream","MediaStreamTrack","MediaCapabilities","MediaMetadata",
- "MediaController","AudioContext","webkitAudioContext",
- "OfflineAudioContext","webkitOfflineAudioContext",
- "Audio","Blob","URL","webkitURL"
- ];
- var rows=[];
- RESULT.globals={};
- names.forEach(function(n){
-   var t=typeOf(window,n), p=t!=="undefined";
-   RESULT.globals[n]={present:p,type:t};
-   rows.push(row(n,p,t,"","window."+n));
- });
- document.getElementById("globals").innerHTML=table(["API","Presente","typeof","Observação"],rows);
-}
-
-function analyzePrototype(title, proto, names, target){
- var rows=[], out={};
- names.forEach(function(n){
-   var p=protoHas(proto,n), t=typeOf(proto,n), v=val(target,n);
-   out[n]={present:p,type:t,value:v};
-   rows.push(row(n,p,t,v));
- });
- return {html:table(["Membro","Presente","typeof","Valor"],rows),data:out};
-}
-
-function analyzeMedia(){
- var m=document.createElement("video"), a=document.createElement("audio");
- var p=window.HTMLMediaElement && HTMLMediaElement.prototype;
- var x=analyzePrototype("media",p,mediaProps,m);
- var y=analyzePrototype("methods",p,mediaMethods,m);
- var z=analyzePrototype("legacy",p,legacyMedia,m);
- RESULT.media={properties:x.data,methods:y.data,legacy:z.data};
- document.getElementById("media").innerHTML="<div class='card'><b>Propriedades</b>"+x.html+
-   "</div><div class='card'><b>Métodos</b>"+y.html+"</div><div class='card'><b>Históricos/prefixados</b>"+z.html+"</div>";
-
- var ap=window.HTMLAudioElement && HTMLAudioElement.prototype;
- var ax=analyzePrototype("audio",ap,audioProps,a);
- RESULT.audio=ax.data;
- document.getElementById("audio").innerHTML=table(["Membro","Presente","typeof","Valor"],
-   Object.keys(ax.data).map(function(n){var q=ax.data[n];return row(n,q.present,q.type,q.value)}));
-
- var vp=window.HTMLVideoElement && HTMLVideoElement.prototype;
- var vx=analyzePrototype("video",vp,videoProps,m);
- var vm=analyzePrototype("videoMethods",vp,videoMethods,m);
- RESULT.video={properties:vx.data,methods:vm.data};
- document.getElementById("video").innerHTML="<div class='card'><b>Propriedades</b>"+vx.html+
-   "</div><div class='card'><b>Métodos fullscreen/presentation/estatísticas</b>"+vm.html+"</div>";
-}
-
-function analyzeEvents(){
- var rows=[];
- var e={};
- var v=document.createElement("video");
- events.forEach(function(n){
-   var prop="on"+n;
-   var p=exists(v,prop), t=typeOf(v,prop);
-   e[n]={property:prop,present:p,type:t};
-   rows.push(row(prop,p,t));
- });
- RESULT.events=e;
- document.getElementById("events").innerHTML=table(["Evento / propriedade","Presente","typeof"],rows);
-}
-
-function analyzeWebAudio(){
- var rows=[], data={globals:{},contextPrototype:{}};
- webAudioGlobals.forEach(function(n){
-   var t=typeOf(window,n), p=t!=="undefined";
-   data.globals[n]={present:p,type:t};
-   rows.push(row(n,p,t,"","window."+n));
- });
- var extra="";
- var C=window.AudioContext||window.webkitAudioContext;
- if(C){
-   try{
-     var ctx=new C();
-     data.context={created:true,state:ctx.state,sampleRate:ctx.sampleRate,
-       baseLatency:val(ctx,"baseLatency"),outputLatency:val(ctx,"outputLatency")};
-     var cp=C.prototype;
-     var cr=analyzePrototype("ctx",cp,webAudioContextMethods,ctx);
-     data.contextPrototype=cr.data;
-     extra="<div class='card'><b>Contexto criado com sucesso</b>"+
-       "<br>state: "+esc(ctx.state)+
-       "<br>sampleRate: "+esc(ctx.sampleRate)+
-       "<br>baseLatency: "+esc(val(ctx,"baseLatency"))+
-       "<br>outputLatency: "+esc(val(ctx,"outputLatency"))+
-       cr.html+"</div>";
-     try{ctx.close();}catch(e){}
-   }catch(e){
-     data.context={created:false,error:e.message};
-     extra="<div class='card'><b>Constructor encontrado, mas criação falhou:</b> "+esc(e.message)+"</div>";
-   }
- } else {
-   data.context={created:false,reason:"AudioContext/ webkitAudioContext ausente"};
- }
- RESULT.webaudio=data;
- document.getElementById("webaudio").innerHTML=
-   table(["API","Presente","typeof","Observação"],rows)+extra;
-}
-
-function analyzeMSE(){
- var names=["MediaSource","SourceBuffer","SourceBufferList","TimeRanges"];
- var rows=[], d={};
- names.forEach(function(n){
-   var t=typeOf(window,n),p=t!=="undefined"; d[n]={present:p,type:t};
-   rows.push(row(n,p,t));
- });
- var extra="";
- if(window.MediaSource){
-   ["isTypeSupported","canConstructInDedicatedWorker"].forEach(function(n){
-     var p=typeof MediaSource[n]!=="undefined";
-     d["MediaSource."+n]={present:p,type:typeof MediaSource[n],value:val(MediaSource,n)};
-     rows.push(row("MediaSource."+n,p,typeof MediaSource[n],val(MediaSource,n)));
-   });
- }
- RESULT.mse=d;
- document.getElementById("mse").innerHTML=table(["API","Presente","typeof","Valor"],rows);
-}
-
-function analyzeFullscreen(){
- var v=document.createElement("video"), e=document.createElement("div");
- var groups=[
-  ["Element fullscreen moderno",e,["requestFullscreen","requestFullScreen","webkitRequestFullscreen","webkitRequestFullScreen"]],
-  ["Document fullscreen moderno/histórico",document,
-   ["fullscreenEnabled","fullscreenElement","exitFullscreen","webkitFullscreenEnabled",
-    "webkitFullscreenElement","webkitIsFullScreen","webkitCurrentFullScreenElement",
-    "webkitCancelFullScreen","webkitExitFullscreen","webkitExitFullScreen"]],
-  ["Video fullscreen histórico",v,
-   ["webkitSupportsFullscreen","webkitDisplayingFullscreen","webkitEnterFullscreen",
-    "webkitEnterFullScreen","webkitExitFullscreen","webkitExitFullScreen"]]
- ];
- var d={};
- var html="";
- groups.forEach(function(g){
-   var rows=[];
-   g[2].forEach(function(n){
-     var p=exists(g[1],n), t=typeOf(g[1],n), vv=val(g[1],n);
-     d[n]={present:p,type:t,value:vv};
-     rows.push(row(n,p,t,vv));
-   });
-   html+="<div class='card'><b>"+esc(g[0])+"</b>"+table(["Nome","Presente","typeof","Valor"],rows)+"</div>";
- });
- RESULT.fullscreen=d;
- document.getElementById("fullscreen").innerHTML=html;
-}
-
-function analyzeCodecs(){
- var v=document.createElement("video"), a=document.createElement("audio");
- var tests=[
-  ["video/mp4","video"],
-  ["video/mp4; codecs=\"avc1.42E01E\"","video"],
-  ["video/mp4; codecs=\"avc1.640028\"","video"],
-  ["video/mp4; codecs=\"mp4a.40.2\"","video"],
-  ["video/webm","video"],
-  ["video/webm; codecs=\"vp8\"","video"],
-  ["video/webm; codecs=\"vp9\"","video"],
-  ["video/ogg","video"],
-  ["audio/mpeg","audio"],
-  ["audio/mp4","audio"],
-  ["audio/mp4; codecs=\"mp4a.40.2\"","audio"],
-  ["audio/ogg","audio"],
-  ["audio/ogg; codecs=\"vorbis\"","audio"],
-  ["audio/webm","audio"],
-  ["audio/wav","audio"]
- ];
- var rows=[],d=[];
- tests.forEach(function(t){
-   var el=t[1]==="video"?v:a, r="";
-   try{r=el.canPlayType(t[0]);}catch(e){r="[throws: "+e.message+"]";}
-   d.push({mime:t[0],kind:t[1],result:r});
-   rows.push("<tr><td>"+esc(t[1])+"</td><td>"+esc(t[0])+"</td><td class='value'>"+esc(r)+"</td></tr>");
- });
- RESULT.codecs=d;
- document.getElementById("codecs").innerHTML=table(["Tipo","MIME","canPlayType()"],rows)+
- "<p class='small'>Resultado vazio normalmente significa que o navegador não declara suporte. \"maybe\"/\"probably\" não garante que a reprodução real funcionará.</p>";
-}
-
-function functionalMessage(s){document.getElementById("functional").innerHTML+=s;}
-
-function runFunctionalTests(){
- document.getElementById("functional").innerHTML="";
- var v=document.createElement("video"), a=document.createElement("audio");
- RESULT.functional={};
-
- function check(name,fn){
-   try{
-     var r=fn(); RESULT.functional[name]={ok:true,result:String(r)};
-     functionalMessage("<div class='card'><b>"+esc(name)+"</b>: <span class='yes'>OK</span><br>"+esc(String(r))+"</div>");
-   }catch(e){
-     RESULT.functional[name]={ok:false,error:e.message};
-     functionalMessage("<div class='card'><b>"+esc(name)+"</b>: <span class='no'>FALHOU</span><br>"+esc(e.name+": "+e.message)+"</div>");
-   }
- }
-
- check("Criar HTMLAudioElement",function(){return a.tagName;});
- check("Criar HTMLVideoElement",function(){return v.tagName;});
- check("video.canPlayType",function(){return v.canPlayType("video/mp4");});
- check("audio.canPlayType",function(){return a.canPlayType("audio/mpeg");});
- check("Alterar volume",function(){a.volume=0.25;return a.volume;});
- check("Alterar playbackRate",function(){a.playbackRate=1.25;return a.playbackRate;});
- check("Alterar muted",function(){a.muted=true;var x=a.muted;a.muted=false;return x;});
- check("Definir currentTime",function(){v.currentTime=0;return v.currentTime;});
-
- if(window.AudioContext||window.webkitAudioContext){
-   check("Criar Web Audio Context",function(){
-     var C=window.AudioContext||window.webkitAudioContext, c=new C(), s=c.createGain();
-     var result="state="+c.state+", sampleRate="+c.sampleRate+", GainNode="+(!!s);
-     try{c.close();}catch(e){}
-     return result;
-   });
- } else {
-   functionalMessage("<div class='card'><b>Web Audio</b>: não executado — nenhum AudioContext/webkitAudioContext foi encontrado.</div>");
- }
-}
-
-window.runFunctionalTests=runFunctionalTests;
-
-function runAll(){
- RESULT={};
- analyzeGlobals();
- analyzeMedia();
- analyzeEvents();
- analyzeWebAudio();
- analyzeMSE();
- analyzeFullscreen();
- analyzeCodecs();
- document.getElementById("json").textContent=JSON.stringify(RESULT,null,2);
- document.getElementById("status").innerHTML=
-   "<b>Análise concluída.</b> "+new Date().toString()+
-   "<br><span class='small'>A análise de presença não implica suporte funcional. Use \"Testes funcionais\" e o campo canPlayType para complementar.</span>";
-}
-window.runAll=runAll;
-
-function downloadJSON(){
- var blob=new Blob([JSON.stringify(RESULT,null,2)],{type:"application/json"});
- var url=URL.createObjectURL(blob), a=document.createElement("a");
- a.href=url; a.download="ps4-webkit-audio-video-analysis.json";
- document.body.appendChild(a); a.click(); document.body.removeChild(a);
- setTimeout(function(){URL.revokeObjectURL(url);},1000);
-}
-window.downloadJSON=downloadJSON;
-
-function copyJSON(){
- var text=JSON.stringify(RESULT,null,2);
- if(navigator.clipboard && navigator.clipboard.writeText){
-   navigator.clipboard.writeText(text);
- } else {
-   var ta=document.createElement("textarea"); ta.value=text; document.body.appendChild(ta);
-   ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
- }
-}
-window.copyJSON=copyJSON;
-
-runAll();
-})();
-</script>
-</body>
+        </script>
+    </head>
+    <body onload="initElements()">
+        <p>Tests that the cue display tree has been removed properly and no crash happens.</p>
+        <video controls>
+            <track src="resources/captions.vtt" kind="captions">
+        </video>
+    </body>
 </html>
