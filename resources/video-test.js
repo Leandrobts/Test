@@ -1,10 +1,9 @@
 
 var video = null;
 var mediaElement = document; // If not set, an event from any element will trigger a waitForEvent() callback.
-var consoleElement = null;
+var console = null;
 var printFullTestDetails = true; // This is optionaly switched of by test whose tested values can differ. (see disableFullTestDetailsPrinting())
 var Failed = false;
-var Success = true;
 
 var track = null; // Current TextTrack being tested.
 var cues = null; // Current TextTrackCueList being tested.
@@ -34,11 +33,11 @@ function enableFullTestDetailsPrinting()
 
 function logConsole()
 {
-    if (!consoleElement && document.body) {
-        consoleElement = document.createElement('div');
-        document.body.appendChild(consoleElement);
+    if (!console && document.body) {
+        console = document.createElement('div');
+        document.body.appendChild(console);
     }
-    return consoleElement;
+    return console;
 }
 
 function findMediaElement()
@@ -62,9 +61,17 @@ function test(testFuncString, endit)
         endTest();
 }
 
-function compare(testFuncString, expected, comparison)
+function testExpected(testFuncString, expected, comparison)
 {
-    var observed = eval(testFuncString);
+    try {
+        var observed = eval(testFuncString);
+    } catch (ex) {
+        consoleWrite(ex);
+        return;
+    }
+
+    if (comparison === undefined)
+        comparison = '==';
 
     var success = false;
     switch (comparison)
@@ -76,92 +83,9 @@ function compare(testFuncString, expected, comparison)
         case '!=':  success = observed != expected; break;
         case '==': success = observed == expected; break;
         case '===': success = observed === expected; break;
-        case 'instanceof': success = observed instanceof expected; break;
     }
 
-    return {success:success, observed:observed};
-}
-
-function testExpected(testFuncString, expected, comparison)
-{
-    if (comparison === undefined)
-        comparison = '==';
-
-    try {
-        let {success, observed} = compare(testFuncString, expected, comparison);
-        reportExpected(success, testFuncString, comparison, expected, observed)
-    } catch (ex) {
-        consoleWrite(ex);
-    }
-}
-
-function testExpectedEqualWithTolerance(testFuncString, expected, tolerance)
-{
-    try {
-        let observed = eval(testFuncString);
-        let success = Math.abs(observed - expected) <= tolerance;
-        reportExpected(success, testFuncString, '==', expected, observed)
-    } catch (ex) {
-        consoleWrite(ex);
-    }
-}
-
-function sleepFor(duration) {
-    return new Promise(resolve => {
-        setTimeout(resolve, duration);
-    });
-}
-
-function testExpectedEventuallySilent(testFuncString, expected, comparison, timeout)
-{
-    return testExpectedEventuallyWhileRunningBetweenTests(testFuncString, expected, comparison, timeout, null, true);
-}
-
-function testExpectedEventually(testFuncString, expected, comparison, timeout)
-{
-    return testExpectedEventuallyWhileRunningBetweenTests(testFuncString, expected, comparison, timeout, null, false);
-}
-
-function testExpectedEventuallyWhileRunningBetweenTests(testFuncString, expected, comparison, timeout, work, silent = false)
-{
-    return new Promise(async resolve => {
-        var success;
-        var observed;
-        var timeSlept = 0;
-        if (comparison === undefined)
-            comparison = '==';
-        while (timeout === undefined || timeSlept < timeout) {
-            try {
-                ({success, observed} = compare(testFuncString, expected, comparison));
-                if (success) {
-                    if (!silent)
-                        reportExpected(success, testFuncString, comparison, expected, observed);
-                    resolve();
-                    return;
-                }
-                await sleepFor(1);
-                timeSlept++;
-                if (work)
-                    work();
-            } catch (ex) {
-                consoleWrite(ex);
-                resolve();
-                return;
-            }
-        }
-        reportExpected(success, testFuncString, comparison, expected, observed, "AFTER TIMEOUT");
-        resolve();
-    });
-}
-
-async function runUntil(run, until, timeout) {
-    while (timeout === undefined || timeout--) {
-        run();
-        if (until())
-            return;
-        await sleepFor(1);
-    }
-    failTest("Did not end fast enough.");
+    reportExpected(success, testFuncString, comparison, expected, observed)
 }
 
 function testArraysEqual(testFuncString, expected)
@@ -183,7 +107,7 @@ function testArraysEqual(testFuncString, expected)
 
 var testNumber = 0;
 
-function reportExpected(success, testFuncString, comparison, expected, observed, explanation)
+function reportExpected(success, testFuncString, comparison, expected, observed)
 {
     testNumber++;
 
@@ -192,11 +116,8 @@ function reportExpected(success, testFuncString, comparison, expected, observed,
     if (printFullTestDetails || !success)
         msg = "EXPECTED (<em>" + testFuncString + " </em>" + comparison + " '<em>" + expected + "</em>')";
 
-    if (!success) {
+    if (!success)
         msg +=  ", OBSERVED '<em>" + observed + "</em>'";
-        if (explanation !== undefined)
-            msg += ", " + explanation;
-    }
 
     logResult(success, msg);
 }
@@ -206,7 +127,7 @@ function runSilently(testFuncString)
     if (printFullTestDetails)
         consoleWrite("RUN(" + testFuncString + ")");
     try {
-        return eval(testFuncString);
+        eval(testFuncString);
     } catch (ex) {
         if (!printFullTestDetails) {
             // No details were printed previous, give some now.
@@ -221,91 +142,10 @@ function run(testFuncString)
 {
     consoleWrite("RUN(" + testFuncString + ")");
     try {
-        return eval(testFuncString);
+        eval(testFuncString);
     } catch (ex) {
         consoleWrite(ex);
     }
-}
-
-function waitForEventWithTimeout(element, type, time, message) {
-    let listener = new Promise(resolve => {
-        element.addEventListener(type, event => {
-            resolve(event);
-        }, { once: true });
-    });
-    let timeout = new Promise((resolve) => {
-        setTimeout(resolve, time, 'timeout');
-    });
-
-    return Promise.race([
-        listener, 
-        timeout,
-    ]).then(result => {
-        if (result === 'timeout')
-            return Promise.reject(new Error(message));
-        
-        consoleWrite(`EVENT(${result.type})`);
-        return Promise.resolve(result);
-    });
-}
-
-function waitFor(element, type, silent, success) {
-    return new Promise(resolve => {
-        element.addEventListener(type, event => {
-            if (silent) {
-                resolve(event);
-                return;
-            }
-
-            if (success !== undefined)
-                logResult(success, `EVENT(${event.type})`);
-            else
-                consoleWrite(`EVENT(${event.type})`);
-            
-            resolve(event);
-        }, { once: true });
-    });
-}
-
-function waitForConditionOrTimeout(condition, silent, completeTimeout, stepTimeout) {
-
-    if (completeTimeout == undefined)
-        completeTimeout = 1000;
-    if (stepTimeout == undefined)
-        stepTimeout = 100;
-
-    return new Promise(resolve => {
-        const initialTimestamp = Date.now();
-
-        function evalConditionOrTimeout() {
-            const result = eval(condition);
-            if (result) {
-                if (!silent)
-                    consoleWrite("EXPECTED (" + condition + ") OK");
-                resolve(result);
-                return;
-            }
-
-            if ((Date.now() - initialTimestamp) > completeTimeout) {
-                if (!silent)
-                    consoleWrite("EXPECTED (" + condition + ") FAIL");
-                resolve(result);
-                return;
-            }
-
-            setTimeout(evalConditionOrTimeout, stepTimeout);
-        }
-
-        evalConditionOrTimeout();
-    });
-}
-
-function waitForAndSucceed(element, type) {
-    return waitFor(element, type, false, true);
-}
-
-function waitForAndFail(element, type) {
-    return waitFor(element, type, false, false);
 }
 
 function waitForEventOnce(eventName, func, endit)
@@ -350,17 +190,7 @@ function waitForEventAndFail(eventName)
     waitForEventAndTest(eventName, "false", true);
 }
 
-function waitForEventAndFailFor(element, eventName)
-{
-    waitForEventAndTest(element, eventName, "false", true);
-}
-
 function waitForEventAndTest(eventName, testFuncString, endit)
-{
-    waitForEventAndTestFor(mediaElement, eventName, testFuncString, endit)
-}
-
-function waitForEventAndTestFor(element, eventName, testFuncString, endit)
 {
     function _eventCallback(event)
     {
@@ -369,38 +199,16 @@ function waitForEventAndTestFor(element, eventName, testFuncString, endit)
             endTest();
     }
 
-    element.addEventListener(eventName, _eventCallback, true);
+    mediaElement.addEventListener(eventName, _eventCallback, true);
 }
 
-function waitForEventOnceOn(element, eventName, func, endit)
-{
-    waitForEventOn(element, eventName, func, endit, true);
-}
-
-function waitForEventOn(element, eventName, func, endit, oneTimeOnly)
-{
-    waitForEvent(eventName, func, endit, oneTimeOnly, element);
-}
-
-function testDOMException(testString, exceptionString)
+function testException(testString, exceptionString)
 {
     try {
         eval(testString);
     } catch (ex) {
-        var exception = ex;
+        logResult(ex.code == eval(exceptionString), "TEST(" + testString + ") THROWS("+exceptionString+")");
     }
-    logResult(exception instanceof DOMException && exception.code === eval(exceptionString),
-        "TEST(" + testString + ") THROWS(" + exceptionString + ")");
-}
-
-function testException(testString, exceptionString) {
-    try {
-        eval(testString);
-    } catch (ex) {
-        var exception = ex;
-    }
-    logResult(exception !== undefined && exception == eval(exceptionString),
-        "TEST(" + testString + ") THROWS(" + exceptionString + ")");
 }
 
 var testEnded = false;
@@ -409,11 +217,8 @@ function endTest()
 {
     consoleWrite("END OF TEST");
     testEnded = true;
-    if (window.testRunner) {
-        // FIXME (121170): We shouldn't need the zero-delay timer. But text track layout
-        // happens asynchronously, so we need it to run first to have stable test results.
-        setTimeout("testRunner.notifyDone()", 0);
-    }
+    if (window.testRunner)
+        testRunner.notifyDone();
 }
 
 function endTestLater()
@@ -435,11 +240,6 @@ function failTest(text)
     endTest();
 }
 
-function passTest(text)
-{
-    logResult(Success, text);
-    endTest();
-}
 
 function logResult(success, text)
 {
@@ -453,9 +253,7 @@ function consoleWrite(text)
 {
     if (testEnded)
         return;
-    var span = document.createElement("span");
-    logConsole().appendChild(span);
-    span.innerHTML = text + '<br>';
+    logConsole().innerHTML += text + "<br>";
 }
 
 function relativeURL(url)
@@ -500,11 +298,7 @@ function testCues(index, expected)
     for (var i = 0; i < cues.length; i++) {
         for (j = 0; j < expected.tests.length; j++) {
             var test = expected.tests[j];
-            var propertyString = "cues[" + i + "]." + test.property;
-            var propertyValue = eval(propertyString);
-            if (test["precision"] && typeof(propertyValue) == 'number')
-                propertyValue = propertyValue.toFixed(test["precision"]);
-            reportExpected(test.values[i] == propertyValue, propertyString, "==", test.values[i], propertyValue)
+            testExpected("cues[" + i + "]." + test.property, test.values[i]);
         }
     }
 }
@@ -525,24 +319,19 @@ function enableAllTextTracks()
     }
 }
 
+var requiredEvents = [];
+
 function waitForEventsAndCall(eventList, func)
 {
-    var requiredEvents = []
-
     function _eventCallback(event)
     {
         if (!requiredEvents.length)
             return;
 
-        for (var index = 0; index < requiredEvents.length; index++) {
-            if (requiredEvents[index][1] === event.type) {
-                break;
-            }
-        }
-        if (index >= requiredEvents.length)
+        var index = requiredEvents.indexOf(event.type);
+        if (index < 0)
             return;
 
-        requiredEvents[index][0].removeEventListener(event, _eventCallback);
         requiredEvents.splice(index, 1);
         if (requiredEvents.length)
             return;
@@ -550,71 +339,9 @@ function waitForEventsAndCall(eventList, func)
         func();
     }
 
+    requiredEvents = [];
     for (var i = 0; i < eventList.length; i++) {
-        requiredEvents[i] = eventList[i].slice(0);
-        requiredEvents[i][0].addEventListener(requiredEvents[i][1], _eventCallback, true);
+        requiredEvents[i] = eventList[i][1];
+        eventList[i][0].addEventListener(requiredEvents[i], _eventCallback, true);
     }
-}
-
-function setCaptionDisplayMode(mode)
-{
-    if (window.internals)
-        internals.setCaptionDisplayMode(mode);
-    else
-        consoleWrite("<br><b>** This test only works in DRT! **<" + "/b><br>");
-}
-
-function runWithKeyDown(fn, preventDefault) 
-{
-    var eventName = 'keypress'
-    function thunk(event) {
-        if (preventDefault && event !== undefined)
-            event.preventDefault();
-
-        document.removeEventListener(eventName, thunk, false);
-        if (typeof fn === 'function')
-            fn();
-        else
-            run(fn);
-    }
-    document.addEventListener(eventName, thunk, false);
-
-    if (window.internals)
-        internals.withUserGesture(thunk);
-}
-
-function shouldResolve(promise) {
-    return new Promise((resolve, reject) => {
-        promise.then(result => {
-            logResult(Success, 'Promise resolved');
-            resolve(result);
-        }).catch((error) => {
-            logResult(Failed, 'Promise rejected');
-            reject(error);
-        });
-    });
-}
-
-function shouldReject(promise) {
-    return new Promise((resolve, reject) => {
-        promise.then(result => {
-            logResult(Failed, 'Promise resolved incorrectly');
-            reject(result);
-        }).catch((error) => {
-            logResult(Success, 'Promise rejected correctly');
-            resolve(error);
-        });
-    });
-
-}
-
-function handlePromise(promise) {
-    function handle() { }
-    return promise.then(handle, handle);
-}
-
-function checkMediaCapabilitiesInfo(info, expectedSupported, expectedSmooth, expectedPowerEfficient) {
-    logResult(info.supported == expectedSupported, "info.supported == " + expectedSupported);
-    logResult(info.smooth == expectedSmooth, "info.smooth == " + expectedSmooth);
-    logResult(info.powerEfficient == expectedPowerEfficient, "info.powerEfficient == " + expectedPowerEfficient);
 }
