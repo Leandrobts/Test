@@ -1,20 +1,94 @@
 <!DOCTYPE html>
-<html class="test-wait">
+
+<html>
+<head>
 <meta charset="utf-8">
-<title>Disposing a calc transition should not cause a heap-use-after-free crash</title>
-<link rel="help" href="https://crbug.com/40332981">
-<style>
-#test { transition: width 1s; }
-</style>
-<div id="test"></div>
+<title>ImageLoader UAF reproduction test</title>
+</head>
+
+<body>
+
+<div id="host" style="display:none"></div>
+
 <script>
-  test.style.width = 'calc(100px + 100%)';
-  requestAnimationFrame(function() {
-    test.style.width = '100px';
-    requestAnimationFrame(function() {
-      document.body.removeChild(test);
-      document.documentElement.classList.remove('test-wait');
-    });
-  });
+
+function log(message)
+{
+    var output = document.getElementById("output");
+
+    if (output)
+        output.innerHTML += message + "<br>";
+}
+
+var output = document.createElement("div");
+output.id = "output";
+document.body.appendChild(output);
+
+log("Starting ImageLoader test...");
+
+log("showModalDialog: " + typeof window.showModalDialog);
+
+var host = document.getElementById("host");
+
+if (!host.attachShadow) {
+    log("FAIL: Shadow DOM is not supported.");
+} else if (typeof window.showModalDialog !== "function") {
+    log("UNSUPPORTED: showModalDialog is not available.");
+} else {
+
+    var sr = host.attachShadow({ mode: "open" });
+
+    sr.innerHTML =
+        '<picture id="pic">' +
+        '<source srcset="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">' +
+        '<img>' +
+        '</picture>';
+
+    var pic = sr.getElementById("pic");
+
+    pic.addEventListener("load", function listener() {
+
+        pic.removeEventListener("load", listener, true);
+
+        log("load event fired.");
+
+        /*
+         * This is the important operation from the original
+         * WebKit regression test.
+         *
+         * Removing the <img> from <picture> re-enters
+         * ImageLoader::updatedHasPendingEvent().
+         */
+        pic.textContent = "";
+
+        log("IMG removed from PICTURE.");
+
+        /*
+         * The original test deliberately enters a nested
+         * event loop here.
+         */
+        log("Entering showModalDialog().");
+
+        window.showModalDialog(
+            "resources/self-closing-modal-dialog.html"
+        );
+
+        /*
+         * We should only reach this point after the modal
+         * event loop has returned.
+         */
+        log("showModalDialog() returned.");
+
+        setTimeout(function() {
+
+            log("PASS if no crash.");
+
+        }, 0);
+
+    }, true);
+}
+
 </script>
+
+</body>
 </html>

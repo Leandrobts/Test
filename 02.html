@@ -1,19 +1,51 @@
 <!DOCTYPE html>
-<style>
-#test { transition: width 1s; }
-</style>
-
-<pre>This test checks that a heap-use-after-free crash does not occur on Valgrind when disposing a calc transition.
-This test passes if it does not crash under ASAN.</pre>
-<div id="test"></div>
-
+<body>
 <script>
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
+}
 
-test.style.width = 'calc(100px + 100%)';
-requestAnimationFrame(function () {
-    test.style.width = '100px';
-    requestAnimationFrame(function () {
-        document.body.removeChild(test);        
-    });
-});
+
+// The victim's JS wrapper is created in the parent realm so it never roots the iframe's window.
+let victim = document.createElement('div');
+window.__victim = victim;
+
+let f = document.createElement('iframe');
+f.srcdoc =
+    '<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for \'script\'">' +
+    '<body>' +
+    '<' + 'script>document.body.appendChild(parent.__victim); parent.__factory = trustedTypes;</' + 'script>';
+f.onload = () => setTimeout(() => setTimeout(go, 0), 0);
+document.body.appendChild(f);
+
+function callback() {
+    document.adoptNode(victim);
+    f.remove();
+    f = null;
+    gc();
+    return null;
+}
+
+function go() {
+    // Register the iframe's default policy via the parent-realm createPolicy binding so the
+    // callback's stored JSDOMGlobalObject is the parent's window.
+    TrustedTypePolicyFactory.prototype.createPolicy.call(window.__factory, 'default', { createScript: callback });
+    window.__factory = null;
+    window.__victim = null;
+    gc();
+    // Triggers the TrustedScript default-policy callback while the only protection for the
+    // iframe's Document is the raw ScriptExecutionContext& held by trustedTypeCompliantString.
+    try { victim.setAttribute('onclick', 'x'); } catch (e) { }
+    document.body.textContent = 'PASS if no crash';
+
+}
 </script>
+</body>

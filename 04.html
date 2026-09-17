@@ -1,70 +1,170 @@
 <!DOCTYPE html>
+
 <html>
+<head>
+    <meta charset="utf-8">
+    <title>ImageLoader nested event loop test</title>
+</head>
+
 <body>
-<pre id='console'></pre>
+
+<div id="output"></div>
 
 <script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
-}
 
 function log(message)
 {
-    document.getElementById('console').appendChild(document.createTextNode(message + "\n"));
+    document.getElementById("output").innerHTML +=
+        message + "<br>";
 }
 
-function test1()
+log("=== ImageLoader test ===");
+
+log("showModalDialog: " + typeof window.showModalDialog);
+log("alert: " + typeof window.alert);
+
+
+/*
+ * The original WebKit test uses showModalDialog()
+ * to create a nested event loop.
+ *
+ * On the PS4, if showModalDialog() is unavailable,
+ * alert() is used as the closest available synchronous
+ * modal browser operation.
+ */
+
+var host = document.createElement("div");
+
+host.style.display = "none";
+
+document.body.appendChild(host);
+
+
+/*
+ * Keep the original <picture> / <source> / <img>
+ * structure used by the WebKit test.
+ */
+
+var picture = document.createElement("picture");
+
+var source = document.createElement("source");
+
+source.setAttribute(
+    "srcset",
+    "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+);
+
+var image = document.createElement("img");
+
+picture.appendChild(source);
+picture.appendChild(image);
+
+host.appendChild(picture);
+
+
+log("Elements created.");
+
+
+/*
+ * The load handler is the important part of the test.
+ */
+
+image.addEventListener("load", function loadHandler()
 {
-    log("Test that FileReader.abort on newly created FileReader doesn't crash.");
-    new FileReader().abort();
-}
+    log("IMG load event fired.");
 
-function test2()
-{
-    log("Test that FileReader.abort on newly created FileReader doesn't fire events.");
+    /*
+     * Same basic operation as the original test:
+     *
+     * remove the event listener
+     * remove the image from its parent
+     *
+     * This causes ImageLoader state to be updated while
+     * the load event is being dispatched.
+     */
 
-    var reader = new FileReader();
-    reader.onload = function() {
-        log("Received load event");
-    };
-    reader.onloadend = function() {
-        log("Received loadend event");
-    };
-    reader.onabort = function() {
-        log("Received abort event");
-    };
-    reader.onerror = function(event) {
-        log("Received error event: " + event.target.error.code);
-    };
+    image.removeEventListener("load", loadHandler, false);
 
-    reader.abort();
-}
+    log("Load listener removed.");
 
-function runTests()
-{
-    test1();
-    gc();
-    log("PASSED");
+    picture.removeChild(image);
 
-    test2();
-    gc();
-    log("PASSED");
-
-    log("DONE");
-    
-}
+    log("IMG removed from PICTURE.");
 
 
+    /*
+     * Original:
+     *
+     *     showModalDialog(...)
+     *
+     * PS4 adaptation:
+     *
+     *     alert(...)
+     *
+     * The purpose is to introduce a synchronous modal
+     * operation at the same point in the execution flow.
+     */
 
-window.onload = runTests;
+    log("Entering synchronous modal operation.");
+
+    if (typeof window.showModalDialog === "function") {
+
+        log("Using native showModalDialog().");
+
+        window.showModalDialog(
+            "resources/self-closing-modal-dialog.html"
+        );
+
+    } else if (typeof window.alert === "function") {
+
+        log("showModalDialog unavailable.");
+        log("Using alert() as PS4 fallback.");
+
+        window.alert(
+            "ImageLoader nested event-loop test"
+        );
+
+    } else {
+
+        log("ERROR: No synchronous modal API available.");
+
+    }
+
+
+    /*
+     * Execution should continue here after the modal
+     * operation returns.
+     */
+
+    log("Synchronous modal operation returned.");
+
+
+    /*
+     * Allow the browser to process the next task.
+     */
+
+    setTimeout(function()
+    {
+        log("Test completed.");
+        log("If the browser did not crash, execution survived the test path.");
+
+    }, 0);
+
+}, false);
+
+
+/*
+ * Start loading the image after the handler has
+ * already been installed.
+ */
+
+log("Starting image load.");
+
+image.src =
+    "data:image/gif;base64," +
+    "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
 </script>
+
 </body>
 </html>
