@@ -1,49 +1,175 @@
-<!DOCTYPE html>
-<html>
+
+
+<!DOCTYPE html><html>
 <head>
-<script src="resources/gc.js"></script>
+<meta charset="UTF-8">
+<title>Fullscreen Focus Lifecycle Test</title>
 </head>
-<body>
+<body><button id="run">Run Test</button>
 
-<script>
+<div id="status">Iframe ready</div><iframe
+    id="testFrame"
+    style="width:300px;height:200px;border:1px solid black;">
+</iframe><script>
+var iframe = document.getElementById("testFrame");
+var popup = null;
+var focusTimer = null;
 
-var style = document.createElement("style");
-style.textContent = '@import url("resources/detached-style.css");';
-document.head.appendChild(style);
+iframe.onload = function() {
 
-var parentSheet = style.sheet;
+    var doc = iframe.contentDocument;
 
-var result = document.createElement("div");
-document.body.appendChild(result);
+    doc.open();
+    doc.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<h3>Iframe</h3>' +
+        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
+        '</body>' +
+        '</html>'
+    );
+    doc.close();
 
-if (!(parentSheet instanceof CSSStyleSheet)) {
-    result.textContent = "FAIL: parentSheet is not CSSStyleSheet";
-} else if (parentSheet.cssRules[0].type !== CSSRule.IMPORT_RULE) {
-    result.textContent = "FAIL: cssRules[0] is not IMPORT_RULE";
-} else {
-    parentSheet.foo = "bar";
+    document.getElementById("status").innerHTML =
+        "Iframe created and ready";
+};
 
-    window.onload = function() {
-        window.childSheet = parentSheet.cssRules[0].styleSheet;
+document.getElementById("run").onclick = function() {
 
-        parentSheet = null;
-        style.remove();
-        style = null;
+    var status = document.getElementById("status");
 
-        gc();
+    popup = window.open(
+        "",
+        "_blank",
+        "width=400,height=300"
+    );
+
+    if (!popup) {
+        status.innerHTML = "Popup blocked";
+        return;
+    }
+
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<p>This test passes if it does not crash.</p>' +
+        '<div id="host"></div>' +
+        '<div id="result"></div>' +
+        '<script>' +
+        'function gc() {' +
+        '    function gcRec(n) {' +
+        '        if (n < 1)' +
+        '            return {};' +
+        '        var temp = {i: "ab" + i + (i / 100000)};' +
+        '        temp += "foo";' +
+        '        gcRec(n-1);' +
+        '    }' +
+        '    for (var i = 0; i < 10000; i++)' +
+        '        gcRec(10);' +
+        '}' +
+        'let shadowRoot = host.attachShadow({ mode: "open" });' +
+        'let victim = document.createElement("div");' +
+        'victim.tabIndex = 0;' +
+        'victim.textContent = "Focusable";' +
+        'shadowRoot.appendChild(victim);' +
+        'victim.focus();' +
+        'async function runTest() {' +
+        '    document.addEventListener("blur", () => {' +
+        '        victim.remove();' +
+        '        victim = null;' +
+        '        gc();' +
+        '    }, true);' +
+        '    await new Promise(resolve =>' +
+        '        window.addEventListener("blur", resolve, { once: true })' +
+        '    );' +
+        '    await new Promise((resolve) => {' +
+        '        requestAnimationFrame(() => setTimeout(resolve, 0));' +
+        '    });' +
+        '    result.textContent = "PASS";' +
+        '}' +
+        'runTest();' +
+        '<\/script>' +
+        '</body>' +
+        '</html>'
+    );
+    popup.document.close();
+
+    status.innerHTML = "Popup opened";
+
+    var frameDocument = iframe.contentDocument;
+    var fullscreenElement = frameDocument.documentElement;
+
+    if (fullscreenElement.webkitRequestFullscreen) {
+        fullscreenElement.webkitRequestFullscreen();
+    }
+
+    setTimeout(function() {
+
+        if (!popup || popup.closed)
+            return;
+
+        popup.focus();
+
+        status.innerHTML = "Focus moved to popup";
 
         setTimeout(function() {
-            gc();
 
-            if (childSheet.parentStyleSheet.foo === "bar")
-                result.textContent = "PASS";
-            else
-                result.textContent = "FAIL: parent stylesheet wrapper was collected";
-        }, 0);
-    };
-}
+            window.focus();
 
-</script>
+            status.innerHTML = "Focus returned to main page";
 
-</body>
+            setTimeout(function() {
+
+                try {
+                    iframe.contentWindow.focus();
+                } catch (e) {
+                }
+
+                status.innerHTML = "Focus moved to iframe";
+
+                setTimeout(function() {
+
+                    if (popup && !popup.closed) {
+                        popup.close();
+                    }
+
+                    status.innerHTML =
+                        "Popup closed - waiting";
+
+                    focusTimer = setInterval(function() {
+
+                        if (!popup || popup.closed) {
+
+                            clearInterval(focusTimer);
+
+                            iframe.remove();
+
+                            status.innerHTML =
+                                "Iframe removed after popup close";
+                        }
+
+                    }, 20);
+
+                }, 30);
+
+            }, 30);
+
+        }, 30);
+
+    }, 30);
+};
+
+window.onblur = function() {
+    document.getElementById("status").innerHTML =
+        "MAIN PAGE BLUR";
+};
+
+window.onfocus = function() {
+    document.getElementById("status").innerHTML =
+        "MAIN PAGE FOCUS";
+};
+</script></body>
 </html>
