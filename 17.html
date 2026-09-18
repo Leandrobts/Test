@@ -1,32 +1,160 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Fullscreen Focus Lifecycle Test (Fixed Order)</title>
+</head>
 <body>
-
-<div id="result">
-<input id="input" type="password">
-</div>
-
-<script src="resources/gc.js"></script>
+    <button id="run">Run Test</button>
+    <div id="status">Iframe ready</div>
+    
+    <iframe
+        id="testFrame"
+        style="width:300px;height:200px;border:1px solid black;">
+    </iframe>
 
 <script>
+var iframe = document.getElementById("testFrame");
+var popup = null;
 
-onload = () => {
+// Função auxiliar para delays baseados em Promise
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-    const input = document.querySelector('input');
+// Função para solicitar fullscreen (suporte cross-browser, priorizando webkit para PS4)
+function enterFullscreen(element) {
+    if (element.requestFullscreen) {
+        return element.requestFullscreen();
+    } else if (element.webkitRequestFullscreen) {
+        // Específico para WebKit/PS4, deve ser chamado direto no onclick
+        return element.webkitRequestFullscreen();
+    } else if (element.msRequestFullscreen) {
+        return element.msRequestFullscreen();
+    }
+    return Promise.reject(new Error('Fullscreen não suportado'));
+}
 
-    input.addEventListener('click', () => {
-        input.type = 'button';
-
-        if (typeof gc == 'function')
-            gc();
-
-        result.innerHTML = '<p>This test passes if WebKit does not hit debug assertions or crash under ASAN.</p><br>PASS';
-    }, { once: true });
-
-    result.innerHTML += '<p>Click the native AutoFill button.</p>';
+iframe.onload = function() {
+    var doc = iframe.contentDocument;
+    doc.open();
+    doc.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<h3>Iframe</h3>' +
+        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
+        '</body>' +
+        '</html>'
+    );
+    doc.close();
 };
 
-</script>
+document.getElementById("run").onclick = async function() {
+    // --- CORREÇÃO CRÍTICA AQUI ---
+    // O pedido de fullscreen deve ser a PRIMEIRA ação síncrona após o clique
+    // para garantir que navegadores restritos (como PS4) aceitem.
+    var frameDocument = iframe.contentDocument;
+    var fullscreenElement = frameDocument.documentElement;
+    
+    try {
+        // Chamamos a função de fullscreen imediatamente
+        await enterFullscreen(fullscreenElement);
+        console.log("Fullscreen solicitado com sucesso (ou em andamento)");
+    } catch (e) {
+        console.error("Falha ao entrar em fullscreen:", e);
+        // Dependendo do teste, você pode querer parar aqui se o fullscreen for obrigatório
+    }
 
+    // --- FIM DA CORREÇÃO CRÍTICA ---
+
+    // Agora que o fullscreen foi iniciado, prosseguimos com o resto do teste
+    // Abrimos o popup (isso pode causar um leve atraso, mas o pedido de FS já foi enviado)
+    popup = window.open("", "_blank", "width=400,height=300");
+
+    if (!popup) {
+        console.error("Popup bloqueado pelo navegador");
+        return;
+    }
+
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<p>This test passes if it does not crash.</p>' +
+        '<div id="host"></div>' +
+        '<div id="result"></div>' +
+        '<script>' +
+        'function gc() {' +
+        '    function gcRec(n) {' +
+        '        if (n < 1) return {};' +
+        '        var temp = {i: "ab" + i + (i / 100000)};' +
+        '        temp += "foo";' +
+        '        gcRec(n-1);' +
+        '    }' +
+        '    for (var i = 0; i < 10000; i++) gcRec(10);' +
+        '}' +
+        'let shadowRoot = host.attachShadow({ mode: "open" });' +
+        'let victim = document.createElement("div");' +
+        'victim.tabIndex = 0;' +
+        'victim.textContent = "Focusable";' +
+        'shadowRoot.appendChild(victim);' +
+        'victim.focus();' +
+        'async function runTest() {' +
+        '    document.addEventListener("blur", () => {' +
+        '        victim.remove();' +
+        '        victim = null;' +
+        '        gc();' +
+        '    }, true);' +
+        '    await new Promise(resolve =>' +
+        '        window.addEventListener("blur", resolve, { once: true })' +
+        '    );' +
+        '    await new Promise((resolve) => {' +
+        '        requestAnimationFrame(() => setTimeout(resolve, 0));' +
+        '    });' +
+        '    result.textContent = "PASS";' +
+        '}' +
+        'runTest();' +
+        '<\/script>' +
+        '</body>' +
+        '</html>'
+    );
+    popup.document.close();
+
+    // Sequência de foco (aguardando o popup abrir e o FS estabilizar)
+    await wait(100); // Aumentei um pouco o tempo inicial para garantir que o FS processe
+    if (!popup || popup.closed) return;
+
+    popup.focus();
+    await wait(300);
+
+    window.focus();
+    await wait(30);
+
+    try {
+        iframe.contentWindow.focus();
+    } catch (e) {}
+
+    await wait(30);
+
+    if (popup && !popup.closed) {
+        popup.close();
+    }
+
+    // Loop assíncrono para aguardar o fechamento do popup
+    while (popup && !popup.closed) {
+        await wait(20);
+    }
+
+    iframe.remove();
+};
+
+window.onblur = function() {
+    document.getElementById("status").innerHTML = "MAIN PAGE BLUR";
+};
+
+window.onfocus = function() {
+    document.getElementById("status").innerHTML = "MAIN PAGE FOCUS";
+};
+</script>
 </body>
 </html>
