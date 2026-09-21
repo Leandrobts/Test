@@ -1,52 +1,74 @@
+<!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>WebKit Focus Blur UAF Test</title>
+</head>
 <body>
-<script src="resources/testharness.js"></script>
-<script src="resources/testharnessreport.js"></script>
+
+<p>This test passes if it does not crash.</p>
+
+<button id="arm">ARM TEST</button>
+<div id="host"></div>
+<div id="result">WAITING</div>
+
+<script src="resources/gc.js"></script>
 <script>
-const WORKER_SOURCE = `
-self.onmessage = event => {
-    const processor = new MediaStreamTrackProcessor({ track: event.data });
+var shadowRoot;
+var victim;
+var armed = false;
+var blurCount = 0;
 
-    function overflowStack() {
-        try {
-            overflowStack();
-        } catch {
-            try {
-                processor.readable;
-            } catch {
-                self.postMessage("done");
-            }
-        }
-    }
+function prepareTest() {
+    host.innerHTML = '';
 
-    overflowStack();
-};
-`;
+    shadowRoot = host.attachShadow({ mode: 'open' });
 
-const WORKER_URL = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
+    victim = document.createElement('div');
+    victim.tabIndex = 0;
+    victim.textContent = 'Focusable';
 
-async function sleep(ms) {
-    await new Promise(resolve => {
-        setTimeout(() => {
-            resolve();
-        }, ms);
-    });
+    shadowRoot.appendChild(victim);
+
+    victim.focus();
+
+    armed = true;
+    result.textContent = 'ARMED - move focus away from the browser';
 }
 
-promise_test(async () => {
-    const canvas = document.createElement('canvas');
-    const [track] = canvas.captureStream(30).getVideoTracks();
+document.addEventListener('blur', function() {
+    if (!armed || !victim)
+        return;
 
-    const worker = new Worker(WORKER_URL);
+    blurCount++;
 
-    worker.postMessage(track);
+    var target = victim;
 
-    await new Promise(resolve => worker.onmessage = resolve);
+    victim = null;
 
-    worker.terminate();
+    target.remove();
 
-    sleep(100);
+    shadowRoot.innerHTML = '';
+
+    gc();
+
+    result.textContent = 'BLUR TRIGGERED: ' + blurCount;
+}, true);
+
+window.addEventListener('blur', function() {
+    if (armed)
+        result.textContent = 'WINDOW BLUR';
+}, true);
+
+window.addEventListener('focus', function() {
+    if (armed)
+        result.textContent = 'FOCUS RETURNED';
+}, false);
+
+document.getElementById('arm').addEventListener('click', function() {
+    prepareTest();
 });
 </script>
+
 </body>
 </html>
