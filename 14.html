@@ -1,152 +1,41 @@
-<!DOCTYPE html><html>
-<head>
-<meta charset="UTF-8">
-<title>Fullscreen Focus Lifecycle Test</title>
-</head>
-<body><button id="run">Run Test</button>
+<!DOCTYPE html><!-- webkit-test-runner [ ThreadedTimeBasedAnimationsEnabled=true ] -->
+<html>
+<body>
+<script>
 
-<div id="status">Iframe ready</div><iframe
-    id="testFrame"
-    style="width:300px;height:200px;border:1px solid black;">
-</iframe><script>
-var iframe = document.getElementById("testFrame");
-var popup = null;
-var focusTimer = null;
+let cycle = 0;
+const maxCycles = 30;
 
-iframe.onload = function() {
+function finish() {
+    document.body.textContent = "PASS if no crash in the UI process during page close.";
+   
+}
 
-    var doc = iframe.contentDocument;
+function runCycle() {
+    if (cycle++ >= maxCycles)
+        return finish();
 
-    doc.open();
-    doc.write(
-        '<!DOCTYPE html>' +
-        '<html>' +
-        '<body>' +
-        '<h3>Iframe</h3>' +
-        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
-        '</body>' +
-        '</html>'
-    );
-    doc.close();
-};
+    let popup = window.open("about:blank", "", "width=200,height=200");
+    if (!popup)
+        return finish();
 
-document.getElementById("run").onclick = function() {
+    popup.document.body.innerHTML =
+        '<div style="width:50px;height:50px;background:green;animation:s 10s linear infinite;will-change:transform"></div>' +
+        '<style>@keyframes s{from{transform:rotate(0)}to{transform:rotate(360deg)}}</style>';
 
-    popup = window.open(
-        "",
-        "_blank",
-        "width=400,height=300"
-    );
+    // Wait two main-thread rAFs so the popup gets a layer-tree commit and the
+    // scrolling-thread display link observer registers, scheduling the 1ms timer.
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            popup.close();
+            // Closing the popup destroys its RemoteLayerTreeEventDispatcher on the
+            // main thread. Race against the scrolling-thread timer callback.
+            setTimeout(runCycle, 0);
+        });
+    });
+}
 
-    if (!popup) {
-        return;
-    }
-
-    popup.document.open();
-    popup.document.write(
-        '<!DOCTYPE html>' +
-        '<html>' +
-        '<body>' +
-        '<p>This test passes if it does not crash.</p>' +
-        '<div id="host"></div>' +
-        '<div id="result"></div>' +
-        '<script>' +
-        'function gc() {' +
-        '    function gcRec(n) {' +
-        '        if (n < 1)' +
-        '            return {};' +
-        '        var temp = {i: "ab" + i + (i / 100000)};' +
-        '        temp += "foo";' +
-        '        gcRec(n-1);' +
-        '    }' +
-        '    for (var i = 0; i < 10000; i++)' +
-        '        gcRec(10);' +
-        '}' +
-        'let shadowRoot = host.attachShadow({ mode: "open" });' +
-        'let victim = document.createElement("div");' +
-        'victim.tabIndex = 0;' +
-        'victim.textContent = "Focusable";' +
-        'shadowRoot.appendChild(victim);' +
-        'victim.focus();' +
-        'async function runTest() {' +
-        '    document.addEventListener("blur", () => {' +
-        '        victim.remove();' +
-        '        victim = null;' +
-        '        gc();' +
-        '    }, true);' +
-        '    await new Promise(resolve =>' +
-        '        window.addEventListener("blur", resolve, { once: true })' +
-        '    );' +
-        '    await new Promise((resolve) => {' +
-        '        requestAnimationFrame(() => setTimeout(resolve, 0));' +
-        '    });' +
-        '    result.textContent = "PASS";' +
-        '}' +
-        'runTest();' +
-        '<\/script>' +
-        '</body>' +
-        '</html>'
-    );
-    popup.document.close();
-
-    var frameDocument = iframe.contentDocument;
-    var fullscreenElement = frameDocument.documentElement;
-
-    if (fullscreenElement.webkitRequestFullscreen) {
-        fullscreenElement.webkitRequestFullscreen();
-    }
-
-    setTimeout(function() {
-
-        if (!popup || popup.closed)
-            return;
-
-        popup.focus();
-
-        setTimeout(function() {
-
-            window.focus();
-
-            setTimeout(function() {
-
-                try {
-                    iframe.contentWindow.focus();
-                } catch (e) {
-                }
-
-                setTimeout(function() {
-
-                    if (popup && !popup.closed) {
-                        popup.close();
-                    }
-
-                    focusTimer = setInterval(function() {
-
-                        if (!popup || popup.closed) {
-
-                            clearInterval(focusTimer);
-                            iframe.remove();
-                        }
-
-                    }, 20);
-
-                }, 30);
-
-            }, 30);
-
-        }, 30);
-
-    }, 30);
-};
-
-window.onblur = function() {
-    document.getElementById("status").innerHTML =
-        "MAIN PAGE BLUR";
-};
-
-window.onfocus = function() {
-    document.getElementById("status").innerHTML =
-        "MAIN PAGE FOCUS";
-};
-</script></body>
+runCycle();
+</script>
+</body>
 </html>
