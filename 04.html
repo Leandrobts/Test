@@ -1,81 +1,27 @@
-<!DOCTYPE html>
-<html>
-<body>
-<script>
-function shouldBe(actual, expected) {
-    if (actual !== expected)
-        throw new Error(`bad value: ${actual}, expected: ${expected}`);
-}
+//@ runDefault("--useConcurrentJIT=false")
+const memories = [];
 
-// Source is a fixed-length view on a resizable ArrayBuffer. Shrinking the
-// buffer inside mapFn makes the view out-of-bounds without detaching it.
-// TypedArray.from must stop writing without throwing.
-function testSourceShrunkOutOfBounds() {
-    const rab = new ArrayBuffer(32, { maxByteLength: 64 });
-    const source = new Int32Array(rab, 0, 8);
-    for (let i = 0; i < 8; i++)
-        source[i] = i + 1;
-    source[Symbol.iterator] = null;
-
-    let calls = 0;
-    const result = Int32Array.from(source, (value, k) => {
-        calls++;
-        if (k === 4)
-            rab.resize(16);
-        return value;
-    });
-    shouldBe(calls, 5);
-    shouldBe(result.length, 8);
-    shouldBe(result[4], 5);
-    shouldBe(result[5], 0);
-}
-
-// Result is a fixed-length view on a resizable ArrayBuffer. Shrinking the
-// buffer inside mapFn makes the result out-of-bounds without detaching it.
-function testResultShrunkOutOfBounds() {
-    let rab;
-    class FixedLengthOnResizable extends Int32Array {
-        constructor(length) {
-            rab = new ArrayBuffer(4 * length, { maxByteLength: 8 * length });
-            super(rab, 0, length);
+(function() {
+    while (true) {
+        try {
+            memories.push(new WebAssembly.Memory({initial: 65535, maximum: 65536}));
+        } catch (e) {
+            break;
         }
     }
+})();
 
-    let calls = 0;
-    const result = FixedLengthOnResizable.from({ length: 8 }, (value, k) => {
-        calls++;
-        if (k === 2)
-            rab.resize(4);
-        return k;
-    });
-    shouldBe(calls, 3);
+const memory = new WebAssembly.Memory({initial: 1, maximum: 100});
+const buffer = memory.toResizableBuffer();
+const view = new Float64Array(buffer);
+
+function trigger(val) {
+    view[0] = val;
 }
 
-// Result's buffer is detached by transfer() inside mapFn.
-function testResultDetached() {
-    let buffer;
-    class ViewOnTransferableBuffer extends Int32Array {
-        constructor(length) {
-            buffer = new ArrayBuffer(4 * length);
-            super(buffer);
-        }
-    }
-
-    let calls = 0;
-    const result = ViewOnTransferableBuffer.from({ length: 8 }, (value, k) => {
-        calls++;
-        if (k === 2)
-            buffer.transfer();
-        return k;
-    });
-    shouldBe(calls, 3);
+for (let i = 0; i < 10000; i++) {
+    trigger(13.37);
 }
 
-for (let i = 0; i < 1000; i++) {
-    testSourceShrunkOutOfBounds();
-    testResultShrunkOutOfBounds();
-    testResultDetached();
-}
-</script>
-</body>
-</html>
+memory.grow(1);
+trigger(1.1);
