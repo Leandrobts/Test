@@ -1,92 +1,51 @@
 <!DOCTYPE html>
-<html>
 <body>
-
-<select id="select1" multiple size="4">
-    <option>one</option>
-    <option selected>two</option>
-</select>
-
-<select id="select2" multiple size="4">
-    <option>one</option>
-    <option selected>two</option>
-</select>
-
-<select id="select3" multiple size="4">
-    <option>one</option>
-    <option selected>two</option>
-</select>
-
 <script>
-
 function gc() {
     function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
     }
     for (var i = 0; i < 10000; i++)
-        gcRec(10);
+    gcRec(10);
 }
 
-var select1 = document.getElementById("select1");
-var select2 = document.getElementById("select2");
-var select3 = document.getElementById("select3");
 
-select1.addEventListener("change", function() {
-    select1.style.display = "none";
-    document.body.offsetHeight;
+// The victim's JS wrapper is created in the parent realm so it never roots the iframe's window.
+let victim = document.createElement('div');
+window.__victim = victim;
+
+let f = document.createElement('iframe');
+f.srcdoc =
+    '<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for \'script\'">' +
+    '<body>' +
+    '<' + 'script>document.body.appendChild(parent.__victim); parent.__factory = trustedTypes;</' + 'script>';
+f.onload = () => setTimeout(() => setTimeout(go, 0), 0);
+document.body.appendChild(f);
+
+function callback() {
+    document.adoptNode(victim);
+    f.remove();
+    f = null;
     gc();
-});
-
-select2.addEventListener("change", function() {
-    select2.parentNode.removeChild(select2);
-    document.body.offsetHeight;
-    gc();
-});
-
-select3.addEventListener("change", function() {
-    select3.parentNode.innerHTML = "";
-    document.body.offsetHeight;
-    gc();
-});
-
-document.body.offsetHeight;
-
-function trigger(select) {
-    var event = document.createEvent("KeyboardEvents");
-
-    event.initKeyboardEvent(
-        "keydown",
-        true,
-        true,
-        window,
-        "Up",
-        0,
-        false,
-        false,
-        false,
-        false
-    );
-
-    select.dispatchEvent(event);
+    return null;
 }
 
-trigger(select1);
-
-setTimeout(function() {
-    trigger(select2);
-}, 1000);
-
-setTimeout(function() {
-    trigger(select3);
-}, 2000);
-
-document.title = "TEST COMPLETE";
-
+function go() {
+    // Register the iframe's default policy via the parent-realm createPolicy binding so the
+    // callback's stored JSDOMGlobalObject is the parent's window.
+    TrustedTypePolicyFactory.prototype.createPolicy.call(window.__factory, 'default', { createScript: callback });
+    window.__factory = null;
+    window.__victim = null;
+    gc();
+    // Triggers the TrustedScript default-policy callback while the only protection for the
+    // iframe's Document is the raw ScriptExecutionContext& held by trustedTypeCompliantString.
+    try { victim.setAttribute('onclick', 'x'); } catch (e) { }
+    document.body.textContent = 'PASS if no crash';
+   
+}
 </script>
-
 </body>
-</html>
