@@ -1,6 +1,6 @@
 if (this.importScripts) {
-    importScripts('../../../resources/js-test.js');
-    importScripts('shared.js');
+    importScripts('../resources/js-test.js');
+    importScripts('../resources/shared.js');
 }
 
 description("Test that -0 and +0 are treated as equal keys in a unique index.");
