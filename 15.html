@@ -1,14 +1,46 @@
-<style>
- div { animation: a0 forwards}
- @keyframes a0 {}
-</style>
-<div id="div">This test passes if it does not crash.</div>
+<!DOCTYPE html>
+<html>
+<body>
+<p>Test for potential use-after-free of responseDocument in XMLHttpRequest during GC.</p>
 <script>
- div.attributeStyleMap.set('animation-timeline', 'none');
- (async () => {
-     await new Promise (resolve=>setTimeout(resolve, 50));
-     document.documentElement.append(div);
-     
- })();
+async function runXHRTest() {
+    const DURATION_MS = 2000;
+    const startTime = Date.now();
 
+    // Função para gerar pressão de coleta de lixo (GC)
+    function pressureGC() {
+        if (Date.now() - startTime > DURATION_MS) return;
+        let arr = new Array(10000).fill("gc-pressure");
+        setTimeout(pressureGC, 5);
+    }
+
+    // Função que dispara XHR repetidamente analisando XML/Document
+    function makeRequest() {
+        if (Date.now() - startTime > DURATION_MS) {
+            document.body.insertAdjacentHTML('beforeend', '<p>PASS if no crash.</p>');
+            return;
+        }
+
+        let xhr = new XMLHttpRequest();
+        xhr.open("GET", "data:application/xml,<root><element>test</element></root>", true);
+        xhr.responseType = "document";
+        xhr.onload = function() {
+            // Acessa o responseXML concorrentemente com o ciclo de vida da requisição
+            let doc = xhr.responseXML;
+            xhr.abort();
+            makeRequest();
+        };
+        xhr.onerror = function() {
+            makeRequest();
+        };
+        xhr.send();
+    }
+
+    pressureGC();
+    makeRequest();
+}
+
+runXHRTest();
 </script>
+</body>
+</html>
