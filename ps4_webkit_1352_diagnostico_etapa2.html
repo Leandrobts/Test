@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PS4 WebKit 13.52 - Diagnóstico funcional</title>
+<style>
+body{font-family:Arial,sans-serif;background:#07152b;color:#f0f6ff;margin:0;padding:14px}
+h1{font-size:24px}h2{font-size:19px;margin:0 0 12px}p{line-height:1.5}
+.card{background:#103466;border:1px solid #3976c1;border-radius:10px;padding:14px;margin:12px 0}
+button{font-size:17px;padding:13px 18px;background:#1cbbdc;color:#00182a;border:0;border-radius:8px;font-weight:bold;margin:5px 6px 5px 0}
+.pass{color:#8ff0ac}.fail{color:#ffb0ae}.warn{color:#ffd885}
+.result{font-size:16px;line-height:1.55;overflow-wrap:anywhere}
+.small{font-size:13px;color:#bcd1eb}pre{white-space:pre-wrap;word-break:break-word}
+#editor{min-height:36px;padding:9px;background:#fff;color:#000}
+</style></head><body>
+<h1>PS4 WebKit 13.52 — Etapa 2</h1>
+<p>Diagnóstico funcional de seis commits. Resultados aparecem na tela, sem necessidade de abrir JSON ou console. Testes benignos; nenhum gatilho de corrupção de memória.</p>
+<div class="card"><button onclick="runAll()">Executar todos</button><button onclick="clearAll()">Limpar resultados</button>
+<p id="status">Aguardando execução.</p><p class="small">Use HTTPS (GitHub Pages). Aguarde até aparecer "Concluído". Tire fotos dos seis cartões.</p></div>
+<div id="results"></div>
+<script>
+(function(){
+var items=[
+['934ecdc2','DOM / Shadow DOM'],
+['8f96cc81','Fetch / FormData / Blob'],
+['4dfdeb7f','Edição / undo / redo'],
+['777fe150','SVG / animação SMIL'],
+['13885ac4','CSS / estilos'],
+['a8459d45','XSLT / processamento XML']
+];
+var results=document.getElementById('results');
+for(var i=0;i<items.length;i++){
+ var c=document.createElement('div');c.className='card';c.id='card'+i;
+ var h=document.createElement('h2');h.appendChild(document.createTextNode((i+1)+'. '+items[i][0]+' — '+items[i][1]));c.appendChild(h);
+ var r=document.createElement('div');r.className='result';r.id='r'+i;r.appendChild(document.createTextNode('Não executado'));c.appendChild(r);results.appendChild(c);
+}
+function add(i,ok,label,detail){
+ var d=document.createElement('div');d.className=ok===true?'pass':ok===false?'fail':'warn';
+ d.appendChild(document.createTextNode((ok===true?'✓ ':ok===false?'✗ ':'? ')+label+(detail?' — '+detail:'')));
+ document.getElementById('r'+i).appendChild(d);
+}
+function reset(i){document.getElementById('r'+i).textContent='';}
+function err(e){return String(e&&e.name?e.name+': '+e.message:e);}
+function test(i,label,fn){try{var x=fn();add(i,!!x,label,String(x));}catch(e){add(i,false,label,err(e));}}
+function runDom(){
+ var i=0;reset(i);
+ test(i,'Node.getRootNode disponível',function(){return typeof document.createElement('div').getRootNode==='function';});
+ var host=document.createElement('div'),method=typeof host.attachShadow==='function'?'attachShadow':typeof host.createShadowRoot==='function'?'createShadowRoot':typeof host.webkitCreateShadowRoot==='function'?'webkitCreateShadowRoot':null;
+ add(i,method!==null,'Método Shadow DOM',method||'nenhum');
+ if(method){try{var root=method==='attachShadow'?host.attachShadow({mode:'open'}):host[method]();var span=document.createElement('span');root.appendChild(span);document.body.appendChild(host);add(i,!!span.parentNode,'Inserção de nó no Shadow DOM');if(typeof span.getRootNode==='function')add(i,span.getRootNode()===root,'getRootNode retorna ShadowRoot');if(typeof span.getRootNode==='function')add(i,span.getRootNode({composed:true})===document,'getRootNode({composed:true}) retorna Document');document.body.removeChild(host);}catch(e){add(i,false,'Operação Shadow DOM',err(e));}}
+ add(i,null,'Limite','Não verifica m_shadowIncludingRoot nem o bug nativo.');
+}
+function runFetch(done){
+ var i=1;reset(i);
+ test(i,'FormData disponível',function(){return typeof FormData==='function';});
+ test(i,'Blob disponível',function(){return typeof Blob==='function';});
+ test(i,'fetch disponível',function(){return typeof fetch==='function';});
+ try{
+ var fd=new FormData();fd.append('texto','ps4');add(i,fd.get?fd.get('texto')==='ps4':null,'Leitura de FormData',fd.get?'get()':'get() ausente');
+ var b=new Blob(['teste'],{type:'text/plain'});add(i,b.size===5,'Criação de Blob','size='+b.size);
+ try{fd.append('arquivo',b,'teste.txt');add(i,true,'Inserção de Blob em FormData');}catch(e){add(i,false,'Inserção de Blob em FormData',err(e));}
+ }catch(e){add(i,false,'Operações FormData/Blob',err(e));}
+ if(typeof fetch!=='function'){done();return;}
+ // Data URL: no external requests and no server dependencies.
+ var finished=false;var timeout=setTimeout(function(){if(!finished){finished=true;add(i,null,'fetch(data:)','tempo excedido (6s)');done();}},6000);
+ try{fetch('data:text/plain,ps4').then(function(response){return response.text();}).then(function(t){if(finished)return;finished=true;clearTimeout(timeout);add(i,t==='ps4','fetch(data:)','resposta='+t);done();},function(e){if(finished)return;finished=true;clearTimeout(timeout);add(i,false,'fetch(data:)',err(e));done();});}catch(e){clearTimeout(timeout);add(i,false,'fetch(data:)',err(e));done();}
+}
+function runEdit(){
+ var i=2;reset(i);
+ var d=document.createElement('div');d.contentEditable='true';d.id='editor';d.textContent='ABC';document.getElementById('card2').appendChild(d);
+ add(i,d.isContentEditable===true,'contentEditable funcional');
+ add(i,typeof document.execCommand==='function','execCommand disponível');
+ if(typeof document.execCommand==='function'){
+ try{d.focus();var sel=window.getSelection(),range=document.createRange();range.selectNodeContents(d);range.collapse(false);sel.removeAllRanges();sel.addRange(range);
+ var inserted=document.execCommand('insertText',false,'D');add(i,inserted&&d.textContent==='ABCD','Inserção via execCommand','texto='+d.textContent);
+ var undo=document.execCommand('undo',false,null);add(i,undo&&d.textContent==='ABC','Undo básico','texto='+d.textContent);
+ var redo=document.execCommand('redo',false,null);add(i,redo&&d.textContent==='ABCD','Redo básico','texto='+d.textContent);
+ }catch(e){add(i,false,'Sequência de edição',err(e));}}
+ d.parentNode.removeChild(d);
+ add(i,null,'Limite','Undo funcional não comprova EditCommandComposition::reapply.');
+}
+function runSvg(){
+ var i=3;reset(i);var ns='http://www.w3.org/2000/svg';
+ try{var svg=document.createElementNS(ns,'svg'),rect=document.createElementNS(ns,'rect'),anim=document.createElementNS(ns,'animate');svg.setAttribute('width','20');svg.setAttribute('height','20');rect.setAttribute('width','10');rect.setAttribute('height','10');anim.setAttribute('attributeName','x');anim.setAttribute('from','0');anim.setAttribute('to','10');anim.setAttribute('dur','1s');rect.appendChild(anim);svg.appendChild(rect);document.getElementById('card3').appendChild(svg);
+ add(i,typeof svg.getCurrentTime==='function','svg.getCurrentTime');
+ add(i,typeof anim.beginElement==='function','animate.beginElement');
+ if(typeof anim.beginElement==='function'){try{anim.beginElement();add(i,true,'Início de animação SMIL');}catch(e){add(i,false,'Início de animação SMIL',err(e));}}
+ add(i,typeof rect.getBBox==='function','rect.getBBox disponível');
+ if(typeof rect.getBBox==='function'){try{add(i,rect.getBBox().width===10,'Geometria SVG','largura='+rect.getBBox().width);}catch(e){add(i,false,'Geometria SVG',err(e));}}
+ svg.parentNode.removeChild(svg);
+ }catch(e){add(i,false,'SVG',err(e));}
+ add(i,null,'Limite','Não verifica Update::addSVGRendererUpdate.');
+}
+function runCss(){
+ var i=4;reset(i);
+ try{var el=document.createElement('div');el.style.cssText='width:37px;color:rgb(1, 2, 3)';document.getElementById('card4').appendChild(el);
+ var s=window.getComputedStyle?getComputedStyle(el):null;add(i,!!s,'getComputedStyle');if(s)add(i,s.width==='37px','Estilo computado','width='+s.width);
+ var sheet=document.createElement('style');sheet.textContent='.ps4csscheck{height:19px}';document.head.appendChild(sheet);el.className='ps4csscheck';
+ if(s)add(i,getComputedStyle(el).height==='19px','Atualização por stylesheet','height='+getComputedStyle(el).height);
+ document.head.removeChild(sheet);el.parentNode.removeChild(el);
+ }catch(e){add(i,false,'CSS',err(e));}
+ add(i,null,'Limite','Não verifica a arquitetura interna Style::Scope.');
+}
+function runXslt(){
+ var i=5;reset(i);
+ add(i,typeof XSLTProcessor==='function','XSLTProcessor disponível');
+ add(i,typeof DOMParser==='function','DOMParser disponível');
+ if(typeof DOMParser==='function'){try{var xml=new DOMParser().parseFromString('<root><item>ok</item></root>','application/xml');add(i,xml.getElementsByTagName('item').length===1,'Parsing XML');}catch(e){add(i,false,'Parsing XML',err(e));}}
+ if(typeof XSLTProcessor==='function'&&typeof DOMParser==='function'){try{
+ var parser=new DOMParser(),xsl=parser.parseFromString('<?xml version="1.0"?><xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0"><xsl:template match="/"><result>OK</result></xsl:template></xsl:stylesheet>','application/xml'),xml2=parser.parseFromString('<root/>','application/xml');
+ var proc=new XSLTProcessor();proc.importStylesheet(xsl);var out=proc.transformToDocument(xml2);add(i,!!out&&out.documentElement&&out.documentElement.nodeName.toLowerCase()==='result','Transformação XSLT simples');
+ }catch(e){add(i,false,'Transformação XSLT simples',err(e));}}
+ add(i,null,'Limite','A ausência de XSLTProcessor não prova ausência de libxslt interna.');
+}
+window.clearAll=function(){for(var i=0;i<items.length;i++){document.getElementById('r'+i).textContent='Não executado';}document.getElementById('status').textContent='Aguardando execução.';};
+window.runAll=function(){document.getElementById('status').textContent='Executando...';runDom();runEdit();runSvg();runCss();runXslt();runFetch(function(){document.getElementById('status').textContent='Concluído — fotografe os seis cartões.';});};
+})();
+</script></body></html>
