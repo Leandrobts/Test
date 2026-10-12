@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PS4 13.52 — Diagnóstico WebKit (10 commits)</title><style>body{background:#101827;color:#edf2fa;font:15px Arial,sans-serif;margin:0;padding:16px;max-width:950px}h1{font-size:23px}h2{font-size:17px;margin:0 0 8px}p{line-height:1.5;color:#c6d2e3}.panel{background:#1b293c;border:1px solid #34455e;border-radius:8px;padding:14px;margin:12px 0}.tag{display:inline-block;padding:4px 8px;border-radius:5px;background:#34455e;margin:4px 0}.yes{color:#9de6b1}.no{color:#ffb0a9}.maybe{color:#ffd990}button{background:#377bd6;color:white;border:0;border-radius:5px;padding:11px 15px;margin:4px;cursor:pointer}button:focus{outline:2px solid white}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#101827;padding:10px;border-radius:5px;font-size:12px}small{color:#b9c8dd}a{color:#9bc6ff}#cards{margin-top:12px}</style></head><body>
+<h1>PS4 13.52 — Triagem WebKit</h1><p>Diagnóstico passivo e não destrutivo das APIs relacionadas aos 10 commits. A presença de APIs <b>não demonstra</b> a existência de vulnerabilidades. Alguns detalhes internos do WebCore não podem ser observados por JavaScript.</p>
+<div class="panel"><b>Ambiente</b><pre id="env"></pre><button id="run">Executar diagnóstico</button><button id="json">Baixar JSON</button><button id="copy">Selecionar JSON</button><textarea id="export" style="width:100%;height:100px;display:none"></textarea><p id="summary"></p></div><div id="cards"></div>
+<script>
+(function(){
+'use strict';
+var commits=[
+['be08720593705c04826f1e0804581ea8aafb2748','Datalist / botão interno','datalist', ['datalist','inputList'], 'O botão interno DataListButtonElement não é observável diretamente.'],
+['a8459d453b2b90948bcfd1d8620c8a1ceb266eab','XSLT / libxslt','xslt',['xslt'], 'A versão e o ciclo de vida da libxslt não são observáveis por JavaScript.'],
+['ccb3ee3ebe364b5b8df6a7e100ae682496f3c6a7','Navegação por Service Worker','navigation',['serviceWorker','swController'], 'O caminho Document::navigateFromServiceWorker não é confirmado pelo suporte geral a Service Worker.'],
+['bbd73ca6e43642eb61c6ec6e6f1b56d7cfb189b4','Service Worker / Background Fetch','backgroundFetch',['serviceWorker','backgroundFetch'], 'Background Fetch exige contexto apropriado e registro de Service Worker; não há registro automático.'],
+['934ecdc220856de5f97da087b09923355c2c7414','DOM / rootNode / Shadow DOM','dom',['getRootNode','shadowModernOrLegacy'], 'O campo interno m_shadowIncludingRoot não é exposto.'],
+['c864982865723cc8d60512d9d99a6ff9c6adab6d','Canvas / captureStream / MediaStream','canvas',['canvasCapture','canvas2d','mediaStream'], 'A correção depende do ciclo de vida de CanvasBase e da captura interna de frames.'],
+['8f96cc81ef906ace167b247fe77a20461e9dc1f4','FormDataConsumer / Fetch / Blob','formdata',['fetch','formData','blob'], 'O caminho interno FormDataConsumer::consume não pode ser confirmado com detecção de APIs.'],
+['4dfdeb7f6ab6f19c3af8d9b1276d65a89d3f3cec','Editor / undo / redo','editing',['contentEditable','execCommand'], 'EditCommandComposition::reapply e a pilha de undo não são expostas diretamente.'],
+['13885ac4490643e1e00c0a4958aa48e0bad7124b','Style::Scope / CSS','style',['computedStyle','styleSheets'], 'A arquitetura interna Style::Scope não pode ser inferida pelo suporte a CSS.'],
+['777fe1501522cc907234a327b306b3cafffb1501','SVG / animação','svg',['svg','svgAnimation'], 'Update::addSVGRendererUpdate não é exposta; SMIL é apenas um indicador de funcionalidade.']
+];
+var result=null;
+function prop(o,k){try{return !!o && k in o}catch(e){return false}}
+function fn(o,k){try{return !!o && typeof o[k]==='function'}catch(e){return false}}
+function check(){var canvas=document.createElement('canvas'),input=document.createElement('input'),svg=document.createElementNS('http://www.w3.org/2000/svg','svg'),anim=document.createElementNS('http://www.w3.org/2000/svg','animate'),node=document.createElement('div'),ta=document.createElement('div');var sw=prop(navigator,'serviceWorker')?navigator.serviceWorker:null;var names={};function pick(obj,arr){var found=[];for(var i=0;i<arr.length;i++)if(fn(obj,arr[i]))found.push(arr[i]);return found}
+var tests={
+datalist:{ok:!!window.HTMLDataListElement && ('list' in input),detail:'HTMLDataListElement + input.list'},
+inputList:{ok:'list' in input,detail:'input.list'},
+xslt:{ok:typeof window.XSLTProcessor==='function',detail:'window.XSLTProcessor'},
+serviceWorker:{ok:!!sw,detail:'navigator.serviceWorker'},
+swController:{ok:!!sw && prop(sw,'controller'),detail:'navigator.serviceWorker.controller (propriedade, não exige controller ativo)'},
+backgroundFetch:{ok:!!window.BackgroundFetchManager || !!(window.ServiceWorkerRegistration && window.ServiceWorkerRegistration.prototype && prop(window.ServiceWorkerRegistration.prototype,'backgroundFetch')),detail:'ServiceWorkerRegistration.prototype.backgroundFetch'},
+getRootNode:{ok:fn(node,'getRootNode'),detail:'Node.getRootNode()'},
+shadowModernOrLegacy:{ok:pick(node,['attachShadow','createShadowRoot','webkitCreateShadowRoot']).length>0,detail:'attachShadow / createShadowRoot / webkitCreateShadowRoot'},
+canvasCapture:{ok:pick(canvas,['captureStream','webkitCaptureStream']).length>0,detail:'canvas.captureStream / webkitCaptureStream'},
+canvas2d:{ok:!!canvas.getContext && !!canvas.getContext('2d'),detail:'canvas.getContext("2d")'},
+mediaStream:{ok:typeof window.MediaStream==='function',detail:'window.MediaStream'},
+fetch:{ok:fn(window,'fetch'),detail:'window.fetch'},
+formData:{ok:typeof window.FormData==='function',detail:'window.FormData'},
+blob:{ok:typeof window.Blob==='function',detail:'window.Blob'},
+contentEditable:{ok:'contentEditable' in ta,detail:'element.contentEditable'},
+execCommand:{ok:fn(document,'execCommand'),detail:'document.execCommand'},
+computedStyle:{ok:fn(window,'getComputedStyle'),detail:'window.getComputedStyle'},
+styleSheets:{ok:prop(document,'styleSheets'),detail:'document.styleSheets'},
+svg:{ok:typeof window.SVGElement!=='undefined' && !!svg.namespaceURI,detail:'SVGElement + namespace SVG'},
+svgAnimation:{ok:fn(anim,'beginElement') || fn(svg,'getCurrentTime'),detail:'SVG animate.beginElement / svg.getCurrentTime'}
+};
+names.shadow=pick(node,['attachShadow','createShadowRoot','webkitCreateShadowRoot']);names.canvas=pick(canvas,['captureStream','webkitCaptureStream']);names.fullscreen=pick(node,['requestFullscreen','webkitRequestFullscreen','webkitRequestFullScreen']);names.mediaRecorder=typeof window.MediaRecorder;
+return {tests:tests,names:names};}
+function escapeHTML(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function run(){var scan=check();var cards=document.getElementById('cards');cards.innerHTML='';var counts={complete:0,partial:0,absent:0};var rows=[];for(var i=0;i<commits.length;i++){var c=commits[i],keys=c[3],hits=0,lines=[];for(var j=0;j<keys.length;j++){var t=scan.tests[keys[j]];if(t.ok)hits++;lines.push('<div class="'+(t.ok?'yes':'no')+'">'+(t.ok?'✓ ':'✕ ')+escapeHTML(t.detail)+'</div>')};var status=hits===keys.length?'APIs detectadas':hits?'Suporte parcial':'APIs não detectadas';var type=hits===keys.length?'complete':hits?'partial':'absent';counts[type]++;rows.push({commit:c[0],component:c[1],checks:keys.map(function(k){return {api:k,available:scan.tests[k].ok}}),matched:hits,total:keys.length,classification:status,limitation:c[4]});var el=document.createElement('section');el.className='panel';el.innerHTML='<h2>'+(i+1)+'. <a href="https://github.com/WebKit/WebKit/commit/'+c[0]+'" target="_blank">'+c[0].slice(0,8)+'</a> — '+escapeHTML(c[1])+'</h2><span class="tag '+(type==='complete'?'yes':type==='partial'?'maybe':'no')+'">'+status+' ('+hits+'/'+keys.length+')</span>'+lines.join('')+'<p><small>'+escapeHTML(c[4])+'</small></p>';cards.appendChild(el)}
+result={target:'PS4 firmware 13.52 (informado pelo usuário)',timestamp:new Date().toISOString(),userAgent:navigator.userAgent,url:location.href,secureContext:!!window.isSecureContext,apiDetails:scan.tests,aliases:scan.names,summary:counts,commits:rows};document.getElementById('summary').textContent='APIs detectadas em todos os critérios: '+counts.complete+' | Parciais: '+counts.partial+' | Não detectadas: '+counts.absent+'. Isto não é um ranking de vulnerabilidades.';document.getElementById('env').textContent='User-Agent: '+navigator.userAgent+'\nOrigem: '+location.protocol+'//'+location.host+'\nContexto seguro: '+(window.isSecureContext?'sim':'não')+'\nAliases: '+JSON.stringify(scan.names);}
+document.getElementById('run').onclick=run;document.getElementById('json').onclick=function(){if(!result)run();var data=JSON.stringify(result,null,2);try{var b=new Blob([data],{type:'application/json'}),url=URL.createObjectURL(b),a=document.createElement('a');a.href=url;a.download='ps4-1352-webkit-10-commits.json';document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(url);a.parentNode.removeChild(a)},500)}catch(e){var t=document.getElementById('export');t.style.display='block';t.value=data;t.select()}};document.getElementById('copy').onclick=function(){if(!result)run();var t=document.getElementById('export');t.style.display='block';t.value=JSON.stringify(result,null,2);t.focus();t.select()};run();
+})();
+</script></body></html>
