@@ -1,31 +1,306 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+ content="width=device-width,initial-scale=1">
+
+<title>PS4 WebKit 777fe150 - Bateria</title>
+
+<style>
+body {
+  background: #101827;
+  color: white;
+  font-family: Arial, sans-serif;
+  padding: 14px;
+}
+h2 { color: #70d7ff; }
+button {
+  padding: 12px;
+  margin: 4px;
+  font-size: 15px;
+  background: #175b91;
+  color: white;
+  border: 1px solid #9bd9ff;
+}
+pre {
+  background: #1d3048;
+  border: 1px solid #6888a8;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-size: 13px;
+}
+#status {
+  padding: 12px;
+  background: #263a53;
+  font-size: 17px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>PS4 - WebKit 777fe150</h2>
+<p>Bateria de variacoes SVG</p>
+
+<button onclick="iniciar()">EXECUTAR TUDO</button>
+<button onclick="selecionar()">SELECIONAR LOG</button>
+
+<div id="status">Aguardando...</div>
+
+<h3>Relatorio</h3>
+<pre id="log"></pre>
+
 <script>
-    function gc() {
-    if (typeof GCController !== "undefined")
-        GCController.collect();
-    else {
-        var gcRec = function (n) {
-            if (n < 1)
-                return {};
-            var temp = {i: "ab" + i + (i / 100000)};
-            temp += "foo";
-            gcRec(n-1);
-        };
-        for (var i = 0; i < 1000; i++)
-            gcRec(10);
-    }
+var NS = "http://www.w3.org/2000/svg";
+var linhas = [];
+var rodando = false;
+var concluidos = 0;
+var erros = 0;
+
+/*
+ * Fallback gc() da PoC original.
+ * Cria pressao de memoria, mas nao garante GC.
+ */
+function gc() {
+  if (typeof GCController !== "undefined") {
+    GCController.collect();
+  } else {
+    var gcRec = function(n) {
+      if (n < 1)
+        return {};
+
+      var temp = {
+        i: "ab" + i + (i / 100000)
+      };
+
+      temp += "foo";
+      gcRec(n - 1);
+    };
+
+    for (var i = 0; i < 1000; i++)
+      gcRec(10);
   }
-  
-  onload = async () => {
-    let svg0 = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    let svgAnimatedLength = svg0.width;
-   // let observation = internals.observeGC(svgAnimatedLength)
-    let baseVal = svgAnimatedLength.baseVal;
-    let clipPath0 = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
-    svg0.append(clipPath0);
-    clipPath0.append('');
-    await undefined;
-    gc();
-    baseVal.value = 0;
-    document.body.innerHTML = 'PASS if no crash';
+}
+
+function log(s) {
+  linhas.push(s);
+  document.getElementById("log").textContent =
+    linhas.join("\n");
+}
+
+function pausa() {
+  return Promise.resolve();
+}
+
+function criar(tipo) {
+  var svg = document.createElementNS(NS, "svg");
+
+  if (tipo === "numero")
+    svg.setAttribute("width", "100");
+
+  if (tipo === "percentual")
+    svg.setAttribute("width", "50%");
+
+  var animated = svg.width;
+  var baseVal = animated.baseVal;
+
+  var clip = document.createElementNS(NS, "clipPath");
+  svg.append(clip);
+  clip.append("");
+
+  return {
+    svg: svg,
+    animated: animated,
+    baseVal: baseVal,
+    clip: clip
   };
+}
+
+async function executarCaso(nome, opcoes) {
+  var inicio = Date.now();
+  var dados = null;
+
+  log("");
+  log("[" + (concluidos + 1) + "] " + nome);
+
+  try {
+    dados = criar(opcoes.tipo || "original");
+
+    if (opcoes.conectar)
+      document.body.appendChild(dados.svg);
+
+    if (opcoes.remover) {
+      if (!dados.svg.parentNode)
+        document.body.appendChild(dados.svg);
+
+      dados.svg.remove();
+    }
+
+    if (opcoes.retirarClip)
+      dados.clip.remove();
+
+    if (opcoes.awaitAntes)
+      await pausa();
+
+    if (opcoes.gc)
+      gc();
+
+    if (opcoes.awaitDepois)
+      await pausa();
+
+    if (opcoes.valor === "specified") {
+      dados.baseVal.valueInSpecifiedUnits = 0;
+    } else if (opcoes.valor === "string") {
+      dados.baseVal.valueAsString = "0";
+    } else {
+      dados.baseVal.value = 0;
+    }
+
+    log("Resultado: PASS");
+    log("width: " +
+      dados.svg.getAttribute("width"));
+
+    log("value: " + dados.baseVal.value);
+    log("unitType: " + dados.baseVal.unitType);
+
+    concluidos++;
+
+  } catch (e) {
+    erros++;
+    concluidos++;
+
+    log("Resultado: ERRO");
+    log("Mensagem: " + e);
+
+    if (e && e.stack)
+      log("Stack: " + e.stack);
+  }
+
+  if (dados && dados.svg.parentNode)
+    dados.svg.parentNode.removeChild(dados.svg);
+
+  log("Tempo: " + (Date.now() - inicio) + " ms");
+}
+
+async function iniciar() {
+  if (rodando)
+    return;
+
+  rodando = true;
+  linhas = [];
+  concluidos = 0;
+  erros = 0;
+
+  var status = document.getElementById("status");
+  status.textContent = "EXECUTANDO...";
+
+  log("=== WEBKIT 777fe150 ===");
+  log("UA: " + navigator.userAgent);
+  log("GCController: " + typeof GCController);
+  log("internals: " + typeof window.internals);
+  log("");
+
+  var casos = [
+    ["Original com GC",
+      {gc:true, awaitAntes:true}],
+
+    ["Original sem GC",
+      {gc:false, awaitAntes:true}],
+
+    ["GC sem await",
+      {gc:true}],
+
+    ["GC antes e await depois",
+      {gc:true, awaitDepois:true}],
+
+    ["Dois awaits",
+      {gc:true, awaitAntes:true,
+       awaitDepois:true}],
+
+    ["SVG conectado",
+      {gc:true, awaitAntes:true,
+       conectar:true}],
+
+    ["SVG removido",
+      {gc:true, awaitAntes:true,
+       remover:true}],
+
+    ["clipPath removido",
+      {gc:true, awaitAntes:true,
+       retirarClip:true}],
+
+    ["width numerico",
+      {gc:true, awaitAntes:true,
+       tipo:"numero"}],
+
+    ["width percentual",
+      {gc:true, awaitAntes:true,
+       tipo:"percentual"}],
+
+    ["valueInSpecifiedUnits",
+      {gc:true, awaitAntes:true,
+       tipo:"numero", valor:"specified"}],
+
+    ["valueAsString",
+      {gc:true, awaitAntes:true,
+       tipo:"numero", valor:"string"}],
+
+    ["Conectado sem GC",
+      {conectar:true, awaitAntes:true}],
+
+    ["Removido sem GC",
+      {remover:true, awaitAntes:true}],
+
+    ["Sem await e sem GC",
+      {}]
+  ];
+
+  for (var i = 0; i < casos.length; i++) {
+    status.textContent =
+      "TESTE " + (i + 1) + "/" + casos.length;
+
+    await executarCaso(casos[i][0], casos[i][1]);
+
+    /*
+     * Permite atualizar a interface
+     * entre os casos.
+     */
+    await new Promise(function(resolve) {
+      setTimeout(resolve, 50);
+    });
+  }
+
+  log("");
+  log("=== RESUMO ===");
+  log("Casos executados: " + concluidos);
+  log("Erros JS: " + erros);
+  log("Concluidos sem erro: " +
+      (concluidos - erros));
+  log("");
+  log("Sem GC deterministico ou observeGC.");
+  log("PASS nao comprova ausencia de UAF.");
+
+  status.textContent =
+    "CONCLUIDO: " + concluidos +
+    " casos / " + erros + " erros";
+
+  rodando = false;
+}
+
+function selecionar() {
+  var el = document.getElementById("log");
+  var range = document.createRange();
+  var selection = window.getSelection();
+
+  range.selectNodeContents(el);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+window.onload = iniciar;
 </script>
+</body>
+</html>
