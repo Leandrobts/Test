@@ -1,42 +1,46 @@
 <!DOCTYPE html>
 <html>
 <body>
-<div id="container">
-    <video id="vid" controls></video>
-</div>
-<p>Test for shadow root desynchronization and destructor cascade.</p>
-<script>
-async function runTest() {
-    let container = document.getElementById('container');
-    let video = document.getElementById('vid');
-
-    // Cria uma árvore de sombra (shadow root) associada ao elemento ou container
-    let shadow = video.attachShadow({ mode: 'open' });
-    let subDiv = document.createElement('div');
-    subDiv.textContent = "Shadow content";
-    shadow.appendChild(subDiv);
-
-    // Aguarda um ciclo e remove o container pai da árvore principal,
-    // simulando a remoção em cascata descrita no bug.
-    await new Promise(resolve => requestAnimationFrame(resolve));
-    
-    // Remove o container do DOM, disparando a limpeza dos filhos e das sombras
-    container.remove();
-
-    // Mantém o elemento de mídia referenciado via código para testar sobrevivência C++ / ActiveDOMObject
-    window.leakedVideo = video;
-
-    // Força tarefas no loop de eventos para tentar acessar ponteiros órfãos (m_shadowIncludingRoot)
-    setTimeout(() => {
-        if (window.leakedVideo) {
-            // Tenta interagir ou disparar atualização de árvore de exibição (ex: propriedades de layout/shadow)
-            window.leakedVideo.load();
-        }
-        document.body.insertAdjacentHTML('beforeend', '<p>PASS if no crash.</p>');
-    }, 100);
+<script type="module">
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
 }
 
-runTest();
+function main() {
+    // Removido noDFG(main) pois é uma função interna de harness de teste
+
+    const object = {
+        opt: new Function('value', `
+            function inlinee(value) {
+                return [-value, -value, -value];
+            }
+
+            return inlinee(value);`)
+    };
+
+    for (let i = 0; i < 10000; i++) {
+        object.opt(BigInt(i));
+    }
+
+    setTimeout(() => {
+        object.opt = null;
+        gc();
+
+        setTimeout(() => {
+            console.log('Should\'ve crashed.');
+        }, 1000);
+    }, 300);
+}
+
+main();
 </script>
 </body>
 </html>
