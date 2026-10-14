@@ -1,14 +1,70 @@
+<!doctype html>
 <!-- webkit-test-runner [ IPCTestingAPIEnabled=true ] -->
-<p>This test passes if WebKit does not crash.</p>
-
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Teste IPC — diagnóstico</title></head><body>
+<h2>Teste IPC — diagnóstico</h2>
+<p id="modo">Verificando API IPC...</p>
+<pre id="diagnostico">Aguardando...</pre>
 <script>
-
-
+if (window.testRunner) {
+  testRunner.dumpAsText();
+  testRunner.waitUntilDone();
+}
 window.setTimeout(async () => {
+  const status = document.getElementById('diagnostico');
+  const mode = document.getElementById('modo');
+  const log = [];
+  let IPC, CoreIPC;
+  try {
+    if (globalThis.IPC && typeof globalThis.IPC.createStreamClientConnection === 'function') {
+      IPC = globalThis.IPC;
+      mode.textContent = 'Modo nativo: API IPC detectada; usando coreipc.js original.';
+      ({ CoreIPC } = await import('./resources/coreipc.js'));
+    } else {
+      mode.textContent = 'Modo SIMULADO: chamadas registradas localmente, sem IPC real.';
+    // Mock local: preserva as chamadas do teste, mas NÃO envia IPC real.
+      function record(name, args) {
+      const entry = { name, ...args };
+      log.push(entry);
+      console.log('[IPC simulado]', entry);
+    }
+    IPC = { pageID: 1 }; // Identificador fictício apenas para a simulação.
+    CoreIPC = {
+      newStreamConnection() {
+        record('newStreamConnection', {});
+        return {
+          handle: { simulated: true },
+          newInterface(name, identifier) {
+            record('newInterface', { interfaceName: name, identifier });
+            return new Proxy({}, {
+              get(_target, method) {
+                if (typeof method !== 'string' || method === 'then') return undefined;
+                return (payload) => {
+                  const summary = method === 'DrawFocusRingPath'
+                    ? { segmentCount: payload?.path?.segments?.length,
+                        outlineWidth: payload?.outlineWidth,
+                        firstSegment: payload?.path?.segments?.[0] }
+                    : { payload };
+                  record(`${name}.${method}`, summary);
+                };
+              }
+            });
+          }
+        };
+      },
+      GPU: {
+        GPUConnectionToWebProcess: {
+          CreateRenderingBackend(identifier, payload) {
+            record('GPUConnectionToWebProcess.CreateRenderingBackend', {
+              identifier, renderingBackendIdentifier: payload.renderingBackendIdentifier,
+              simulatedConnection: true
+            });
+          }
+        }
+      }
+    };
 
-  const { CoreIPC } = await import('./resources/coreipc.js');
 
-
+    }
   const createRepeatedPath = (pathSegments, repeatCount) => Array(repeatCount).fill(pathSegments).flat();
 
   const connection = CoreIPC.newStreamConnection();
@@ -68,6 +124,16 @@ window.setTimeout(async () => {
 
   renderingBackend.DidDrawRemoteToPDF({ pageID, imageBufferIdentifier, snapshotIdentifier: 262145 });
   imageBuffer.GetShareableBitmap({ preserveResolution: true });
+  status.textContent = mode.textContent + '\n' +
+    (log.length ? log.map((item, index) => `${index + 1}. ${item.name}` +
+      (item.segmentCount === undefined ? '' : ` (${item.segmentCount} segmentos)`)).join('\n')
+      : 'Chamadas realizadas pela interface nativa; consulte o WebKit TestRunner.');
+  window.testRunner?.notifyDone();
 
+  } catch (error) {
+    console.error('[Diagnóstico IPC]', error);
+    status.textContent = 'Erro: ' + (error?.stack || String(error));
+    window.testRunner?.notifyDone();
+  }
 }, 20);
 </script>
