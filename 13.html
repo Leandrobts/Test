@@ -1,53 +1,71 @@
 <!DOCTYPE html>
 <html>
 <body>
+<p>This test passes if it does not crash.</p>
+<div id="host"></div>
+<div id="result"></div>
+
+<!-- Elementos necessários para o teste baseado no commit -->
+<div id="initial" tabindex="0">initial</div>
+<div id="target" tabindex="0">target</div>
+<iframe id="iframe"></iframe>
+
 <script>
+// --- Função GC integrada ---
 function gc() {
     function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
     for (var i = 0; i < 10000; i++)
-    gcRec(10);
+        gcRec(10);  
 }
 
+// Configuração do Shadow DOM e da vítima original
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
+victim.focus();
 
-    targetElement = document.createElement('div');
+async function runTest() {   
+    const initial = document.getElementById('initial');
+    const target = document.getElementById('target');
+    const iframe = document.getElementById('iframe');
 
-    let iframe = document.createElement('iframe');
-
-    iframe.srcdoc = `<!DOCTYPE html>
-    <meta http-equiv="Content-Security-Policy" content="require-trusted-types-for \'script\'">
-    <body><script>document.body.appendChild(parent.targetElement); parent.innerTrustedTypes = trustedTypes;</` + 'script>';
-
-    iframe.onload = () => setTimeout(() => {
-        TrustedTypePolicyFactory.prototype.createPolicy.call(window.innerTrustedTypes, 'default', { createHTML: function () {
-            document.adoptNode(targetElement);
-            iframe.remove();
-            iframe = null;
-            gc();
-        } });
-        window.innerTrustedTypes = null;
-
+    // Listener principal da vítima do Shadow DOM (onde ocorre a remoção e o GC)
+    victim.addEventListener('blur', () => {
+        victim.remove();
+        victim = null;
         gc();
-        try {
-            targetElement.innerHTML = 'x';
-        } catch (e) {
-            e.toString();
+    }, true);
+
+    // Listener complementar simulando a movimentação de documento durante o blur
+    initial.addEventListener("blur", () => {
+        if (iframe && iframe.contentDocument) {
+            iframe.contentDocument.body.appendChild(target);
         }
+    });
 
-        document.body.innerHTML = '<p>This test passes if WebKit does not hit assertions or crash under ASAN</p>PASS';
+    // Sequência de foco para forçar a alternância e disparar os eventos
+    initial.focus();
+    target.focus();
+    
+    // Remove o iframe abruptamente para simular a quebra de contexto
+    iframe.remove();
 
-       
-    }, 0);
+    await new Promise((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+    });
 
-    document.body.appendChild(iframe);
+    result.textContent = 'PASS';    
+}    
 
-    document.write('<p>This test requires testRunner and GCController</p>');
-
+runTest();
 </script>
 </body>
 </html>

