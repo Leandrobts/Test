@@ -1,29 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <style>
-  div {
-    overflow: hidden;
-  }
-  dialog {
-    overflow: hidden;
-    position: static;
-    display: inline;
-    float: left;
-  }
-  head {
-    display: inline;
-  }
+    body { font-family: sans-serif; padding: 20px; }
+    #host { margin-bottom: 15px; }
+    input { width: 280px; height: 40px; font-size: 16px; }
+    #console { white-space: pre-wrap; font-family: monospace; margin-top: 20px; }
 </style>
-<script>
-
-  onload = () => {
-    document.head.append(dialog);
-    setTimeout(() => {
-      dialog.showModal();
-      document.styleSheets[0].disabled = true;
-      
-    }, 0);
-  };
-</script>
+</head>
 <body>
-<dialog id="dialog"><div></div></dialog>
-Pass if no crash.
+
+<p>Teste de UAF em Blur de Elemento com Shadow Tree (Adaptado para PS4)</p>
+<div id="host"></div>
+<div id="result"></div>
+
+<!-- Elemento flutuante / input auxiliar para ajudar a tirar o foco da shadow tree -->
+<div style="margin-top: 20px;">
+    <input type="text" id="externalInput" placeholder="Clique aqui para tirar o foco (Blur)">
+</div>
+
+<button id="triggerTest" style="margin-top: 10px; padding: 10px 15px;">Executar Teste de Blur</button>
+<div id="console"></div>
+
+<script>
+// --- Função GC integrada do arquivo 08.html ---
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
+}
+
+function debug(msg) {
+    document.getElementById('console').innerHTML += msg + '<br>';
+}
+
+// Configuração inicial do Shadow DOM e do elemento focalizável (vítima)
+let host = document.getElementById('host');
+let shadowRoot = host.attachShadow({ mode: 'open' });
+let victim = document.createElement('div');
+victim.tabIndex = 0;
+victim.textContent = 'Elemento Focado na Shadow Tree (Clique para testar)';
+victim.style.padding = '10px';
+victim.style.background = '#ddd';
+shadowRoot.appendChild(victim);
+
+// Foca inicialmente no elemento de sombra
+victim.focus();
+
+document.getElementById('triggerTest').addEventListener('click', () => {
+    debug("Iniciando simulação de perda de foco (blur)...");
+
+    // Listener de blur que remove o elemento e força o GC (conforme lógica original do commit)
+    const blurHandler = () => {
+        if (victim) {
+            debug("Evento blur disparado: removendo elemento da shadow tree...");
+            victim.remove();
+            victim = null;
+            gc();
+            debug("Coleta de lixo executada após o blur.");
+        }
+    };
+
+    // Adiciona o listener de captura para o evento blur
+    document.addEventListener('blur', blurHandler, { capture: true, once: true });
+
+    // Simula a perda de foco focando em um elemento externo (o input flutuante)
+    // ou disparando o evento de blur manual caso o foco precise ser forçado
+    const externalInput = document.getElementById('externalInput');
+    externalInput.focus();
+
+    // Como alternativa complementar para simular a perda de foco da janela/elemento:
+    try {
+        const blurEvent = new FocusEvent('blur', { view: window, bubbles: false, cancelable: false });
+        if (victim) victim.dispatchEvent(blurEvent);
+    } catch (e) {
+        debug("Erro ao despachar evento manual: " + e.message);
+    }
+
+    document.getElementById('result').textContent = 'PASS (Se o navegador não fechou, o fluxo foi tratado com segurança)';
+});
+</script>
+
 </body>
+</html>
