@@ -1,42 +1,62 @@
-<!DOCTYPE html><!-- webkit-test-runner [ ThreadedTimeBasedAnimationsEnabled=true ] -->
+<!DOCTYPE html>
 <html>
 <body>
+<p>Teste de Mudança de Foco e Contexto (Adaptado)</p>
+<input id="outerInput">
+<iframe tabindex="0" srcdoc="<input tabindex='0'><script>parent.innerInput = document.querySelector('input');</script>"></iframe>
+
 <script>
-
-
-let cycle = 0;
-const maxCycles = 30;
-
-function finish() {
-    document.body.textContent = "PASS if no crash in the UI process during page close.";
- 
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);  
 }
+    
+let iframe = document.querySelector('iframe');
+let outerInput = document.querySelector('input');
+let innerInput = null;
+    
+iframe.onload = () => setTimeout(runTest, 0);
 
-function runCycle() {
-    if (cycle++ >= maxCycles)
-        return finish();
+function runTest() {
+    // Captura o input interno gerado no iframe
+    let innerInput = window.innerInput;
+    window.innerInput = null;
 
-    let popup = window.open("about:blank", "", "width=200,height=200");
-    if (!popup)
-        return finish();
+    // Mecanismo de mudança de foco: disparado no evento de blur do input externo
+    outerInput.addEventListener('blur', () => {
+        if (innerInput) {
+            // Adota o nó do contexto do iframe para o documento principal durante a perda de foco
+            document.adoptNode(innerInput);
+            innerInput = null;
+        }
+        if (iframe) {
+            iframe.remove();
+            iframe = null;
+        }
+        gc();
+    }, { once: true });
 
-    popup.document.body.innerHTML =
-        '<div style="width:50px;height:50px;background:green;animation:s 10s linear infinite;will-change:transform"></div>' +
-        '<style>@keyframes s{from{transform:rotate(0)}to{transform:rotate(360deg)}}</style>';
-
-    // Wait two main-thread rAFs so the popup gets a layer-tree commit and the
-    // scrolling-thread display link observer registers, scheduling the 1ms timer.
-    requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-            popup.close();
-            // Closing the popup destroys its RemoteLayerTreeEventDispatcher on the
-            // main thread. Race against the scrolling-thread timer callback.
-            setTimeout(runCycle, 0);
-        });
-    });
+    // Foca o input e simula o evento de Tab para forçar a transição de foco na controladora da engine
+    outerInput.focus();
+    outerInput.dispatchEvent(new KeyboardEvent('keydown', { 
+        bubbles: true, 
+        cancelable: true, 
+        view: window, 
+        detail: 0, 
+        key: 'Tab', 
+        code: 'Tab', 
+        keyIdentifier: 'U+0009' 
+    }));
+    
+    document.body.innerHTML += '<p>Fluxo de mudança de foco executado.</p>';
 }
-
-runCycle();
 </script>
 </body>
 </html>
