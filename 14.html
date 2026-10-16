@@ -2,15 +2,17 @@
 <html>
 <body>
 <p>This test passes if it does not crash.</p>
-<div id="host"></div>
+
+<div id="host" style="width:100px;height:100px;background:red">
+    <template id="victimTemplate">
+        <div id="victim" tabindex="0">Focusable</div>
+    </template>
+</div>
+<input tabindex="0" style="position: absolute; opacity: 0; pointer-events: none;">
 <div id="result"></div>
 
-<!-- Elementos para simular a disputa de foco do FocusController -->
-<input id="outerInput" type="text" tabindex="1">
-<iframe id="frame1" srcdoc="<input id='innerInput' tabindex='1'>"></iframe>
-
 <script>
-// --- Função GC integrada ---
+
 function gc() {
     function gcRec(n) {
         if (n < 1)
@@ -20,48 +22,40 @@ function gc() {
         gcRec(n - 1);
     }
     for (var i = 0; i < 10000; i++)
-        gcRec(10);  
+        gcRec(10);
 }
 
+let host = document.getElementById('host');
+let template = document.getElementById('victimTemplate');
 let shadowRoot = host.attachShadow({ mode: 'open' });
-let victim = document.createElement('div');
-victim.tabIndex = 0;
-victim.textContent = 'Focusable';
-shadowRoot.appendChild(victim);
+shadowRoot.appendChild(template.content);
+let victim = shadowRoot.getElementById('victim');
+victim.focus();
 
-async function runTest() {   
-    // O gatilho do UAF original: remove a vítima e roda GC no blur[cite: 1]
-    victim.addEventListener('blur', () => {
+async function runTest() {
+    document.addEventListener('blur', () => {
+        if (!victim) return;
         victim.remove();
         victim = null;
         gc();
     }, true);
 
-    // 1. Foca na vítima do Shadow DOM primeiro
-    victim.focus();
 
-    // 2. Substituição lógica do UIHelper: 
-    // Em vez de desligar a janela via API interna, forçamos o FocusController 
-    // a reavaliar o foco global movendo-o para o outerInput e para o iframe 
-    // na mesma árvore de ticks, forçando a transição de documentos.
-    const outerInput = document.getElementById('outerInput');
-    const frame1 = document.getElementById('frame1');
 
-    outerInput.focus();
-    
-    if (frame1 && frame1.contentDocument) {
-        let innerInput = frame1.contentDocument.getElementById('innerInput');
-        if (innerInput) {
-            innerInput.focus();
-        }
-    }
 
+     // Mecanismo de mudança de foco utilizando simulação de evento de teclado (Tab) e focar no elemento auxiliar
     await new Promise((resolve) => {
-        requestAnimationFrame(() => setTimeout(resolve, 0));
+        requestAnimationFrame(() => {
+            let auxInput = document.querySelector('input');
+            auxInput.focus();
+            auxInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, view: window, detail: 0,
+            key: 'Tab', code: 'Tab', keyIdentifier: 'U+0009', location: 222, ctrlKey: false, altKey: true, shiftKey: false, metaKey: false }));
+            setTimeout(resolve, 0);
+        });
     });
 
-    result.textContent = 'PASS';    
-}    
+    result.textContent = 'PASS';
+}
 
 runTest();
 </script>
