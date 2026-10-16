@@ -1,66 +1,62 @@
 <!DOCTYPE html>
 <html>
 <body>
-<p>This test passes if it does not crash.</p>
-
-<div id="host" style="width:100px;height:100px;background:red">
-    <template id="victimTemplate">
-        <div id="victim" tabindex="0">Focusable</div>
-    </template>
-</div>
-
-<div id="result"></div>
-
 <script>
 
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+let cycle = 0;
+const maxCycles = 30;
+
+function finish() {
+    document.body.textContent = "PASS if no crash in the UI process during page close.";
+    
 }
 
-let host = document.getElementById('host');
-let template = document.getElementById('victimTemplate');
-let shadowRoot = host.attachShadow({ mode: 'open' });
-shadowRoot.appendChild(template.content);
-let victim = shadowRoot.getElementById('victim');
-victim.focus();
+function runCycle() {
+    if (cycle++ >= maxCycles)
+        return finish();
 
-async function runTest() {
-    document.addEventListener('blur', () => {
-        if (!victim) return;
-        victim.remove();
-        victim = null;
-        gc();
-    }, true);
+    let popup = window.open("about:blank", "", "width=200,height=200");
+    if (!popup)
+        return finish();
+
+    popup.document.body.innerHTML =
+        '<iframe id="target_frame" loading="lazy"></iframe>' +
+'<div id="container" tabindex="0" autofocus></div>' +
+'<script>' +
+'const frameB = document.createElement("iframe");' +
+'frameB.id = "frame_b";' +
+'frameB.src = "b";' +
+'document.body.appendChild(frameB);' +
+'let frame = document.getElementById("target_frame");' +
+'addEventListener("load", () => {' +
+'frame.srcdoc = "a";' +
+'frame.contentWindow?.addEventListener("blur", () => { });' +
+'frame.focus();' +
+'});' +
+'container.onfocusin = () => {' +
+'document.body.innerHTML = "";' +
+'};' +
 
 
 
 
-let dummy = document.createElement('input');
-dummy.style.position = 'fixed';
-dummy.style.opacity = '0';
-document.body.appendChild(dummy);
-dummy.focus();
-dummy.remove();
 
 
+        '<\/script>';
 
-
-    await new Promise((resolve) => {
-        requestAnimationFrame(() => setTimeout(resolve, 0));
+    // Wait two main-thread rAFs so the popup gets a layer-tree commit and the
+    // scrolling-thread display link observer registers, scheduling the 1ms timer.
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            popup.close();
+            // Closing the popup destroys its RemoteLayerTreeEventDispatcher on the
+            // main thread. Race against the scrolling-thread timer callback.
+            setTimeout(runCycle, 0);
+        });
     });
-
-    document.getElementById('result').textContent = 'PASS';
 }
 
-runTest();
+runCycle();
 </script>
 </body>
 </html>
