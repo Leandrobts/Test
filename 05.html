@@ -1,50 +1,347 @@
+
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>PS4 WebKit SVG Compatibility</title>
-<style>body{background:#151923;color:#eee;font:15px monospace;padding:16px}pre{white-space:pre-wrap;word-wrap:break-word}button{padding:10px}</style></head>
-<body><h2>PS4 WebKit SVG - Compatibilidade commit 777fe150</h2>
-<p>Diagnostico nao destrutivo. Nao tenta provocar falhas de memoria.</p>
-<button onclick="runTests()">Executar novamente</button>
-<pre id="out">Aguardando...</pre>
-<script>
-function runTests(){
-var out=document.getElementById('out');out.textContent='';
-function log(k,v){out.appendChild(document.createTextNode(k+': '+v+'\n'));}
-function test(k,fn){try{log(k,fn());}catch(e){log(k,'ERRO '+e.name+': '+e.message);}}
-var ns='http://www.w3.org/2000/svg',svg,animated,base,clip;
-test('User agent',function(){return navigator.userAgent;});
-test('createElementNS svg',function(){svg=document.createElementNS(ns,'svg');return svg.namespaceURI+' / '+svg.nodeName;});
-test('svg.width / SVGAnimatedLength',function(){animated=svg.width;return animated?'presente, tipo='+typeof animated:'ausente';});
-test('SVGAnimatedLength.baseVal',function(){base=animated&&animated.baseVal;return base?'presente, value='+base.value:'ausente';});
-test('SVGLength.value setter',function(){if(!base)return 'indisponivel';var old=base.value;base.value=old;return 'suportado, valor='+base.value;});
-test('SVGLength.valueAsString',function(){return base&&typeof base.valueAsString!=='undefined'?base.valueAsString:'indisponivel';});
-test('SVGLength.newValueSpecifiedUnits',function(){return base?typeof base.newValueSpecifiedUnits:'indisponivel';});
-test('SVGAnimatedLength.animVal',function(){return animated&&animated.animVal?'presente':'indisponivel';});
-test('clipPath via createElementNS',function(){clip=document.createElementNS(ns,'clipPath');return clip.localName;});
-test('Node.append (moderno)',function(){return typeof svg.append;});
-test('Node.appendChild (antigo)',function(){return typeof svg.appendChild;});
-test('clipPath.append (moderno)',function(){return typeof clip.append;});
-test('clipPath.appendChild (antigo)',function(){return typeof clip.appendChild;});
-test('appendChild de clipPath',function(){svg.appendChild(clip);return clip.parentNode===svg?'OK':'falhou';});
-test('append de texto equivalente antigo',function(){var t=document.createTextNode('');clip.appendChild(t);return t.parentNode===clip?'OK':'falhou';});
-test('Promise',function(){return typeof window.Promise;});
-test('queueMicrotask',function(){return typeof window.queueMicrotask;});
-test('MutationObserver',function(){return typeof window.MutationObserver;});
-test('internals.observeGC',function(){return window.internals?typeof window.internals.observeGC:'internals indisponivel';});
-test('GCController.collect',function(){return window.GCController?typeof window.GCController.collect:'GCController indisponivel';});
-test('window.gc',function(){return typeof window.gc;});
-test('document.body.innerHTML',function(){return typeof document.body.innerHTML;});
-test('SVGElement constructor',function(){return typeof window.SVGElement;});
-test('SVGAnimatedLength constructor',function(){return typeof window.SVGAnimatedLength;});
-test('SVGLength constructor',function(){return typeof window.SVGLength;});
-test('SVGClipPathElement constructor',function(){return typeof window.SVGClipPathElement;});
-test('SVG tear-off identity',function(){return svg.width===svg.width?'mesmo wrapper':'wrappers diferentes';});
-test('SVG baseVal identity',function(){return svg.width.baseVal===svg.width.baseVal?'mesmo objeto':'objetos diferentes';});
-test('SVG attribute synchronization',function(){svg.setAttribute('width','123');return 'attribute='+svg.getAttribute('width')+', baseVal='+svg.width.baseVal.value;});
-test('SVG baseVal to attribute synchronization',function(){svg.width.baseVal.value=124;return 'attribute='+svg.getAttribute('width')+', baseVal='+svg.width.baseVal.value;});
-test('Detached SVG baseVal (sem GC forçado)',function(){var detached=document.createElementNS(ns,'svg');var length=detached.width.baseVal;length.value=42;return length.value;});
-log('Observacao','commitPropertyChange e commitChange sao funcoes C++ internas; nao sao APIs JavaScript.');
-log('Resultado','Compatibilidade nao comprova nem descarta Use-After-Free.');
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS4 - Diagnostico Shadow DOM e GC</title>
+<style>
+body {
+    margin: 0;
+    background: #101827;
+    color: #eef5ff;
+    font: 16px Arial, sans-serif;
+    padding: 18px;
 }
-if(window.addEventListener)window.addEventListener('load',runTests,false);
-else window.onload=runTests;
-</script></body></html>
+main { max-width: 900px; margin: auto; }
+h1 { font-size: 24px; }
+p { line-height: 1.5; color: #d0dded; }
+.panel {
+    background: #1c2b43;
+    border: 1px solid #3a526e;
+    border-radius: 9px;
+    padding: 15px;
+    margin: 14px 0;
+}
+button {
+    background: #2383cf;
+    color: white;
+    border: 0;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 5px 5px 5px 0;
+    font-size: 16px;
+    cursor: pointer;
+}
+button:disabled { opacity: .5; }
+#log {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font: 14px monospace;
+    max-height: 500px;
+    overflow: auto;
+    background: #0c1524;
+    padding: 12px;
+    border-radius: 6px;
+}
+.small { font-size: 13px; }
+#status { font-weight: bold; }
+label { display: block; margin: 8px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>Diagnostico WebKit PS4: Shadow DOM e GC</h1>
+
+<p>
+Teste funcional de slots manuais, atribuicao e
+remocao de nos, e execucao opcional da funcao gc().
+</p>
+
+<div class="panel">
+    <div id="status">Pronto para testar</div>
+    <p class="small" id="ua"></p>
+
+    <button id="basic">
+        Testar APIs e comportamento
+    </button>
+
+    <button id="memory">
+        Testar gc() separadamente
+    </button>
+
+    <button id="copy">
+        Selecionar resultados
+    </button>
+
+    <button id="clear">Limpar</button>
+
+    <label>
+        <input type="checkbox" id="allowgc">
+        Entendo que gc() pode deixar o navegador lento
+    </label>
+</div>
+
+<div class="panel">
+    <h2>Resultados</h2>
+    <div id="log"></div>
+</div>
+
+<p class="small">
+A funcao gc() gera pressao de memoria, mas nao
+garante coleta de lixo. Este teste nao detecta UAF.
+</p>
+</main>
+
+<script>
+(function () {
+    var logEl = document.getElementById("log");
+    var statusEl = document.getElementById("status");
+
+    function log(kind, msg) {
+        var s = "[" + kind + "] " + msg;
+        logEl.appendChild(
+            document.createTextNode(s + "\n")
+        );
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function showStatus(msg) {
+        statusEl.textContent = msg;
+    }
+
+    function assert(name, condition, details) {
+        log(
+            condition ? "OK" : "FALHA",
+            name + (details ? " - " + details : "")
+        );
+        return !!condition;
+    }
+
+    // Funcao GC original fornecida
+    function gc() {
+        function gcRec(n) {
+            if (n < 1)
+                return {};
+
+            var temp = {
+                i: "ab" + i + (i / 100000)
+            };
+
+            temp += "foo";
+            gcRec(n - 1);
+        }
+
+        for (var i = 0; i < 10000; i++)
+            gcRec(10);
+    }
+
+    function runBasic() {
+        showStatus("Executando testes...");
+
+        log("INFO", "Inicio: " + new Date());
+        log("INFO", "User-Agent: " + navigator.userAgent);
+
+        var host = document.createElement("div");
+        host.style.display = "none";
+        document.body.appendChild(host);
+
+        try {
+            if (!assert(
+                "attachShadow disponivel",
+                typeof host.attachShadow === "function"
+            ))
+                return;
+
+            var root = host.attachShadow({
+                mode: "open",
+                slotAssignment: "manual"
+            });
+
+            assert("ShadowRoot criado", !!root);
+
+            assert(
+                "slotAssignment manual",
+                root.slotAssignment === "manual",
+                "valor: " + root.slotAssignment
+            );
+
+            var slot = document.createElement("slot");
+            root.appendChild(slot);
+
+            assert(
+                "slot.assign disponivel",
+                typeof slot.assign === "function"
+            );
+
+            assert(
+                "slot.assignedNodes disponivel",
+                typeof slot.assignedNodes === "function"
+            );
+
+            assert(
+                "slot.assignedElements disponivel",
+                typeof slot.assignedElements === "function"
+            );
+
+            if (
+                typeof slot.assign !== "function" ||
+                typeof slot.assignedNodes !== "function"
+            )
+                return;
+
+            var a = document.createElement("span");
+            var b = document.createElement("span");
+
+            a.textContent = "A";
+            b.textContent = "B";
+
+            host.appendChild(a);
+            host.appendChild(b);
+
+            // Teste 1
+            slot.assign(a);
+
+            var nodes = slot.assignedNodes();
+
+            assert(
+                "Atribuir A",
+                nodes.length === 1 && nodes[0] === a,
+                "quantidade: " + nodes.length
+            );
+
+            // Teste 2
+            slot.assign(b, a);
+            nodes = slot.assignedNodes();
+
+            assert(
+                "Reordenar B,A",
+                nodes.length === 2 &&
+                nodes[0] === b &&
+                nodes[1] === a,
+                "quantidade: " + nodes.length
+            );
+
+            // Teste 3
+            slot.assign(a);
+            nodes = slot.assignedNodes();
+
+            assert(
+                "Substituir atribuicao por A",
+                nodes.length === 1 && nodes[0] === a,
+                "quantidade: " + nodes.length
+            );
+
+            // Teste 4
+            host.removeChild(a);
+            nodes = slot.assignedNodes();
+
+            assert(
+                "Remover A do host",
+                nodes.length === 0,
+                "quantidade: " + nodes.length
+            );
+
+            // Teste 5
+            host.appendChild(a);
+            slot.assign(a);
+            nodes = slot.assignedNodes();
+
+            assert(
+                "Reinserir e atribuir A",
+                nodes.length === 1 && nodes[0] === a
+            );
+
+            // Teste 6
+            slot.assign();
+            nodes = slot.assignedNodes();
+
+            assert(
+                "Limpar atribuicao",
+                nodes.length === 0
+            );
+
+            log("INFO", "Testes funcionais finalizados.");
+
+        } catch (e) {
+            log(
+                "ERRO",
+                (e.name || "Error") + ": " + e.message
+            );
+        } finally {
+            if (host.parentNode)
+                host.parentNode.removeChild(host);
+
+            showStatus("Teste funcional concluido");
+        }
+    }
+
+    function runGC() {
+        if (!document.getElementById("allowgc").checked) {
+            log(
+                "AVISO",
+                "Marque a caixa antes do teste gc()."
+            );
+            return;
+        }
+
+        showStatus("Executando gc()...");
+        document.getElementById("memory").disabled = true;
+
+        setTimeout(function () {
+            var t = +new Date();
+
+            try {
+                gc();
+
+                log(
+                    "OK",
+                    "gc() executou em " +
+                    ((+new Date()) - t) + " ms."
+                );
+
+                log(
+                    "INFO",
+                    "Isso nao confirma coleta de lixo."
+                );
+
+            } catch (e) {
+                log("ERRO", "gc(): " + e.message);
+            }
+
+            document.getElementById("memory").disabled = false;
+            showStatus("Teste gc() concluido");
+        }, 50);
+    }
+
+    document.getElementById("ua").textContent =
+        navigator.userAgent;
+
+    document.getElementById("basic").onclick = runBasic;
+
+    document.getElementById("memory").onclick = runGC;
+
+    document.getElementById("clear").onclick = function () {
+        logEl.textContent = "";
+        showStatus("Pronto para testar");
+    };
+
+    document.getElementById("copy").onclick = function () {
+        var r = document.createRange();
+        r.selectNodeContents(logEl);
+
+        var s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+
+        log(
+            "INFO",
+            "Texto selecionado para copiar."
+        );
+    };
+
+    log("INFO", "Pagina carregada.");
+})();
+</script>
+</body>
+</html>
