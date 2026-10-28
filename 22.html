@@ -1,59 +1,103 @@
+
 <!DOCTYPE html>
 <html>
 <body>
-<p>This test passes if it does not crash.</p>
-
-<div id="host" style="width:100px;height:100px;background:red"></div>
-
-<div id="result"></div>
+<pre id="log"></pre>
 
 <script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
+var output = document.getElementById("log");
+
+function log(s) {
+    output.textContent += s + "\n";
+}
+
+function gcPressure() {
+    var junk = [];
+
+    for (var i = 0; i < 5000; i++) {
+        junk.push({
+            data: new Array(100).join("GC_" + i)
+        });
+    }
+}
+
+var weakParent;
+var nested;
+var finalized = false;
+
+var registry = new FinalizationRegistry(function(value) {
+    finalized = true;
+    log("FINALIZED: " + value);
+});
+
+function setup() {
+    var style = document.createElement("style");
+    document.head.appendChild(style);
+
+    var sheet = style.sheet;
+
+    sheet.insertRule(
+        ".outer { color: red; & .nested { color: blue; } }",
+        0
+    );
+
+    var parent = sheet.cssRules[0];
+
+    if (!parent.cssRules || !parent.cssRules.length) {
+        log("CSS Nesting indisponivel");
+        return false;
     }
 
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+    nested = parent.cssRules[0];
+
+    weakParent = new WeakRef(parent);
+    registry.register(parent, "CSSStyleRule parent");
+
+    log("Parent: " + parent.constructor.name);
+    log("Child: " + nested.constructor.name);
+
+    sheet.deleteRule(0);
+
+    log("Sheet length: " + sheet.cssRules.length);
+
+    return true;
 }
 
-let host = document.getElementById('host');
+var attempt = 0;
 
-let shadowRoot = host.attachShadow({ mode: 'open' });
-shadowRoot.innerHTML = '<div id="victim" tabindex="0">Focusable</div>';
+function check() {
+    attempt++;
 
-let victim = shadowRoot.getElementById('victim');
-victim.focus();
+    gcPressure();
 
-async function runTest() {
-    document.addEventListener('blur', () => {
-        host.remove();
+    // Consultar WeakRef em tarefa separada.
+    setTimeout(function() {
+        var alive = weakParent.deref() !== undefined;
 
-        if (!victim) return;
+        log("GC attempt " + attempt +
+            ": parent wrapper alive=" + alive);
 
-        victim.remove();
-        victim = null;
-        gc();
-    }, true);
+        if (!alive) {
+            log("Wrapper pai nao esta mais acessivel");
+            log("Finalized: " + finalized);
+            log("Teste encerrado");
+            return;
+        }
 
-    let iframe = document.createElement('iframe');
-    document.body.appendChild(iframe);
-    iframe.contentWindow.focus();
-
-    iframe.remove();
-
-    await new Promise((resolve) => {
-        requestAnimationFrame(() => setTimeout(resolve, 0));
-    });
-
-    document.getElementById('result').textContent = 'PASS';
+        if (attempt < 10) {
+            setTimeout(check, 500);
+        } else {
+            log("Coleta do wrapper nao observada");
+        }
+    }, 100);
 }
 
-runTest();
+try {
+    if (setup())
+        setTimeout(check, 500);
+} catch (e) {
+    log("ERROR: " + e.name + ": " + e.message);
+}
 </script>
 </body>
 </html>
