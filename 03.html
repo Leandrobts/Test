@@ -1,21 +1,54 @@
 <!DOCTYPE html>
 <html>
 <body>
-<p>Destroys a frame owner's renderer while Document::implicitClose() holds a pointer to it.
-PASS if this does not crash.</p>
-<iframe id="frame" src="resources/subframe-smil-animation-forces-owner-layout.html"></iframe>
-<p id="result"></p>
 <script>
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
+}
 
-document.getElementById("frame").addEventListener("load", event => {
-    event.target.style.display = "none";
-});
 
-window.addEventListener("load", () => {
-    requestAnimationFrame(() => {
-        document.getElementById("result").textContent = "PASS: did not crash.";        
-    });
-});
+let survivor, child, list;
+let result = 'PASS if no crash.';
+
+// The setup runs inside a function so the secondary document is not reachable from a
+// global once it returns, and can therefore be collected below.
+(function setup() {
+    let secondaryDocument = document.implementation.createHTMLDocument();
+    secondaryDocument.body.innerHTML = '<input id="i"><label for="i"></label>';
+
+    // One successful lookup registers the list for invalidation at the secondary document
+    // and leaves the index cache's WeakPtr to the <label> as its only valid state.
+    list = secondaryDocument.getElementById('i').labels;
+    if (!list[0])
+        result = 'FAIL: expected the labels list to find the <label>.';
+
+    // Disconnected elements keep the secondary document alive via its referencing node
+    // count, without keeping its JS wrapper reachable.
+    survivor = secondaryDocument.createElement('div');
+    child = secondaryDocument.createElement('span');
+})();
+
+// Destroys the <label>, so the index cache's WeakPtr nulls itself with no code running on
+// the node list. The list must still be considered registered at the document. This has to
+// happen in an earlier collection than the one that destroys the node list below.
+gc(); gc(); gc();
+
+// Destroys the node list, which has to unregister itself from the document here.
+list = null;
+gc(); gc(); gc();
+
+// Walks the document's node list registry. Used to dereference the freed node list.
+survivor.appendChild(child);
+
+document.body.textContent = result;
 </script>
 </body>
 </html>

