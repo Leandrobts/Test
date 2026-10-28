@@ -1,67 +1,120 @@
+
+
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="UTF-8">
+<title>PS4 CSSStyleRule GC Test</title>
+</head>
 <body>
-<p>This test passes if it does not crash.</p>
-
-<div id="host" style="width:100px;height:100px;background:red">
-    <template id="victimTemplate">
-        <div id="victim" tabindex="0">Focusable</div>
-    </template>
-</div>
-
-<div id="result"></div>
+<pre id="log">Iniciando teste...</pre>
 
 <script>
+var output = document.getElementById("log");
+
+function log(msg) {
+    output.textContent += "\n" + msg;
+}
 
 function gc() {
     function gcRec(n) {
         if (n < 1)
             return {};
-        var temp = { i: "ab" + i + (i / 100000) };
+
+        var temp = {
+            i: "ab" + n + (n / 100000)
+        };
+
         temp += "foo";
         gcRec(n - 1);
     }
+
     for (var i = 0; i < 10000; i++)
         gcRec(10);
 }
 
-let host = document.getElementById('host');
-let template = document.getElementById('victimTemplate');
-let shadowRoot = host.attachShadow({ mode: 'open' });
-shadowRoot.appendChild(template.content);
-let victim = shadowRoot.getElementById('victim');
-victim.focus();
+var weakParent = null;
+var nested = null;
+var registry = null;
+var finalized = false;
+var attempt = 0;
 
-async function runTest() {
-    document.addEventListener('blur', () => {
-        if (!victim) return;
-        victim.remove();
-        victim = null;
-        gc();
-    }, true);
+function setup() {
+    var style = document.createElement("style");
+    document.head.appendChild(style);
 
+    var sheet = style.sheet;
 
+    sheet.insertRule(
+        ".outer { color:red; & .nested { color:blue; } }",
+        0
+    );
 
+    var parent = sheet.cssRules[0];
 
-   const decoy = document.createElement('input');
-decoy.style.position = 'fixed';
-decoy.style.opacity = '0';
-document.body.appendChild(decoy);
-decoy.focus();          // rouba o foco de victim ? dispara blur
-await new Promise(r => setTimeout(r, 0));
-decoy.remove();
+    nested = parent.cssRules[0];
 
+    weakParent = new WeakRef(parent);
 
-
-
-    await new Promise((resolve) => {
-        requestAnimationFrame(() => setTimeout(resolve, 0));
+    registry = new FinalizationRegistry(function(value) {
+        finalized = true;
+        log("FINALIZED: " + value);
     });
 
-    document.getElementById('result').textContent = 'PASS';
+    registry.register(parent, "CSSStyleRule parent");
+
+    log("Parent: " + parent.constructor.name);
+    log("Child: " + nested.constructor.name);
+    log("Before delete: " +
+        (nested.parentRule === parent));
+
+    sheet.deleteRule(0);
+
+    log("Sheet length: " + sheet.cssRules.length);
+    log("Parent reference released after setup");
+
+    // parent e sheet sao variaveis locais.
+    // Nao retornamos nenhuma referencia ao pai.
 }
 
-runTest();
+function checkGC() {
+    attempt++;
+
+    gc();
+
+    setTimeout(function() {
+        var alive = weakParent.deref() !== undefined;
+
+        log("Attempt " + attempt +
+            ": parent alive=" + alive);
+
+        if (!alive) {
+            log("PARENT WRAPPER COLLECTED");
+            log("Finalized: " + finalized);
+            log("TEST FINISHED");
+            return;
+        }
+
+        if (attempt < 10) {
+            setTimeout(checkGC, 500);
+        } else {
+            log("PARENT WRAPPER NOT COLLECTED");
+            log("TEST FINISHED");
+        }
+    }, 100);
+}
+
+try {
+    if (typeof WeakRef !== "function" ||
+        typeof FinalizationRegistry !== "function") {
+        log("WeakRef/FinalizationRegistry unavailable");
+    } else {
+        setup();
+        setTimeout(checkGC, 500);
+    }
+} catch (e) {
+    log("ERROR: " + e.name + ": " + e.message);
+}
 </script>
 </body>
 </html>
