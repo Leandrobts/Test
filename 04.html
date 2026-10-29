@@ -1,49 +1,80 @@
 <!DOCTYPE html>
 <html>
+<head>
+    <meta charset="utf-8">
+    <title>PS4 Font Metrics UAF Test - Option B</title>
+</head>
 <body>
-<script>
-function fullGC() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
-}
+    <p>This test passes if it does not crash.</p>
+    <div id="status">Testing via Worker...</div>
 
+    <script>
+    
+    // Código executado dentro do Worker para orquestrar o teste
+    const WORKER_SCRIPT = `
+        self.onmessage = function(e) {
+            if (e.data.cmd === 'start') {
+                // Notifica a thread principal para inflar o cache e executar as medições
+                self.postMessage({ action: 'PRUNE_CACHE' });
+                
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    self.postMessage({ action: 'MEASURE', attempt: attempt });
+                }
 
-//@ runDefault("--initialMarkingVersion=4294967294")
+                self.postMessage({ action: 'DONE' });
+            }
+        };
+    `;
 
-// Starts each heap two Full collections short of the marking version's wrap. The wrap collection resets every block to
-// nullVersion, keeping the marks of blocks whose marks were current, as the survivors of the collection before. A block
-// that collection does not reach has no live cells left, and allocation reuses it with those marks still in it; the next
-// Full collection must not take them for survivors. fullGC() leaves sweeping to allocation, so the empty blocks stay.
+    const blob = new Blob([WORKER_SCRIPT], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
 
-function makeObject(i) {
-    return { a0: i, a1: i, a2: i, a3: i, a4: i, a5: i, a6: i, a7: i, a8: i, a9: i,
-        a10: i, a11: i, a12: i, a13: i, a14: i, a15: i, a16: i, a17: i, a18: i, a19: i };
-}
+    const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+    const keepAlive = [];
 
-let objects = [];
-for (let i = 0; i < 10000; ++i)
-    objects.push(makeObject(i));
-fullGC(); // Marks these objects' blocks at the last version before the wrap.
+    worker.onmessage = function(e) {
+        const msg = e.data;
 
-objects = null;
-fullGC(); // The wrap collection, which reaches none of those blocks.
+        if (msg.action === 'PRUNE_CACHE') {
+            // Thread Principal: Inflar o cache de fontes usando <canvas>
+            const dummies = [];
+            for (let i = 0; i < 3500; i++) {
+                const dummy = document.createElement('canvas');
+                dummy.width = 1;
+                dummy.height = 1;
+                const ctx = dummy.getContext('2d');
+                ctx.font = '10px "dummy' + i + '"';
+                dummies.push(ctx);
+            }
+        } 
+        else if (msg.action === 'MEASURE') {
+            // Thread Principal: Executar a medição com o contexto 2D
+            const attempt = msg.attempt;
+            const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+            const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
 
-let survivors = [];
-for (let i = 0; i < 1000; ++i)
-    survivors.push(makeObject(i));
-fullGC(); // Reaches the new objects, in reused blocks that still hold the old marks.
+            document.fonts.add(metricsDonor);
+            document.fonts.add(measured);
 
-for (let i = 0; i < survivors.length; ++i) {
-    if (survivors[i].a19 !== i)
-        throw new Error("Bad object at " + i);
-}
-</script>
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+
+            context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+            keepAlive.push(metricsDonor, measured, context);
+
+            context.measureText('\u13A0\u13A2\u13A4');
+        } 
+        else if (msg.action === 'DONE') {
+            document.getElementById('status').innerText = 'PASS if no crash';
+            
+        }
+    };
+
+    window.onload = function() {
+        worker.postMessage({ cmd: 'start' });
+    };
+    </script>
 </body>
 </html>
