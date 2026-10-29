@@ -1,112 +1,74 @@
 
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="UTF-8">
-<title>PS4 Iframe GC Diagnostic</title>
-</head>
 <body>
-<pre id="log">PS4 Iframe GC Test
-</pre>
+<pre id="log">Iniciando...</pre>
 
 <script>
-var output = document.getElementById("log");
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
+}
 
 function log(s) {
-    output.textContent += s + "\n";
+    document.getElementById("log").textContent += "\n" + s;
 }
 
-var weakFrame;
-var weakParent;
-var weakChild;
+// Criar apenas UM iframe
+const iframe = document.createElement("iframe");
+document.body.appendChild(iframe);
 
-var registry = new FinalizationRegistry(function(name) {
-    log("FINALIZED: " + name);
-});
+// Criar o CSS dentro do iframe
+const doc = iframe.contentDocument;
+const style = doc.createElement("style");
+doc.head.appendChild(style);
 
-function setup() {
-    var frame = document.createElement("iframe");
-    document.body.appendChild(frame);
+const sheet = style.sheet;
 
-    var doc = frame.contentDocument;
-    var style = doc.createElement("style");
-    doc.head.appendChild(style);
+sheet.insertRule(
+    ".outer { color: red; & .nested { color: blue; } }",
+    0
+);
 
-    var sheet = style.sheet;
+let nestedRules = sheet.cssRules[0].cssRules;
 
-    sheet.insertRule(
-        ".outer { color:red; & .nested { color:blue; } }",
-        0
-    );
+// Remover a regra original
+sheet.deleteRule(0);
 
-    var parent = sheet.cssRules[0];
-    var child = parent.cssRules[0];
+// Remover o iframe
+iframe.remove();
 
-    weakFrame = new WeakRef(frame);
-    weakParent = new WeakRef(parent);
-    weakChild = new WeakRef(child);
+log("Iframe removed");
 
-    registry.register(frame, "iframe element");
-    registry.register(parent, "CSSStyleRule parent");
-    registry.register(child, "CSSStyleRule child");
+// Primeira chamada de GC
+gc();
 
-    log("Parent: " + parent.constructor.name);
-    log("Child: " + child.constructor.name);
+const nested = nestedRules[0];
+nestedRules = null;
 
-    sheet.deleteRule(0);
-    log("Sheet length: " + sheet.cssRules.length);
+// Segunda chamada de GC
+gc();
 
-    frame.remove();
-    log("Iframe removed");
-
-    // Referencias locais deixam o escopo.
-}
-
-function pressure() {
-    var junk = [];
-
-    for (var i = 0; i < 5000; i++) {
-        junk.push(new Array(100).join("GC_" + i));
-    }
-}
-
-var attempt = 0;
-
-function check() {
-    attempt++;
-    pressure();
-
-    setTimeout(function() {
-        var frameAlive =
-            weakFrame.deref() !== undefined;
-
-        var parentAlive =
-            weakParent.deref() !== undefined;
-
-        var childAlive =
-            weakChild.deref() !== undefined;
-
-        log(
-            "Attempt " + attempt +
-            " frame=" + frameAlive +
-            " parent=" + parentAlive +
-            " child=" + childAlive
-        );
-
-        if (attempt < 10) {
-            setTimeout(check, 500);
-        } else {
-            log("TEST FINISHED");
-        }
-    }, 100);
-}
-
+// Resultado original
 try {
-    setup();
-    setTimeout(check, 500);
+    log(
+        nested.parentRule === null
+        ? "PASS"
+        : "FAIL: parentRule is " + nested.parentRule
+    );
 } catch (e) {
-    log("ERROR: " + e.name + ": " + e.message);
+    log("EXCEPTION: " + e.name + ": " + e.message);
 }
+
+log("TEST FINISHED");
 </script>
 </body>
 </html>
