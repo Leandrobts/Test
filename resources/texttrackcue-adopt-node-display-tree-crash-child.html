@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Adopting a video whose cue display tree is in the UA shadow tree must migrate it exactly once</title>
+</head>
+<body>
+<video id="v" controls muted preload="auto" width="640" height="480"></video>
+<pre id="log"></pre>
+<script>
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
+}
+function log(message)
+{
+    document.getElementById("log").textContent += message + "\n";
+}
+
+function raf()
+{
+    return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+const N = 800;
+
+// Keeps the author-side fragment reachable until we deliberately drop it.
+let keepAlive = {};
+
+async function test()
+{
+    let video = document.getElementById("v");
+
+    // An in-band track is required: TrackListBase::didMoveToNewDocument() only iterates m_inbandTracks.
+    video.src = "counting-subtitled.m4v";
+    await new Promise(resolve => video.textTracks.addEventListener("addtrack", resolve, { once: true }));
+
+    let track = video.textTracks[0];
+    track.mode = "showing";
+
+    // A base-class TextTrackCue (not a VTTCue) is what updateDisplay() parents via appendChild().
+    // TextTrackCue::create() requires both a [cuebackground] and a [cue] element in the fragment.
+    let fragment = document.createDocumentFragment();
+    let background = document.createElement("span");
+    background.setAttribute("cuebackground", "");
+    let cueElement = document.createElement("span");
+    cueElement.setAttribute("cue", "");
+    background.appendChild(cueElement);
+    for (let i = 0; i < N; ++i) {
+        let span = document.createElement("span");
+        span.textContent = "x";
+        cueElement.appendChild(span);
+    }
+    fragment.appendChild(background);
+    keepAlive.fragment = fragment;
+    track.addCue(new TextTrackCue(0, 9999, fragment));
+
+    video.play().catch(() => { });
+
+    // Wait until the display tree has actually been appended into the UA shadow tree.
+    let shadowRoot = internals.shadowRoot(video);
+    let displayBox = null;
+    for (let i = 0; i < 200 && shadowRoot; ++i) {
+        await raf();
+        document.body.offsetHeight;
+        displayBox = shadowRoot.querySelector('[useragentpart="-webkit-generic-cue-root"]');
+        if (displayBox && displayBox.isConnected)
+            break;
+    }
+
+    if (!displayBox || !displayBox.isConnected) {
+        log("FAIL: the cue display tree was never parented into the UA shadow tree.");
+        return;
+    }
+
+    video.pause();
+    await raf();
+
+    document.implementation.createHTMLDocument("").adoptNode(video);
+
+   keepAlive.fragment = null;
+}
+
+// The GC has to run after test()'s frame is gone, otherwise JSC's conservative stack scan keeps the
+// author fragment alive and the counter is never driven down.
+test().catch(error => {
+    log("FAIL: " + error);
+    top.postMessage('*', {status: 'done'});
+}).then(() => {
+    setTimeout(() => {
+        gc();
+        gc();
+        log("PASS if no crash.");
+        top.postMessage('*', {status: 'done'});
+    }, 0);
+});
+</script>
+</body>
+</html>
