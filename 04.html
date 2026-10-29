@@ -1,45 +1,78 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Teste de fontes e Canvas 2D</title></head>
+<head>
+    <meta charset="utf-8">
+    <title>CSS Font Selector Opportunistic Load Reentrancy Test - PS4 Main Thread</title>
+</head>
 <body>
-<pre id="resultado">Iniciando teste...</pre>
-<script>
-(function () {
-    var output = document.getElementById('resultado');
+    <p>This test passes if it does not crash.</p>
+    <div id="status">Testing...</div>
+
+    <script>
+
     function finish(message) {
-        output.appendChild(document.createTextNode('\n' + message));
+        document.getElementById('status').innerText = message;       
     }
 
-    var worker = new Worker('resources/opportunistic-load-reentrancy-worker.js');
-    worker.onmessage = function (event) {
-        var data = event.data;
-        if (data && data.type === 'measure-text') {
-            try {
-                var canvas = document.createElement('canvas');
-                canvas.width = 10;
-                canvas.height = 10;
-                var context = canvas.getContext('2d');
-                if (!context)
-                    throw new Error('Canvas 2D indisponÃ­vel');
-                context.font = data.font;
-                var result = context.measureText(String.fromCharCode(data.character));
-                finish('measureText: ' + result.width);
-                finish('PASS: mediÃ§Ã£o executada (nÃ£o comprova ausÃªncia de UAF)');
-                worker.postMessage({ type: 'measurement-complete', width: result.width });
-            } catch (error) {
-                finish('FAIL: ' + error);
-                worker.postMessage({ type: 'measurement-error', message: String(error) });
+    try {
+        // Carregamento síncrono compatível com a thread principal
+        const fontRequest = new XMLHttpRequest();
+        // Ajuste o caminho do Ahem.woff conforme a sua estrutura de pastas local
+        fontRequest.open('GET', 'resources/Ahem.woff', false);
+        
+        // Forma compatível com XHR síncrono na thread principal para ler arquivos binários
+        fontRequest.overrideMimeType('text/plain; charset=x-user-defined');
+        fontRequest.send();
+
+        if (fontRequest.status === 200 || fontRequest.status === 0) {
+            // Converte o texto recebido em ArrayBuffer/Uint8Array
+            const text = fontRequest.responseText;
+            const bytes = new Uint8Array(text.length);
+            for (let i = 0; i < text.length; i++) {
+                bytes[i] = text.charCodeAt(i) & 0xff;
             }
-        } else if (data && data.type === 'error') {
-            finish('FAIL: worker error: ' + data.message);
-        } else if (data && data.type === 'done') {
-            finish('Worker concluÃ­do');
+
+            // Cria o Blob e a URL temporária para o FontFace
+            const blob = new Blob([bytes], { type: 'font/woff' });
+            const dataUrl = URL.createObjectURL(blob);
+
+            const face1 = new FontFace('testFace', 'url("' + dataUrl + '")');
+            const face2 = new FontFace('testFace', 'url("' + dataUrl + '")');
+            document.fonts.add(face1);
+            document.fonts.add(face2);
+
+            // Populating the deferred promise makes resolution observable below.
+            void face1.loaded;
+            void face2.loaded;
+
+            const reenterFontFaceSet = function () {
+                document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
+            };
+            Object.defineProperty(face1, 'then', { get: reenterFontFaceSet });
+            Object.defineProperty(face2, 'then', { get: reenterFontFaceSet });
+
+            // Substituição do OffscreenCanvas pelo elemento <canvas> tradicional do DOM
+            const canvas = document.createElement('canvas');
+            canvas.width = 10;
+            canvas.height = 10;
+            const context = canvas.getContext('2d');
+
+            if (!context) {
+                throw new Error('Canvas 2D indisponível');
+            }
+
+            context.font = '10px Times, testFace';
+            // The pre-warm helper runs unconditionally at the top of
+            // FontCascadeFonts::glyphDataForVariant, so any character reaches it.
+            context.measureText(String.fromCharCode(0x13A0));
+
+            finish("PASS if no crash");
+        } else {
+            finish("FAIL: Could not load Ahem.woff (status: " + fontRequest.status + ")");
         }
-    };
-    worker.onerror = function (event) {
-        finish('FAIL: worker error: ' + event.message);
-    };
-}());
-</script>
+    } catch (e) {
+        finish("FAIL: " + e.message);
+    }
+    </script>
 </body>
 </html>
