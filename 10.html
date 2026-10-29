@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html>
 <body>
-<script src="resources/js-test.js"></script>
 <script>
+
+
 function gc() {
     function gcRec(n) {
           if (n < 1)
@@ -15,47 +16,40 @@ function gc() {
     gcRec(10);
 }
 
-description(`This tests ChildNode.after() when a subframe pagehide listener, run by the detach step of
-"converting nodes into a node", re-parents the reference sibling into another container. This reaches the
-same window as before-after-with-reparented-reference-sibling-crash.html but through
-disconnectSubframesIfNeeded rather than DOMNodeRemoved, so it needs no mutation-event preference.<br>
-WebKit should throw NotFoundError instead of splicing the new children into the other container's sibling chain.`);
+let survivor, child, list;
+let result = 'PASS if no crash.';
 
-jsTestIsAsync = true;
+// The setup runs inside a function so the secondary document is not reachable from a
+// global once it returns, and can therefore be collected below.
+(function setup() {
+    let secondaryDocument = document.implementation.createHTMLDocument();
+    secondaryDocument.body.innerHTML = '<input id="i"><label for="i"></label>';
 
-var parent = document.createElement('div');
-var otherParent = document.createElement('div');
-var target = document.createElement('span');
-var refSibling = document.createElement('span');
-// n1 wraps the iframe, so removing n1 during the detach step disconnects the subframe and fires pagehide.
-var n1 = document.createElement('div');
-var n2 = document.createElement('span');
-var frame = document.createElement('iframe');
+    // One successful lookup registers the list for invalidation at the secondary document
+    // and leaves the index cache's WeakPtr to the <label> as its only valid state.
+    list = secondaryDocument.getElementById('i').labels;
+    if (!list[0])
+        result = 'FAIL: expected the labels list to find the <label>.';
 
-parent.append(target, refSibling);
-n1.appendChild(frame);
-document.body.append(parent, otherParent, n1);
+    // Disconnected elements keep the secondary document alive via its referencing node
+    // count, without keeping its JS wrapper reachable.
+    survivor = secondaryDocument.createElement('div');
+    child = secondaryDocument.createElement('span');
+})();
 
-frame.onload = () => {
-    frame.contentWindow.addEventListener('pagehide', () => otherParent.appendChild(refSibling), { once: true });
+// Destroys the <label>, so the index cache's WeakPtr nulls itself with no code running on
+// the node list. The list must still be considered registered at the document. This has to
+// happen in an earlier collection than the one that destroys the node list below.
+gc(); gc(); gc();
 
-    shouldThrowErrorName(`target.after(n1, n2)`, 'NotFoundError');
-    shouldBe('refSibling.parentNode', 'otherParent');
-    shouldBe('parent.firstChild', 'target');
-    shouldBe('parent.lastChild', 'target');
-    shouldBe('n1.parentNode', 'null');
-    shouldBe('n2.parentNode', 'null');
+// Destroys the node list, which has to unregister itself from the document here.
+list = null;
+gc(); gc(); gc();
 
+// Walks the document's node list registry. Used to dereference the freed node list.
+survivor.appendChild(child);
 
-        gc();
-    // Before the fix, parent and otherParent shared one sibling chain, so this reassigned
-    // otherParent's CheckedPtr<Node> m_lastChild over a destroyed node.
-    shouldNotThrow(`otherParent.appendChild(document.createElement('span'))`);
-
-    finishJSTest();
-};
-frame.src = 'about:blank';
-
+document.body.textContent = result;
 </script>
 </body>
 </html>
