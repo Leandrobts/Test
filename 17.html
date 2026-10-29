@@ -1,25 +1,97 @@
+
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="UTF-8">
+<title>PS4 iframe CSSOM lifecycle</title>
+</head>
 <body>
-<select id="a" style="display: table-column">
-    <option>One</option>
-</select>
-
-<select id="b" style="display: table-column-group">
-    <option>Two</option>
-</select>
-
-<pre id="result"></pre>
+<pre id="log">Iniciando...</pre>
 
 <script>
-const a = document.getElementById("a");
-const b = document.getElementById("b");
+var output = document.getElementById("log");
 
-document.getElementById("result").textContent =
-    "A: " + getComputedStyle(a).display + "\n" +
-    "B: " + getComputedStyle(b).display + "\n" +
-    "base-select suportado: " +
-    CSS.supports("appearance", "base-select");
+function log(s) {
+    output.textContent += "\n" + s;
+}
+
+var weakFrame;
+var weakDocument;
+var registry = new FinalizationRegistry(function(value) {
+    log("FINALIZED: " + value);
+});
+
+function pressure() {
+    var junk = [];
+    for (var i = 0; i < 5000; i++) {
+        junk.push(new Array(100).join("GC_" + i));
+    }
+}
+
+function setup() {
+    var frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+
+    var doc = frame.contentDocument;
+
+    var style = doc.createElement("style");
+    doc.head.appendChild(style);
+
+    var sheet = style.sheet;
+
+    sheet.insertRule(
+        ".outer { color:red; & .nested { color:blue; } }",
+        0
+    );
+
+    log("Parent type: " +
+        sheet.cssRules[0].constructor.name);
+
+    log("Child count: " +
+        sheet.cssRules[0].cssRules.length);
+
+    weakFrame = new WeakRef(frame);
+    weakDocument = new WeakRef(doc);
+
+    registry.register(frame, "iframe");
+    registry.register(doc, "document");
+
+    frame.remove();
+
+    log("iframe removed");
+}
+
+var attempts = 0;
+
+function check() {
+    attempts++;
+
+    pressure();
+
+    setTimeout(function() {
+        var frameAlive =
+            weakFrame.deref() !== undefined;
+
+        var docAlive =
+            weakDocument.deref() !== undefined;
+
+        log("Attempt " + attempts +
+            " frame=" + frameAlive +
+            " document=" + docAlive);
+
+        if (attempts < 10)
+            setTimeout(check, 500);
+        else
+            log("TEST FINISHED");
+    }, 100);
+}
+
+try {
+    setup();
+    setTimeout(check, 500);
+} catch (e) {
+    log("ERROR: " + e.name + ": " + e.message);
+}
 </script>
 </body>
 </html>
