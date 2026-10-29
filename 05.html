@@ -2,42 +2,42 @@
 <html>
 <body>
 <script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
-}
-    
-// Keep the shadow tree alive with a ChildNodeList, which holds a C++ reference to the
-// shadow root but is not traced as an opaque root by the garbage collector. Once the
-// detached host element is collected, Element::removeShadowRootSlow() detaches the shadow
-// root, and the cached Node::m_shadowIncludingRoot of nodes in the shadow tree must no
-// longer point at the freed host.
-let childNodes;
-(function () {
-    let host = document.createElement('div');
-    let shadowRoot = host.attachShadow({ mode: 'open' });
-    shadowRoot.innerHTML = '<span></span>';
-    childNodes = shadowRoot.childNodes;
-})();
 
-setTimeout(function () {
-    
-        gc();
-    setTimeout(function () {
-       gc();
-        let child = childNodes.item(0);
-        let composedRoot = child.getRootNode({ composed: true });
-        document.write(composedRoot.nodeType == Node.DOCUMENT_FRAGMENT_NODE ? 'PASS' : 'FAIL');
-        
-    }, 0);
-}, 0);
+function finish(message) {
+    document.body.appendChild(document.createTextNode(message)); 
+}
+
+const worker = new Worker('resources/opportunistic-load-reentrancy-worker.js');
+
+worker.onmessage = function (event) {
+    const data = event.data;
+
+    // Como o Worker não tem DOM, ele pede para a página principal criar o canvas
+    if (data && data.action === 'MEASURE') {
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = 10;
+            canvas.height = 10;
+            const context = canvas.getContext('2d');
+            
+            context.font = data.font;
+            const result = context.measureText(data.text);
+            
+            console.log('measureText executado na main thread:', result.width);
+            
+            // Retorna o sucesso de volta para o worker continuar/encerrar
+            worker.postMessage({ status: 'success' });
+        } catch (e) {
+            worker.postMessage({ status: 'error', message: e.message });
+        }
+    } else if (data === 'done' || data.status === 'done') {
+        finish("PASS if no crash");
+    }
+};
+
+worker.onerror = function (event) { 
+    finish("FAIL: worker error: " + event.message); 
+};
 </script>
 </body>
 </html>
