@@ -1,43 +1,80 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<meta charset="utf-8">
 <body>
+<p>This tests encountering a XML parser error during outerHTML. WebKit should not expose the shared document fragment.</p>
+<div id="result"></div>
+
 <script>
-
-function finish(message) {
-    document.body.appendChild(document.createTextNode(message)); 
-}
-
-const worker = new Worker('resources/opportunistic-load-reentrancy-worker2.js');
-
-worker.onmessage = function (event) {
-    const data = event.data;
-
-    // Como o Worker não tem DOM, ele pede para a página principal criar o canvas
-    if (data && data.action === 'MEASURE') {
-        try {
-            const canvas = document.createElement('canvas');
-            canvas.width = 10;
-            canvas.height = 10;
-            const context = canvas.getContext('2d');
-            
-            context.font = data.font;
-            const result = context.measureText(data.text);
-            
-            console.log('measureText executado na main thread:', result.width);
-            
-            // Retorna o sucesso de volta para o worker continuar/encerrar
-            worker.postMessage({ status: 'success' });
-        } catch (e) {
-            worker.postMessage({ status: 'error', message: e.message });
-        }
-    } else if (data === 'done' || data.status === 'done') {
-        finish("PASS if no crash");
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
     }
-};
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
+}
+(() => {
+    let walker;
+    window.parentDonor = document.createElement("input");
+    parentDonor.type = "radio";
+    parentDonor.name = "g";
 
-worker.onerror = function (event) { 
-    finish("FAIL: worker error: " + event.message); 
-};
-</script>
+    window.childReady = () => {
+        const escaped = window.parentDonor;
+        if (!escaped || escaped.parentNode) {
+            result.textContent = 'FAIL - escaped did not have a parent';
+            return;
+        }
+
+        document.adoptNode(escaped);
+        walker = document.createTreeWalker(escaped);
+        window.parentDonor = null;
+
+        document.querySelector("iframe").remove();
+
+        setTimeout(() => {
+            gc();
+
+            const nodeType = walker.currentNode.getRootNode({ composed: true }).nodeType;
+            result.textContent = nodeType == Node.ELEMENT_NODE ? 'PASS' : `FAIL - bad node type: ${nodeType}`;
+
+        }, 0);
+    };
+
+    const childSource = `<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+<div id="victim"></div>
+<div id="cleanup"></div>
+<script><![CDATA[
+(() => {
+    class XFragmentEscape extends HTMLElement {
+        constructor() {
+            super();
+            this.after(parent.parentDonor);
+        }
+    }
+    customElements.define("x-fragment-escape", XFragmentEscape);
+
+    try {
+        document.getElementById("victim").outerHTML =
+            "<x-fragment-escape></x-fragment-escape><";
+    } catch (error) {
+    }
+
+    document.getElementById("cleanup").innerHTML =
+        '<span xmlns="http://www.w3.org/1999/xhtml">cleanup</span>';
+    parent.childReady();
+})();
+]]><\/script>
 </body>
-</html>
+</html>`;
+
+    const frame = document.createElement("iframe");
+    frame.src = URL.createObjectURL(new Blob([childSource], { type: "application/xhtml+xml" }));
+    document.body.append(frame);
+})();
+</script>
