@@ -2,77 +2,57 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>CSS Font Selector Opportunistic Load Reentrancy Test - PS4 Main Thread</title>
+    
 </head>
 <body>
-    <p>This test passes if it does not crash.</p>
-    <div id="status">Testing...</div>
+<script>
 
-    <script>
+function loadFontAsDataURL(path) {
+    return fetch(path)
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.arrayBuffer();
+        })
+        .then(function(buffer) {
+            return new Promise(function(resolve, reject) {
+                var reader = new FileReader();
+                reader.onload  = function(e) { resolve(e.target.result); };
+                reader.onerror = reject;
+                reader.readAsDataURL(new Blob([buffer], { type: 'font/woff' }));
+            });
+        });
+}
 
-    function finish(message) {
-        document.getElementById('status').innerText = message;       
-    }
+loadFontAsDataURL('resources/Ahem.woff')
+    .then(function(dataUrl) {
+        var face1 = new FontFace('testFace', 'url("' + dataUrl + '")');
+        var face2 = new FontFace('testFace', 'url("' + dataUrl + '")');
+        document.fonts.add(face1);
+        document.fonts.add(face2);
 
-    try {
-        // Carregamento síncrono compatível com a thread principal
-        const fontRequest = new XMLHttpRequest();
-        // Ajuste o caminho do Ahem.woff conforme a sua estrutura de pastas local
-        fontRequest.open('GET', 'resources/Ahem.woff', false);
-        
-        // Forma compatível com XHR síncrono na thread principal para ler arquivos binários
-        fontRequest.overrideMimeType('text/plain; charset=x-user-defined');
-        fontRequest.send();
+        void face1.loaded;
+        void face2.loaded;
 
-        if (fontRequest.status === 200 || fontRequest.status === 0) {
-            // Converte o texto recebido em ArrayBuffer/Uint8Array
-            const text = fontRequest.responseText;
-            const bytes = new Uint8Array(text.length);
-            for (let i = 0; i < text.length; i++) {
-                bytes[i] = text.charCodeAt(i) & 0xff;
-            }
+        var trapFired = false;
+        var reenterFontFaceSet = function() {
+            trapFired = true;
+            document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
+        };
+        Object.defineProperty(face1, 'then', { get: reenterFontFaceSet });
+        Object.defineProperty(face2, 'then', { get: reenterFontFaceSet });
 
-            // Cria o Blob e a URL temporária para o FontFace
-            const blob = new Blob([bytes], { type: 'font/woff' });
-            const dataUrl = URL.createObjectURL(blob);
+        var canvas = document.createElement('canvas');
+        canvas.width  = 10;
+        canvas.height = 10;
+        canvas.style.position = 'absolute';
+        canvas.style.left = '-9999px';
+        document.body.appendChild(canvas);
+        var context = canvas.getContext('2d');
 
-            const face1 = new FontFace('testFace', 'url("' + dataUrl + '")');
-            const face2 = new FontFace('testFace', 'url("' + dataUrl + '")');
-            document.fonts.add(face1);
-            document.fonts.add(face2);
-
-            // Populating the deferred promise makes resolution observable below.
-            void face1.loaded;
-            void face2.loaded;
-
-            const reenterFontFaceSet = function () {
-                document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
-            };
-            Object.defineProperty(face1, 'then', { get: reenterFontFaceSet });
-            Object.defineProperty(face2, 'then', { get: reenterFontFaceSet });
-
-            // Substituição do OffscreenCanvas pelo elemento <canvas> tradicional do DOM
-            const canvas = document.createElement('canvas');
-            canvas.width = 10;
-            canvas.height = 10;
-            const context = canvas.getContext('2d');
-
-            if (!context) {
-                throw new Error('Canvas 2D indisponível');
-            }
-
-            context.font = '10px Times, testFace';
-            // The pre-warm helper runs unconditionally at the top of
-            // FontCascadeFonts::glyphDataForVariant, so any character reaches it.
-            context.measureText(String.fromCharCode(0x13A0));
-
-            finish("PASS if no crash");
-        } else {
-            finish("FAIL: Could not load Ahem.woff (status: " + fontRequest.status + ")");
-        }
-    } catch (e) {
-        finish("FAIL: " + e.message);
-    }
-    </script>
+        context.font = '10px Times, testFace';
+        context.measureText(String.fromCharCode(0x13A0)); 
+    })
+    
+</script>
 </body>
 </html>
