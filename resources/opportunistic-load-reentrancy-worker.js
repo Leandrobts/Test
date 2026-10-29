@@ -3,8 +3,7 @@
 // resolves FontFace.loaded and runs author script while it is still iterating.
 // That script calls FontFaceSet.add(), which clears CSSFontFaceSet::m_cache.
 
-function fontDataURL(path)
-{
+function fontDataURL(path) {
     const fontRequest = new XMLHttpRequest();
     fontRequest.open('GET', path, false);
     fontRequest.responseType = 'arraybuffer';
@@ -13,7 +12,6 @@ function fontDataURL(path)
 }
 
 const dataUrl = fontDataURL('resources/Ahem.woff');
-
 const face1 = new FontFace('testFace', 'url("' + dataUrl + '")');
 const face2 = new FontFace('testFace', 'url("' + dataUrl + '")');
 self.fonts.add(face1);
@@ -26,12 +24,20 @@ void face2.loaded;
 const reenterFontFaceSet = function () {
     self.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
 };
+
 Object.defineProperty(face1, 'then', { get: reenterFontFaceSet });
 Object.defineProperty(face2, 'then', { get: reenterFontFaceSet });
 
-const context = new OffscreenCanvas(10, 10).getContext('2d');
-context.font = '10px Times, testFace';
-// The pre-warm helper runs unconditionally at the top of
-// FontCascadeFonts::glyphDataForVariant, so any character reaches it.
-context.measureText(String.fromCharCode(0x13A0));
-postMessage('done');
+// Substituição do OffscreenCanvas: como o worker do PS4 não possui OffscreenCanvas,
+// solicitamos via postMessage para a thread principal executar o canvas mantendo a lógica.
+postMessage({ 
+    action: 'MEASURE', 
+    font: '10px Times, testFace', 
+    text: String.fromCharCode(0x13A0) 
+});
+
+onmessage = function(e) {
+    if (e.data && (e.data.status === 'success' || e.data.status === 'error')) {
+        postMessage('done');
+    }
+};
