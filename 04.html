@@ -1,33 +1,78 @@
 <!DOCTYPE html>
 <html>
+<head>
+    <meta charset="utf-8">
+</head>
 <body>
 <script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
+function loadFontAsDataURL(path) {
+    return fetch(path)
+        .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status + ' ao carregar ' + path);
+            return r.arrayBuffer();
+        })
+        .then(function(buffer) {
+            return new Promise(function(resolve, reject) {
+                var reader = new FileReader();
+                reader.onload  = function(e) { resolve(e.target.result); };
+                reader.onerror = reject;
+                reader.readAsDataURL(new Blob([buffer], { type: 'font/woff' }));
+            });
+        });
 }
 
-const style = document.createElement("style");
-document.head.appendChild(style);
-const sheet = style.sheet;
-sheet.insertRule(".outer { color: red; & .nested { color: blue; } }", 0);
+loadFontAsDataURL('resources/Ahem.woff')
+    .then(function(dataUrl) {
+        var N_DUMMIES = 1200;
+        var dummies = [];
+        for (var i = 0; i < N_DUMMIES; i++) {
+            var d = document.createElement('canvas');
+            d.width = 1; d.height = 1;
+            d.getContext('2d').font = '10px "dummy' + i + '"';
+            dummies.push(d);
+        }
 
-let nestedRules = sheet.cssRules[0].cssRules;
-sheet.deleteRule(0);
-gc();
+        var keepAlive = [];
 
-const nested = nestedRules[0];
-nestedRules = null;
-gc();
+        for (var attempt = 0; attempt < 2; attempt++) {
+            var metricsDonor = new FontFace(
+                'metricsDonor' + attempt,
+                'url("' + dataUrl + '")'
+            );
+            var measured = new FontFace(
+                'measured' + attempt,
+                'url("' + dataUrl + '")',
+                { unicodeRange: 'U+13A0-13FF' }
+            );
 
-document.write(nested.parentRule === null ? "PASS" : "FAIL: parentRule is " + nested.parentRule);
+            document.fonts.add(metricsDonor);
+            document.fonts.add(measured);
+
+            void metricsDonor.loaded;
+            void measured.loaded;
+
+            var reenterFontFaceSet = function() {
+                document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
+            };
+            Object.defineProperty(metricsDonor, 'then', { get: reenterFontFaceSet });
+            Object.defineProperty(measured,     'then', { get: reenterFontFaceSet });
+
+            var canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            canvas.style.position = 'absolute';
+            canvas.style.left = '-9999px';
+            document.body.appendChild(canvas);
+            var context = canvas.getContext('2d');
+
+            context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+            keepAlive.push(metricsDonor, measured, context);
+
+            var metrics = context.measureText('\u13A0\u13A2\u13A4');
+        }
+    })
+    .catch(function(e) {
+        // Erros silenciados
+    });
 </script>
 </body>
 </html>
