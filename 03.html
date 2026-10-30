@@ -1,74 +1,99 @@
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body>
-<pre id="log">Testando...</pre>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diagnóstico de fontes WebKit / PS4</title>
+<style>
+body{font:16px Arial,sans-serif;background:#151b29;color:#edf2fc;margin:0;padding:18px;line-height:1.5}main{max-width:850px;margin:auto}h1{font-size:22px}button{padding:12px 16px;margin:6px 8px 8px 0;border:0;border-radius:6px;background:#76b7ff;color:#09111e;font-weight:bold}button:disabled{opacity:.5}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1020;padding:14px;border-radius:6px;font:13px monospace}small{color:#b9c7df}.status{font-weight:bold}
+</style>
+</head>
+<body><main>
+<h1>Diagnóstico de fontes — WebKit / PS4</h1>
+<p>Verificação não destrutiva de compatibilidade, carregamento de fontes e consistência de TextMetrics. Não tenta provocar falhas de memória.</p>
+<button id="run">Executar diagnóstico</button><button id="copy">Selecionar relatório</button>
+<p id="status" class="status">Aguardando execução.</p>
+<pre id="output">Nenhum teste executado.</pre>
+<small>O teste usa apenas fontes locais e uma fonte de dados inválidos pequena. Uma falha ao carregar a fonte de teste é esperada. Resultados normais não comprovam ausência de vulnerabilidade; erros ou mudanças de métricas não comprovam UAF.</small>
 <script>
-function log(msg) { document.getElementById('log').textContent = msg; }
-
-var results = [];
-
-// 1. transferControlToOffscreen disponivel?
-var tcoSupport = typeof HTMLCanvasElement !== 'undefined' &&
-                 typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function';
-results.push('transferControlToOffscreen: ' + (tcoSupport ? 'DISPONIVEL' : 'AUSENTE'));
-
-// 2. OffscreenCanvas disponivel no main thread?
-var ocMainSupport = typeof OffscreenCanvas !== 'undefined';
-results.push('OffscreenCanvas (main thread): ' + (ocMainSupport ? 'DISPONIVEL' : 'AUSENTE'));
-
-// 3. Blob Worker funciona?
-var blobWorkerBody = 'postMessage(typeof OffscreenCanvas !== "undefined" ? "OC:SIM" : "OC:NAO");';
-try {
-    var blob = new Blob([blobWorkerBody], { type: 'application/javascript' });
-    var blobURL = URL.createObjectURL(blob);
-    var w = new Worker(blobURL);
-    w.onmessage = function(e) {
-        results.push('Blob Worker: DISPONIVEL');
-        results.push('OffscreenCanvas (dentro de Worker): ' + e.data);
-        URL.revokeObjectURL(blobURL);
-        finish();
-    };
-    w.onerror = function(e) {
-        results.push('Blob Worker: ERRO — ' + e.message);
-        finish();
-    };
-} catch(e) {
-    results.push('Blob Worker: EXCECAO — ' + e.message);
-    finish();
+(function(){
+'use strict';
+var output=document.getElementById('output'), status=document.getElementById('status'), run=document.getElementById('run');
+var lines=[], running=false;
+function write(s){lines.push(String(s));output.textContent=lines.join('\n');}
+function value(x){return (typeof x==='number' && !isFinite(x))?String(x):String(x);}
+function metrics(ctx,text){
+ var m=ctx.measureText(text), keys=['width','actualBoundingBoxAscent','actualBoundingBoxDescent','fontBoundingBoxAscent','fontBoundingBoxDescent','emHeightAscent','emHeightDescent'];
+ var o={};for(var i=0;i<keys.length;i++){var v=m[keys[i]];o[keys[i]]=(typeof v==='number')?value(v):(typeof v==='undefined'?'indisponível':String(v));}return o;
 }
-
-// 4. Se transferControlToOffscreen disponivel, testar transferencia real
-if (tcoSupport) {
-    try {
-        var testCanvas = document.createElement('canvas');
-        testCanvas.width = 4; testCanvas.height = 4;
-        var offscreen = testCanvas.transferControlToOffscreen();
-        results.push('transferControlToOffscreen() — execucao: OK');
-        results.push('offscreen instanceof OffscreenCanvas: ' + (offscreen instanceof OffscreenCanvas));
-    } catch(e) {
-        results.push('transferControlToOffscreen() — execucao: ERRO — ' + e.message);
-    }
+function format(o){var a=[];for(var k in o)if(Object.prototype.hasOwnProperty.call(o,k))a.push(k+'='+o[k]);return a.join('; ');}
+function difference(a,b){var changed=[];for(var k in a)if(a[k]!==b[k])changed.push(k+': '+a[k]+' -> '+b[k]);return changed.length?changed.join('; '):'nenhuma';}
+function finish(){running=false;run.disabled=false;status.textContent='Diagnóstico concluído.';write('\nFIM. Este relatório descreve apenas comportamentos observáveis via JavaScript.');}
+function start(){
+ if(running)return;running=true;run.disabled=true;lines=[];status.textContent='Executando...';
+ write('DIAGNÓSTICO WEBKIT / PS4');write('Data: '+new Date().toString());write('User agent: '+navigator.userAgent);write('');
+ var canvas=document.createElement('canvas');canvas.width=64;canvas.height=64;
+ var ctx=null;try{ctx=canvas.getContext('2d');}catch(e){write('Canvas getContext erro: '+e);}
+ write('Canvas 2D: '+!!ctx);
+ write('FontFace: '+(typeof FontFace==='function'));
+ write('document.fonts: '+!!document.fonts);
+ write('document.fonts.load: '+!!(document.fonts&&document.fonts.load));
+ write('document.fonts.check: '+!!(document.fonts&&document.fonts.check));
+ write('OffscreenCanvas: '+(typeof OffscreenCanvas!=='undefined'));
+ write('transferControlToOffscreen: '+(typeof HTMLCanvasElement!=='undefined'&&typeof HTMLCanvasElement.prototype.transferControlToOffscreen==='function'));
+ write('Worker: '+(typeof Worker==='function'));
+ write('Blob: '+(typeof Blob==='function'));
+ write('Promise: '+(typeof Promise==='function'));
+ if(!ctx){write('Canvas indisponível: encerrando.');finish();return;}
+ write('\nBASELINE (fontes locais)');
+ var samples=['ABC abc 123','\u13A0\u13A2\u13A4','Espaço e acentos: ação'];
+ var baseline=[];
+ for(var i=0;i<samples.length;i++){
+   ctx.font='16px sans-serif';var a=metrics(ctx,samples[i]);var b=metrics(ctx,samples[i]);
+   baseline.push(a);write('Amostra '+i+' ('+samples[i]+'): '+format(a));write('Repetição: '+difference(a,b));
+ }
+ if(!document.fonts||typeof FontFace!=='function'||typeof Promise!=='function'){
+   write('\nFont Loading API incompleta: teste assíncrono ignorado.');finish();return;
+ }
+ var fs=document.fonts;
+ write('\nFONT LOADING API');write('document.fonts.status inicial: '+fs.status);
+ var events=[];
+ function listen(name){if(fs.addEventListener)fs.addEventListener(name,function(){events.push(name);write('Evento observado: '+name);});}
+ listen('loading');listen('loadingdone');listen('loadingerror');
+ var face;
+ try{
+   // Fonte pequena e intencionalmente inválida: observa rejeição sem consumo elevado.
+   face=new FontFace('PS4DiagnosticFont','url(data:font/ttf;base64,QUJDRA==)');
+   write('FontFace inicial: '+face.status);
+   fs.add(face);write('FontFace adicionada: '+face.status);
+ }catch(e){write('Criação/registro de FontFace falhou: '+e);finish();return;}
+ var settled=false;
+ function conclude(label){
+   if(settled)return;settled=true;write('Resultado do carregamento: '+label);
+   write('FontFace.status final: '+face.status);write('document.fonts.status: '+fs.status);
+   write('Eventos observados até agora: '+(events.join(', ')||'nenhum'));
+   write('\nMÉTRICAS APÓS TENTATIVA DE CARREGAMENTO');
+   for(var j=0;j<samples.length;j++){
+     ctx.font='16px sans-serif';var after=metrics(ctx,samples[j]);
+     write('Amostra '+j+' — diferença vs baseline: '+difference(baseline[j],after));
+   }
+   try{write('document.fonts.check para fonte de teste: '+fs.check('16px PS4DiagnosticFont'));}catch(e){write('fonts.check erro: '+e);}
+   finish();
+ }
+ try{
+   var promise=face.load();write('FontFace.load() invocado; status imediato: '+face.status);
+   if(promise&&typeof promise.then==='function'){
+     promise.then(function(){conclude('resolvido (inesperado para dados inválidos)');},function(e){conclude('rejeitado (esperado para dados inválidos): '+(e&&e.name?e.name:String(e)));});
+   }else{conclude('load() não retornou Promise');}
+ }catch(e){conclude('exceção: '+e);}
+ // Timeout de observação, não garante cancelamento do carregamento.
+ setTimeout(function(){conclude('sem conclusão em 5 segundos (timeout de observação)');},5000);
 }
-
-function finish() {
-    log(results.join('\n') + '\n\n' +
-        '---\n' +
-        'Para o UAF do commit 5ccd64b funcionar no PS4, precisa:\n' +
-        '  [1] Blob Worker: DISPONIVEL\n' +
-        '  [2] OffscreenCanvas dentro de Worker: OC:SIM\n' +
-        '       OU\n' +
-        '  [2] transferControlToOffscreen: DISPONIVEL\n' +
-        '       + Blob Worker: DISPONIVEL');
-}
-
-// Timeout caso o worker nao responda
-setTimeout(function() {
-    if (results.length < 4) {
-        results.push('Worker: sem resposta em 3s');
-        finish();
-    }
-}, 3000);
-</script>
-</body>
-</html>
+run.onclick=start;
+document.getElementById('copy').onclick=function(){
+ var selection=window.getSelection&&window.getSelection();
+ if(selection&&document.createRange){var range=document.createRange();range.selectNodeContents(output);selection.removeAllRanges();selection.addRange(range);status.textContent='Relatório selecionado. Use a opção Copiar do navegador.';}
+ else status.textContent='Selecione manualmente o texto do relatório.';
+};
+})();
+</script></main></body></html>
