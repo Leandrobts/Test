@@ -1,68 +1,170 @@
 <!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-</head>
-<body>
-<p>This test passes if it does not crash.</p>
-<div id="status">Running...</div>
+<pre id="log"></pre>
 <script>
-  
+function log(s) { document.getElementById('log').textContent += s + '\n'; }
 
-  function finish(msg) {
-      document.getElementById('status').innerText = msg;
-    
-  }
+fetch('Ahem.woff')
+    .then(function(r) { return r.arrayBuffer(); })
+    .then(function(b) {
+        return new Promise(function(res, rej) {
+            var fr = new FileReader();
+            fr.onload  = function(e) { res(e.target.result); };
+            fr.onerror = rej;
+            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
+        });
+    })
+    .then(function(dataUrl) {
 
-  // Carrega o binário local para garantir o comportamento síncrono de reentrância
-  const xhr = new XMLHttpRequest();
-  xhr.open('GET', 'resources/Ahem.woff', false);
-  xhr.overrideMimeType('text/plain; charset=x-user-defined');
-  
-  try {
-      xhr.send();
-      if (xhr.status === 200 || xhr.status === 0) {
-          const text = xhr.responseText;
-          const bytes = new Uint8Array(text.length);
-          for (let i = 0; i < text.length; i++) {
-              bytes[i] = text.charCodeAt(i) & 0xff;
-          }
-          const blob = new Blob([bytes], { type: 'font/woff' });
-          const dataUrl = URL.createObjectURL(blob);
+        // ---------------------------------------------------------------
+        // Teste A — getter na INSTANCIA (padrao do 42b1e2a que crashou)
+        // Se disparar: o problema e apenas o mecanismo de save()
+        // Se nao disparar: o problema nao esta aqui (check de thenable nao
+        //                  funciona nem em instancia para este codigo path)
+        // ---------------------------------------------------------------
+        log('=== Teste A: getter na INSTANCIA + context.save() ===');
 
-          let face = new FontFace('MyTestFam', 'url("' + dataUrl + '")');
-          face.loaded;
-          document.fonts.add(face);
+        var faceA = new FontFace('FamA', 'url("' + dataUrl + '")');
+        document.fonts.add(faceA);
+        void faceA.loaded;
 
-          let context = document.createElement('canvas').getContext('2d');
-          context.save();
-          context.lineWidth = 0.5;
-          context.font = '10px MyTestFam';
+        var ctxA = document.createElement('canvas').getContext('2d');
+        ctxA.save();
+        ctxA.lineWidth = 0.5;
+        ctxA.font = '10px FamA';
 
-          let reentered = false;
-          Object.defineProperty(FontFace.prototype, 'then', {
+        var firedA = false;
+        var reentA = false;
+        Object.defineProperty(faceA, 'then', {
             configurable: true,
-            get() {
-              if (reentered)
+            get: function() {
+                if (reentA) return undefined;
+                reentA = true;
+                firedA = true;
+                log('  Teste A: getter DISPAROU — fazendo saves...');
+                for (var i = 0; i < 32; i++) {
+                    ctxA.save();
+                    ctxA.lineWidth = 1 + i;
+                }
+                log('  Teste A: ' + 32 + ' saves feitos');
+                reentA = false;
                 return undefined;
-              reentered = true;
-              for (let i = 0; i < 18; i++) {
-                context.save();
-                context.lineWidth = 1 + i;
-              }
-              reentered = false;
-              return undefined;
             }
-          });
+        });
 
-          context.measureText('a');
-          finish("PASS if no crash");
-      } else {
-          finish("FAIL: Ahem.woff not found");
-      }
-  } catch (e) {
-      finish("FAIL: " + e.message);
-  }
+        log('  Teste A: chamando measureText...');
+        ctxA.measureText('a');
+
+        if (!firedA) {
+            log('  Teste A: getter NAO disparou');
+            log('  -> thenable-check nao acessa instancia.then neste code path');
+        } else {
+            log('  Teste A: getter disparou mas SEM crash');
+            log('  -> context.save() nao causa reallocation nesta versao do WebKit');
+        }
+
+        log('');
+
+        // ---------------------------------------------------------------
+        // Teste B — getter no PROTOTYPE (padrao original fe938b0)
+        // Com flag reentered para evitar recursao
+        // ---------------------------------------------------------------
+        log('=== Teste B: getter no PROTOTYPE + context.save() ===');
+
+        var faceB = new FontFace('FamB', 'url("' + dataUrl + '")');
+        document.fonts.add(faceB);
+        void faceB.loaded;
+
+        var ctxB = document.createElement('canvas').getContext('2d');
+        ctxB.save();
+        ctxB.lineWidth = 0.5;
+        ctxB.font = '10px FamB';
+
+        var firedB = false;
+        var reentB = false;
+        Object.defineProperty(FontFace.prototype, 'then', {
+            configurable: true,
+            get: function() {
+                if (reentB) return undefined;
+                reentB = true;
+                firedB = true;
+                log('  Teste B: getter DISPAROU — fazendo saves...');
+                for (var i = 0; i < 32; i++) {
+                    ctxB.save();
+                    ctxB.lineWidth = 1 + i;
+                }
+                log('  Teste B: ' + 32 + ' saves feitos');
+                reentB = false;
+                return undefined;
+            }
+        });
+
+        log('  Teste B: chamando measureText...');
+        ctxB.measureText('a');
+
+        if (!firedB) {
+            log('  Teste B: getter NAO disparou');
+        } else {
+            log('  Teste B: getter disparou mas SEM crash');
+        }
+
+        // Limpar prototype para nao afetar testes seguintes
+        delete FontFace.prototype.then;
+
+        log('');
+
+        // ---------------------------------------------------------------
+        // Teste C — getter na INSTANCIA + document.fonts.add() como acao
+        // Substitui context.save() pelo trigger confirmado do 42b1e2a.
+        // Se crashar: o FontProxy e liberado pelo mesmo caminho do 42b1e2a,
+        // confirmando que fe938b0 e atingivel via mecanismo diferente.
+        // ---------------------------------------------------------------
+        log('=== Teste C: getter na INSTANCIA + document.fonts.add() ===');
+
+        var faceC = new FontFace('FamC', 'url("' + dataUrl + '")');
+        document.fonts.add(faceC);
+        void faceC.loaded;
+
+        var ctxC = document.createElement('canvas').getContext('2d');
+        ctxC.save();
+        ctxC.lineWidth = 0.5;
+        ctxC.font = '10px FamC';
+
+        var firedC = false;
+        var reentC = false;
+        var addCount = 0;
+        Object.defineProperty(faceC, 'then', {
+            configurable: true,
+            get: function() {
+                if (reentC) return undefined;
+                reentC = true;
+                firedC = true;
+                log('  Teste C: getter DISPAROU — chamando fonts.add()...');
+                document.fonts.add(new FontFace('Unrelated', 'local("x")'));
+                addCount++;
+                reentC = false;
+                return undefined;
+            }
+        });
+
+        log('  Teste C: chamando measureText...');
+        ctxC.measureText('a');
+
+        if (!firedC) {
+            log('  Teste C: getter NAO disparou');
+        } else {
+            log('  Teste C: getter disparou, fonts.add() chamado ' + addCount + 'x, SEM crash');
+        }
+
+        log('');
+        log('=== RESULTADO ===');
+        log('Getter A (instancia): ' + (firedA ? 'DISPAROU' : 'NAO disparou'));
+        log('Getter B (prototype): ' + (firedB ? 'DISPAROU' : 'NAO disparou'));
+        log('Getter C (instancia + fonts.add): ' + (firedC ? 'DISPAROU' : 'NAO disparou'));
+        log('');
+        log('Interpretacao:');
+        log('A/B/C nao dispara: thenable-check nao acessa .then neste code path');
+        log('A/C dispara, B nao: WebKit antigo so checa own property (instancia)');
+        log('A/B/C dispara sem crash: save() nao causa reallocation / caminho diferente');
+        log('C dispara e CRASH: FontProxy vulneravel pelo mesmo mecanismo do 42b1e2a');
+    });
 </script>
-</body>
-</html>
