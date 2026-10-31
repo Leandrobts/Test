@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PS4 14.00 - Remocao de pai CSSOM</title>
+<style>body{background:#151923;color:#f1f3f7;font:15px Arial,sans-serif;padding:16px;line-height:1.45}button{font-size:16px;padding:12px;margin:5px 5px 8px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#242b39;padding:12px;border-radius:6px}small{color:#bac5d5}</style>
+</head>
+<body>
+<h2>PS4 14.00 - Remocao do pai CSSOM</h2>
+<p><small>Diagnostico de referencias CSSOM. Nao verifica destruicao nativa nem comprova UAF.</small></p>
+<button onclick="run('rule')">1. deleteRule</button>
+<button onclick="run('element')">2. Remover style</button>
+<button onclick="run('both')">3. Ambos</button>
+<button onclick="clearLog()">Limpar log</button>
+<pre id="log">Pronto. Execute um dos tres cenarios.</pre>
+<script>
+(function(){
+var output=document.getElementById('log');
+var savedChild=null;
+var serial=0;
+function log(s){output.textContent+='\n'+s;}
+function describeRule(rule){
+  if(rule===null)return 'null';
+  if(typeof rule==='undefined')return 'undefined';
+  try{return '[type='+rule.type+', cssText='+String(rule.cssText).replace(/\s+/g,' ').slice(0,180)+']';}
+  catch(e){return 'EXCECAO: '+String(e);}
+}
+function makeDetachedChild(mode){
+  var style=document.createElement('style');
+  style.textContent='';
+  document.head.appendChild(style);
+  var sheet=style.sheet;
+  sheet.insertRule('.outer { color: red; & .nested { color: blue; } }',0);
+  var outer=sheet.cssRules[0];
+  if(!outer.cssRules || outer.cssRules.length!==1){
+    log('CSS Nesting indisponivel: '+String(outer.cssText));
+    if(style.parentNode)style.parentNode.removeChild(style);
+    return null;
+  }
+  var child=outer.cssRules[0];
+  log('Antes: folha='+sheet.cssRules.length+', filho='+describeRule(child));
+  log('Antes: parentRule='+describeRule(child.parentRule));
+  if(mode==='rule'||mode==='both'){
+    sheet.deleteRule(0);
+    log('Depois de deleteRule: folha='+sheet.cssRules.length+', parentRule='+describeRule(child.parentRule));
+  }
+  if(mode==='element'||mode==='both'){
+    style.parentNode.removeChild(style);
+    log('Elemento style removido do DOM: '+(!style.isConnected));
+    log('Depois de remover style: parentRule='+describeRule(child.parentRule));
+  }
+  // Eliminar tambem o elemento nos cenarios em que so a regra foi removida.
+  if(style.parentNode)style.parentNode.removeChild(style);
+  // A funcao retorna apenas a regra filha; nao retorna pai, folha, colecao ou style.
+  return child;
+}
+window.clearLog=function(){savedChild=null;output.textContent='Pronto.';};
+window.run=function(mode){
+  savedChild=null;
+  serial++;
+  output.textContent='Execucao '+serial+' / modo '+mode+'\n'+navigator.userAgent;
+  try{
+    savedChild=makeDetachedChild(mode);
+    if(!savedChild){log('Teste encerrado.');return;}
+    log('Apos sair da funcao: parentRule='+describeRule(savedChild.parentRule));
+    log('Apos sair da funcao: parentStyleSheet='+String(savedChild.parentStyleSheet));
+    // Proxima tarefa do event loop: locais de makeDetachedChild ja sairam de escopo.
+    setTimeout(function(){
+      if(!savedChild)return;
+      log('Proxima tarefa: parentRule='+describeRule(savedChild.parentRule));
+      log('Proxima tarefa: parentStyleSheet='+String(savedChild.parentStyleSheet));
+      log('FIM. parentRule nao-null NAO significa ponteiro pendente.');
+    },100);
+  }catch(e){log('ERRO: '+String(e));}
+};
+})();
+</script>
+</body>
+</html>
