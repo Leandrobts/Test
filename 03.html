@@ -1,282 +1,37 @@
+
+<!-- Identical to offscreen-canvas2d-measuretext-uaf.html, but exercising CanvasRenderingContext2D path -->
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>CSS UAF — iframe realm teardown</title>
-<style>
-  body { background:#0d1117; color:#c9d1d9; font-family:monospace;
-         font-size:13px; margin:0; padding:16px; }
-  h2   { color:#58a6ff; margin:0 0 8px; }
-  #log { background:#0d1117; border:1px solid #30363d; padding:10px;
-         height:420px; overflow-y:auto; white-space:pre-wrap;
-         font-size:12px; border-radius:4px; }
-  .ok   { color:#3fb950 }  .warn { color:#d29922 }
-  .fail { color:#f85149 }  .info { color:#8b949e }
-</style>
-</head>
-<body>
-<h2>CSS UAF — root(CSSRule*) — iframe realm teardown</h2>
-<div id="log"></div>
+<p>This test passes if it does not crash.</p>
 <script>
-"use strict";
+  if (window.testRunner)
+    testRunner.dumpAsText();
 
-const logEl = document.getElementById('log');
-function log(msg, cls) {
-    const s = document.createElement('span');
-    if (cls) s.className = cls;
-    s.textContent = msg + '\n';
-    logEl.appendChild(s);
-    logEl.scrollTop = logEl.scrollHeight;
-}
+  let face = new FontFace('MyTestFam', 'local(Helvetica)');
+  face.loaded;
+  document.fonts.add(face);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TÉCNICA: destruição síncrona do realm do iframe
-//
-// O mecanismo de opaque roots protege o outer enquanto nested estiver vivo,
-// tornando o GC ineficaz. A navegação de um iframe destrói o realm de forma
-// síncrona, fora do ciclo do GC, bypassando essa proteção.
-//
-// Sequência C++ esperada (sem o patch):
-//   removeChild(iframe)
-//     → Document::detach()
-//     → CSSStyleSheet::~CSSStyleSheet()
-//     → CSSStyleSheet::setParentStyleSheet(nullptr) nos wrappers restantes
-//     → ~CSSStyleRule() para outer  ← chamado sincronamente
-//     → NÃO chama wrapper->setParentRule(nullptr) nos filhos  ← bug
-//     → nested.m_parentRule permanece como raw ptr dangling
-// ─────────────────────────────────────────────────────────────────────────────
+  let context = document.createElement('canvas').getContext('2d');
 
-function runVariant(label, setupFn, teardownFn) {
-    log('\n── ' + label + ' ──', 'info');
+  context.save();
+  context.lineWidth = 0.5;
 
-    // Cria iframe
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
+  context.font = '10px MyTestFam';
 
-    const iDoc = iframe.contentDocument;
-    const iWin = iframe.contentWindow;
-
-    // Injeta o style no iframe
-    const style = iDoc.createElement('style');
-    iDoc.head.appendChild(style);
-    const sheet = style.sheet;
-
-    try {
-        sheet.insertRule('.outer { color: red; & .nested { color: blue; } }', 0);
-    } catch(e) {
-        log('insertRule falhou (CSS Nesting não suportado?): ' + e, 'fail');
-        document.body.removeChild(iframe);
-        return;
+  let reentered = false;
+  Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get() {
+      if (reentered)
+        return undefined;
+      reentered = true;
+      for (let i = 0; i < 18; i++) {
+        context.save();
+        context.lineWidth = 1 + i;
+      }
+      reentered = false;
+      return undefined;
     }
+  });
 
-    // Captura referência cruzada ao outer e ao nested
-    const outer  = sheet.cssRules[0];
-    let nestedRules = outer.cssRules;
-    const nested = nestedRules[0];
-
-    log('nested obtido     : ' + nested);
-    log('parentRule antes  : ' + nested.parentRule);
-    log('parentRule é outer: ' + (nested.parentRule === outer));
-
-    if (!nested) {
-        log('nested não obtido — abortar variante', 'warn');
-        document.body.removeChild(iframe);
-        return;
-    }
-
-    // Setup customizado por variante (ex: deleteRule ou não)
-    setupFn(sheet, outer, nestedRules);
-    nestedRules = null;
-
-    // Teardown do iframe (síncrono)
-    teardownFn(iframe);
-
-    // Acessa parentRule com o realm destruído
-    // Se m_parentRule dangling → lê memória liberada
-    let result, typeVal, cssVal;
-    try {
-        result = nested.parentRule;
-        log('parentRule depois : ' + result,
-            result === null ? 'ok' : 'warn');
-
-        if (result !== null) {
-            try {
-                typeVal = result.type;
-                cssVal  = result.cssText;
-                const typeOk = (typeVal === 1);
-                const cssOk  = typeof cssVal === 'string' && cssVal.length > 0;
-                if (!typeOk || !cssOk) {
-                    log('ANOMALIA: type=' + typeVal + ' css=' + cssVal, 'fail');
-                } else {
-                    log('type=' + typeVal + ' css=' + String(cssVal).slice(0,40), 'info');
-                }
-            } catch(e) {
-                log('EXCEPTION ao ler membros: ' + e, 'fail');
-            }
-        } else {
-            log('PASS — parentRule null após destruição do realm', 'ok');
-        }
-    } catch(e) {
-        log('EXCEPTION em nested.parentRule: ' + e, 'fail');
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Variante 1: deleteRule antes de remover o iframe
-//   → sheet solta RefPtr<outer> antes do teardown
-//   → durante ~CSSStyleSheet(), outer pode ter refcount baixo
-// ─────────────────────────────────────────────────────────────────────────────
-runVariant(
-    'V1: deleteRule → removeChild(iframe)',
-    function setup(sheet) {
-        sheet.deleteRule(0);        // sheet solta RefPtr<outer>
-    },
-    function teardown(iframe) {
-        document.body.removeChild(iframe);
-    }
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Variante 2: sem deleteRule — deixa ~CSSStyleSheet() chamar setParentStyleSheet
-//   → teardown do sheet vai soltar outer via m_childRuleCSSOMWrappers
-//   → ~CSSStyleRule() do outer chamado durante destruição do sheet
-// ─────────────────────────────────────────────────────────────────────────────
-runVariant(
-    'V2: sem deleteRule → removeChild(iframe)',
-    function setup() { /* não faz nada */ },
-    function teardown(iframe) {
-        document.body.removeChild(iframe);
-    }
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Variante 3: navegação do iframe (about:blank) ao invés de remoção
-//   → document anterior destruído sincronamente, novo documento criado
-//   → realm antigo pode ou não ser destruído imediatamente
-// ─────────────────────────────────────────────────────────────────────────────
-(function() {
-    log('\n── V3: deleteRule → iframe.src = about:blank ──', 'info');
-
-    const iframe = document.createElement('iframe');
-    iframe.style.display = 'none';
-    document.body.appendChild(iframe);
-
-    const iDoc = iframe.contentDocument;
-    const style = iDoc.createElement('style');
-    iDoc.head.appendChild(style);
-    const sheet = style.sheet;
-
-    try {
-        sheet.insertRule('.outer { color: red; & .nested { color: blue; } }', 0);
-    } catch(e) {
-        log('insertRule falhou: ' + e, 'fail');
-        document.body.removeChild(iframe);
-        return;
-    }
-
-    let nestedRules = sheet.cssRules[0].cssRules;
-    const nested = nestedRules[0];
-    sheet.deleteRule(0);
-    nestedRules = null;
-
-    log('nested: ' + nested, 'info');
-    log('parentRule antes nav: ' + nested.parentRule, 'info');
-
-    // Navegação sincrona: substitui o documento do iframe
-    iframe.contentWindow.location.href = 'about:blank';
-
-    // Verifica imediatamente após (antes do iframe carregar about:blank)
-    try {
-        const r = nested.parentRule;
-        log('parentRule após nav (sync): ' + r, r === null ? 'ok' : 'warn');
-        if (r !== null) {
-            try { log('  type=' + r.type + ' css=' + String(r.cssText).slice(0,40), 'info'); }
-            catch(e) { log('  EXCEPTION membros: ' + e, 'fail'); }
-        }
-    } catch(e) {
-        log('EXCEPTION parentRule após nav: ' + e, 'fail');
-    }
-
-    // Verifica após o load do about:blank
-    iframe.addEventListener('load', function() {
-        try {
-            const r = nested.parentRule;
-            log('parentRule após nav (load): ' + r, r === null ? 'ok' : 'warn');
-            if (r !== null) {
-                try { log('  type=' + r.type + ' css=' + String(r.cssText).slice(0,40), 'info'); }
-                catch(e) { log('  EXCEPTION membros: ' + e, 'fail'); }
-            }
-        } catch(e) {
-            log('EXCEPTION parentRule (load): ' + e, 'fail');
-        }
-        document.body.removeChild(iframe);
-    });
-})();
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Variante 4: múltiplos iframes em sequência rápida
-//   Cria N iframes, cada um com a estrutura, remove todos de uma vez.
-//   Pressão de teardown múltiplo simultaneo no mesmo realm cycle.
-// ─────────────────────────────────────────────────────────────────────────────
-(function() {
-    log('\n── V4: N iframes removidos simultaneamente ──', 'info');
-    const N = 30;
-    const nesteds = [];
-    const iframes = [];
-
-    for (let i = 0; i < N; i++) {
-        const iframe = document.createElement('iframe');
-        iframe.style.display = 'none';
-        document.body.appendChild(iframe);
-        iframes.push(iframe);
-
-        const iDoc = iframe.contentDocument;
-        const style = iDoc.createElement('style');
-        iDoc.head.appendChild(style);
-        const sheet = style.sheet;
-        try {
-            sheet.insertRule('.outer { color:red; & .nested { color:blue; } }', 0);
-            let nr = sheet.cssRules[0].cssRules;
-            nesteds.push(nr[0]);
-            sheet.deleteRule(0);
-            nr = null;
-        } catch(e) {
-            nesteds.push(null);
-        }
-    }
-
-    // Remove todos sincronamente
-    iframes.forEach(f => document.body.removeChild(f));
-
-    let nullCount = 0, objCount = 0, excCount = 0;
-    nesteds.forEach(function(nested, i) {
-        if (!nested) return;
-        try {
-            const r = nested.parentRule;
-            if (r === null) {
-                nullCount++;
-            } else {
-                objCount++;
-                try {
-                    const t = r.type, c = r.cssText;
-                    if (t !== 1 || typeof c !== 'string')
-                        log('  [' + i + '] ANOMALIA type=' + t + ' css=' + typeof c, 'fail');
-                } catch(e) {
-                    excCount++;
-                    log('  [' + i + '] EXCEPTION membros: ' + e, 'fail');
-                }
-            }
-        } catch(e) {
-            excCount++;
-            log('  [' + i + '] EXCEPTION parentRule: ' + e, 'fail');
-        }
-    });
-
-    log('Resultado V4 (' + N + ' iframes): null=' + nullCount +
-        ' obj=' + objCount + ' exc=' + excCount,
-        (nullCount > 0 || excCount > 0) ? 'warn' : 'info');
-})();
+  context.measureText('a');
 </script>
-</body>
-</html>
