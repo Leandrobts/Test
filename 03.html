@@ -1,45 +1,35 @@
+
 <!DOCTYPE html>
 <html>
-<head>
-    <meta charset="utf-8">
-    <title>PoC - PS4 Canvas measureText Reentrancy Compatibility</title>
-</head>
 <body>
 <script>
-    // Cria uma fonte baseada numa tipografia local suportada
-    let face = new FontFace('PS4CompatTest', 'local(Arial)');
-    face.loaded;
-    document.fonts.add(face);
+// Regression test for rdar://184581483.  Exercises the WorkerThread::createThread()
+// thread-start handoff: shared workers that close themselves immediately make the main
+// thread drop SharedWorkerContextManager's map reference while the new thread is still
+// starting up.
+//
+// Start the workers before js-test.js is fetched: the handoff window is widest while the
+// page is still coming up, and waiting for that script halves how often the race is lost.
+//
+// self.close() is what actually stops a shared worker: its pending-activity flag keeps
+// this side alive, so closing the port alone would leave the thread running until
+// document teardown, after the test has finished.
+for (let i = 0; i < 10; ++i) {
+    const url = URL.createObjectURL(new Blob(["self.close();//" + i], { type: "text/javascript" }));
+    new SharedWorker(url, "worker" + i);
+}
+</script>
+<script src="resources/js-test.js"></script>
+<script>
+description("Tests that a shared worker closing itself while its thread is still starting up does not crash.");
+jsTestIsAsync = true;
 
-    let canvas = document.createElement('canvas');
-    canvas.width = 100;
-    canvas.height = 100;
-    let ctx = canvas.getContext('2d');
-    
-    // Configura o estado inicial da fonte no contexto
-    ctx.font = '10px PS4CompatTest';
-
-    let reentered = false;
-    Object.defineProperty(FontFace.prototype, 'then', {
-        configurable: true,
-        get() {
-            if (reentered) return undefined;
-            reentered = true;
-            
-            // Força a manipulação reentrante da pilha de estados 
-            // durante o ciclo de avaliação de fontes do PS4[span_5](start_span)[span_5](end_span)[span_6](start_span)[span_6](end_span)
-            for (let i = 0; i < 500; i++) {
-                ctx.save();
-                ctx.lineWidth = 1 + (i % 10);
-            }
-            
-            reentered = false;
-            return undefined;
-        }
-    });
-
-    // Dispara measureText, forçando a chamada a accessFont() e font.width()[span_7](start_span)[span_7](end_span)[span_8](start_span)[span_8](end_span)
-    ctx.measureText('Teste Compatibilidade PS4');
+// Stay alive long enough for each close() to reach the main thread, so a crash
+// lands in this test rather than in whichever test runs next.
+setTimeout(function() {
+    testPassed("Started and closed 10 shared workers without crashing.");
+    finishJSTest();
+}, 500);
 </script>
 </body>
 </html>
