@@ -1,63 +1,45 @@
+
 <!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <title>Main Thread Canvas FontMetrics Test</title>
-</head>
-<body>
-    <h1>Teste de FontMetrics UAF na Thread Principal</h1>
-    <p id="status">Executando adaptação com canvas padrão...</p>
-
 <script>
-async function runMainThreadTest() {
-    try {
-        const statusEl = document.getElementById('status');
-        const dummies = [];
-        
-        // 1. Criação dos elementos canvas padrões para esgotar/re-enhar o cache de fontes
-        for (let i = 0; i < 3500; i++) {
-            const canvas = document.createElement('canvas');
-            canvas.width = 1;
-            canvas.height = 1;
-            const ctx = canvas.getContext('2d');
-            ctx.font = '10px "dummy' + i + '"';
-            dummies.push({ canvas, ctx });
-        }
-
-        const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-
-        // 2. Loop de tentativa e injeção via document.fonts
-        for (let attempt = 0; attempt < 2; attempt++) {
-            const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
-            const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
-            
-            document.fonts.add(metricsDonor);
-            document.fonts.add(measured);
-
-            // Força o carregamento assíncrono para engatilhar a reentrância no layout
-            metricsDonor.load().catch(() => {});
-            measured.load().catch(() => {});
-
-            const canvas = document.createElement('canvas');
-            canvas.width = 64;
-            canvas.height = 64;
-            const context = canvas.getContext('2d');
-            context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
-
-            // Medição de texto disparando o CodePath correspondente
-            context.measureText('\u13A0\u13A2\u13A4');
-        }
-
-        statusEl.innerText = 'Teste executado com sucesso na thread principal.';
-        statusEl.style.color = 'green';
-    } catch (e) {
-        document.getElementById('status').innerText = 'Erro na execução: ' + e.message;
-        document.getElementById('status').style.color = 'red';
-    }
+function gc() {
+    for (let i = 0; i < 10000; i++)
+        new String("abc");
 }
 
-// Executa após o carregamento da página
-window.addEventListener('DOMContentLoaded', runMainThreadTest);
+function enter(outer, inner) {
+    let canvas = document.createElement("canvas");
+    let innerCtx;
+    let outerCtx = canvas.getContext(outer, {
+        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
+        get alpha() { innerCtx = canvas.getContext(inner); return true; },
+    });
+    document.write(`${outer} ${inner} ${name(outerCtx)}<br>`);
+}
+
+function reenter(outer, inner) {
+    let canvas = document.createElement("canvas");
+    canvas.width = 10;
+    canvas.height = 10;
+    let innerCtx;
+    let outerCtx = canvas.getContext(outer, { 
+        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
+        get alpha() { innerCtx = canvas.getContext(inner); return true; },
+    });
+    document.write(`${outer} ${inner} ${name(outerCtx)} ${name(innerCtx)}<br>`);
+}
+
+function name(ctx) {
+    return ctx ? ctx.constructor.name : "null";
+}
+
+for (let outer of ["2d", "bitmaprenderer"])
+    for (let inner of ["2d", "bitmaprenderer"])
+        enter(outer, inner);
+
+for (let outer of ["2d", "bitmaprenderer"])
+    for (let inner of ["2d", "bitmaprenderer"])
+        reenter(outer, inner);
+
+gc();
+document.write("PASS if no crash.");
 </script>
-</body>
-</html>
