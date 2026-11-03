@@ -1,56 +1,30 @@
+
 <!DOCTYPE html>
-<html>
-<head>
-<script src="resources/testharness.js"></script>
-<script src="resources/testharnessreport.js"></script>
-</head>
-<body>
 <script>
-function makeTrack(context, channelCount)
-{
-    const destination = context.createMediaStreamDestination();
-    const merger = context.createChannelMerger(channelCount);
-    for (let channel = 0; channel < channelCount; ++channel) {
-        const oscillator = context.createOscillator();
-        oscillator.frequency.value = 200 + 100 * channel;
-        oscillator.connect(merger, 0, channel);
-        oscillator.start();
-    }
-    merger.connect(destination);
-    return destination.stream.getAudioTracks()[0];
+
+function gc() {
+        for (let i = 0; i < 10000; i++)
+        new String("abc");
 }
 
-promise_test(async (test) => {
-    const context = new AudioContext();
-    test.add_cleanup(() => context.close());
-    await context.resume();
+function reenter(outer, inner) {
+    let canvas = document.createElement("canvas");
+    let innerCtx;
+    let outerCtx = canvas.getContext(outer, {
+        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
+        get alpha() { innerCtx = canvas.getContext(inner); return true; },
+    });
+    document.write(`getContext("${outer}") with reentrant getContext("${inner}"): outer=${name(outerCtx)} inner=${name(innerCtx)}<br>`);
+}
 
-    const monoTrack = makeTrack(context, 1);
-    const stereoTrack = makeTrack(context, 2);
+function name(ctx) {
+    return ctx ? ctx.constructor.name : "null";
+}
 
-    const pc1 = new RTCPeerConnection();
-    const pc2 = new RTCPeerConnection();
-    test.add_cleanup(() => { pc1.close(); pc2.close(); });
-    pc1.onicecandidate = event => { if (event.candidate) pc2.addIceCandidate(event.candidate).catch(() => { }); };
-    pc2.onicecandidate = event => { if (event.candidate) pc1.addIceCandidate(event.candidate).catch(() => { }); };
+for (let outer of ["2d"])
+    for (let inner of ["2d"])
+        reenter(outer, inner);
 
-    const sender = pc1.addTrack(stereoTrack, new MediaStream([stereoTrack]));
-    await pc1.setLocalDescription(await pc1.createOffer());
-    await pc2.setRemoteDescription(pc1.localDescription);
-    await pc2.setLocalDescription(await pc2.createAnswer());
-    await pc1.setRemoteDescription(pc2.localDescription);
-
-    // Let audio start flowing so that pullAudioData() is being dispatched to the signaling thread.
-    await new Promise(resolve => test.step_timeout(resolve, 300));
-
-    // Each replaceTrack() flips the channel count so setOutputFormat() frees and reallocates the ring buffer while a pull may be in flight.
-    for (let i = 0; i < 30; ++i) {
-        await sender.replaceTrack(monoTrack);
-        await new Promise(resolve => test.step_timeout(resolve, 40));
-        await sender.replaceTrack(stereoTrack);
-        await new Promise(resolve => test.step_timeout(resolve, 40));
-    }
-}, "replaceTrack() alternating channel counts must not free AudioSampleDataSource's ring buffer under a concurrent pull");
+gc();
+document.write("PASS if no crash.");
 </script>
-</body>
-</html>
