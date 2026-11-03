@@ -1,33 +1,63 @@
 <!DOCTYPE html>
-<p>This test passes if it does not crash.</p>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Main Thread Canvas FontMetrics Test</title>
+</head>
+<body>
+    <h1>Teste de FontMetrics UAF na Thread Principal</h1>
+    <p id="status">Executando adaptação com canvas padrão...</p>
+
 <script>
+async function runMainThreadTest() {
+    try {
+        const statusEl = document.getElementById('status');
+        const dummies = [];
+        
+        // 1. Criação dos elementos canvas padrões para esgotar/re-enhar o cache de fontes
+        for (let i = 0; i < 3500; i++) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1;
+            canvas.height = 1;
+            const ctx = canvas.getContext('2d');
+            ctx.font = '10px "dummy' + i + '"';
+            dummies.push({ canvas, ctx });
+        }
 
-  let face = new FontFace('MyTestFam', 'local(Helvetica)');
-  face.loaded;
-  document.fonts.add(face);
+        const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
 
-  let context = document.createElement('canvas').getContext('2d');
+        // 2. Loop de tentativa e injeção via document.fonts
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+            const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
+            
+            document.fonts.add(metricsDonor);
+            document.fonts.add(measured);
 
-  context.save();
-  context.lineWidth = 0.5;
+            // Força o carregamento assíncrono para engatilhar a reentrância no layout
+            metricsDonor.load().catch(() => {});
+            measured.load().catch(() => {});
 
-  context.font = '10px MyTestFam';
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+            context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
 
-  let reentered = false;
-  Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-      if (reentered)
-        return undefined;
-      reentered = true;
-      for (let i = 0; i < 18; i++) {
-        context.save();
-        context.lineWidth = 1 + i;
-      }
-      reentered = false;
-      return undefined;
+            // Medição de texto disparando o CodePath correspondente
+            context.measureText('\u13A0\u13A2\u13A4');
+        }
+
+        statusEl.innerText = 'Teste executado com sucesso na thread principal.';
+        statusEl.style.color = 'green';
+    } catch (e) {
+        document.getElementById('status').innerText = 'Erro na execução: ' + e.message;
+        document.getElementById('status').style.color = 'red';
     }
-  });
+}
 
-  context.fillText('a_Test_String_12345_!@#$', 10, 50);
+// Executa após o carregamento da página
+window.addEventListener('DOMContentLoaded', runMainThreadTest);
 </script>
+</body>
+</html>
