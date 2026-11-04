@@ -1,62 +1,78 @@
 <!DOCTYPE html>
 <html>
 <body>
+<p>Posts EncodedVideoChunks over a BroadcastChannel whose only other recipient lives on a worker thread. The message is also forwarded to the NetworkProcess, and the WebContent process used to encode it for IPC while the worker was already deserializing the very same SerializedScriptValue, which is destructive. This test passes if it does not crash.</p>
+<pre id="output"></pre>
 <script>
+const ITERATIONS = 20;
+const CHUNK_COUNT = 32;
+const CHUNK_SIZE = 2 * 1024 * 1024;
 
 
-(function () {
-    var sampleRate = 8000;
-    var samples = 8000;
-    var buffer = new ArrayBuffer(44 + samples * 2);
-    var view = new DataView(buffer);
+const output = document.getElementById("output");
+function log(msg) { output.textContent += msg + "\n"; }
 
-    function writeText(offset, text) {
-        for (var i = 0; i < text.length; i++) {
-            view.setUint8(offset + i, text.charCodeAt(i));
-        }
+const workerCode = [
+    'var bc = new BroadcastChannel("postmessage-encodedvideochunks-to-worker");',
+    'bc.onmessage = function(event) {',
+    '    try {',
+    '        var chunks = event.data.chunks;',
+    '        var total = 0;',
+    '        for (var i = 0; i < chunks.length; ++i)',
+    '            total += chunks[i].byteLength;',
+    '        self.postMessage("received:" + chunks.length + ":" + total);',
+    '    } catch (e) {',
+    '        self.postMessage("ERROR:" + e);',
+    '    }',
+    '};',
+    'self.postMessage("READY");'
+].join("\n");
+
+const expectedFromWorker = "received:" + CHUNK_COUNT + ":" + (CHUNK_COUNT * CHUNK_SIZE);
+const url = URL.createObjectURL(new Blob([workerCode], { type: "application/javascript" }));
+const worker = new Worker(url);
+let iteration = 0;
+let failed = false;
+
+function done() {
+    URL.revokeObjectURL(url);
+    worker.terminate();
+
+}
+
+function postOne() {
+    if (iteration++ >= ITERATIONS) {
+        if (!failed)
+            log("PASS: did not crash");
+        done();
+        return;
     }
+    // Many large chunks keep the IPC encoder busy walking
+    // SerializedScriptValueInternals::serializedVideoChunks long enough for the worker to
+    // deserialize (and thereby dismantle) the same value on its own thread.
+    const chunks = [];
+    for (let i = 0; i < CHUNK_COUNT; ++i)
+        chunks.push(new EncodedVideoChunk({ type: "key", timestamp: i, data: new Uint8Array(CHUNK_SIZE) }));
+    const channel = new BroadcastChannel("postmessage-encodedvideochunks-to-worker");
+    channel.postMessage({ chunks });
+    channel.close();
+}
 
-    writeText(0, "RIFF");
-    view.setUint32(4, buffer.byteLength - 8, true);
-    writeText(8, "WAVE");
-    writeText(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeText(36, "data");
-    view.setUint32(40, samples * 2, true);
+worker.onmessage = function(event) {
+    if (event.data !== "READY" && event.data !== expectedFromWorker && !failed) {
+        failed = true;
+        log("FAIL: worker received \"" + event.data + "\" instead of \"" + expectedFromWorker + "\"");
+    }
+    postOne();
+};
 
-    var blob = new Blob([buffer], {
-        type: "audio/wav"
-    });
-
-    var url = URL.createObjectURL(blob);
-    var audio = document.createElement("audio");
-
-    audio.onloadedmetadata = function () {
-        console.log("WAV OK");
-        console.log("Duracao:", audio.duration);
-        console.log("readyState:", audio.readyState);
-        URL.revokeObjectURL(url);
-    };
-
-    audio.onerror = function () {
-        console.log("WAV FALHOU");
-        console.log("Codigo:",
-            audio.error ? audio.error.code : "desconhecido");
-        console.log("Mensagem:",
-            audio.error ? audio.error.message : "");
-        URL.revokeObjectURL(url);
-    };
-
-    audio.src = url;
-    audio.load();
-})();
-
+worker.onerror = function(event) {
+    if (!failed) {
+        failed = true;
+        log("FAIL: worker error: " + event.message);
+    }
+    done();
+};
 </script>
 </body>
 </html>

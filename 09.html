@@ -1,110 +1,87 @@
-<!DOCTYPE html>
-<html>
-<body>
 <script>
+//@ skip if $secAccel3Removed
+//@ runDefault("--verifyGC=1", "--collectContinuously=1", "--forceEagerCompilation=1", "--useFTLJIT=0")
 
-const pageCount = 128;
-const total = pageCount * 0x10000;
+// --useFTLJIT=0 pins f to the DFG. FTL elides the same barrier, but both tiers reach the bug
+// through the same operationNewArrayBuffer, so testing one tier is enough.
+//
+// When the global object is having a bad time, operationNewArrayBuffer creates the JSArray cell and
+// then allocates its ArrayStorage butterfly via switchToSlowPutArrayStorage. That second allocation
+// must not let a GC run: a conservative stack scan would blacken the freshly created array, which
+// breaks the invariant DFG's StoreBarrierInsertionPhase relies on when it elides the
+// FencedStoreBarrier for stores into a cell allocated in the current epoch. The store below would
+// then create an untracked black -> white edge and the victim would be swept while reachable.
 
-function makeCaf()
+// Not testLoopCount: these iterations exist to accumulate GC-cycle race attempts, not only to reach a tier.
+const D = 130, W = 55, K = 100, LIT = 4096, ITER = 1000;
+
+function clobber(a, b, c, d, e, g, h, i) { return a ^ b ^ c ^ d ^ e ^ g ^ h ^ i; }
+noInline(clobber);
+
+var mkTail, mkLink;
 {
-    const bytes = new Uint8Array(total);
-    const view = new DataView(bytes.buffer);
-    bytes.set([0x63, 0x61, 0x66, 0x66, 0x00, 0x01, 0x00, 0x00], 0);
-    const target = 0x7efff8;
-    const firstPayload = (target - 8 - 12) % 12;
-    let offset = 8;
-    bytes.set([0x66, 0x72, 0x65, 0x65], offset);
-    view.setBigUint64(offset + 4, BigInt(firstPayload));
-    offset += 12 + firstPayload;
-    while (offset + 12 <= target) {
-        bytes.set([0x66, 0x72, 0x65, 0x65], offset);
-        offset += 12;
-    }
-    bytes.set([0x64, 0x61, 0x74, 0x61], target);
-    view.setBigUint64(target + 4, BigInt(total - target - 12));
-    return bytes;
+    let props = [];
+    for (let j = 0; j < W; ++j)
+        props.push("b" + j + ": {}");
+    mkTail = eval("(function (victim) { return { a: null, p: victim, " + props.join(", ") + " }; })");
+    mkLink = eval("(function (next) { return { a: next, " + props.join(", ") + " }; })");
 }
 
-const template = makeCaf();
+function makeChain() {
+    let victim = {};
+    let cur = mkTail(victim);
+    for (let i = 0; i < D; ++i)
+        cur = mkLink(cur);
+    return cur;
+}
+noInline(makeChain);
 
+// Zeroes out the dead frames of makeChain()/f() so that a stale spill slot doesn't keep the victim
+// alive as a conservative root.
+var scrub;
+{
+    let parts = [];
+    for (let i = 0; i < 512; ++i)
+        parts.push("a" + i + " = 0");
+    scrub = eval("(function scrub() { let " + parts.join(", ") + "; return a0 + a511; })");
+    noInline(scrub);
+}
 
-const retained = Array.from({ length: 8 }, () => new ArrayBuffer(65536));
-const victim = new ArrayBuffer(template.byteLength);
-new Uint8Array(victim).set(template);
+// A straight-line DFG function with no GC point after its NewArrayBuffer, so it never safepoints
+// while the concurrent marker drains.
+let source = "(obj, seed) => {\n";
+source += "    let arr = [" + Array(LIT).fill(7).join(",") + "];\n";
+source += "    let x = seed | 0;\n";
+for (let i = 0; i < K; ++i)
+    source += "    x = (x ^ (x << 13)); x = (x ^ (x >>> 17)); x = (x ^ (x << 5));\n";
+let cur = "obj";
+for (let i = 0; i < D; ++i) {
+    source += "    let v" + i + " = " + cur + ".a;\n";
+    cur = "v" + i;
+}
+source += "    let victim = " + cur + ".p;\n";
+source += "    arr[0] = victim;\n";      // The store whose barrier was elided.
+source += "    " + cur + ".p = null;\n"; // Drop the only other reference to the victim.
+source += "    victim = null;\n";
+for (let i = D - 1; i >= 0; --i)
+    source += "    v" + i + " = null;\n";
+source += "    clobber(x, x, x, x, x, x, x, x);\n";
+source += "    return arr;\n";
+source += "}";
+const f = eval(source);
 
+// Force a bad time so that NewArrayBuffer takes the slow-put-array-storage path.
+Object.defineProperty(Array.prototype, 0, { get() { } });
 
-const context = document.createElement("audio");
-context.preload = "auto";
+let keepArr = null;
+let seed = 0x2545F491;
+for (let i = 0; i < ITER; ++i) {
+    let head = makeChain();
+    scrub();
+    keepArr = f(head, seed + i);
+    scrub();
+}
 
-const audioBlob = new Blob([victim], {
-    type: "audio/x-caf"
-});
-
-const audioURL = URL.createObjectURL(audioBlob);
-
-const decode = new Promise(function(resolve, reject) {
-
-    context.onloadedmetadata = function() {
-        console.log("Metadados carregados");
-        console.log("Duracao:", context.duration);
-        resolve(context);
-    };
-
-    context.onerror = function() {
-        var err = context.error;
-
-        console.log("Falha ao carregar audio");
-        console.log("networkState:", context.networkState);
-        console.log("readyState:", context.readyState);
-
-        if (err) {
-            console.log("MediaError code:", err.code);
-            console.log("MediaError message:",
-                err.message || "indisponivel");
-        }
-
-        reject(new Error(
-            "Falha ao carregar audio. Codigo: " +
-            (err ? err.code : "desconhecido")
-        ));
-    };
-
-    context.src = audioURL;
-    context.load();
-});
-
-decode.then(function() {
-    console.log("Carregamento concluido");
-}, function(error) {
-    console.log(error.message);
-}).then(function() {
-    URL.revokeObjectURL(audioURL);
-});
-
-setTimeout(() => {
-    
-    let victim = new ArrayBuffer(template.byteLength);
-new Uint8Array(victim).set(template);
-
-// Substitui victim.grow(1)
-const expanded = new ArrayBuffer(victim.byteLength + 65536);
-new Uint8Array(expanded).set(new Uint8Array(victim));
-victim = expanded;
-
-console.log("Novo tamanho:", victim.byteLength);
-
-    const activeSize = total - 0x10000;
-    const replacement = new ArrayBuffer(activeSize, { maxByteLength: total });
-    const bytes = new Uint8Array(replacement);
-    bytes.set(template.subarray(0, activeSize));
-    retained.push(replacement, bytes);
-    decode.catch(() => { }).then(() => {
-        document.body.appendChild(document.createTextNode("PASS if no crash"));
-       
-    });
-}, 0);
-globalThis.retained = retained;
+if (keepArr.length !== LIT)
+    throw new Error("bad length: " + keepArr.length);
 </script>
-</body>
-</html>
