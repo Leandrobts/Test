@@ -1,45 +1,110 @@
-
 <!DOCTYPE html>
+<html>
+<body>
 <script>
-function gc() {
-    for (let i = 0; i < 10000; i++)
-        new String("abc");
+
+const pageCount = 128;
+const total = pageCount * 0x10000;
+
+function makeCaf()
+{
+    const bytes = new Uint8Array(total);
+    const view = new DataView(bytes.buffer);
+    bytes.set([0x63, 0x61, 0x66, 0x66, 0x00, 0x01, 0x00, 0x00], 0);
+    const target = 0x7efff8;
+    const firstPayload = (target - 8 - 12) % 12;
+    let offset = 8;
+    bytes.set([0x66, 0x72, 0x65, 0x65], offset);
+    view.setBigUint64(offset + 4, BigInt(firstPayload));
+    offset += 12 + firstPayload;
+    while (offset + 12 <= target) {
+        bytes.set([0x66, 0x72, 0x65, 0x65], offset);
+        offset += 12;
+    }
+    bytes.set([0x64, 0x61, 0x74, 0x61], target);
+    view.setBigUint64(target + 4, BigInt(total - target - 12));
+    return bytes;
 }
 
-function enter(outer, inner) {
-    let canvas = document.createElement("canvas");
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, {
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
+const template = makeCaf();
+
+
+const retained = Array.from({ length: 8 }, () => new ArrayBuffer(65536));
+const victim = new ArrayBuffer(template.byteLength);
+new Uint8Array(victim).set(template);
+
+
+const context = document.createElement("audio");
+context.preload = "auto";
+
+const audioBlob = new Blob([victim], {
+    type: "audio/x-caf"
+});
+
+const audioURL = URL.createObjectURL(audioBlob);
+
+const decode = new Promise(function(resolve, reject) {
+
+    context.onloadedmetadata = function() {
+        console.log("Metadados carregados");
+        console.log("Duracao:", context.duration);
+        resolve(context);
+    };
+
+    context.onerror = function() {
+        var err = context.error;
+
+        console.log("Falha ao carregar audio");
+        console.log("networkState:", context.networkState);
+        console.log("readyState:", context.readyState);
+
+        if (err) {
+            console.log("MediaError code:", err.code);
+            console.log("MediaError message:",
+                err.message || "indisponivel");
+        }
+
+        reject(new Error(
+            "Falha ao carregar audio. Codigo: " +
+            (err ? err.code : "desconhecido")
+        ));
+    };
+
+    context.src = audioURL;
+    context.load();
+});
+
+decode.then(function() {
+    console.log("Carregamento concluido");
+}, function(error) {
+    console.log(error.message);
+}).then(function() {
+    URL.revokeObjectURL(audioURL);
+});
+
+setTimeout(() => {
+    
+    let victim = new ArrayBuffer(template.byteLength);
+new Uint8Array(victim).set(template);
+
+// Substitui victim.grow(1)
+const expanded = new ArrayBuffer(victim.byteLength + 65536);
+new Uint8Array(expanded).set(new Uint8Array(victim));
+victim = expanded;
+
+console.log("Novo tamanho:", victim.byteLength);
+
+    const activeSize = total - 0x10000;
+    const replacement = new ArrayBuffer(activeSize, { maxByteLength: total });
+    const bytes = new Uint8Array(replacement);
+    bytes.set(template.subarray(0, activeSize));
+    retained.push(replacement, bytes);
+    decode.catch(() => { }).then(() => {
+        document.body.appendChild(document.createTextNode("PASS if no crash"));
+       
     });
-    document.write(`${inner} ${name(outerCtx)} ${name(innerCtx)}<br>`);
-}
-
-function reenter(outer, inner) {
-    let canvas = document.createElement("canvas");
-    canvas.width = 10;
-    canvas.height = 10;
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, { 
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
-    });
-    document.write(`${outer} ${inner} ${name(outerCtx)} ${name(innerCtx)}<br>`);
-}
-
-function name(ctx) {
-    return ctx ? ctx.constructor.name : "null";
-}
-
-for (let outer of ["2d", "bitmaprenderer"])
-    for (let inner of ["2d", "bitmaprenderer"])
-        enter(outer, inner);
-
-for (let outer of ["2d", "bitmaprenderer"])
-    for (let inner of ["2d", "bitmaprenderer"])
-        reenter(outer, inner);
-
-gc();
-document.write("PASS if no crash.");
+}, 0);
+globalThis.retained = retained;
 </script>
+</body>
+</html>
