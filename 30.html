@@ -1,50 +1,71 @@
-<!DOCTYPE html>
+<!doctype html>
+<meta charset="utf-8">
+<body>
+<p>This tests encountering a XML parser error during outerHTML. WebKit should not expose the shared document fragment.</p>
+<div id="result"></div>
+<script src="resources/gc.js"></script>
 <script>
-if (window.testRunner)
-    testRunner.dumpAsText();
+(() => {
+    
 
-function gc() {
-    if (window.GCController)
-        return GCController.collect();
-    for (let i = 0; i < 10000; i++)
-        new String("abc");
-}
+    let walker;
+    window.parentDonor = document.createElement("input");
+    parentDonor.type = "radio";
+    parentDonor.name = "g";
 
-function reenter(outer, inner) {
-    let canvas = document.createElement("canvas");
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, {
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
-    });
-    document.write(`getContext("${outer}") with reentrant getContext("${inner}"): outer=${name(outerCtx)} inner=${name(innerCtx)}<br>`);
-}
+    window.childReady = () => {
+        const escaped = window.parentDonor;
+        if (!escaped || escaped.parentNode) {
+            result.textContent = 'FAIL - escaped did not have a parent';
+            return;
+        }
 
-function reenterOffscreen(outer, inner) {
-    // Adaptado do OffscreenCanvas original para usar um elemento canvas padrão no PS4
-    let canvas = document.createElement("canvas");
-    canvas.width = 10;
-    canvas.height = 10;
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, {
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
-    });
-    document.write(`OffscreenCanvas getContext("${outer}") with reentrant getContext("${inner}"): outer=${name(outerCtx)} inner=${name(innerCtx)}<br>`);
-}
+        document.adoptNode(escaped);
+        walker = document.createTreeWalker(escaped);
+        window.parentDonor = null;
 
-function name(ctx) {
-    return ctx ? ctx.constructor.name : "null";
-}
+        document.querySelector("iframe").remove();
 
-for (let outer of ["2d", "bitmaprenderer", "webgl", "webgl2"])
-    for (let inner of ["2d", "bitmaprenderer", "webgl", "webgl2"])
-        reenter(outer, inner);
+        setTimeout(() => {
+            gc();
 
-for (let outer of ["2d", "bitmaprenderer", "webgl", "webgl2"])
-    for (let inner of ["2d", "bitmaprenderer", "webgl", "webgl2"])
-        reenterOffscreen(outer, inner);
+            const nodeType = walker.currentNode.getRootNode({ composed: true }).nodeType;
+            result.textContent = nodeType == Node.ELEMENT_NODE ? 'PASS' : `FAIL - bad node type: ${nodeType}`;
+            
+        }, 0);
+    };
 
-gc();
-document.write("PASS if no crash.");
+    const childSource = `<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+<div id="victim"></div>
+<div id="cleanup"></div>
+<script><![CDATA[
+(() => {
+    class XFragmentEscape extends HTMLElement {
+        constructor() {
+            super();
+            this.after(parent.parentDonor);
+        }
+    }
+    customElements.define("x-fragment-escape", XFragmentEscape);
+
+    try {
+        document.getElementById("victim").outerHTML =
+            "<x-fragment-escape></x-fragment-escape><";
+    } catch (error) {
+    }
+
+    document.getElementById("cleanup").innerHTML =
+        '<span xmlns="http://www.w3.org/1999/xhtml">cleanup</span>';
+    parent.childReady();
+})();
+]]><\/script>
+</body>
+</html>`;
+
+    const frame = document.createElement("iframe");
+    frame.src = URL.createObjectURL(new Blob([childSource], { type: "application/xhtml+xml" }));
+    document.body.append(frame);
+})();
 </script>
