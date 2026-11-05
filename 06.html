@@ -1,82 +1,64 @@
+
 <!DOCTYPE html>
 <html>
+<head><meta charset="utf-8"></head>
 <body>
 <script>
 
-const pageCount = 128;
-const total = pageCount * 0x10000;
+let ctx = null;
+let inGetter = false;
 
-function makeCaf()
-{
-    const bytes = new Uint8Array(total);
-    const view = new DataView(bytes.buffer);
-    bytes.set([0x63, 0x61, 0x66, 0x66, 0x00, 0x01, 0x00, 0x00], 0);
-    const target = 0x7efff8;
-    const firstPayload = (target - 8 - 12) % 12;
-    let offset = 8;
-    bytes.set([0x66, 0x72, 0x65, 0x65], offset);
-    view.setBigUint64(offset + 4, BigInt(firstPayload));
-    offset += 12 + firstPayload;
-    while (offset + 12 <= target) {
-        bytes.set([0x66, 0x72, 0x65, 0x65], offset);
-        offset += 12;
+Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get() {
+        if (inGetter || !ctx)
+            return undefined;
+        inGetter = true;
+        for (let i = 0; i < 16; i++) {
+            try {
+                ctx.measureText(
+                    String.fromCharCode(0x0400 + i * 0x100) + 'z'
+                );
+            } catch (e) { }
+
+            try { ctx.measureText('x'); } catch (e) { }
+        }
+        inGetter = false;
+        return undefined;
     }
-    bytes.set([0x64, 0x61, 0x74, 0x61], target);
-    view.setBigUint64(target + 4, BigInt(total - target - 12));
-    return bytes;
-}
-
-const template = makeCaf();
-
-
-const retained = Array.from({ length: 8 }, () => new ArrayBuffer(65536));
-const victim = new ArrayBuffer(template.byteLength);
-new Uint8Array(victim).set(template);
-const context = document.createElement("audio");
-context.preload = "auto";
-const audioBlob = new Blob([victim], { type: "audio/x-caf" });
-const audioURL = URL.createObjectURL(audioBlob);
-const decode = new Promise((resolve, reject) => { context.onloadedmetadata = () => { resolve(context);};
-
-    context.onerror = () => { reject(new Error("Falha ao carregar audio"));};
-    context.src = audioURL;
-    context.load();
 });
 
-retained.push(
-    victim,
-    context,
-    decode,
-    template,
-    audioBlob
-);
+function attempt(n)
+{
+    for (let d = 0; d < 3; d++)
+        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
 
-decode.then(() => { console.log("Audio carregado com sucesso");}, error => { console.log(error.message);}).then(() => { URL.revokeObjectURL(audioURL);});
+    const family = 'VarFam' + n;
+    const face = new FontFace(family, 'local(Helvetica)');
+    void face.loaded;
+    document.fonts.add(face);
 
+    const canvas = document.createElement('canvas');
+    canvas.width = 10;
+    canvas.height = 10;
+    ctx = canvas.getContext('2d');
+    ctx.font = '20px Helvetica, ' + family;
 
-setTimeout(() => {
-    
-    let victim = new ArrayBuffer(template.byteLength);
-new Uint8Array(victim).set(template);
+    for (let i = 0; i < 50; i++)
+        ctx.measureText('x');
 
-// Substitui victim.grow(1)
-const expanded = new ArrayBuffer(victim.byteLength + 65536);
-new Uint8Array(expanded).set(new Uint8Array(victim));
-victim = expanded;
+    // Original fallback trigger.
+    ctx.measureText('\uE005AB');
+}
 
-console.log("Novo tamanho:", victim.byteLength);
-
-    const activeSize = total - 0x10000;
-    const replacement = new ArrayBuffer(activeSize, { maxByteLength: total });
-    const bytes = new Uint8Array(replacement);
-    bytes.set(template.subarray(0, activeSize));
-    retained.push(replacement, bytes);
-    decode.catch(() => { }).then(() => {
+window.onload = function () {
+    setTimeout(function () {
+        for (let n = 0; n < 3; n++) {
+            try { attempt(n); } catch (e) { }
+        }
         document.body.appendChild(document.createTextNode("PASS if no crash"));
-       
-    });
-}, 0);
-globalThis.retained = retained;
+    }, 0);
+};
 </script>
 </body>
 </html>
