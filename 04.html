@@ -1,59 +1,159 @@
 
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"></head>
+<head>
+<meta charset="UTF-8">
+<title>WebKit 322208 - PS4</title>
+</head>
 <body>
+<h2>WebKit 322208 - PS4</h2>
+<pre id="log"></pre>
+
 <script>
+(function () {
+    var output = document.getElementById("log");
 
-let ctx = null;
-let inGetter = false;
-
-Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-        if (inGetter || !ctx)
-            return undefined;
-        inGetter = true;
-        for (let i = 0; i < 16; i++) {
-            try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch (e) { }
-            try { ctx.measureText('x'); } catch (e) { }
-        }
-        inGetter = false;
-        return undefined;
+    function log(message) {
+        output.appendChild(
+            document.createTextNode(message + "\n")
+        );
     }
-});
 
-function attempt(n)
-{
-    for (let d = 0; d < 3; d++)
-        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
+    function check(name, condition) {
+        log((condition ? "PASS " : "FAIL ") + name);
+    }
 
-    const family = 'VarFam' + n;
-    const face = new FontFace(family, 'local(Helvetica)');
-    void face.loaded;
-    document.fonts.add(face);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 10;
-    canvas.height = 10;
-    ctx = canvas.getContext('2d');
-    ctx.font = '20px Helvetica, ' + family;
-
-    for (let i = 0; i < 50; i++)
-        ctx.measureText('x');
-
-    // U+E005 is absent from Helvetica, so this walks the fallback list into the pending face.
-    ctx.measureText('\uE005AB');
-}
-
-window.onload = function () {
-    setTimeout(function () {
-        for (let n = 0; n < 3; n++) {
-            try { attempt(n); } catch (e) { }
+    function gc() {
+        function gcRec(n) {
+            if (n < 1)
+                return {};
+            var temp = {i: "ab" + i + (i / 100000)};
+            temp += "foo";
+            gcRec(n-1);
         }
-        document.body.appendChild(document.createTextNode("PASS if no crash"));
-    }, 0);
-};
+        for (var i = 0; i < 10000; i++)
+            gcRec(10);
+    }
+
+    // Retorna apenas a ShadowRoot interna.
+    // O hospedeiro não é retornado nem armazenado
+    // em uma variável global.
+
+    function detachedShadowRootOf() {
+        var outer = document.createElement("div");
+        document.body.appendChild(outer);
+
+        var outerShadow = outer.attachShadow({
+            mode: "open"
+        });
+
+        var host = document.createElement("div");
+        outerShadow.appendChild(host);
+
+        var innerShadow = host.attachShadow({
+            mode: "open"
+        });
+
+        var slot = document.createElement("slot");
+        innerShadow.appendChild(slot);
+
+        var lightChild = document.createElement("span");
+        host.appendChild(lightChild);
+
+        check("ShadowRoot inicialmente associada",
+            innerShadow.host === host);
+
+        check("Slot pertence a ShadowRoot",
+            slot.getRootNode() === innerShadow);
+
+        // Preserva a ordem principal de remoção:
+        // 1. Remove o filho convencional.
+        // 2. Esvazia a ShadowRoot interna.
+        // 3. Remove o host da árvore externa.
+
+        host.removeChild(lightChild);
+
+        while (innerShadow.firstChild)
+            innerShadow.removeChild(innerShadow.firstChild);
+
+        outerShadow.removeChild(host);
+
+        return innerShadow;
+    }
+
+    log("CENARIO A: SHADOWROOT SEM FILHOS");
+
+    var shadowA = detachedShadowRootOf();
+
+    check("ShadowRoot A existe", !!shadowA);
+
+    log("");
+    log("CENARIO B: SHADOWROOT COM FILHO");
+
+    var shadowB = detachedShadowRootOf();
+    var child = document.createElement("b");
+    shadowB.appendChild(child);
+
+    check("Filho pertence a ShadowRoot B",
+        child.parentNode === shadowB);
+
+    log("");
+    log("PRESSAO SOBRE O GC");
+
+    gc();
+
+    log("");
+    log("VERIFICACOES APOS GC");
+
+    try {
+        check("ShadowRoot A conserva host",
+            shadowA.host !== null);
+
+        check("Raiz composta A corresponde ao host",
+            shadowA.getRootNode({composed: true}) ===
+            shadowA.host);
+    } catch (e) {
+        log("ERRO A: " + e.name + ": " + e.message);
+    }
+
+    try {
+        check("ShadowRoot B conserva host",
+            shadowB.host !== null);
+
+        check("Raiz composta B corresponde ao host",
+            child.getRootNode({composed: true}) ===
+            shadowB.host);
+    } catch (e) {
+        log("ERRO B: " + e.name + ": " + e.message);
+    }
+
+    log("");
+    log("AGUARDANDO NOVA VERIFICACAO...");
+
+    setTimeout(function () {
+        gc();
+
+        log("");
+        log("VERIFICACOES ASSINCRONAS");
+
+        try {
+            check("ShadowRoot A conserva host",
+                shadowA.host !== null);
+
+            check("ShadowRoot B conserva host",
+                shadowB.host !== null);
+
+            check("Raiz composta B corresponde ao host",
+                child.getRootNode({composed: true}) ===
+                shadowB.host);
+        } catch (e) {
+            log("ERRO: " + e.name + ": " + e.message);
+        }
+
+        log("");
+        log("TEST COMPLETE");
+    }, 100);
+})();
 </script>
 </body>
 </html>
