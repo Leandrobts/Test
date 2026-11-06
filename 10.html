@@ -1,77 +1,85 @@
+
+<!DOCTYPE html>
+<html>
+<body>
 <script>
-function assert(condition, message) {
-    if (!condition)
-        throw new Error(message);
+// 03_ps4_v2: duas correcoes adicionais
+//   - font/woff em vez de font/otf (confirmado no diagnostico_86074ba que ficou loading)
+//   - checkpoint async para ver se getter dispara apos o script
+
+document.fonts;
+
+function log(message) {
+    document.body.appendChild(document.createTextNode(message));
+    document.body.appendChild(document.createElement("br"));
 }
 
-{
-    let calls = 0;
-    let array = new BigInt64Array([1n, 2n, 3n]);
-    let threw = false;
-    try {
-        array.filter(() => {
-            if (calls++ === 0)
-                array.buffer.transfer();
-            return true;
-        });
-    } catch (error) {
-        threw = true;
-        assert(error instanceof TypeError, error);
-    }
-    assert(threw, "bigint detach");
-    assert(calls === 3, "bigint detach calls " + calls);
-}
+(function run() {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadowRoot = host.attachShadow({ mode: "open" });
 
-{
-    let calls = 0;
-    let array = new Int32Array([1, 2, 3]);
-    array.constructor = { [Symbol.species]: Float64Array };
-    let result = array.filter(() => {
-        if (calls++ === 0)
-            array.buffer.transfer();
-        return true;
+    // WOFF em vez de OTF: diagnostico provou que font/woff vai para "loading" no PS4
+    const dataUrl = "data:font/woff;base64," + "A".repeat(150000);
+
+    const fontFaceStyle = document.createElement("style");
+    fontFaceStyle.textContent =
+        `@font-face { font-family: reentryFont; src: url("${dataUrl}"); }` +
+        `.probe { font: 24px reentryFont; }`;
+    shadowRoot.appendChild(fontFaceStyle);
+
+    const probe = document.createElement("span");
+    probe.className = "probe";
+    probe.textContent = "A";
+    shadowRoot.appendChild(probe);
+
+    document.body.offsetHeight;
+    // Checar status ANTES e DEPOIS de fonts.load() para diagnóstico
+    log("status apos offsetHeight: " + document.fonts.status);
+    document.fonts.load("24px reentryFont", "A");
+    log("status apos fonts.load: " + document.fonts.status);
+
+    document.fonts.ready;
+
+    let getterCallCount = 0;
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            ++getterCallCount;
+            log(">>> GETTER DISPAROU! count=" + getterCallCount);
+            host.remove();
+            log("apos host.remove()");
+            return undefined;
+        }
     });
-    assert(calls === 3, "float calls " + calls);
-    assert(result instanceof Float64Array, "species");
-    assert(result.length === 3, "length");
-    assert(result[0] === 1, "first " + result[0]);
-    assert(Number.isNaN(result[1]) && Number.isNaN(result[2]), result);
-}
 
-{
-    let calls = 0;
-    let array = new BigInt64Array(new ArrayBuffer(24, { maxByteLength: 24 }));
-    array[0] = 1n;
-    array[1] = 2n;
-    array[2] = 3n;
-    let threw = false;
-    try {
-        array.filter(() => {
-            if (calls++ === 0)
-                array.buffer.resize(8);
-            return true;
-        });
-    } catch (error) {
-        threw = true;
-        assert(error instanceof TypeError, error);
-    }
-    assert(threw, "bigint shrink");
-    assert(calls === 3, "bigint shrink calls " + calls);
-}
+    const prependedStyle = document.createElement("style");
+    prependedStyle.textContent = ".unused { color: red; }";
+    shadowRoot.prepend(prependedStyle);
 
-{
-    let result = new Int32Array([1, 2, 3]).filter(value => value > 1);
-    assert(result.join() === "2,3", result);
-}
+    document.styleSheets.length;
 
-{
-    let calls = 0;
-    let array = new Int32Array([1, 2, 3]);
-    let result = array.filter(() => {
-        if (calls++ === 0)
-            array.buffer.transfer();
-        return true;
+    log("getter sync: " + getterCallCount);
+    log("status: " + document.fonts.status);
+
+    // Checkpoint async: continua monitorando apos o script
+    Promise.resolve().then(() => {
+        log("microtask: getter=" + getterCallCount
+            + " status=" + document.fonts.status);
     });
-    assert(result.join() === "1,0,0", result);
-}
+
+    // Checkpoint tardio: verifica se getter disparou como macrotask
+    setTimeout(() => {
+        log("setTimeout(0): getter=" + getterCallCount
+            + " status=" + document.fonts.status);
+    }, 0);
+
+    setTimeout(() => {
+        log("setTimeout(500): getter=" + getterCallCount
+            + " status=" + document.fonts.status);
+    }, 500);
+})();
 </script>
+</body>
+</html>
