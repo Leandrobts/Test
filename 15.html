@@ -1,66 +1,120 @@
+
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
 <body>
+<pre id="log"></pre>
 <script>
+// Diagnostico dos pre-requisitos para o bug 86074ba no PS4
+//
+// Questoes a responder:
+//   P1: document.fonts.ready existe e e uma Promise?
+//   P2: document.fonts.load() funciona e retorna Promise?
+//   P3: document.fonts.status transiciona para "loading"?
+//   P4: FontFaceSet.prototype.then e acessivel?
+//   P5: Shadow DOM + @font-face funciona no PS4?
+//   P6: document.styleSheets.length acessa shadow roots?
+//   P7: O trigger completo funciona com data: URL grande (pending)?
 
-let ctx = null;
-let inGetter = false;
-let getterCalls = 0;
-Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-        if (inGetter || !ctx)
-            return undefined;
-        inGetter = true;
-        getterCalls++;
-console.log('Getter executado:', getterCalls);
-        for (let i = 0; i < 16; i++) {
-            try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch (e) { }
-            try { ctx.measureText('x'); } catch (e) { }
-        }
-        inGetter = false;
-        return undefined;
-    }
-});
+function log(s) { document.getElementById('log').textContent += s + '\n'; }
 
-function attempt(n)
-{
-    for (let d = 0; d < 3; d++)
-        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
+// P1 — document.fonts.ready
+log('P1 fonts.ready: ' + (typeof document.fonts.ready));
+log('    e Promise: ' + (document.fonts.ready instanceof Promise));
 
-    const family = 'VarFam' + n;
-    const face = new FontFace(family, 'local(Helvetica)');
-    void face.loaded;
-    document.fonts.add(face);
+// P2 — document.fonts.load
+log('P2 fonts.load: ' + (typeof document.fonts.load));
 
-const canvas = document.createElement('canvas');
-    canvas.width = 10;   // Defina a largura desejada (ex: 10)
-    canvas.height = 10;  // Defina a altura desejada (ex: 10)
-    
-    ctx = canvas.getContext('2d');
-    ctx.font = '20px Helvetica, ' + family;
+// P3 — status inicial
+log('P3 status inicial: ' + document.fonts.status);
+document.fonts;  // "touch" como no test original
+log('    apos touch:  ' + document.fonts.status);
 
-    for (let i = 0; i < 50; i++)
-        ctx.measureText('x');
+// P4 — FontFaceSet.prototype.then
+var protoThenExists = 'then' in FontFace.prototype;
+log('P4 FontFace.prototype.then in: ' + protoThenExists);
 
-    // U+E005 is absent from Helvetica, so this walks the fallback list into the pending face.
-    ctx.measureText('\u13A0\u13A2\u13A4');
+// P5 — Shadow DOM + @font-face
+var host = document.createElement('div');
+document.body.appendChild(host);
+try {
+    var shadow = host.attachShadow({ mode: 'open' });
+    var style = document.createElement('style');
+    // data: URL grande — fica pending (confirmado no PS4)
+    var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(10000000) + '")';
+    style.textContent = '@font-face { font-family: testFont86; src: ' + pendingUrl + '; } .p { font: 24px testFont86; }';
+    shadow.appendChild(style);
+    var span = document.createElement('span');
+    span.className = 'p';
+    span.textContent = 'A';
+    shadow.appendChild(span);
+    log('P5 Shadow DOM + @font-face: OK (sem excecao)');
+} catch(e) {
+    log('P5 ERRO: ' + e.message);
 }
 
-window.onload = function () {
-    setTimeout(function () {
-        for (let n = 0; n < 3; n++) {
-            try { attempt(n); } catch (e) { }
-        }
-        document.body.appendChild(
-    document.createTextNode(
-        'Teste concluído. Getter executado: ' + getterCalls
-    )
-);
+// P3b — status apos @font-face no shadow root + layout
+void document.body.offsetHeight;
+log('P3b status apos layout: ' + document.fonts.status);
 
-    }, 0);
-};
+// P6 — Verificar se document.fonts.load() transiciona para loading
+var loadStartTime = Date.now();
+try {
+    var loadPromise = document.fonts.load('24px testFont86', 'A');
+    log('P6 fonts.load() retornou: ' + (typeof loadPromise));
+    log('    status apos load(): ' + document.fonts.status);
+} catch(e) {
+    log('P6 ERRO em fonts.load(): ' + e.message);
+}
+
+// P7 — Instalar getter em FontFaceSet.prototype.then e ver se dispara
+var getterCount = 0;
+try {
+    Object.defineProperty(FontFace.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            delete FontFace.prototype.then;
+            getterCount++;
+            log('P7 FontFace.prototype.then getter disparou! count=' + getterCount);
+            // Nao chamar host.remove() ainda — apenas detectar disparo
+            return undefined;
+        }
+    });
+    log('P7 FontFace.prototype.then getter instalado');
+} catch(e) {
+    log('P7 ERRO ao instalar getter: ' + e.message);
+}
+
+// P8 — Trigger: adicionar style e acessar document.styleSheets.length
+try {
+    var prependedStyle = document.createElement('style');
+    prependedStyle.textContent = '.unused { color: red; }';
+    if (host.shadowRoot)
+        host.shadowRoot.prepend(prependedStyle);
+    log('P8 style prependado ao shadow root');
+} catch(e) {
+    log('P8 ERRO prepend: ' + e.message);
+}
+
+// Trigger principal
+var ssLen = document.styleSheets.length;
+log('P8 document.styleSheets.length: ' + ssLen);
+log('P8 getter disparou apos styleSheets.length: ' + (getterCount > 0));
+
+// Aguardar microtasks para ver se getter dispara async
+Promise.resolve().then(function() {
+    log('P8 getter disparou async (microtask): ' + (getterCount > 0));
+    log('\n=== RESUMO ===');
+    log('fonts.ready presente:  ' + (document.fonts.ready instanceof Promise));
+    log('fonts.load presente:   ' + (typeof document.fonts.load === 'function'));
+    log('status atingiu loading:' + (document.fonts.status === 'loading' || document.fonts.status === 'loading'));
+    log('getter proto funciona: ' + (typeof FontFace.prototype !== 'undefined'));
+    log('getter disparou:       ' + (getterCount > 0));
+    if (getterCount === 0 && document.fonts.status === 'loaded') {
+        log('\nSTATUS LOADED = fonte nao ficou em loading.');
+        log('Usar URL maior (1.1MB) ou endpoint que nao responde.');
+    }
+});
 </script>
 </body>
 </html>
