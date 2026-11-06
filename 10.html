@@ -1,105 +1,77 @@
-
-
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body>
-<pre id="log"></pre>
 <script>
-
-
-function log(s) { document.getElementById('log').textContent += s + '\n'; }
-
-// Toca document.fonts antes do load event (necessario para m_isDocumentLoaded)
-document.fonts;
-
-// data: URL grande (1.1MB) — confirmado que fica "pending" no PS4 (commit 5ccd64b)
-// Evita o problema de cache: URL grande nao e pre-aquecida por opportunistically...
-var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(1100000) + '")';
-
-function run() {
-    var host = document.createElement('div');
-    document.body.appendChild(host);
-    var shadowRoot = host.attachShadow({ mode: 'open' });
-
-    // @font-face com URL grande → font fica "loading" → document.fonts.ready re-armado
-    var fontFaceStyle = document.createElement('style');
-    fontFaceStyle.textContent =
-        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
-        '.probe { font: 24px reentryFont; }';
-    shadowRoot.appendChild(fontFaceStyle);
-
-    var probe = document.createElement('span');
-    probe.className = 'probe';
-    probe.textContent = 'A';
-    shadowRoot.appendChild(probe);
-
-    // Forca layout para iniciar carregamento da fonte
-    void document.body.offsetHeight;
-    log('status apos layout: ' + document.fonts.status);
-
-    // Rastreia o carregamento
-    document.fonts.load('24px reentryFont', 'A');
-    log('status apos load(): ' + document.fonts.status);
-
-    // Materializa a promise ready para que o thenable check ocorra
-    void document.fonts.ready;
-
-    // Prepend style → marca shadow scope com pending Reset update
-    var prependedStyle = document.createElement('style');
-    prependedStyle.textContent = '.unused { color: blue; }';
-    shadowRoot.prepend(prependedStyle);
-
-    var getterCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            delete FontFaceSet.prototype.then;
-            getterCount++;
-            log('[GETTER DISPAROU] count=' + getterCount + ' status=' + document.fonts.status);
-            // HOST.REMOVE(): libera o ListHashSetNode que o iterator aponta
-            // Se m_inDocumentShadowRoots e iterado neste momento → UAF
-            host.remove();
-            return undefined;
-        }
-    });
-
-    // Trigger 1: document.styleSheets.length (original do commit)
-    var ssLen = document.styleSheets.length;
-    log('T1 styleSheets.length: ' + ssLen + ' | getter: ' + getterCount);
-
-    // Trigger 2: document.body.offsetHeight (forca layout completo + style flush)
-    void document.body.offsetHeight;
-    log('T2 offsetHeight | getter: ' + getterCount);
-
-    // Trigger 3: getComputedStyle no probe (forca resolve de estilo do shadow root)
-    try {
-        var cs = window.getComputedStyle(probe);
-        void cs.fontFamily;
-        log('T3 getComputedStyle | getter: ' + getterCount);
-    } catch(e) {}
-
-    // Trigger 4: shadowRoot.styleSheets (accesso direto)
-    try {
-        void shadowRoot.styleSheets.length;
-        log('T4 shadowRoot.styleSheets | getter: ' + getterCount);
-    } catch(e) {}
-
-    log('status final: ' + document.fonts.status);
-    log('getter total: ' + getterCount);
-
-    // Aguarda async (rendering path que confirmamos disparar o getter)
-    setTimeout(function() {
-        log('getter apos 200ms: ' + getterCount);
-        if (getterCount === 0)
-            log('getter nao disparou — fonte pode ja estar loaded (usar data: URL maior)');
-        log('PASS se chegou aqui sem crash');
-    }, 200);
+function assert(condition, message) {
+    if (!condition)
+        throw new Error(message);
 }
 
-window.addEventListener('load', function() {
-    setTimeout(run, 0);
-});
+{
+    let calls = 0;
+    let array = new BigInt64Array([1n, 2n, 3n]);
+    let threw = false;
+    try {
+        array.filter(() => {
+            if (calls++ === 0)
+                array.buffer.transfer();
+            return true;
+        });
+    } catch (error) {
+        threw = true;
+        assert(error instanceof TypeError, error);
+    }
+    assert(threw, "bigint detach");
+    assert(calls === 3, "bigint detach calls " + calls);
+}
+
+{
+    let calls = 0;
+    let array = new Int32Array([1, 2, 3]);
+    array.constructor = { [Symbol.species]: Float64Array };
+    let result = array.filter(() => {
+        if (calls++ === 0)
+            array.buffer.transfer();
+        return true;
+    });
+    assert(calls === 3, "float calls " + calls);
+    assert(result instanceof Float64Array, "species");
+    assert(result.length === 3, "length");
+    assert(result[0] === 1, "first " + result[0]);
+    assert(Number.isNaN(result[1]) && Number.isNaN(result[2]), result);
+}
+
+{
+    let calls = 0;
+    let array = new BigInt64Array(new ArrayBuffer(24, { maxByteLength: 24 }));
+    array[0] = 1n;
+    array[1] = 2n;
+    array[2] = 3n;
+    let threw = false;
+    try {
+        array.filter(() => {
+            if (calls++ === 0)
+                array.buffer.resize(8);
+            return true;
+        });
+    } catch (error) {
+        threw = true;
+        assert(error instanceof TypeError, error);
+    }
+    assert(threw, "bigint shrink");
+    assert(calls === 3, "bigint shrink calls " + calls);
+}
+
+{
+    let result = new Int32Array([1, 2, 3]).filter(value => value > 1);
+    assert(result.join() === "2,3", result);
+}
+
+{
+    let calls = 0;
+    let array = new Int32Array([1, 2, 3]);
+    let result = array.filter(() => {
+        if (calls++ === 0)
+            array.buffer.transfer();
+        return true;
+    });
+    assert(result.join() === "1,0,0", result);
+}
 </script>
-</body>
-</html>

