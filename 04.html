@@ -2,22 +2,53 @@
 <html>
 <body>
 <script>
+// Touch document.fonts before load event
 document.fonts;
-function log(message)
-{
+
+function log(message) {
     document.body.appendChild(document.createTextNode(message));
     document.body.appendChild(document.createElement("br"));
 }
 
-function run()
-{
+// =============================================
+// DIAGNÓSTICO 1: FontFaceSet.prototype.then
+// funciona no PS4?
+// =============================================
+let protoTestCount = 0;
+Object.defineProperty(FontFaceSet.prototype, "then", {
+    configurable: true,
+    get() {
+        delete FontFaceSet.prototype.then;
+        ++protoTestCount;
+        return undefined;
+    }
+});
+// Força uma promise resolution para testar o getter
+Promise.resolve(document.fonts).then(() => {});
+log("D1 - getter proto disparou no Promise.resolve: " + protoTestCount);
+
+function run() {
+    log("--- INICIO run() ---");
+
     const host = document.createElement("div");
     document.body.appendChild(host);
     const shadowRoot = host.attachShadow({ mode: "open" });
 
+    // =============================================
+    // DIAGNÓSTICO 2: Escolha da URL da fonte
+    // Testa Blob URL para garantir loading state
+    // =============================================
+    // Cria um blob grande que nao vai parsear como fonte valida
+    // mas mantem o status em "loading" por mais tempo
+    const fakeBytes = new Uint8Array(2 * 1024 * 1024); // 2MB zeros
+    for (let i = 0; i < fakeBytes.length; i++) fakeBytes[i] = i & 0xFF;
+    const blob = new Blob([fakeBytes], { type: "font/otf" });
+    const blobUrl = URL.createObjectURL(blob);
+
     const fontFaceStyle = document.createElement("style");
-    fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }`
-        + `.probe { font: 24px reentryFont; }`;
+    fontFaceStyle.textContent =
+        `@font-face { font-family: reentryFont; src: url("${blobUrl}"); }` +
+        `.probe { font: 24px reentryFont; }`;
     shadowRoot.appendChild(fontFaceStyle);
 
     const probe = document.createElement("span");
@@ -25,45 +56,85 @@ function run()
     probe.textContent = "A";
     shadowRoot.appendChild(probe);
 
-    document.body.offsetHeight; 
+    document.body.offsetHeight; // Forca layout para iniciar carregamento
     document.fonts.load("24px reentryFont", "A");
-    log("document.fonts.status: " + document.fonts.status);
 
+    log("D2 - status apos offsetHeight+load: " + document.fonts.status);
+    log("D2 - document.fonts.size: " + document.fonts.size);
 
-    document.fonts.ready;
+    // Verificar se a fonte foi registrada no FontFaceSet
+    let fontFound = false;
+    document.fonts.forEach(f => {
+        if (f.family === "reentryFont") {
+            fontFound = true;
+            log("D2 - reentryFont encontrada, status: " + f.status);
+        }
+    });
+    if (!fontFound) log("D2 - PROBLEMA: reentryFont NAO encontrada em document.fonts!");
 
+    // =============================================
+    // DIAGNÓSTICO 3: document.fonts.ready
+    // O proxy JS foi materializado?
+    // =============================================
+    const readyPromise = document.fonts.ready;
+    log("D3 - fonts.ready tipo: " + typeof readyPromise);
+    log("D3 - fonts.ready === fonts.ready: " + (document.fonts.ready === readyPromise));
 
+    // =============================================
+    // DIAGNÓSTICO 4: Prepend e reset path
+    // =============================================
     const prependedStyle = document.createElement("style");
     prependedStyle.textContent = ".unused { color: red; }";
     shadowRoot.prepend(prependedStyle);
+    log("D4 - estilos no shadowRoot: " + shadowRoot.styleSheets.length);
 
-    let dentroDaOperacao = false;
-let getterCallCount = 0;
+    // =============================================
+    // DIAGNÓSTICO 5: Instalar getter
+    // =============================================
+    let getterCallCount = 0;
+    // Restaurar o getter (pode ter sido consumido no D1)
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            ++getterCallCount;
+            log(">>> GETTER DISPAROU! count=" + getterCallCount);
+            host.remove();
+            return undefined;
+        }
+    });
+    log("D5 - getter instalado");
+    log("D5 - status antes do trigger: " + document.fonts.status);
 
-Object.defineProperty(FontFaceSet.prototype, "then", {
-    configurable: true,
-    get() {
-        delete FontFaceSet.prototype.then;
-        ++getterCallCount;
+    // =============================================
+    // DIAGNÓSTICO 6: Testar triggers alternativos
+    // =============================================
 
-        log("Getter executado");
-        log("Dentro da operacao: " + dentroDaOperacao);
+    // Trigger 1: Original do commit
+    const before1 = getterCallCount;
+    document.styleSheets.length;
+    log("D6 - T1 (styleSheets.length): getter=" + (getterCallCount > before1));
 
-        return undefined;
-    }
-});
+    // Trigger 2: Novo offsetHeight
+    const before2 = getterCallCount;
+    document.body.offsetHeight;
+    log("D6 - T2 (offsetHeight): getter=" + (getterCallCount > before2));
 
-dentroDaOperacao = true;
-document.styleSheets.length;
-dentroDaOperacao = false;
+    // Trigger 3: getComputedStyle
+    const before3 = getterCallCount;
+    window.getComputedStyle(probe).fontFamily;
+    log("D6 - T3 (getComputedStyle): getter=" + (getterCallCount > before3));
 
-log("Contagem imediata: " + getterCallCount);
+    // Trigger 4: Forca scroll
+    const before4 = getterCallCount;
+    document.body.scrollTop;
+    log("D6 - T4 (scrollTop): getter=" + (getterCallCount > before4));
 
-setTimeout(function() {
-    log("Contagem posterior: " + getterCallCount);
-}, 1000);
-
-    
+    log("--- RESULTADO FINAL ---");
+    log("getter disparou total: " + getterCallCount);
+    log("status final: " + document.fonts.status);
+    log("PASS se nao travou.");
+}
 
 window.addEventListener("load", () => setTimeout(run, 0));
 </script>
