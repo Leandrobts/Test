@@ -1,61 +1,92 @@
 <!DOCTYPE html>
 <html>
 <body>
-<p>Tests that an element recorded in Style::DocumentScope::LayoutDependencyUpdateContext survives
-until LocalFrameViewLayoutContext::layout() returns.</p>
-<p>A &lt;use&gt; shadow tree clone can be a CSS query container, so
-invalidateForContainerDependencies() records it in
-LayoutDependencyUpdateContext::invalidatedContainers. That set lives on layout()'s stack across
-Document::updateStyleIfNeeded(), and SVGUseElement::updateUserAgentShadowTree() destroys and
-recreates the clone from inside that style update - so the recorded element dies while still
-referenced. With a CheckedRef this traps in
-CanMakeCheckedPtrBase::decrementCheckedPtrCount() when the sets are torn down.</p>
-<p>Passes if it does not crash.</p>
 <script>
+// Style::Scope::flushPendingDescendantUpdates() used to walk
+// Document::m_inDocumentShadowRoots (a WeakListHashSet) with a live iterator while
+// making a per-root flushPendingUpdate() callout. That callout re-registers the
+// shadow scope's @font-face rules, which removes the previous CSSFontFace; when that
+// face is the only loading one, document.fonts.ready settles synchronously and its
+// thenable assimilation runs an author getter. Disconnecting the iterated shadow
+// root from that getter frees the list node the iterator points at.
 
-
-// The <use> here targets its own ancestor <svg>, so expanding the shadow tree re-invalidates it
-// and the clones are rebuilt more than once. The cloned <text> carries container-type, which is
-// what puts it in the invalidatedContainers set.
-const markup = `<!DOCTYPE html><html><head><style>
-.class3 { container-type: inline-size; }
-</style></head><body>
-<svg id="rootSvg">
-    <text id="textElement" class="class3">
-        <tref xlink:href="#textPathTarget">
-            <textPath id="textPathTarget">
-                <altGlyph xlink:href="#rootSvg">
-                    Text</text>
-    <textPath id="secondTextPath"></textPath>
-    <circle id="circleElement" cx="0.66" cy="34%" r="1"></circle>
-    <use id="useCircle" xlink:href="#circleElement"></use>
-    <marker id="markerElement">
-        <menu id="menuElement">
-            <q id="quoteElement" class="class3">text</q>
-            <svg id="innerSvg" viewBox="1 1 1 62">
-                <use id="useRoot" xlink:href="#rootSvg"></use>
-            </svg>
-        </menu>
-    </marker>
-</svg>
-</body></html>`;
-
-// Whether the shadow tree rebuild lands inside the window where the element is already recorded
-// depends on how many rebuild rounds the recursive <use> takes, so load the document several
-// times rather than once.
-const FRAMES = 12;
-let remaining = FRAMES;
-for (let i = 0; i < FRAMES; ++i) {
-    const frame = document.createElement('iframe');
-    frame.onload = () => {
-        if (--remaining)
-            return;
-        document.body.textContent = 'PASS did not crash';
-
-    };
-    frame.srcdoc = markup;
-    document.body.appendChild(frame);
+if (window.testRunner) {
+    testRunner.dumpAsText();
+    testRunner.waitUntilDone();
 }
+
+// Touch document.fonts before the load event so that FontFaceSet is marked as
+// document-loaded; completedLoading() only settles the ready promise in that state.
+document.fonts;
+
+function log(message)
+{
+    document.body.appendChild(document.createTextNode(message));
+    document.body.appendChild(document.createElement("br"));
+}
+
+function run()
+{
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadowRoot = host.attachShadow({ mode: "open" });
+
+    const fontFaceStyle = document.createElement("style");
+    fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/Ahem.otf"); }`
+        + `.probe { font: 24px reentryFont; }`;
+    shadowRoot.appendChild(fontFaceStyle);
+
+    const probe = document.createElement("span");
+    probe.className = "probe";
+    probe.textContent = "A";
+    shadowRoot.appendChild(probe);
+
+    document.body.offsetHeight; // Force layout so the font load starts.
+    document.fonts.load("24px reentryFont", "A");
+    log("document.fonts.status: " + document.fonts.status);
+
+    // Materialize the JS promise for the ready proxy that startedLoading() re-armed,
+    // so that settling it goes through JSPromise::resolve() and its thenable check.
+    document.fonts.ready;
+
+    // Give the shadow scope a pending UpdateType::ActiveSet whose flush takes the
+    // ResolverUpdateType::Reset path, so all of its sheets (including the @font-face
+    // one) get re-processed. Prepending rather than appending is what makes
+    // analyzeStyleSheetChange() pick Reset.
+    const prependedStyle = document.createElement("style");
+    prependedStyle.textContent = ".unused { color: red; }";
+    shadowRoot.prepend(prependedStyle);
+
+    let getterCallCount = 0;
+
+
+
+
+Object.defineProperty(FontFace.prototype, "then", {
+    configurable: true,
+    get() {
+        delete FontFace.prototype.then;
+
+        ++getterCallCount;
+        host.remove();
+
+        return undefined;
+    }
+});
+
+
+
+
+
+    document.styleSheets.length; // Reaches Scope::flushPendingDescendantUpdates().
+
+    log("FontFaceSet.prototype.then getter calls: " + getterCallCount);
+    log("PASS if no crash.");
+    if (window.testRunner)
+        testRunner.notifyDone();
+}
+
+window.addEventListener("load", () => setTimeout(run, 0));
 </script>
 </body>
 </html>
