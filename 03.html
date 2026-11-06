@@ -2,52 +2,76 @@
 <html>
 <body>
 <script>
-const originalIterator = Array.prototype[Symbol.iterator];
+// Style::Scope::flushPendingDescendantUpdates() used to walk
+// Document::m_inDocumentShadowRoots (a WeakListHashSet) with a live iterator while
+// making a per-root flushPendingUpdate() callout. That callout re-registers the
+// shadow scope's @font-face rules, which removes the previous CSSFontFace; when that
+// face is the only loading one, document.fonts.ready settles synchronously and its
+// thenable assimilation runs an author getter. Disconnecting the iterated shadow
+// root from that getter frees the list node the iterator points at.
 
-// Variant 1: substitute plain objects for the readable/writable slots.
-Array.prototype[Symbol.iterator] = function() {
-    const arr = this;
-    let i = 0;
-    return {
-        next() {
-            if (i >= arr.length)
-                return { done: true };
-            let val = arr[i];
-            if (arr.length === 3 && i >= 1)
-                val = { fake: true };
-            i++;
-            return { value: val, done: false };
+
+// Touch document.fonts before the load event so that FontFaceSet is marked as
+// document-loaded; completedLoading() only settles the ready promise in that state.
+document.fonts;
+
+function log(message)
+{
+    document.body.appendChild(document.createTextNode(message));
+    document.body.appendChild(document.createElement("br"));
+}
+
+function run()
+{
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadowRoot = host.attachShadow({ mode: "open" });
+
+    const fontFaceStyle = document.createElement("style");
+    fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }`
+        + `.probe { font: 24px reentryFont; }`;
+    shadowRoot.appendChild(fontFaceStyle);
+
+    const probe = document.createElement("span");
+    probe.className = "probe";
+    probe.textContent = "A";
+    shadowRoot.appendChild(probe);
+
+    document.body.offsetHeight; // Force layout so the font load starts.
+    document.fonts.load("24px reentryFont", "A");
+    log("document.fonts.status: " + document.fonts.status);
+
+    // Materialize the JS promise for the ready proxy that startedLoading() re-armed,
+    // so that settling it goes through JSPromise::resolve() and its thenable check.
+    document.fonts.ready;
+
+    // Give the shadow scope a pending UpdateType::ActiveSet whose flush takes the
+    // ResolverUpdateType::Reset path, so all of its sheets (including the @font-face
+    // one) get re-processed. Prepending rather than appending is what makes
+    // analyzeStyleSheetChange() pick Reset.
+    const prependedStyle = document.createElement("style");
+    prependedStyle.textContent = ".unused { color: red; }";
+    shadowRoot.prepend(prependedStyle);
+
+    let getterCallCount = 0;
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            ++getterCallCount;
+            host.remove(); // Frees the iterated Document::m_inDocumentShadowRoots node.
+            return undefined;
         }
-    };
-};
-new TransformStream();
+    });
 
-// Variant 2: substitute an object that holds a heap pointer.
-let buf = new ArrayBuffer(65536);
-Array.prototype[Symbol.iterator] = function() {
-    const arr = this;
-    let i = 0;
-    return {
-        next() {
-            if (i >= arr.length)
-                return { done: true };
-            let val = arr[i];
-            if (arr.length === 3 && i >= 1)
-                val = { pad: 0, ptr: buf };
-            i++;
-            return { value: val, done: false };
-        }
-    };
-};
-new TransformStream();
+    document.styleSheets.length; // Reaches Scope::flushPendingDescendantUpdates().
 
-// Variant 3: truncated iterator returning fewer than 3 entries.
-Array.prototype[Symbol.iterator] = function() {
-    return { next() { return { done: true }; } };
-};
-new TransformStream();
+    log("FontFaceSet.prototype.then getter calls: " + getterCallCount);
+    log("PASS if no crash.");
+    
+}
 
-Array.prototype[Symbol.iterator] = originalIterator;
+window.addEventListener("load", () => setTimeout(run, 0));
 </script>
 </body>
 </html>
