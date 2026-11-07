@@ -4,61 +4,89 @@
 <body>
 <pre id="log"></pre>
 <script>
-function log(s) {
-    document.getElementById('log').textContent += s + '\n';
-}
+// CORRECAO DE ORDEM — getter instalado ANTES do prepend
+//
+// Problema da versao anterior:
+//   shadowRoot.prepend() → flush → completedLoading() → promise settled
+//   DEPOIS: getter instalado ← tarde demais
+//   DEPOIS: document.styleSheets.length ← nada a fazer
+//   RESULTADO: getter dispara async (task), sem C++ ativo → sem crash
+//
+// Esta versao:
+//   getter instalado ANTES do prepend
+//   SE completedLoading() resolve a promise sincronamente durante prepend():
+//     thenable check → FontFaceSet.prototype.then → getter SINCRONO
+//     → host.remove() DURANTE o flush com iterator vivo → UAF
+//   SE ainda async:
+//     getter dispara em task posterior → sem crash (esperado)
+//
+// A chave: se ">>> GETTER DISPAROU" aparece ANTES de "apos prepend"
+//          → getter e sincrono durante prepend() → UAF possivel
 
-// Touch document.fonts antes do load event
+function log(s) { document.getElementById('log').textContent += s + '\n'; }
+
 document.fonts;
 
-const host = document.createElement("div");
+const host = document.createElement('div');
 document.body.appendChild(host);
-const shadowRoot = host.attachShadow({ mode: "open" });
+const shadowRoot = host.attachShadow({ mode: 'open' });
 
-const fontFaceStyle = document.createElement("style");
-fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }`
-    + `.probe { font: 24px reentryFont; }`;
+// Fonte com URL invalida — falha rapido e triggeriza completedLoading()
+// no PS4: se o servidor responde com 404, a fonte falha
+// Alternativa: data: URL invalida pequena (falha no parse)
+const fontFaceStyle = document.createElement('style');
+fontFaceStyle.textContent =
+    '@font-face { font-family: reentryFont; src: url("no-such-font.otf"); }' +
+    '.probe { font: 24px reentryFont; }';
 shadowRoot.appendChild(fontFaceStyle);
 
-const probe = document.createElement("span");
-probe.className = "probe";
-probe.textContent = "A";
+const probe = document.createElement('span');
+probe.className = 'probe';
+probe.textContent = 'A';
 shadowRoot.appendChild(probe);
 
-document.body.offsetHeight; // Força layout para iniciar o carregamento
-document.fonts.load("24px reentryFont", "A");
-log("document.fonts.status: " + document.fonts.status);
+document.body.offsetHeight;
+document.fonts.load('24px reentryFont', 'A');
+log('status inicial: ' + document.fonts.status);
 
-// Materializa a promessa ready
-document.fonts.ready;
+void document.fonts.ready;
 
-// Prepend para criar o estado pendente UpdateType::ActiveSet
-const prependedStyle = document.createElement("style");
-prependedStyle.textContent = ".unused { color: red; }";
-shadowRoot.prepend(prependedStyle);
-log('apos prepend. status=' + document.fonts.status);
+const prependedStyle = document.createElement('style');
+prependedStyle.textContent = '.unused { color: red; }';
 
-let getterCallCount = 0;
-Object.defineProperty(FontFaceSet.prototype, "then", {
+// GETTER INSTALADO ANTES DO PREPEND ← ordem corrigida
+let getterCount = 0;
+Object.defineProperty(FontFaceSet.prototype, 'then', {
     configurable: true,
     get() {
         delete FontFaceSet.prototype.then;
-        ++getterCallCount;
-        log('>>> GETTER DISPAROU! count=' + getterCallCount);
-        log('    status no momento: ' + document.fonts.status);
-        host.remove(); // Remove o host do shadow root
-        log('    apos host.remove() — sem crash ate aqui');
+        getterCount++;
+        log('>>> GETTER DISPAROU count=' + getterCount + ' status=' + document.fonts.status);
+        host.remove();
+        log('    apos host.remove()');
         return undefined;
     }
 });
-document.styleSheets.length; // Reaches Scope::flushPendingDescendantUpdates().
-    
 log('getter instalado. status=' + document.fonts.status);
-log('aguardando resolução...');
+
+// PREPEND — triggeriza o flush no PS4 (confirmado pelo log anterior)
+shadowRoot.prepend(prependedStyle);
+log('apos prepend. status=' + document.fonts.status + ' getter=' + getterCount);
+
+// STYLEESHEETS.LENGTH — trigger secundario do commit original
+document.styleSheets.length;
+log('apos styleSheets. getter=' + getterCount);
 
 Promise.resolve().then(function() {
-    log('microtask: status=' + document.fonts.status + ' getter=' + getterCallCount);
+    log('microtask: getter=' + getterCount);
 });
+
+setTimeout(function() {
+    log('500ms: getter=' + getterCount);
+    if (getterCount === 0)
+        log('getter nao disparou — fonte pode ja estar loaded antes do prepend');
+    log('PASS se chegou aqui sem crash');
+}, 500);
 </script>
 </body>
 </html>
