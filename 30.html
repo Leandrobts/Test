@@ -1,71 +1,78 @@
-<!doctype html>
-<meta charset="utf-8">
-<body>
-<p>This tests encountering a XML parser error during outerHTML. WebKit should not expose the shared document fragment.</p>
-<div id="result"></div>
-<script src="resources/gc.js"></script>
+
 <script>
-(() => {
-    
+function assert(condition, message) {
+    if (!condition)
+        throw new Error(message);
+}
 
-    let walker;
-    window.parentDonor = document.createElement("input");
-    parentDonor.type = "radio";
-    parentDonor.name = "g";
-
-    window.childReady = () => {
-        const escaped = window.parentDonor;
-        if (!escaped || escaped.parentNode) {
-            result.textContent = 'FAIL - escaped did not have a parent';
-            return;
-        }
-
-        document.adoptNode(escaped);
-        walker = document.createTreeWalker(escaped);
-        window.parentDonor = null;
-
-        document.querySelector("iframe").remove();
-
-        setTimeout(() => {
-            gc();
-
-            const nodeType = walker.currentNode.getRootNode({ composed: true }).nodeType;
-            result.textContent = nodeType == Node.ELEMENT_NODE ? 'PASS' : `FAIL - bad node type: ${nodeType}`;
-            
-        }, 0);
-    };
-
-    const childSource = `<?xml version="1.0"?>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<body>
-<div id="victim"></div>
-<div id="cleanup"></div>
-<script><![CDATA[
-(() => {
-    class XFragmentEscape extends HTMLElement {
-        constructor() {
-            super();
-            this.after(parent.parentDonor);
-        }
-    }
-    customElements.define("x-fragment-escape", XFragmentEscape);
-
+{
+    let calls = 0;
+    let array = new BigInt64Array([1n, 2n, 3n]);
+    let threw = false;
     try {
-        document.getElementById("victim").outerHTML =
-            "<x-fragment-escape></x-fragment-escape><";
+        array.filter(() => {
+            if (calls++ === 0)
+                array.buffer.transfer();
+            return true;
+        });
     } catch (error) {
+        threw = true;
+        assert(error instanceof TypeError, error);
     }
+    assert(threw, "bigint detach");
+    assert(calls === 3, "bigint detach calls " + calls);
+}
 
-    document.getElementById("cleanup").innerHTML =
-        '<span xmlns="http://www.w3.org/1999/xhtml">cleanup</span>';
-    parent.childReady();
-})();
-]]><\/script>
-</body>
-</html>`;
+{
+    let calls = 0;
+    let array = new Int32Array([1, 2, 3]);
+    array.constructor = { [Symbol.species]: Float64Array };
+    let result = array.filter(() => {
+        if (calls++ === 0)
+            array.buffer.transfer();
+        return true;
+    });
+    assert(calls === 3, "float calls " + calls);
+    assert(result instanceof Float64Array, "species");
+    assert(result.length === 3, "length");
+    assert(result[0] === 1, "first " + result[0]);
+    assert(Number.isNaN(result[1]) && Number.isNaN(result[2]), result);
+}
 
-    const frame = document.createElement("iframe");
-    frame.src = URL.createObjectURL(new Blob([childSource], { type: "application/xhtml+xml" }));
-    document.body.append(frame);
-})();
+{
+    let calls = 0;
+    let array = new BigInt64Array(new ArrayBuffer(24, { maxByteLength: 24 }));
+    array[0] = 1n;
+    array[1] = 2n;
+    array[2] = 3n;
+    let threw = false;
+    try {
+        array.filter(() => {
+            if (calls++ === 0)
+                array.buffer.resize(8);
+            return true;
+        });
+    } catch (error) {
+        threw = true;
+        assert(error instanceof TypeError, error);
+    }
+    assert(threw, "bigint shrink");
+    assert(calls === 3, "bigint shrink calls " + calls);
+}
+
+{
+    let result = new Int32Array([1, 2, 3]).filter(value => value > 1);
+    assert(result.join() === "2,3", result);
+}
+
+{
+    let calls = 0;
+    let array = new Int32Array([1, 2, 3]);
+    let result = array.filter(() => {
+        if (calls++ === 0)
+            array.buffer.transfer();
+        return true;
+    });
+    assert(result.join() === "1,0,0", result);
+}
 </script>
