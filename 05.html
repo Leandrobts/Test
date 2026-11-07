@@ -2,27 +2,29 @@
 <html>
 <head>
 <meta charset="utf-8">
+<title>WebKit Forced Flush Test</title>
 </head>
 <body>
+<h2>Teste de Flush Forçado no WebKit</h2>
 <pre id="log"></pre>
 <script>
 function log(message)
 {
     document.getElementById('log').textContent += message + '\n';
+    console.log(message);
 }
 
-log("Iniciando teste híbrido...");
+log("Iniciando teste de flush forçado síncrono...");
 
-// Touch document.fonts imediatamente
+// Touch document.fonts
 document.fonts;
 
 const host = document.createElement("div");
 document.body.appendChild(host);
 const shadowRoot = host.attachShadow({ mode: "open" });
 
-const fontFaceStyle = document.createElement("style");
-// Usando a base64 pesada que mantinha o estado de loading ativo no seu teste anterior
 const pendingUrl = 'data:font/woff;base64,' + 'A'.repeat(150000);
+const fontFaceStyle = document.createElement("style");
 fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("${pendingUrl}"); }`
     + `.probe { font: 24px reentryFont; }`;
 shadowRoot.appendChild(fontFaceStyle);
@@ -32,18 +34,19 @@ probe.className = "probe";
 probe.textContent = "A";
 shadowRoot.appendChild(probe);
 
-document.body.offsetHeight; // Força layout
+// Força layout inicial
+document.body.offsetHeight;
 document.fonts.load("24px reentryFont", "A");
 log("document.fonts.status: " + document.fonts.status);
 
-// Materializa a promessa ready
+// Materializa ready
 document.fonts.ready;
 
-// Prepend para criar o estado pendente UpdateType::ActiveSet
+// Prepend para criar pendência UpdateType::ActiveSet
 const prependedStyle = document.createElement("style");
 prependedStyle.textContent = ".unused { color: red; }";
 shadowRoot.prepend(prependedStyle);
-log('apos prepend. status=' + document.fonts.status);
+log('após prepend. status=' + document.fonts.status);
 
 let getterCallCount = 0;
 Object.defineProperty(FontFaceSet.prototype, "then", {
@@ -53,19 +56,40 @@ Object.defineProperty(FontFaceSet.prototype, "then", {
         ++getterCallCount;
         log('>>> GETTER DISPAROU! count=' + getterCallCount);
         log('    status no momento: ' + document.fonts.status);
-        host.remove(); // Remove o host
-        log('    apos host.remove()');
+        try {
+            host.remove();
+            log('    host.remove() executado com sucesso.');
+        } catch(e) {
+            log('    erro no host.remove(): ' + e);
+        }
         return undefined;
     }
 });
 
-log('Tentando gatilho de estilo...');
+log('Aplicando gatilhos agressivos de flush síncrono...');
 
-// Testando o flush síncrono com a execução inline
-document.styleSheets.length;
+try {
+    // 1. Leituras geométricas múltiplas
+    const rect = document.body.getBoundingClientRect();
+    const probeRect = probe.getBoundingClientRect();
+    
+    // 2. Leitura de estilo computado
+    const computed = window.getComputedStyle(probe).fontFamily;
+    
+    // 3. Modificação via CSSOM
+    if (shadowRoot.styleSheets.length > 0) {
+        shadowRoot.styleSheets[0].insertRule('.forced { display: block; }', 0);
+    }
+    
+    // 4. Acesso a folhas globais
+    const len = document.styleSheets.length;
+    
+    log('Gatilhos executados. Rect height: ' + rect.height + ', Computed font: ' + computed);
+} catch (err) {
+    log('Erro ao executar gatilhos: ' + err);
+}
 
-log("FontFaceSet.prototype.then getter calls: " + getterCallCount);
-log("Fim do script.");
+log("Fim do script principal. getterCallCount = " + getterCallCount);
 </script>
 </body>
 </html>
