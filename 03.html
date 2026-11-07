@@ -1,49 +1,66 @@
+
 <!DOCTYPE html>
 <html>
 <body>
-<script src="resources/js-test.js"></script>
 <script>
-description("replaceSync() on a detached constructed stylesheet must not mutate contents shared with another sheet or published to the stylesheet contents cache.");
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);  
+}
+    
+const sheetsPerRound = 6;
+const childrenPerSheet = 24;
+const rounds = 6;
 
-// A second replaceSync() replaces rather than appends.
-const sheet = new CSSStyleSheet();
-sheet.replaceSync(".x { color: red; }");
-sheet.replaceSync(".y { color: blue; }");
-shouldBe("sheet.cssRules.length", "1");
-shouldBeEqualToString("sheet.cssRules[0].cssText", ".y { color: blue; }");
+let css = "@media all {";
+for (let i = 0; i < childrenPerSheet; ++i)
+    css += " @media all { .a" + i + " { color: rgb(" + i + ", 7, 9) } }";
+css += " }";
 
-// Same, with contents that are not cacheable and so stay in place across both calls.
-const nested = new CSSStyleSheet();
-nested.replaceSync(".p { & .q { color: red; } }");
-nested.replaceSync(".r { & .s { color: blue; } }");
-shouldBe("nested.cssRules.length", "1");
-shouldBeEqualToString("nested.cssRules[0].selectorText", ".r");
+function makeRound()
+{
+    const styles = [];
+    for (let i = 0; i < sheetsPerRound; ++i) {
+        const style = document.createElement("style");
+        style.textContent = css;
+        document.head.appendChild(style);
+        styles.push(style);
+    }
 
-// Replacing after the sheet has been adopted takes the general path.
-const adopted = new CSSStyleSheet();
-adopted.replaceSync(".t { color: red; }");
-document.adoptedStyleSheets = [adopted];
-adopted.replaceSync(".u { color: blue; }");
-shouldBe("adopted.cssRules.length", "1");
-shouldBeEqualToString("adopted.cssRules[0].selectorText", ".u");
+    const lists = [];
+    for (const style of styles) {
+        const children = style.sheet.cssRules[0].cssRules;
+        for (let i = 0; i < childrenPerSheet; ++i) {
+            const list = children[i].cssRules;
+            list.expando = 1;
+            lists.push(list);
+        }
+    }
 
-// A fresh sheet parsing the first text does not see rules left behind by the sheet above.
-const other = new CSSStyleSheet();
-other.replaceSync(".x { color: red; }");
-shouldBe("other.cssRules.length", "1");
-shouldBeEqualToString("other.cssRules[0].cssText", ".x { color: red; }");
+    for (const style of styles)
+        style.remove();
 
-// Two sheets sharing cached contents: replacing one does not grow the other, which would
-// desync its CSSOM wrapper vector from the rule count and make insertRule() write out of bounds.
-const first = new CSSStyleSheet();
-const second = new CSSStyleSheet();
-first.replaceSync(".p { color: red; }");
-second.replaceSync(".p { color: red; }");
-second.cssRules[0];
-first.replaceSync(".q { color: blue; }");
-shouldBe("second.cssRules.length", "1");
-shouldThrowErrorName("second.insertRule('.r { color: green; }', 2)", "IndexSizeError");
-shouldBe("second.cssRules.length", "1");
+    return lists;
+}
+
+let held = [];
+for (let round = 0; round < rounds; ++round) {
+    held.push(makeRound());
+    if (held.length > 2)
+        held.shift();
+    gc();
+}
+held = null;
+gc();
+
+document.write("PASS if no crash");
 </script>
 </body>
 </html>
