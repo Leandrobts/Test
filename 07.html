@@ -1,139 +1,520 @@
+
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS4 WebKit Diagnostic</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#111;color:#eee;font-family:monospace;font-size:14px;padding:8px}
+  h1{color:#fff;font-size:18px;margin-bottom:8px;border-bottom:1px solid #444;padding-bottom:4px}
+  h2{color:#adf;font-size:14px;margin:10px 0 4px;padding:3px 6px;background:#1a2a3a}
+  .row{display:flex;justify-content:space-between;padding:2px 6px;border-bottom:1px solid #222}
+  .row:hover{background:#1a1a1a}
+  .label{color:#ccc;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .val{color:#888;margin-left:8px;white-space:nowrap;max-width:200px;overflow:hidden;text-overflow:ellipsis}
+  .pass{color:#4f4}
+  .fail{color:#f44}
+  .warn{color:#fa4}
+  .info{color:#48f}
+  .crash{color:#f4f;background:#2a0030;padding:3px 6px;font-weight:bold}
+  #log{margin-top:4px;padding:4px;background:#0a0a0a;max-height:120px;overflow-y:auto;font-size:11px;color:#888}
+  button{margin:4px 4px 0 0;padding:4px 10px;background:#333;color:#eee;border:1px solid #555;cursor:pointer;font-size:12px}
+  button:hover{background:#444}
+  .section{margin-bottom:8px;border:1px solid #333}
+  #status{position:fixed;top:4px;right:4px;background:#222;padding:4px 8px;border:1px solid #555;font-size:12px}
+  .mono{font-family:monospace;font-size:11px;word-break:break-all}
+</style>
+</head>
 <body>
+<div id="status">Iniciando...</div>
+<h1>&#x1F50D; PS4 WebKit Diagnostic — UAF Font Research</h1>
+<button onclick="runAll()">&#x25B6; Executar Todos</button>
+<button onclick="clearLS()">&#x1F5D1; Limpar Cache</button>
+<button onclick="location.reload()">&#x21BA; Reload</button>
+<div id="output"></div>
+<div id="log"></div>
 
 <script>
-(function(){
-    var logElement = document.createElement('pre');
-    logElement.id = 'debug-log';
-    logElement.style.cssText = 'position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';
-    
-    if (document.body) {
-        document.body.appendChild(logElement);
-    } else {
-        document.addEventListener('DOMContentLoaded', function() {
-            document.body.appendChild(logElement);
-        });
-    }
-    
-    function log(msg, color) {
-        if (!color) color = '#ff5555';
-        if (!logElement) return;
-        var line = document.createElement('div');
-        line.style.color = color;
-        line.textContent = msg;
-        logElement.appendChild(line);
-        logElement.scrollTop = logElement.scrollHeight;
-    }
-    
-    window.log = log;
+'use strict';
 
-    window.onerror = function(message, source, lineno, colno, error) {
-        log('[ERRO JS] ' + message + '\n  -> ' + source + ':' + lineno + ':' + colno);
-    };
-    
-    window.addEventListener('error', function(event) {
-        var target = event.target;
-        if (target && (target.tagName || target === window)) {
-            var tagName = target.tagName ? target.tagName.toLowerCase() : 'recurso';
-            var sourceUrl = target.src || target.href || 'desconhecido';
-            log('[FALHA RECURSO/' + tagName + '] Não foi possível carregar: ' + sourceUrl, '#ffaa00');
-        }
-    }, true);
-    
-    window.addEventListener('unhandledrejection', function(event) {
-        log('[PROMISE REJECTION] ' + event.reason);
-    });
-    
-    var methods = ['log', 'error', 'warn', 'info'];
-    for (var i = 0; i < methods.length; i++) {
-        (function(method) {
-            var original = console[method];
-            console[method] = function() {
-                var args = Array.prototype.slice.call(arguments);
-                if (original) {
-                    original.apply(console, args);
-                }
-                var text = args.map(function(arg) {
-                    if (typeof arg === 'object') {
-                        try { return JSON.stringify(arg); } catch (e) { return '[Objeto Circular]'; }
-                    }
-                    return arg;
-                }).join(' ');
-                var color = '#ffffff';
-                if (method === 'error') color = '#ff5555';
-                if (method === 'warn') color = '#ffaa00';
-                log('[Console.' + method + '] ' + text, color);
-            };
-        })(methods[i]);
-    }
-    
-    log('[Debug Ativo]', '#00ff00');
-})();
-</script>
+var out = document.getElementById('output');
+var logEl = document.getElementById('log');
+var statusEl = document.getElementById('status');
+var results = {};
+var LS_KEY = 'ps4diag_v3';
 
-<script>
-var ctx = null;
-var inGetter = false;
+// ── helpers ──────────────────────────────────────────────────────────────────
+function log(msg){ logEl.innerHTML += '<div>'+msg+'</div>'; logEl.scrollTop=99999; }
+function setStatus(s){ statusEl.textContent = s; }
+function cls(v){ return v===true?'pass':v===false?'fail':'info'; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 
-if (typeof FontFace !== 'undefined' && FontFace.prototype) {
-    try {
-        Object.defineProperty(FontFace.prototype, 'then', {
-            configurable: true,
-            get: function() {
-                if (inGetter || !ctx)
-                    return undefined;
-                inGetter = true;
-                for (var i = 0; i < 16; i++) {
-                    try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch (e) { }
-                    try { ctx.measureText('x'); } catch (e) { }
-                }
-                inGetter = false;
-                return undefined;
-            }
-        });
-    } catch (e) {}
+function section(id, title){
+  var d = document.createElement('div');
+  d.className='section'; d.id='sec_'+id;
+  d.innerHTML='<h2>'+title+'</h2><div id="rows_'+id+'"></div>';
+  out.appendChild(d);
+  return id;
 }
 
-function attempt(n) {
-    if (typeof FontFace === 'undefined' || !document.fonts) {
-        throw new Error("FontFace não suportado");
-    }
+function row(secId, label, value, cssClass){
+  var c = cssClass || (value===true?'pass':value===false?'fail':'val');
+  var disp = value===true?'✅ SIM':value===false?'❌ NÃO':esc(String(value));
+  var el = document.getElementById('rows_'+secId);
+  if(el) el.innerHTML += '<div class="row"><span class="label">'+esc(label)+'</span><span class="'+c+'">'+disp+'</span></div>';
+  results[label] = value;
+}
 
-    for (var d = 0; d < 3; d++) {
-        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
-    }
+// localStorage: salva progresso para detectar qual teste causou crash
+function lsSave(key, val){ try{ localStorage.setItem(LS_KEY+'_'+key, JSON.stringify(val)); }catch(e){} }
+function lsGet(key){ try{ var v=localStorage.getItem(LS_KEY+'_'+key); return v!=null?JSON.parse(v):null; }catch(e){return null;} }
+function lsDel(key){ try{ localStorage.removeItem(LS_KEY+'_'+key); }catch(e){} }
 
-    var family = 'VarFam' + n;
-    var face = new FontFace(family, 'local(Helvetica)');
-    var dummyLoaded = face.loaded;
-    document.fonts.add(face);
+function clearLS(){
+  try{
+    for(var k in localStorage){
+      if(k.indexOf(LS_KEY)===0) localStorage.removeItem(k);
+    }
+  }catch(e){}
+  log('Cache limpo.');
+}
+
+// ── TESTES ───────────────────────────────────────────────────────────────────
+
+// ── S1: Ambiente ─────────────────────────────────────────────────────────────
+function testEnv(){
+  var s = section('env','1 · Ambiente / User Agent');
+  row(s,'User Agent', navigator.userAgent,'mono info');
+  row(s,'Platform', navigator.platform||'(n/a)','info');
+  row(s,'Vendor', navigator.vendor||'(n/a)','info');
+  row(s,'Language', navigator.language||'(n/a)','info');
+  row(s,'localStorage disponível', (function(){try{localStorage.setItem('_t','1');localStorage.removeItem('_t');return true;}catch(e){return false;}})());
+  row(s,'Promise disponível', typeof Promise !== 'undefined');
+  row(s,'Object.defineProperty', typeof Object.defineProperty === 'function');
+  row(s,'Proxy disponível', typeof Proxy !== 'undefined');
+  row(s,'fetch disponível', typeof fetch !== 'undefined');
+  row(s,'ArrayBuffer disponível', typeof ArrayBuffer !== 'undefined');
+}
+
+// ── S2: FontFace API ─────────────────────────────────────────────────────────
+function testFontFaceAPI(){
+  var s = section('ff','2 · FontFace API');
+  row(s,'typeof FontFace', typeof FontFace !== 'undefined');
+  row(s,'typeof FontFaceSet', typeof FontFaceSet !== 'undefined');
+  row(s,'document.fonts existe', 'fonts' in document);
+  if('fonts' in document){
+    row(s,'document.fonts.add', typeof document.fonts.add==='function');
+    row(s,'document.fonts.check', typeof document.fonts.check==='function');
+    row(s,'document.fonts.load', typeof document.fonts.load==='function');
+    row(s,'document.fonts.ready', 'ready' in document.fonts);
+    row(s,'document.fonts[Symbol.iterator]', typeof document.fonts[Symbol&&Symbol.iterator]==='function');
+    var sz = 0; try{ document.fonts.forEach(function(){sz++;}); }catch(e){}
+    row(s,'Fontes em document.fonts (count)', sz, 'info');
+  }
+  if(typeof FontFace !== 'undefined'){
+    row(s,'FontFace.prototype existe', !!FontFace.prototype);
+    row(s,'"loaded" em FontFace.prototype', 'loaded' in FontFace.prototype);
+    row(s,'"load" em FontFace.prototype', 'load' in FontFace.prototype);
+    row(s,'"status" em FontFace.prototype', 'status' in FontFace.prototype);
+    row(s,'"family" em FontFace.prototype', 'family' in FontFace.prototype);
+    row(s,'"then" já existe em FontFace.prototype', 'then' in FontFace.prototype, 'warn');
+    // Tenta criar FontFace
+    try{
+      var tf = new FontFace('_diag_', 'local(Helvetica)');
+      row(s,'new FontFace() funciona', true);
+      row(s,'face.status inicial', tf.status, 'info');
+      row(s,'face.loaded é Promise', tf.loaded instanceof Promise);
+    }catch(e){
+      row(s,'new FontFace() funciona', false);
+      row(s,'Erro new FontFace()', e.message, 'fail');
+    }
+  }
+}
+
+// ── S3: Getter defineProperty ─────────────────────────────────────────────────
+function testDefineProperty(){
+  var s = section('dp','3 · Object.defineProperty em FontFace.prototype');
+  if(typeof FontFace === 'undefined'){ row(s,'FontFace ausente — skip','-','warn'); return; }
+
+  // Testa se consegue definir getter
+  var defined = false;
+  try{
+    Object.defineProperty(FontFace.prototype,'then',{
+      configurable:true,
+      get:function(){ return undefined; }
+    });
+    defined = true;
+  }catch(e){
+    row(s,'defineProperty funciona', false);
+    row(s,'Erro', e.message,'fail');
+    return;
+  }
+  row(s,'defineProperty funciona', defined);
+
+  // Testa se o getter é chamável (criando instância e acessando .then)
+  var called = false;
+  try{
+    Object.defineProperty(FontFace.prototype,'then',{
+      configurable:true,
+      get:function(){ called=true; return undefined; }
+    });
+    var tf = new FontFace('_dp_','local(Helvetica)');
+    var _ = tf.then; // acesso direto ao getter
+    row(s,'Getter chamado via acesso direto (tf.then)', called);
+  }catch(e){
+    row(s,'Getter chamado via acesso direto', false);
+    row(s,'Erro acesso direto', e.message,'fail');
+  }
+
+  // Remove getter
+  try{ Object.defineProperty(FontFace.prototype,'then',{configurable:true,value:undefined,writable:true}); }catch(e){}
+}
+
+// ── S4: Fontes locais ────────────────────────────────────────────────────────
+function testLocalFonts(){
+  var s = section('lf','4 · Fontes locais disponíveis (local())');
+  if(typeof FontFace === 'undefined'){ row(s,'FontFace ausente — skip','-','warn'); return; }
+
+  var fonts = [
+    'Helvetica','Helvetica Neue','Arial','Arial Narrow',
+    'Times','Times New Roman',
+    'Courier','Courier New',
+    'Verdana','Georgia','Tahoma','Trebuchet MS','Impact',
+    'Comic Sans MS',
+    'SCE-PS3 Rodin LATIN','SCE-PS3 Rodin',
+    'SCE Gothic','SCE-PS3 Rodin JP',
+    'Hiragino Kaku Gothic ProN','Yu Gothic','Meiryo',
+    'sans-serif','serif','monospace','cursive','fantasy'
+  ];
+
+  fonts.forEach(function(name){
+    try{
+      var f = new FontFace('_lf_test_','local("'+name+'")');
+      // Status imediatamente após criação
+      var status = f.status;
+      // Para fontes locais, status 'loaded' significa que existe
+      row(s, name, status==='loaded'?true:(status==='unloaded'?false:status),
+          status==='loaded'?'pass':(status==='error'?'fail':'warn'));
+    }catch(e){
+      row(s, name, 'erro: '+e.message,'fail');
+    }
+  });
+}
+
+// ── S5: Getter durante measureText ───────────────────────────────────────────
+function testGetterTrigger(){
+  var s = section('gt','5 · Getter dispara durante canvas operations');
+  if(typeof FontFace==='undefined'||!('fonts' in document)){
+    row(s,'APIs ausentes — skip','-','warn'); return;
+  }
+
+  var canvas = document.createElement('canvas');
+  canvas.width=64; canvas.height=64;
+  var ctx = canvas.getContext('2d');
+
+  // Lista de testes: [nome, font, char, operation]
+  var tests = [
+    ['measureText("a") fonte única',         '10px UAFFont','a','measure'],
+    ['measureText("A") fonte única',         '10px UAFFont','A','measure'],
+    ['measureText("0") fonte única',         '10px UAFFont','0','measure'],
+    ['measureText("\\u00E9") latin-ext',     '10px UAFFont','\u00E9','measure'],
+    ['measureText("\\u13A0") Cherokee',      '10px UAFFont','\u13A0','measure'],
+    ['measureText("a") Times fallback',      '10px Times,UAFFont','a','measure'],
+    ['measureText("a") Helvetica fallback',  '10px Helvetica,UAFFont','a','measure'],
+    ['fillText("a")',                         '10px UAFFont','a','fill'],
+    ['fonts.load()',                          '10px UAFFont','a','fontsload'],
+    ['face.load() direto',                   '10px UAFFont','a','faceload'],
+  ];
+
+  // Instala fontes de teste
+  try{
+    var f1 = new FontFace('UAFFont','local(Helvetica)');
+    document.fonts.add(f1);
+    void f1.loaded;
+  }catch(e){ row(s,'Erro setup fonte',''+e,'fail'); return; }
+
+  tests.forEach(function(t){
+    var name=t[0], fontStr=t[1], ch=t[2], op=t[3];
+    var fired = false;
+    var getterThis = null;
+    lsSave('getter_test', name); // salva progresso para detectar crash
+    try{
+      Object.defineProperty(FontFace.prototype,'then',{
+        configurable:true,
+        get:function(){ fired=true; getterThis=this; return undefined; }
+      });
+      ctx.font = fontStr;
+      if(op==='measure')      ctx.measureText(ch);
+      else if(op==='fill')    ctx.fillText(ch,0,32);
+      else if(op==='fontsload') {
+        document.fonts.load(fontStr,ch);
+      }
+      else if(op==='faceload'){
+        var fl = new FontFace('UAFFont2','local(Helvetica)');
+        document.fonts.add(fl);
+        void fl.loaded;
+        fl.load();
+      }
+    }catch(e){
+      row(s,name,'erro: '+e.message,'fail');
+      return;
+    }finally{
+      try{
+        Object.defineProperty(FontFace.prototype,'then',{
+          configurable:true,value:undefined,writable:true
+        });
+      }catch(e2){}
+    }
+    row(s,name, fired, fired?'pass':'warn');
+  });
+  lsDel('getter_test');
+}
+
+// ── S6: Reentrância no getter ─────────────────────────────────────────────────
+function testReentrancy(){
+  var s = section('re','6 · Reentrância dentro do getter');
+  if(typeof FontFace==='undefined'||!('fonts' in document)){
+    row(s,'APIs ausentes — skip','-','warn'); return;
+  }
+
+  var canvas = document.createElement('canvas');
+  canvas.width=64; canvas.height=64;
+  var ctx = canvas.getContext('2d');
+
+  try{
+    var f = new FontFace('RFont','local(Helvetica)');
+    document.fonts.add(f);
+    void f.loaded;
+    ctx.font='10px RFont';
+  }catch(e){ row(s,'Setup falhou',''+e,'fail'); return; }
+
+  // Testa cada ação de reentrância
+  var actions = [
+    ['ctx.save() × 1', function(){ctx.save();}],
+    ['ctx.save() × 8', function(){for(var i=0;i<8;i++)ctx.save();}],
+    ['ctx.restore()', function(){ctx.restore();}],
+    ['ctx.font = novo tamanho', function(){ctx.font='12px RFont';}],
+    ['document.fonts.add()', function(){document.fonts.add(new FontFace('RFont2','local(Helvetica)'));}],
+    ['document.createElement("span")', function(){document.createElement('span');}],
+    ['new FontFace() sem add', function(){new FontFace('RF3','local(Helvetica)');}],
+  ];
+
+  actions.forEach(function(a){
+    var aName=a[0], aFn=a[1];
+    var fired=false, error=null, actionOk=false;
+    lsSave('reentrance_test', aName);
+    try{
+      Object.defineProperty(FontFace.prototype,'then',{
+        configurable:true,
+        get:function(){
+          fired=true;
+          try{ aFn(); actionOk=true; }
+          catch(e){ error=e.message; }
+          return undefined;
+        }
+      });
+      ctx.measureText('a');
+    }catch(e){
+      row(s,aName,'excecão externa: '+e.message,'fail');
+      return;
+    }finally{
+      try{Object.defineProperty(FontFace.prototype,'then',{configurable:true,value:undefined,writable:true});}catch(e2){}
+    }
+    if(!fired)       row(s,aName,'getter não disparou','warn');
+    else if(error)   row(s,aName,'getter OK / ação falhou: '+error,'fail');
+    else if(!actionOk) row(s,aName,'getter OK / ação sem retorno','warn');
+    else             row(s,aName,'✅ getter + ação OK','pass');
+  });
+  lsDel('reentrance_test');
+}
+
+// ── S7: Contagem incremental de ctx.save() no getter ────────────────────────
+function testSaveCount(){
+  var s = section('sc','7 · ctx.save() incremental no getter (detecta crash)');
+  if(typeof FontFace==='undefined'||!('fonts' in document)){
+    row(s,'APIs ausentes — skip','-','warn'); return;
+  }
+
+  // Verifica se houve crash anterior neste teste
+  var lastCrash = lsGet('save_count_last');
+  if(lastCrash!==null){
+    row(s,'⚠️ Crash detectado na sessão anterior com N saves', lastCrash,'crash');
+    lsDel('save_count_last');
+  }
+
+  var canvas = document.createElement('canvas');
+  canvas.width=64; canvas.height=64;
+  var ctx = canvas.getContext('2d');
+  try{
+    var f = new FontFace('SCFont','local(Helvetica)');
+    document.fonts.add(f);
+    void f.loaded;
+    ctx.font='10px SCFont';
+  }catch(e){ row(s,'Setup falhou',''+e,'fail'); return; }
+
+  var counts = [1,2,4,8,16,32,64,128,256];
+  counts.forEach(function(n){
+    var fired=false, ok=false;
+    lsSave('save_count_last', n); // se crashar aqui, próxima sessão vai mostrar n
+    try{
+      Object.defineProperty(FontFace.prototype,'then',{
+        configurable:true,
+        get:function(){
+          fired=true;
+          for(var i=0;i<n;i++) ctx.save();
+          ok=true;
+          return undefined;
+        }
+      });
+      // Reset state antes de cada teste (canvas novo)
+      var c2 = document.createElement('canvas');
+      c2.width=64; c2.height=64;
+      var ctx2 = c2.getContext('2d');
+      ctx2.font='10px SCFont';
+      ctx2.measureText('a');
+    }catch(e){
+      row(s,'N='+n+' saves','excecão: '+e.message,'fail');
+      return;
+    }finally{
+      try{Object.defineProperty(FontFace.prototype,'then',{configurable:true,value:undefined,writable:true});}catch(e2){}
+    }
+    if(!fired)    row(s,'N='+n+' saves','getter não disparou','warn');
+    else if(!ok)  row(s,'N='+n+' saves','save() falhou','fail');
+    else          row(s,'N='+n+' saves','OK — sem crash','pass');
+  });
+  lsDel('save_count_last');
+  row(s,'Resultado final','Nenhum save() causou crash detectável','info');
+}
+
+// ── S8: Canvas 2D API ────────────────────────────────────────────────────────
+function testCanvasAPI(){
+  var s = section('cv','8 · Canvas 2D API');
+  var canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d');
+  if(!ctx){ row(s,'getContext("2d") falhou',false); return; }
+
+  var props = [
+    'save','restore','font','measureText','fillText','strokeText',
+    'drawImage','createPattern','createLinearGradient',
+    'getImageData','putImageData','scale','rotate','translate',
+    'transform','setTransform','resetTransform',
+    'filter','globalCompositeOperation'
+  ];
+  props.forEach(function(p){
+    var exists = p in ctx;
+    row(s,'ctx.'+p, exists, exists?'pass':'warn');
+  });
+
+  // TextMetrics properties
+  var tm = ctx.measureText('a');
+  if(tm){
+    var tmProps = ['width','actualBoundingBoxLeft','actualBoundingBoxRight',
+                   'fontBoundingBoxAscent','fontBoundingBoxDescent',
+                   'actualBoundingBoxAscent','actualBoundingBoxDescent'];
+    tmProps.forEach(function(p){
+      var exists = p in tm;
+      row(s,'TextMetrics.'+p, exists, exists?'pass':'warn');
+    });
+    row(s,'TextMetrics.width valor', tm.width, 'info');
+  }
+}
+
+// ── S9: Comparação de largura por fonte ──────────────────────────────────────
+function testFontWidths(){
+  var s = section('fw','9 · Largura "a" por fonte (detecta fonts distintas)');
+  var canvas = document.createElement('canvas');
+  var ctx = canvas.getContext('2d');
+  if(!ctx){ row(s,'Canvas indisponível','-','warn'); return; }
+
+  var fontTests = [
+    '10px Helvetica','10px Arial','10px Times','10px Times New Roman',
+    '10px "SCE-PS3 Rodin LATIN"','10px serif','10px sans-serif',
+    '10px monospace','10px UAFFont','10px SomeFontThatDoesNotExist999'
+  ];
+
+  // baseline
+  ctx.font='10px serif';
+  var baseline = ctx.measureText('a').width;
+
+  fontTests.forEach(function(f){
+    try{
+      ctx.font = f;
+      var w = ctx.measureText('a').width;
+      var diff = w!==baseline;
+      row(s,f,'w='+w+(diff?' (≠ baseline)':' (= baseline)'), diff?'warn':'info');
+    }catch(e){
+      row(s,f,'erro: '+e.message,'fail');
+    }
+  });
+}
+
+// ── S10: Teste completo do mecanismo UAF ──────────────────────────────────────
+function testUAFMechanism(){
+  var s = section('uaf','10 · Verificação completa do mecanismo UAF');
+  if(typeof FontFace==='undefined'||!('fonts' in document)){
+    row(s,'APIs ausentes — skip','-','warn'); return;
+  }
+
+  // Verifica crash anterior neste teste
+  var lastStep = lsGet('uaf_step');
+  if(lastStep){
+    row(s,'⚠️ Crash na etapa anterior', lastStep,'crash');
+    lsDel('uaf_step');
+  }
+
+  var steps = [
+    // [descricao, fn_setup, fn_trigger, fn_getter_action]
+    {
+      name: 'UAF_CSSSegmentedFontFace style (local + measureText a)',
+      font: 'local(Helvetica)', char: 'a', op:'measure',
+      action: function(ctx){ for(var i=0;i<8;i++) ctx.save(); }
+    },
+    {
+      name: 'UAF_FontFaceSet add (local + measureText a)',
+      font: 'local(Helvetica)', char: 'a', op:'measure',
+      action: function(ctx){ document.fonts.add(new FontFace('_x_','local(Helvetica)')); }
+    },
+    {
+      name: 'deleteRule + offsetTop (cria style @font-face)',
+      font: 'local(Helvetica)', char: 'a', op:'measure',
+      action: function(ctx){
+        var st=document.getElementById('_diag_style_');
+        if(st&&st.sheet&&st.sheet.cssRules.length>0) st.sheet.deleteRule(0);
+        void document.body.offsetTop;
+      }
+    }
+  ];
+
+  // Cria style de teste para o deleteRule
+  var testStyle = document.createElement('style');
+  testStyle.id = '_diag_style_';
+  testStyle.textContent = '@font-face{font-family:_df_;src:local(Helvetica);}';
+  document.head.appendChild(testStyle);
+
+  steps.forEach(function(step){
+    var fired=false, actionDone=false, error=null;
+    lsSave('uaf_step', step.name);
 
     var canvas = document.createElement('canvas');
-    canvas.width = 10;
-    canvas.height = 10;
-    ctx = canvas.getContext('2d');
-    
-    ctx.font = '20px Helvetica, ' + family;
+    canvas.width=64; canvas.height=64;
+    var ctx = canvas.getContext('2d');
 
-    for (var i = 0; i < 50; i++) {
-        ctx.measureText('x');
-    }
+    try{
+      var f = new FontFace('_uaf_',''+step.font);
+      document.fonts.add(f);
+      void f.loaded;
+      ctx.font = '10px _uaf_';
 
-    ctx.measureText('\uE005\u4E00\u9FA5\u2200\u05D0\u0E01\u10A0\uD83D\uDE00\uD83D\uDE80AB');
-}
-
-window.onload = function () {
-    setTimeout(function () {
-        for (var n = 0; n < 10; n++) {
-            try { attempt(n); } catch (e) {}
+      Object.defineProperty(FontFace.prototype,'then',{
+        configurable:true,
+        get:function(){
+          fired=true;
+          try{ step.action(ctx); actionDone=true; }
+          catch(e){ error=e.message; }
+          return undefined;
         }
-        if (document.body) {
-            document.body.appendChild(document.createTextNode("PASS if no crash "));
-        }
-    }, 0);
-};
-</script>
-</body>
-</html>
+      });
+
+      if(step.op==='measure'
