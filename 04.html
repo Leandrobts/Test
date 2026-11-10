@@ -1,8 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <body>
-<p>This tests encountering a XML parser error during outerHTML. WebKit should not expose the shared document fragment.</p>
-<div id="result"></div>
+
 
  <script>
 (function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] Não foi possível carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
@@ -10,67 +9,52 @@
     
 <script src="resources/gc.js"></script>
 <script>
-(() => {
-    
+const sheetsPerRound = 6;
+const childrenPerSheet = 24;
+const rounds = 6;
 
-    let walker;
-    window.parentDonor = document.createElement("input");
-    parentDonor.type = "radio";
-    parentDonor.name = "g";
+let css = "@media all {";
+for (let i = 0; i < childrenPerSheet; ++i)
+    css += " @media all { .a" + i + " { color: rgb(" + i + ", 7, 9) } }";
+css += " }";
 
-    window.childReady = () => {
-        const escaped = window.parentDonor;
-        if (!escaped || escaped.parentNode) {
-            result.textContent = 'FAIL - escaped did not have a parent';
-            return;
-        }
-
-        document.adoptNode(escaped);
-        walker = document.createTreeWalker(escaped);
-        window.parentDonor = null;
-
-        document.querySelector("iframe").remove();
-
-        setTimeout(() => {
-            gc();
-
-            const nodeType = walker.currentNode.getRootNode({ composed: true }).nodeType;
-            result.textContent = nodeType == Node.ELEMENT_NODE ? 'PASS' : `FAIL - bad node type: ${nodeType}`;
-            
-        }, 0);
-    };
-
-    const childSource = `<?xml version="1.0"?>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<body>
-<div id="victim"></div>
-<div id="cleanup"></div>
-<script><![CDATA[
-(() => {
-    class XFragmentEscape extends HTMLElement {
-        constructor() {
-            super();
-            this.after(parent.parentDonor);
-        }
-    }
-    customElements.define("x-fragment-escape", XFragmentEscape);
-
-    try {
-        document.getElementById("victim").outerHTML =
-            "<x-fragment-escape></x-fragment-escape><";
-    } catch (error) {
+function makeRound()
+{
+    const styles = [];
+    for (let i = 0; i < sheetsPerRound; ++i) {
+        const style = document.createElement("style");
+        style.textContent = css;
+        document.head.appendChild(style);
+        styles.push(style);
     }
 
-    document.getElementById("cleanup").innerHTML =
-        '<span xmlns="http://www.w3.org/1999/xhtml">cleanup</span>';
-    parent.childReady();
-})();
-]]><\/script>
-</body>
-</html>`;
+    const lists = [];
+    for (const style of styles) {
+        const children = style.sheet.cssRules[0].cssRules;
+        for (let i = 0; i < childrenPerSheet; ++i) {
+            const list = children[i].cssRules;
+            list.expando = 1;
+            lists.push(list);
+        }
+    }
 
-    const frame = document.createElement("iframe");
-    frame.src = URL.createObjectURL(new Blob([childSource], { type: "application/xhtml+xml" }));
-    document.body.append(frame);
-})();
+    for (const style of styles)
+        style.remove();
+
+    return lists;
+}
+
+let held = [];
+for (let round = 0; round < rounds; ++round) {
+    held.push(makeRound());
+    if (held.length > 2)
+        held.shift();
+    gc();
+}
+held = null;
+gc();
+
+document.write("PASS if no crash");
 </script>
+</body>
+</html>
