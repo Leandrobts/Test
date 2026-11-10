@@ -1,120 +1,36 @@
-
-<!DOCTYPE html>
+<!doctype html>
 <html>
-<head><meta charset="utf-8"></head>
-<body>
-<pre id="log"></pre>
+<head>
+<meta charset="utf-8">
 <script>
-// Diagnostico dos pre-requisitos para o bug 86074ba no PS4
-//
-// Questoes a responder:
-//   P1: document.fonts.ready existe e e uma Promise?
-//   P2: document.fonts.load() funciona e retorna Promise?
-//   P3: document.fonts.status transiciona para "loading"?
-//   P4: FontFaceSet.prototype.then e acessivel?
-//   P5: Shadow DOM + @font-face funciona no PS4?
-//   P6: document.styleSheets.length acessa shadow roots?
-//   P7: O trigger completo funciona com data: URL grande (pending)?
+(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] N�o foi poss�vel carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
+</script>
+<script src="resources/testharness.js"></script>
+<script src="resources/testharnessreport.js"></script>
+</head>
+<body>
+<script>
 
-function log(s) { document.getElementById('log').textContent += s + '\n'; }
-
-// P1 — document.fonts.ready
-log('P1 fonts.ready: ' + (typeof document.fonts.ready));
-log('    e Promise: ' + (document.fonts.ready instanceof Promise));
-
-// P2 — document.fonts.load
-log('P2 fonts.load: ' + (typeof document.fonts.load));
-
-// P3 — status inicial
-log('P3 status inicial: ' + document.fonts.status);
-document.fonts;  // "touch" como no test original
-log('    apos touch:  ' + document.fonts.status);
-
-// P4 — FontFaceSet.prototype.then
-var protoThenExists = 'then' in FontFace.prototype;
-log('P4 FontFace.prototype.then in: ' + protoThenExists);
-
-// P5 — Shadow DOM + @font-face
-var host = document.createElement('div');
-document.body.appendChild(host);
-try {
-    var shadow = host.attachShadow({ mode: 'open' });
-    var style = document.createElement('style');
-    // data: URL grande — fica pending (confirmado no PS4)
-    var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(10000000) + '")';
-    style.textContent = '@font-face { font-family: testFont86; src: ' + pendingUrl + '; } .p { font: 24px testFont86; }';
-    shadow.appendChild(style);
-    var span = document.createElement('span');
-    span.className = 'p';
-    span.textContent = 'A';
-    shadow.appendChild(span);
-    log('P5 Shadow DOM + @font-face: OK (sem excecao)');
-} catch(e) {
-    log('P5 ERRO: ' + e.message);
-}
-
-// P3b — status apos @font-face no shadow root + layout
-void document.body.offsetHeight;
-log('P3b status apos layout: ' + document.fonts.status);
-
-// P6 — Verificar se document.fonts.load() transiciona para loading
-var loadStartTime = Date.now();
-try {
-    var loadPromise = document.fonts.load('24px testFont86', 'A');
-    log('P6 fonts.load() retornou: ' + (typeof loadPromise));
-    log('    status apos load(): ' + document.fonts.status);
-} catch(e) {
-    log('P6 ERRO em fonts.load(): ' + e.message);
-}
-
-// P7 — Instalar getter em FontFaceSet.prototype.then e ver se dispara
-var getterCount = 0;
-try {
-    Object.defineProperty(FontFace.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            delete FontFace.prototype.then;
-            getterCount++;
-            log('P7 FontFace.prototype.then getter disparou! count=' + getterCount);
-            // Nao chamar host.remove() ainda — apenas detectar disparo
-            return undefined;
-        }
-    });
-    log('P7 FontFace.prototype.then getter instalado');
-} catch(e) {
-    log('P7 ERRO ao instalar getter: ' + e.message);
-}
-
-// P8 — Trigger: adicionar style e acessar document.styleSheets.length
-try {
-    var prependedStyle = document.createElement('style');
-    prependedStyle.textContent = '.unused { color: red; }';
-    if (host.shadowRoot)
-        host.shadowRoot.prepend(prependedStyle);
-    log('P8 style prependado ao shadow root');
-} catch(e) {
-    log('P8 ERRO prepend: ' + e.message);
-}
-
-// Trigger principal
-var ssLen = document.styleSheets.length;
-log('P8 document.styleSheets.length: ' + ssLen);
-log('P8 getter disparou apos styleSheets.length: ' + (getterCount > 0));
-
-// Aguardar microtasks para ver se getter dispara async
-Promise.resolve().then(function() {
-    log('P8 getter disparou async (microtask): ' + (getterCount > 0));
-    log('\n=== RESUMO ===');
-    log('fonts.ready presente:  ' + (document.fonts.ready instanceof Promise));
-    log('fonts.load presente:   ' + (typeof document.fonts.load === 'function'));
-    log('status atingiu loading:' + (document.fonts.status === 'loading' || document.fonts.status === 'loading'));
-    log('getter proto funciona: ' + (typeof FontFace.prototype !== 'undefined'));
-    log('getter disparou:       ' + (getterCount > 0));
-    if (getterCount === 0 && document.fonts.status === 'loaded') {
-        log('\nSTATUS LOADED = fonte nao ficou em loading.');
-        log('Usar URL maior (1.1MB) ou endpoint que nao responde.');
+promise_test(async () => {
+    function createReadStream() {
+        const response = new Response(new Blob(['aaaaa']));
+        return response.body;
     }
-});
+
+    const f = document.body.appendChild(document.createElement('iframe'));
+    const response = new f.contentWindow.Response(createReadStream());
+
+    f.contentWindow.Object.prototype.__defineGetter__('then', () => {
+        delete f.contentWindow.Object.prototype.then;
+
+        f.remove();
+    });
+
+    response.blob();
+
+    await new Promise(resolve => setTimeout(resolve, 50));
+}, "Ensure redefining then does not alter blob promise");
+
 </script>
 </body>
 </html>

