@@ -1,104 +1,37 @@
-
+<!-- Identical to offscreen-canvas2d-measuretext-uaf.html, but exercising CanvasRenderingContext2D path -->
 <!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body>
-<pre id="log"></pre>
+<p>This test passes if it does not crash.</p>
+<script>
+(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] N�o foi poss�vel carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
+</script>
 <script>
 
+  let face = new FontFace('MyTestFam', 'local(Helvetica)');
+  face.loaded;
+  document.fonts.add(face);
 
-function log(s) { document.getElementById('log').textContent += s + '\n'; }
+  let context = document.createElement('canvas').getContext('2d');
 
-// Toca document.fonts antes do load event (necessario para m_isDocumentLoaded)
-document.fonts;
+  context.save();
+  context.lineWidth = 0.5;
 
-// data: URL grande (1.1MB) — confirmado que fica "pending" no PS4 (commit 5ccd64b)
-// Evita o problema de cache: URL grande nao e pre-aquecida por opportunistically...
-var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(1100000) + '")';
+  context.font = '10px MyTestFam';
 
-function run() {
-    var host = document.createElement('div');
-    document.body.appendChild(host);
-    var shadowRoot = host.attachShadow({ mode: 'open' });
+  let reentered = false;
+  Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get() {
+      if (reentered)
+        return undefined;
+      reentered = true;
+      for (let i = 0; i < 18; i++) {
+        context.save();
+        context.lineWidth = 1 + i;
+      }
+      reentered = false;
+      return undefined;
+    }
+  });
 
-    // @font-face com URL grande → font fica "loading" → document.fonts.ready re-armado
-    var fontFaceStyle = document.createElement('style');
-    fontFaceStyle.textContent =
-        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
-        '.probe { font: 24px reentryFont; }';
-    shadowRoot.appendChild(fontFaceStyle);
-
-    var probe = document.createElement('span');
-    probe.className = 'probe';
-    probe.textContent = 'A';
-    shadowRoot.appendChild(probe);
-
-    // Forca layout para iniciar carregamento da fonte
-    void document.body.offsetHeight;
-    log('status apos layout: ' + document.fonts.status);
-
-    // Rastreia o carregamento
-    document.fonts.load('24px reentryFont', 'A');
-    log('status apos load(): ' + document.fonts.status);
-
-    // Materializa a promise ready para que o thenable check ocorra
-    void document.fonts.ready;
-
-    // Prepend style → marca shadow scope com pending Reset update
-    var prependedStyle = document.createElement('style');
-    prependedStyle.textContent = '.unused { color: blue; }';
-    shadowRoot.prepend(prependedStyle);
-
-    var getterCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            delete FontFaceSet.prototype.then;
-            getterCount++;
-            log('[GETTER DISPAROU] count=' + getterCount + ' status=' + document.fonts.status);
-            // HOST.REMOVE(): libera o ListHashSetNode que o iterator aponta
-            // Se m_inDocumentShadowRoots e iterado neste momento → UAF
-            host.remove();
-            return undefined;
-        }
-    });
-
-    // Trigger 1: document.styleSheets.length (original do commit)
-    var ssLen = document.styleSheets.length;
-    log('T1 styleSheets.length: ' + ssLen + ' | getter: ' + getterCount);
-
-    // Trigger 2: document.body.offsetHeight (forca layout completo + style flush)
-    void document.body.offsetHeight;
-    log('T2 offsetHeight | getter: ' + getterCount);
-
-    // Trigger 3: getComputedStyle no probe (forca resolve de estilo do shadow root)
-    try {
-        var cs = window.getComputedStyle(probe);
-        void cs.fontFamily;
-        log('T3 getComputedStyle | getter: ' + getterCount);
-    } catch(e) {}
-
-    // Trigger 4: shadowRoot.styleSheets (accesso direto)
-    try {
-        void shadowRoot.styleSheets.length;
-        log('T4 shadowRoot.styleSheets | getter: ' + getterCount);
-    } catch(e) {}
-
-    log('status final: ' + document.fonts.status);
-    log('getter total: ' + getterCount);
-
-    // Aguarda async (rendering path que confirmamos disparar o getter)
-    setTimeout(function() {
-        log('getter apos 200ms: ' + getterCount);
-        if (getterCount === 0)
-            log('getter nao disparou — fonte pode ja estar loaded (usar data: URL maior)');
-        log('PASS se chegou aqui sem crash');
-    }, 200);
-}
-
-window.addEventListener('load', function() {
-    setTimeout(run, 0);
-});
+  context.measureText('a');
 </script>
-</body>
-</html>

