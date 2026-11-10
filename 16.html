@@ -2,9 +2,6 @@
 <html>
 <head><meta charset="utf-8"></head>
 <body>
-<script>
-(function(){const logElement=document.createElement('pre');logElement.id='debug-log';logElement.style.cssText='position: fixed; bottom: 0; left: 0; width: 100%; max-height: 220px; overflow-y: auto; background: rgba(0, 0, 0, 0.85); color: #ff5555; font-family: monospace; font-size: 11px; z-index: 999999; padding: 8px; box-sizing: border-box; margin: 0; border-top: 2px solid #ff0000; text-align: left; white-space: pre-wrap; word-break: break-all;';if(document.body){document.body.appendChild(logElement);}else{document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(logElement));}function log(msg,color='#ff5555'){if(!logElement)return;const line=document.createElement('div');line.style.color=color;line.textContent=msg;logElement.appendChild(line);logElement.scrollTop=logElement.scrollHeight;}window.onerror=function(message,source,lineno,colno,error){log(`[ERRO JS] ${message}\n  -> ${source}:${lineno}:${colno}`);};window.addEventListener('error',function(event){const target=event.target;if(target&&(target.tagName||target===window)){const tagName=target.tagName?target.tagName.toLowerCase():'recurso';const sourceUrl=target.src||target.href||'desconhecido';log(`[FALHA RECURSO/${tagName}] Não foi possível carregar: ${sourceUrl}`,'#ffaa00');}},true);window.addEventListener('unhandledrejection',function(event){log(`[PROMISE REJECTION] ${event.reason}`);});['log','error','warn','info'].forEach(method=>{const original=console[method];console[method]=function(...args){original.apply(console,args);const text=args.map(arg=>{if(typeof arg==='object'){try{return JSON.stringify(arg);}catch(e){return '[Objeto Circular]';}}return arg;}).join(' ');let color='#ffffff';if(method==='error')color='#ff5555';if(method==='warn')color='#ffaa00';log(`[Console.${method}] ${text}`,color);};});log('[Debug Ativo]','#00ff00');})();
-</script>
 <button id="start">Iniciar teste</button>
 <pre id="log" style="background:#111;color:#eee;padding:8px;font:12px monospace;white-space:pre-wrap;"></pre>
 <script>
@@ -17,27 +14,19 @@ function log(msg, color = '#fff') {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-const SW_SOURCE = `
-self.addEventListener('install', e => self.skipWaiting());
-self.addEventListener('activate', e => self.clients.claim());
-`;
-
 async function runTest() {
   log('--- iniciando ---');
 
-  // 1) Service Worker
   if (!('serviceWorker' in navigator)) {
-    log('❌ Service Worker indisponível — precisa de https:// ou http://localhost', '#f80');
+    log('❌ Service Worker indisponível', '#f80');
     return;
   }
   log('✅ Service Worker API presente');
 
-  // 2) Registra o SW ANTES de checar backgroundFetch
-  const swBlob = new Blob([SW_SOURCE], { type: 'application/javascript' });
-  const swUrl = URL.createObjectURL(swBlob);
+  // Registra o SW a partir de um arquivo real (não Blob)
   let swr;
   try {
-    swr = await navigator.serviceWorker.register(swUrl, { scope: './' });
+    swr = await navigator.serviceWorker.register('sw.js', { scope: './' });
     log('✅ Service Worker registrado');
   } catch (e) {
     log('❌ Falha ao registrar SW: ' + e.message, '#f55');
@@ -47,24 +36,24 @@ async function runTest() {
   await navigator.serviceWorker.ready;
   log('✅ Service Worker pronto');
 
-  // 3) Background Fetch: fica em swr, NÃO em registration
+  // Background Fetch fica em swr, não em registration
   if (typeof swr.backgroundFetch === 'undefined') {
-    log('❌ Background Fetch API indisponível neste navegador — skip', '#f80');
+    log('❌ Background Fetch API indisponível — skip', '#f80');
     return;
   }
   log('✅ Background Fetch API presente');
 
-  // 4) Pre-populate allDocumentsMap
+  // Pre-populate allDocumentsMap
   for (let i = 0; i < 8; i++)
     document.implementation.createHTMLDocument();
   log('✅ 8 documentos pré-criados');
 
-  // 5) Inicia o fetch
+  // Inicia o fetch
   let request;
   try {
     request = await swr.backgroundFetch.fetch(
       'repro-' + Date.now(),
-      [location.href] // mesma origem, sempre servível
+      [location.href] // mesma origem
     );
   } catch (e) {
     log('❌ backgroundFetch.fetch falhou: ' + e.message, '#f55');
@@ -72,21 +61,20 @@ async function runTest() {
   }
   log('✅ backgroundFetch iniciado: ' + request.id);
 
-  // 6) Dispara o progress
+  // Dispara progress
   await new Promise((resolve) => {
     let fired = false;
     request.onprogress = () => {
       if (fired) return;
       fired = true;
-      log('⚡ progress disparado — criando 512 documentos (invalidação do iterator)…', '#0f0');
+      log('⚡ progress disparado — criando 512 documentos…', '#0f0');
       for (let i = 0; i < 512; i++)
         document.implementation.createHTMLDocument();
       resolve();
     };
-    // fallback caso onprogress nunca dispare (ex.: fetch já completo)
     setTimeout(() => {
       if (!fired) {
-        log('⚠ onprogress não disparou em 5s — tentando mesmo assim', '#f80');
+        log('⚠ onprogress não disparou em 5s', '#f80');
         resolve();
       }
     }, 5000);
@@ -98,7 +86,7 @@ async function runTest() {
 document.getElementById('start').addEventListener('click', () => {
   logEl.innerHTML = '';
   log('clicou', '#0f0');
-  runTest().catch(e => log('❌ ERRO NÃO TRATADO: ' + (e.stack || e.message), '#f55'));
+  runTest().catch(e => log('❌ ERRO: ' + (e.stack || e.message), '#f55'));
 });
 </script>
 </body>
