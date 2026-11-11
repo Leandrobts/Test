@@ -1,6 +1,6 @@
 self.addEventListener('fetch', event => {
     // Intercepta a requisição que imita o load-and-stall.py
-    if (event.request.url.includes('resources/load-and-stall.py')) {
+    if (event.request.url.includes('load-and-stall.py')) {
         event.respondWith(
             new Response(
                 new ReadableStream({
