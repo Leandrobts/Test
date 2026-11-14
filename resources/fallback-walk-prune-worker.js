@@ -18,7 +18,7 @@ function paddedFontDataURL(path, paddingLength)
     return new FileReaderSync().readAsDataURL(blob);
 }
 
-const dataURL = paddedFontDataURL('../../../resources/Ahem.woff', 800000);
+const dataURL = paddedFontDataURL('Ahem.woff', 800000);
 
 // One family with several distinct requests, so the walk pumps several times and each pump
 // runs FontCascade::update and advances FontCascadeCache's prune counter.
