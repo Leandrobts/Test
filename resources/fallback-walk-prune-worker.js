@@ -18,31 +18,27 @@ function paddedFontDataURL(path, paddingLength)
     return new FileReaderSync().readAsDataURL(blob);
 }
 
-self.onmessage = function (event)
-{
-    const { primerCanvas, testCanvas } = event.data;
+const dataURL = paddedFontDataURL('../../../resources/Ahem.woff', 800000);
 
-    const dataURL = paddedFontDataURL('Ahem.woff', 800000);
+// One family with several distinct requests, so the walk pumps several times and each pump
+// runs FontCascade::update and advances FontCascadeCache's prune counter.
+const faceCount = 4;
+const faces = [];
+for (let faceIndex = 0; faceIndex < faceCount; ++faceIndex) {
+    const face = new FontFace('paddedAhem', 'url("' + dataURL + '#' + faceIndex + '")');
+    faces.push(face);
+    self.fonts.add(face);
+}
 
-    // One family with several distinct requests, so the walk pumps several times and each pump
-    // runs FontCascade::update and advances FontCascadeCache's prune counter.
-    const faceCount = 4;
-    const faces = [];
-    for (let faceIndex = 0; faceIndex < faceCount; ++faceIndex) {
-        const face = new FontFace('paddedAhem', 'url("' + dataURL + '#' + faceIndex + '")');
-        faces.push(face);
-        self.fonts.add(face);
-    }
+// Bring the prune counter to one below its interval so that a pump during the walk crosses it.
+// self.fonts.check() triggers a synchronous FontCascade lookup in FontCascadeCache,
+// incrementing its prune counter — the same mechanism that canvas context.font = ... uses.
+for (let primeIndex = 0; primeIndex < 1000 - faceCount; ++primeIndex)
+    self.fonts.check('11px primingFamily' + primeIndex, 'a');
 
-    // Bring the prune counter to one below its interval so that a pump during the walk crosses it.
-    const primingContext = primerCanvas.getContext('2d');
-    for (let primeIndex = 0; primeIndex < 1000 - faceCount; ++primeIndex)
-        primingContext.font = '11px primingFamily' + primeIndex;
-
-    // Times has no glyph for U+13A0, so resolving it walks down to paddedAhem.
-    const context = testCanvas.getContext('2d');
-    context.font = '32px Times, paddedAhem';
-    context.fillText(String.fromCharCode(0x13A0) + String.fromCharCode(0x0301), 40, 200);
-
-    postMessage(faces.map(face => face.status).join(','));
-};
+// Times has no glyph for U+13A0, so self.fonts.load() walks the cascade down to paddedAhem.
+// In a worker, the load triggered during this walk completes synchronously, reaching
+// FontCascadeCache::pruneUnreferencedEntries — this is what causes the UAF without the fix.
+self.fonts.load('32px Times, paddedAhem', String.fromCharCode(0x13A0) + String.fromCharCode(0x0301))
+    .then(() => postMessage(faces.map(face => face.status).join(',')))
+    .catch(e => postMessage('error: ' + e.message));
