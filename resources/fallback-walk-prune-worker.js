@@ -18,8 +18,31 @@ function paddedFontDataURL(path, paddingLength)
     return new FileReaderSync().readAsDataURL(blob);
 }
 
-const dataURL = paddedFontDataURL('Ahem.woff', 800000);
+self.onmessage = function (event)
+{
+    const { primerCanvas, testCanvas } = event.data;
 
-// OffscreenCanvas is not available on this platform; send the data URL to the
-// main thread so it can create FontFace objects and perform canvas operations there.
-postMessage(dataURL);
+    const dataURL = paddedFontDataURL('Ahem.woff', 800000);
+
+    // One family with several distinct requests, so the walk pumps several times and each pump
+    // runs FontCascade::update and advances FontCascadeCache's prune counter.
+    const faceCount = 4;
+    const faces = [];
+    for (let faceIndex = 0; faceIndex < faceCount; ++faceIndex) {
+        const face = new FontFace('paddedAhem', 'url("' + dataURL + '#' + faceIndex + '")');
+        faces.push(face);
+        self.fonts.add(face);
+    }
+
+    // Bring the prune counter to one below its interval so that a pump during the walk crosses it.
+    const primingContext = primerCanvas.getContext('2d');
+    for (let primeIndex = 0; primeIndex < 1000 - faceCount; ++primeIndex)
+        primingContext.font = '11px primingFamily' + primeIndex;
+
+    // Times has no glyph for U+13A0, so resolving it walks down to paddedAhem.
+    const context = testCanvas.getContext('2d');
+    context.font = '32px Times, paddedAhem';
+    context.fillText(String.fromCharCode(0x13A0) + String.fromCharCode(0x0301), 40, 200);
+
+    postMessage(faces.map(face => face.status).join(','));
+};
