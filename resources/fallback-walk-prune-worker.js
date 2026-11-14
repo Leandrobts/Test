@@ -35,15 +35,24 @@ try {
 
     for (let primeIndex = 0; primeIndex < 1000 - faceCount; ++primeIndex)
         self.fonts.check('11px primingFamily' + primeIndex, 'a');
-    postMessage('step: priming done');
+    // ... (paddedFontDataURL e setup das faces igual antes) ...
 
-    self.fonts.load('32px Times, paddedAhem', String.fromCharCode(0x13A0) + String.fromCharCode(0x0301))
-        .then(function() {
-            postMessage('PASS if no crash, faces ' + faces.map(function(f) { return f.status; }).join(','));
-        })
-        .catch(function(e) {
-            postMessage('FAIL load rejected: ' + e.message);
-        });
+postMessage('step: priming done');
+
+// Teste 1: face.load() individual funciona?
+faces[0].load()
+    .then(function() { postMessage('step: face[0].load() resolveu, status = ' + faces[0].status); })
+    .catch(function(e) { postMessage('step: face[0].load() error: ' + e.message); });
+
+// Teste 2: carregar só paddedAhem sem Times
+self.fonts.load('32px paddedAhem', 'a')
+    .then(function(loaded) { postMessage('step: fonts.load(paddedAhem) resolveu, count = ' + loaded.length); })
+    .catch(function(e) { postMessage('step: fonts.load(paddedAhem) error: ' + e.message); });
+
+// Sentinela: sempre dispara para sabermos o estado real
+setTimeout(function() {
+    postMessage('TIMEOUT faces: ' + faces.map(function(f) { return f.status; }).join(','));
+}, 4000);
 
 } catch(e) {
     postMessage('FAIL exception: ' + e.message + ' — stack: ' + e.stack);
