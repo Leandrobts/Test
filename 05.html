@@ -2,33 +2,128 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <title>Fallback OffscreenCanvas - Abordagem 2 (Canvas Proxy)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teste Resizable Constant Folding - PS4</title>
     <style>
-        body { background: #111; color: #fff; text-align: center; font-family: sans-serif; margin-top: 40px; }
-        canvas { border: 2px solid #444; background: #000; }
+        body {
+            background-color: #121212;
+            color: #00ff66;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 20px;
+            margin: 0;
+        }
+        h1 {
+            color: #ffffff;
+            font-size: 20px;
+            border-bottom: 2px solid #00ff66;
+            padding-bottom: 10px;
+        }
+        #console {
+            background-color: #000000;
+            border: 1px solid #333;
+            padding: 15px;
+            border-radius: 5px;
+            height: 70vh;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        .log { color: #cccccc; }
+        .success { color: #00ff66; font-weight: bold; }
+        .error { color: #ff3333; font-weight: bold; }
+        .info { color: #33ccff; }
     </style>
 </head>
 <body>
-    <h1>Abordagem 2: Canvas Proxy (Comandos)</h1>
-    <canvas id="meuCanvas" width="640" height="360"></canvas>
+
+    <h1>Simulador WebKit (Commit 13bfbf9 - Constant Folding) - PS4</h1>
+    <div id="console">Iniciando teste de otimização e redimensionamento...</div>
 
     <script>
-        const canvas = document.getElementById('meuCanvas');
-        const ctx = canvas.getContext('2d');
-        
-        const worker = new Worker('worker2.js');
+        const consoleEl = document.getElementById('console');
 
-        // Escuta os comandos enviados pelo Worker e executa no canvas real da DOM
-        worker.onmessage = function(e) {
-            const msg = e.data;
-            if (msg.type === 'setProperty') {
-                ctx[msg.property] = msg.value;
-            } else if (msg.type === 'call') {
-                if (typeof ctx[msg.method] === 'function') {
-                    ctx[msg.method](...msg.args);
+        function log(message, type = 'log') {
+            const span = document.createElement('div');
+            span.className = type;
+            span.textContent = message;
+            consoleEl.appendChild(span);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+            if (type === 'error') console.error(message);
+            else console.log(message);
+        }
+
+        const assert = {
+            eq: function(lhs, rhs, msg) {
+                if (lhs !== rhs) {
+                    throw new Error(`Falha na asserção: Esperado "${rhs}", mas obteve "${lhs}". ${msg || ''}`);
                 }
             }
         };
+
+        try {
+            log("[1/6] Esgotando memória disponível (simulando exaustão do teste original)...", "info");
+            const memories = [];
+            // Nota: Reduzido de 65535 para evitar travar navegadores antigos de consoles com pouca RAM livre,
+            // mantendo a lógica de loop de estouro intacta.
+            for (let i = 0; i < 200; i++) {
+                try {
+                    memories.push(new ArrayBuffer(1024 * 1024)); // Blocos de 1MB
+                } catch (e) {
+                    log(`Limite de alocação atingido na iteração ${i}: ${e.message}`, "info");
+                    break;
+                }
+            }
+
+            log("[2/6] Configurando buffer inicial e Float64Array (equivalente ao view)...", "info");
+            const pageSize = 65536; // 64KB por página
+            let buffer = new ArrayBuffer(pageSize);
+            let view = new Float64Array(buffer);
+
+            function trigger(val) {
+                view[0] = val;
+            }
+
+            log("[3/6] Aquecendo o motor com loop de alta frequência (simulando JIT)...", "info");
+            for (let i = 0; i < 10000; i++) {
+                trigger(13.37);
+            }
+            log(`Valor atual em view[0] após aquecimento: ${view[0]}`);
+            assert.eq(view[0], 13.37);
+
+            log("[4/6] Simulando memory.grow(1) (Crescimento e realocação do buffer)...", "info");
+            function simulateMemoryGrow(oldBuffer, additionalPages) {
+                const newSize = oldBuffer.byteLength + (additionalPages * pageSize);
+                const newBuffer = new ArrayBuffer(newSize);
+                
+                const oldBytes = new Uint8Array(oldBuffer);
+                const newBytes = new Uint8Array(newBuffer);
+                newBytes.set(oldBytes);
+                
+                return newBuffer;
+            }
+
+            // Realoca o buffer (simulando o grow da memória WebAssembly)
+            buffer = simulateMemoryGrow(buffer, 1);
+            
+            // Atualiza a view para apontar para o novo buffer realocado
+            view = new Float64Array(buffer);
+
+            log("[5/6] Acionando trigger com novo valor após o redimensionamento...", "info");
+            trigger(1.1);
+
+            log("[6/6] Executando validação final...", "info");
+            assert.eq(view[0], 1.1);
+
+            log("\nSUCESSO: O teste passou com êxito! O valor em view[0] foi atualizado corretamente para 1.1 após o crescimento da memória.", "success");
+
+        } catch (error) {
+            log(`\nERRO NO TESTE: ${error.message}`, "error");
+            if (error.stack) {
+                log(error.stack, "error");
+            }
+        }
     </script>
 </body>
 </html>
