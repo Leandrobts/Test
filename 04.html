@@ -2,34 +2,11 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Teste Resizable Buffer / ArrayBuffer - PS4</title>
+    <title>Teste Resizable Buffer - PS4</title>
     <style>
-        body {
-            background-color: #121212;
-            color: #00ff66;
-            font-family: 'Courier New', Courier, monospace;
-            padding: 20px;
-            margin: 0;
-        }
-        h1 {
-            color: #ffffff;
-            font-size: 20px;
-            border-bottom: 2px solid #00ff66;
-            padding-bottom: 10px;
-        }
-        #console {
-            background-color: #000000;
-            border: 1px solid #333;
-            padding: 15px;
-            border-radius: 5px;
-            height: 70vh;
-            overflow-y: auto;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            font-size: 14px;
-            line-height: 1.4;
-        }
+        body { background-color: #121212; color: #00ff66; font-family: monospace; padding: 20px; }
+        h1 { color: #ffffff; font-size: 20px; border-bottom: 2px solid #00ff66; padding-bottom: 10px; }
+        #console { background-color: #000; border: 1px solid #333; padding: 15px; height: 70vh; overflow-y: auto; white-space: pre-wrap; font-size: 14px; }
         .log { color: #cccccc; }
         .success { color: #00ff66; font-weight: bold; }
         .error { color: #ff3333; font-weight: bold; }
@@ -37,91 +14,76 @@
     </style>
 </head>
 <body>
-
     <h1>Simulador de Teste WebKit (Commit 6b357f3) - PS4</h1>
     <div id="console">Iniciando teste...</div>
 
     <script>
-        const consoleEl = document.getElementById('console');
+        var consoleEl = document.getElementById('console');
 
-        function log(message, type = 'log') {
-            const span = document.createElement('div');
-            span.className = type;
+        function log(message, type) {
+            var span = document.createElement('div');
+            span.className = type || 'log';
             span.textContent = message;
             consoleEl.appendChild(span);
             consoleEl.scrollTop = consoleEl.scrollHeight;
-            // Também espelha no console real caso exista
-            if (type === 'error') console.error(message);
-            else console.log(message);
         }
 
-        // Simulação do módulo assert do WebKit
-        const assert = {
+        var assert = {
             eq: function(lhs, rhs, msg) {
                 if (lhs !== rhs) {
-                    throw new Error(`Falha na asserção: Esperado "${rhs}", mas obteve "${lhs}". ${msg || ''}`);
+                    throw new Error('Falha na assercao: Esperado "' + rhs + '", mas obteve "' + lhs + '". ' + (msg || ''));
                 }
             }
         };
 
+        var pageSize = 65536;
+        var buffer = null;
+        var ta = null;
+
+        function simulateMemoryGrow(oldBuffer, additionalPages) {
+            var newSize = oldBuffer.byteLength + (additionalPages * pageSize);
+            var newBuffer = new ArrayBuffer(newSize);
+            var oldBytes = new Uint8Array(oldBuffer);
+            var newBytes = new Uint8Array(newBuffer);
+            newBytes.set(oldBytes);
+            return newBuffer;
+        }
+
         try {
-            log("[1/5] Testando esgotamento de alocações (equivalente a 'memories.push')...", "info");
-            const memories = [];
-            for (let i = 0; i < 500; i++) {
+            log("[1/5] Testando esgotamento de alocacoes...", "info");
+            var memories = [];
+            for (var i = 0; i < 500; i++) {
                 try {
-                    // Simula blocos de 64KB (tamanho padrão de página WebAssembly)
                     memories.push(new ArrayBuffer(65536));
                 } catch (e) {
-                    log(`Limite de alocação atingido na iteração ${i}: ${e.message}`, "info");
+                    log("Limite atingido na iteracao " + i + ": " + e.message, "info");
                     break;
                 }
             }
 
-            log("[2/5] Inicializando buffer principal e visão Uint32Array...", "info");
-            const pageSize = 65536; // 64KB por página
-            let buffer = new ArrayBuffer(pageSize); // initial: 1
-            let ta = new Uint32Array(buffer);
-            
-            // Atribui o valor mágico exato do teste original
+            log("[2/5] Inicializando buffer principal e visao Uint32Array...", "info");
+            buffer = new ArrayBuffer(pageSize);
+            ta = new Uint32Array(buffer);
             ta[0] = 0xCAFEBABE;
-            log(`Valor inicial gravado em ta[0]: 0x${ta[0].toString(16).toUpperCase()}`);
+            log("Valor inicial gravado em ta[0]: 0x" + ta[0].toString(16).toUpperCase());
 
-            log("[3/5] Simulando memory.grow(1) (Crescimento e realocação de buffer)...", "info");
-            // Como o JS tradicional não cresce in-place, alocamos um novo e copiamos os dados
-            function simulateMemoryGrow(oldBuffer, additionalPages) {
-                const newSize = oldBuffer.byteLength + (additionalPages * pageSize);
-                const newBuffer = new ArrayBuffer(newSize);
-                
-                const oldBytes = new Uint8Array(oldBuffer);
-                const newBytes = new Uint8Array(newBuffer);
-                newBytes.set(oldBytes);
-                
-                return newBuffer;
-            }
-
-            // Executa o crescimento simulado
+            log("[3/5] Simulando memory.grow(1) (Crescimento e realocacao)...", "info");
             buffer = simulateMemoryGrow(buffer, 1);
-
-            // Simula a atualização do vetor/ponteiro que o commit corrigiu nativamente
             ta = new Uint32Array(buffer);
 
-            log("[4/5] Executando loop de estresse de memória (Coletor de Lixo / Alocações)...", "info");
-            for (let i = 0; i < 100; i++) {
-                const arr = new ArrayBuffer(65536);
+            log("[4/5] Executando loop de estresse de memoria...", "info");
+            for (var j = 0; j < 100; j++) {
+                var arr = new ArrayBuffer(65536);
                 new Uint32Array(arr).fill(0xDEADBEEF);
             }
 
-            log("[5/5] Executando validação final (assert.eq)...", "info");
-            // Valida se o dado se manteve intacto após o redimensionamento e o estresse
+            log("[5/5] Executando validacao final (assert.eq)...", "info");
             assert.eq(ta[0], 0xCAFEBABE);
 
-            log("\nSUCESSO: O teste passou com êxito! O valor em ta[0] permaneceu correto (0xCAFEBABE).", "success");
-
+            log("\nSUCESSO: O teste passou! Valor em ta[0]: 0xCAFEBABE.", "success");
         } catch (error) {
-            log(`\nERRO NO TESTE: ${error.message}`, "error");
-            if (error.stack) {
-                log(error.stack, "error");
-            }
+            log("\nERRO NO TESTE: " + error.message, "error");
+            if (error.stack) log(error.stack, "error");
         }
     </script>
 </body>

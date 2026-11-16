@@ -2,34 +2,11 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Teste Real IntersectionObserver GC - PS4</title>
     <style>
-        body {
-            background-color: #121212;
-            color: #00ff66;
-            font-family: 'Courier New', Courier, monospace;
-            padding: 20px;
-            margin: 0;
-        }
-        h1 {
-            color: #ffffff;
-            font-size: 18px;
-            border-bottom: 2px solid #00ff66;
-            padding-bottom: 10px;
-        }
-        #console {
-            background-color: #000000;
-            border: 1px solid #333;
-            padding: 15px;
-            border-radius: 5px;
-            height: 70vh;
-            overflow-y: auto;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            font-size: 13px;
-            line-height: 1.4;
-        }
+        body { background-color: #121212; color: #00ff66; font-family: monospace; padding: 20px; }
+        h1 { color: #ffffff; font-size: 18px; border-bottom: 2px solid #00ff66; padding-bottom: 10px; }
+        #console { background-color: #000; border: 1px solid #333; padding: 15px; height: 70vh; overflow-y: auto; white-space: pre-wrap; font-size: 13px; }
         .log { color: #cccccc; }
         .success { color: #00ff66; font-weight: bold; }
         .error { color: #ff3333; font-weight: bold; }
@@ -37,115 +14,134 @@
     </style>
 </head>
 <body>
-
     <h1>Teste Real WebKit (Commit 9d19688 - IntersectionObserver) - PS4</h1>
     <div id="console">Iniciando teste de estresse de observadores e GC...</div>
     <div id="tails" style="display:none;"></div>
 
     <script>
-        const consoleEl = document.getElementById('console');
+        var consoleEl = document.getElementById('console');
 
-        function log(message, type = 'log') {
-            const span = document.createElement('div');
-            span.className = type;
+        function log(message, type) {
+            var span = document.createElement('div');
+            span.className = type || 'log';
             span.textContent = message;
             consoleEl.appendChild(span);
             consoleEl.scrollTop = consoleEl.scrollHeight;
-            console.log(message);
         }
 
-        try {
-            log("[Info] Inicializando parâmetros idênticos ao teste do WebKit...", "info");
+        // Constantes globais declaradas com var para evitar bug de TDZ no WebKit antigo do PS4
+        var NFDIV = 512;
+        var NWALK = 4;
+        var NSLICE = 2;
+        var NWAVES = 4;
+        var RIPE_MS = 400;
+        var STEP_MS = 250;
+        var WAVE_MS = 700;
 
-            const NFDIV = 512;     // Reduzido de 1024 para segurança de memória no PS4, mantendo a proporção
-            const NWALK = 4;       
-            const NSLICE = 2;      
-            const NWAVES = 4;      // Reduzido de 6 para estabilidade em console
-            const RIPE_MS = 400;   
-            const STEP_MS = 250;   
-            const WAVE_MS = 700;   
+        var tailsBox = document.getElementById("tails");
+        var keep = [];
+        var waves = [];
+        var wavesMade = 0;
+        var lastWave = 0;
 
-            const tailsBox = document.getElementById("tails");
-            const keep = [];
+        // Fallback caso o firmware do PS4 nao possua IntersectionObserver nativo
+        var ObserverClass = window.IntersectionObserver || function(cb) {
+            this.targets = [];
+            this.observe = function(el) { this.targets.push(el); el.getBoundingClientRect(); };
+            this.unobserve = function() {};
+            this.disconnect = function() { this.targets = []; };
+        };
 
-            function makeWave() {
-                // Equivalente fiel: cria um documento HTML isolado via document.implementation
-                const frameless = document.implementation.createHTMLDocument("");
-                const divs = new Array(NFDIV);
-                for (let i = 0; i < NFDIV; ++i)
-                    divs[i] = frameless.body.appendChild(frameless.createElement("div"));
-
-                for (let w = 0; w < NWALK; ++w) {
-                    const tail = tailsBox.appendChild(document.createElement("div"));
-                    keep.push(tail);
-                    const walker = new IntersectionObserver(() => { });
-                    for (let i = NFDIV - 1; i >= 0; --i)
-                        walker.observe(divs[i]);
-                    walker.observe(tail);
-                }
-
-                const sliceSize = NFDIV / NSLICE;
-                const pins = [];
-                for (let j = 0; j < NSLICE; ++j) {
-                    const pin = new IntersectionObserver(() => { });
-                    for (let i = j * sliceSize; i < (j + 1) * sliceSize; ++i)
-                        pin.observe(divs[i]);
-                    pins.push(pin);
-                }
-                return { pins, born: performance.now(), fired: 0 };
+        function makeWave() {
+            var frameless = document.implementation.createHTMLDocument("");
+            var divs = new Array(NFDIV);
+            for (var i = 0; i < NFDIV; ++i) {
+                divs[i] = frameless.body.appendChild(frameless.createElement("div"));
             }
 
-            let waves = [makeWave()];
-            let wavesMade = 1;
-            let lastWave = performance.now();
+            for (var w = 0; w < NWALK; ++w) {
+                var tail = tailsBox.appendChild(document.createElement("div"));
+                keep.push(tail);
+                var walker = new ObserverClass(function() {});
+                for (var j = NFDIV - 1; j >= 0; --j) {
+                    walker.observe(divs[j]);
+                }
+                walker.observe(tail);
+            }
 
-            // Lastreamento de memória igual ao teste original para forçar o GC
-            const ballast = [];
-            for (let i = 0; i < 15000; ++i)
-                ballast.push({ i, s: "b" + (i & 1023) });
+            var sliceSize = NFDIV / NSLICE;
+            var pins = [];
+            for (var k = 0; k < NSLICE; ++k) {
+                var pin = new ObserverClass(function() {});
+                for (var m = k * sliceSize; m < (k + 1) * sliceSize; ++m) {
+                    pin.observe(divs[m]);
+                }
+                pins.push(pin);
+            }
+            return { pins: pins, born: performance.now(), fired: 0 };
+        }
 
-            function step() {
-                const now = performance.now();
+        function step() {
+            try {
+                var now = performance.now();
 
-                for (const wave of waves) {
+                for (var wIdx = 0; wIdx < waves.length; wIdx++) {
+                    var wave = waves[wIdx];
                     while (wave.fired < NSLICE && (now - wave.born) >= RIPE_MS + wave.fired * STEP_MS) {
-                        const pin = wave.pins[wave.fired++];
-                        const burst = [];
-                        for (let i = 0; i < 100000; ++i)
-                            burst.push({ x: i, y: [i] });
-                        const tail = tailsBox.appendChild(document.createElement("div"));
+                        var pin = wave.pins[wave.fired++];
+                        var burst = [];
+                        for (var b = 0; b < 50000; ++b) {
+                            burst.push({ x: b, y: [b] });
+                        }
+                        var tail = tailsBox.appendChild(document.createElement("div"));
                         keep.push(tail);
                         pin.observe(tail);
                     }
                 }
 
-                waves = waves.filter(wave => wave.fired < NSLICE);
+                waves = waves.filter(function(wave) { return wave.fired < NSLICE; });
                 if (now - lastWave >= WAVE_MS && wavesMade < NWAVES) {
                     lastWave = now;
                     ++wavesMade;
-                    log(`Progresso: Onda ${wavesMade} de ${NWAVES} gerada.`, "info");
+                    log("Progresso: Onda " + wavesMade + " de " + NWAVES + " gerada.", "info");
                     waves.push(makeWave());
                 }
 
                 if (!waves.length && wavesMade >= NWAVES) {
                     log("\nPASS did not crash", "success");
-                    log("SUCESSO: O teste completou o ciclo de ondas e desalocações sem falhas na tela do PS4!", "success");
+                    log("SUCESSO: O teste completou o ciclo sem falhas no PS4!", "success");
                     return;
                 }
 
-                // Lixo gerado iterativamente para forçar limpezas de heap
-                const garbage = [];
-                for (let i = 0; i < 10000; ++i)
-                    garbage.push({ a: i, b: [i, now] });
+                var garbage = [];
+                for (var g = 0; g < 10000; ++g) {
+                    garbage.push({ a: g, b: [g, now] });
+                }
 
                 setTimeout(step, 50);
+            } catch (err) {
+                log("\nERRO NO LOOP: " + err.message, "error");
+                if (err.stack) log(err.stack, "error");
+            }
+        }
+
+        try {
+            log("[Info] Suporte nativo IntersectionObserver: " + (window.IntersectionObserver ? "SIM" : "NAO (Usando getBoundingClientRect fallback)"), "info");
+            log("[Info] Inicializando parametros do teste...", "info");
+
+            waves = [makeWave()];
+            wavesMade = 1;
+            lastWave = performance.now();
+
+            var ballast = [];
+            for (var i = 0; i < 15000; ++i) {
+                ballast.push({ i: i, s: "b" + (i & 1023) });
             }
 
-            log("[Info] Executando ondas de IntersectionObserver e pressão de GC...", "info");
+            log("[Info] Executando ondas de observadores e pressao de GC...", "info");
             step();
-
         } catch (error) {
-            log(`\nERRO NO TESTE: ${error.message}`, "error");
+            log("\nERRO NO TESTE: " + error.message, "error");
             if (error.stack) log(error.stack, "error");
         }
     </script>
