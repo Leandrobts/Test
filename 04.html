@@ -1,90 +1,53 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>Teste Resizable Buffer - PS4</title>
-    <style>
-        body { background-color: #121212; color: #00ff66; font-family: monospace; padding: 20px; }
-        h1 { color: #ffffff; font-size: 20px; border-bottom: 2px solid #00ff66; padding-bottom: 10px; }
-        #console { background-color: #000; border: 1px solid #333; padding: 15px; height: 70vh; overflow-y: auto; white-space: pre-wrap; font-size: 14px; }
-        .log { color: #cccccc; }
-        .success { color: #00ff66; font-weight: bold; }
-        .error { color: #ff3333; font-weight: bold; }
-        .info { color: #33ccff; }
-    </style>
+<meta charset="utf-8">
+<script src="resources/inspector-test.js"></script>
+<script src="resources/remote-object-utilities.js"></script>
+<script>
+
+function makeRegistryWithUnrootedTokens(count)
+{
+    let registry = new FinalizationRegistry(() => { });
+
+    function makeOversizeToken() {
+        function inner() { return arguments; }
+        return inner.apply(null, new Array(1024));
+    }
+
+    window.targets = [];
+    let tokens = [];
+    for (let i = 0; i < count; ++i) {
+        let target = {};
+        window.targets.push(target);
+        let token = makeOversizeToken();
+        tokens.push(token);
+        registry.register(target, i, token);
+    }
+    tokens = null;
+
+    window.registry = registry;
+    return registry;
+}
+
+function test()
+{
+    WI.runtimeManager.evaluateInInspectedWindow(`makeRegistryWithUnrootedTokens(500)`, {objectGroup: "test", doNotPauseOnExceptionsAndMuteConsole: true, generatePreview: false}, (remoteObject, wasThrown) => {
+        InspectorTest.expectFalse(wasThrown, "Should evaluate the setup without throwing.");
+        InspectorTest.expectThat(remoteObject instanceof WI.RemoteObject, "Should get a RemoteObject for the FinalizationRegistry.");
+
+        remoteObject.getPropertyDescriptors((properties) => {
+            let live = properties.find((property) => property.name === "live");
+            let dead = properties.find((property) => property.name === "dead");
+            InspectorTest.expectThat(properties.some((property) => property.name === "cleanupCallback"), "Should report the internal \"cleanupCallback\" property.");
+            InspectorTest.expectThat(!!dead, "Should report the internal \"dead\" property.");
+            InspectorTest.expectThat(!!live, "Should report the internal \"live\" property.");
+            InspectorTest.expectEqual(live ? live.value.size : -1, 500, "Should walk all 500 live registrations without a use-after-free.");
+            InspectorTest.completeTest();
+        }, {generatePreview: false});
+    });
+}
+</script>
 </head>
-<body>
-    <h1>Simulador de Teste WebKit (Commit 6b357f3) - PS4</h1>
-    <div id="console">Iniciando teste...</div>
-
-    <script>
-        var consoleEl = document.getElementById('console');
-
-        function log(message, type) {
-            var span = document.createElement('div');
-            span.className = type || 'log';
-            span.textContent = message;
-            consoleEl.appendChild(span);
-            consoleEl.scrollTop = consoleEl.scrollHeight;
-        }
-
-        var assert = {
-            eq: function(lhs, rhs, msg) {
-                if (lhs !== rhs) {
-                    throw new Error('Falha na assercao: Esperado "' + rhs + '", mas obteve "' + lhs + '". ' + (msg || ''));
-                }
-            }
-        };
-
-        var pageSize = 65536;
-        var buffer = null;
-        var ta = null;
-
-        function simulateMemoryGrow(oldBuffer, additionalPages) {
-            var newSize = oldBuffer.byteLength + (additionalPages * pageSize);
-            var newBuffer = new ArrayBuffer(newSize);
-            var oldBytes = new Uint8Array(oldBuffer);
-            var newBytes = new Uint8Array(newBuffer);
-            newBytes.set(oldBytes);
-            return newBuffer;
-        }
-
-        try {
-            log("[1/5] Testando esgotamento de alocacoes...", "info");
-            var memories = [];
-            for (var i = 0; i < 500; i++) {
-                try {
-                    memories.push(new ArrayBuffer(65536));
-                } catch (e) {
-                    log("Limite atingido na iteracao " + i + ": " + e.message, "info");
-                    break;
-                }
-            }
-
-            log("[2/5] Inicializando buffer principal e visao Uint32Array...", "info");
-            buffer = new ArrayBuffer(pageSize);
-            ta = new Uint32Array(buffer);
-            ta[0] = 0xCAFEBABE;
-            log("Valor inicial gravado em ta[0]: 0x" + ta[0].toString(16).toUpperCase());
-
-            log("[3/5] Simulando memory.grow(1) (Crescimento e realocacao)...", "info");
-            buffer = simulateMemoryGrow(buffer, 1);
-            ta = new Uint32Array(buffer);
-
-            log("[4/5] Executando loop de estresse de memoria...", "info");
-            for (var j = 0; j < 100; j++) {
-                var arr = new ArrayBuffer(65536);
-                new Uint32Array(arr).fill(0xDEADBEEF);
-            }
-
-            log("[5/5] Executando validacao final (assert.eq)...", "info");
-            assert.eq(ta[0], 0xCAFEBABE);
-
-            log("\nSUCESSO: O teste passou! Valor em ta[0]: 0xCAFEBABE.", "success");
-        } catch (error) {
-            log("\nERRO NO TESTE: " + error.message, "error");
-            if (error.stack) log(error.stack, "error");
-        }
-    </script>
-</body>
+<body onload="runTest()"></body>
 </html>
