@@ -1,77 +1,53 @@
 <!DOCTYPE html>
-<html>
 <body>
 <script>
-// Style::Scope::flushPendingDescendantUpdates() used to walk
-// Document::m_inDocumentShadowRoots (a WeakListHashSet) with a live iterator while
-// making a per-root flushPendingUpdate() callout. That callout re-registers the
-// shadow scope's @font-face rules, which removes the previous CSSFontFace; when that
-// face is the only loading one, document.fonts.ready settles synchronously and its
-// thenable assimilation runs an author getter. Disconnecting the iterated shadow
-// root from that getter frees the list node the iterator points at.
-
-
-// Touch document.fonts before the load event so that FontFaceSet is marked as
-// document-loaded; completedLoading() only settles the ready promise in that state.
+// Precondição: tocar document.fonts antes do load event
 document.fonts;
 
-function log(message)
-{
-    document.body.appendChild(document.createTextNode(message));
-    document.body.appendChild(document.createElement("br"));
-}
-
-function run()
-{
+window.addEventListener("load", () => setTimeout(() => {
     const host = document.createElement("div");
     document.body.appendChild(host);
-    const shadowRoot = host.attachShadow({ mode: "open" });
+    const shadow = host.attachShadow({ mode: "open" });
 
-    const fontFaceStyle = document.createElement("style");
-    fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }`
-        + `.probe { font: 24px reentryFont; }`;
-    shadowRoot.appendChild(fontFaceStyle);
+    // @font-face numa shadow root — dispara o pipeline de loading
+    const style = document.createElement("style");
+    style.textContent = `
+        @font-face { font-family: f; src: url("x.otf"); }
+        .p { font: 24px f; }`;
+    shadow.appendChild(style);
 
-    const probe = document.createElement("span");
-    probe.className = "probe";
-    probe.textContent = "A";
-    shadowRoot.appendChild(probe);
+    const span = document.createElement("span");
+    span.className = "p";
+    span.textContent = "A";
+    shadow.appendChild(span);
 
-    document.body.offsetHeight; // Force layout so the font load starts.
-    document.fonts.load("24px reentryFont", "A");
-    log("document.fonts.status: " + document.fonts.status);
+    // Força layout ? inicia font load
+    document.body.offsetHeight;
+    document.fonts.load("24px f", "A");
 
-    // Materialize the JS promise for the ready proxy that startedLoading() re-armed,
-    // so that settling it goes through JSPromise::resolve() and its thenable check.
+    // Materializa a promise ready para que settling passe por JSPromise::resolve
     document.fonts.ready;
 
-    // Give the shadow scope a pending UpdateType::ActiveSet whose flush takes the
-    // ResolverUpdateType::Reset path, so all of its sheets (including the @font-face
-    // one) get re-processed. Prepending rather than appending is what makes
-    // analyzeStyleSheetChange() pick Reset.
-    const prependedStyle = document.createElement("style");
-    prependedStyle.textContent = ".unused { color: red; }";
-    shadowRoot.prepend(prependedStyle);
+    // Prepend (não append) ? força analyzeStyleSheetChange a escolher Reset
+    // Reset re-processa @font-face ? pode zerar o contador de loading fonts
+    const extra = document.createElement("style");
+    extra.textContent = ".x { color: red; }";
+    shadow.prepend(extra);
 
-    let getterCallCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, "then", {
+    // Intercepta o .then do FontFaceSet para remover o host durante a iteração
+    Object.defineProperty(FontFace.prototype, "then", {
         configurable: true,
         get() {
-            delete FontFaceSet.prototype.then;
-            ++getterCallCount;
-            host.remove(); // Frees the iterated Document::m_inDocumentShadowRoots node.
+            delete FontFace.prototype.then;
+            host.remove(); // ? libera o nó que o iterator aponta
             return undefined;
         }
     });
 
-    document.styleSheets.length; // Reaches Scope::flushPendingDescendantUpdates().
+    // Trigger: acesso a document.styleSheets chama flushPendingDescendantUpdates
+    document.styleSheets.length;
 
-    log("FontFaceSet.prototype.then getter calls: " + getterCallCount);
-    log("PASS if no crash.");
-    
-}
-
-window.addEventListener("load", () => setTimeout(run, 0));
+    document.body.append("alive — sem crash");
+}, 0));
 </script>
 </body>
-</html>

