@@ -1,71 +1,63 @@
 <html>
 <body>
-<button id="run">Run V3</button>
+<button id="run">Run V2</button>
 <div id="status">Ready</div>
 <iframe id="testFrame" width="100" height="100"></iframe>
 <script>
 /*
-  DIFERENÇA DO ORIGINAL: dois popups com foco alternado
-  FocusController processa mais transições cross-window
-  enquanto fullscreen está ativo no iframe.
+  DIFERENÇA DO ORIGINAL: iframe.remove() acontece de dentro do
+  handler webkitfullscreenchange do documento filho — FullscreenManager
+  está no meio da call stack quando o Document começa teardown.
 */
 
 var iframe = document.getElementById("testFrame");
-var popup1 = null;
-var popup2 = null;
-var focusTimer = null;
+var popup = null;
 
 iframe.onload = function() {
-    var doc = iframe.contentDocument;
-    doc.open();
-    doc.write(
+    var iDoc = iframe.contentDocument;
+    iDoc.open();
+    iDoc.write(
         '<!DOCTYPE html><html><body>' +
-        '<div style="width:200px;height:150px;background:green"></div>' +
+        '<div style="width:200px;height:150px;background:blue"></div>' +
         '</body></html>'
     );
-    doc.close();
+    iDoc.close();
+
+    // Listener no documento FILHO
+    iDoc.addEventListener('webkitfullscreenchange', function() {
+        document.getElementById("status").innerHTML =
+            "CHILD fullscreenchange — removing iframe from callback";
+
+        if (iframe && iframe.parentNode) {
+            iframe.remove();
+        }
+        if (popup && !popup.closed) {
+            popup.close();
+        }
+    });
 };
 
 document.getElementById("run").onclick = function() {
-    popup1 = window.open("", "_blank", "width=400,height=300");
-    popup1.document.open();
-    popup1.document.write('<!DOCTYPE html><html><body><h3>Popup 1</h3></body></html>');
-    popup1.document.close();
-
-    popup2 = window.open("", "_blank", "width=400,height=300");
-    popup2.document.open();
-    popup2.document.write('<!DOCTYPE html><html><body><h3>Popup 2</h3></body></html>');
-    popup2.document.close();
+    popup = window.open("", "_blank", "width=400,height=300");
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html><html><body><h3>Popup</h3></body></html>'
+    );
+    popup.document.close();
 
     iframe.contentDocument.documentElement.webkitRequestFullscreen();
 
     setTimeout(function() {
-        // Foco alternado entre 3 janelas + iframe
-        popup1.focus();
-        popup2.focus();
+        if (!popup || popup.closed) return;
+
+        popup.focus();
         window.focus();
         iframe.contentWindow.focus();
-        popup1.focus();
-        window.focus();
-
+        iframe.remove().
         setTimeout(function() {
-            if (popup1 && !popup1.closed) popup1.close();
-
-            // Intervalo maior entre fechar popup1 e popup2
-            // para pegar diferentes estados do FocusController
-            setTimeout(function() {
-                if (popup2 && !popup2.closed) popup2.close();
-
-                focusTimer = setInterval(function() {
-                    if ((!popup1 || popup1.closed) &&
-                        (!popup2 || popup2.closed)) {
-                        clearInterval(focusTimer);
-                        iframe.remove();
-                        document.getElementById("status").innerHTML =
-                            "iframe removed após ambos popups fechados";
-                    }
-                }, 20);
-            }, 150);
+            // popup.close() dispara eventos de foco
+            // que podem coincidir com fullscreenchange do filho
+            if (popup && !popup.closed) popup.close();
         }, 300);
     }, 300);
 };
