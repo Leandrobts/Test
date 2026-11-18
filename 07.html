@@ -1,38 +1,46 @@
 <html>
 <body>
-<button id="run">Run V4 (Auto-Loop)</button>
+<button id="run">Abrir Popup e Iniciar</button>
 <button id="stop">Stop</button>
 <div id="status">Ready</div>
-<div id="log" style="font-family:monospace;font-size:11px;height:250px;overflow-y:auto;border:1px solid #ccc;padding:4px"></div>
+<div id="log" style="font-family:monospace;font-size:11px;
+     height:250px;overflow-y:auto;border:1px solid #ccc;padding:4px"></div>
 <script>
 /*
-  FUZZER: estrutura IDÊNTICA ao teste original (popup + foco + setInterval)
-  Varia o delay do primeiro setTimeout de 0 a 600ms para encontrar
-  a janela de timing que causa UAF ou crash.
+  V4 CORRIGIDO: abre o popup UMA VEZ via gesto do usuário.
+  Fuzza o delay entre webkitRequestFullscreen() e iframe.remove()
+  sem precisar reabrir popup a cada iteração.
+  Popup fica aberto durante todas as rodadas.
 */
 
-var running = false;
+var running  = false;
+var popup    = null;
 var iteration = 0;
-var delay1 = 0;   // delay antes do bloco de foco
-var delay2 = 300; // delay fixo entre foco e popup.close (igual ao original)
+var delay1   = 0;    // delay antes do bloco de foco — varia de 0 a 600ms
+var delay2   = 300;  // delay fixo entre foco e popup operações
 
 function log(msg) {
-    var div = document.getElementById("log");
+    var div  = document.getElementById("log");
     var line = document.createElement("div");
-    line.textContent = "[i=" + iteration + " d1=" + delay1 + "ms] " + msg;
+    line.textContent = "[i=" + iteration + " d=" + delay1 + "ms] " + msg;
     div.appendChild(line);
     div.scrollTop = div.scrollHeight;
 }
 
 function runIteration() {
     if (!running) return;
+    if (!popup || popup.closed) {
+        document.getElementById("status").innerHTML = "Popup fechou — stop";
+        running = false;
+        return;
+    }
+
     iteration++;
 
     var iframe = document.createElement("iframe");
-    iframe.style.cssText = "width:100px;height:100px;position:fixed;top:-300px;left:-300px";
+    iframe.style.cssText = "width:100px;height:100px";
     document.body.appendChild(iframe);
 
-    var popup = null;
     var focusTimer = null;
     var done = false;
 
@@ -40,92 +48,75 @@ function runIteration() {
         if (done) return;
         done = true;
         log(msg);
-        if (focusTimer) clearInterval(focusTimer);
+        if (focusTimer) { clearInterval(focusTimer); focusTimer = null; }
         if (iframe.parentNode) iframe.remove();
-        if (popup && !popup.closed) try { popup.close(); } catch(e) {}
 
-        // Incrementa delay a cada 3 iterações
         if (iteration % 3 === 0) {
             delay1 = delay1 >= 600 ? 0 : delay1 + 25;
         }
-
-        if (running) setTimeout(runIteration, 400);
+        if (running) setTimeout(runIteration, 500);
     }
 
+    // Monitora dangling pointer via fullscreenchange
+    document.addEventListener('webkitfullscreenchange', function onFsChange() {
+        document.removeEventListener('webkitfullscreenchange', onFsChange);
+        var el = document.webkitFullscreenElement;
+        if (el) {
+            try {
+                finish("DANGLING PTR — tag=" + el.tagName +
+                       " clientW=" + el.clientWidth);
+            } catch(e) {
+                finish("EXCEPTION no dangling: " + e);
+            }
+        }
+    });
+
     iframe.onload = function() {
-        var doc = iframe.contentDocument;
-        doc.open();
-        doc.write(
+        var iDoc = iframe.contentDocument;
+        iDoc.open();
+        iDoc.write(
             '<!DOCTYPE html><html><body>' +
             '<div style="width:200px;height:150px;background:red"></div>' +
             '</body></html>'
         );
-        doc.close();
+        iDoc.close();
 
-        // Monitora state pós-remove via fullscreenchange
-        document.addEventListener('webkitfullscreenchange', function onFsChange() {
-            document.removeEventListener('webkitfullscreenchange', onFsChange);
-            var el = document.webkitFullscreenElement;
-            if (el) {
-                try {
-                    finish("DANGLING PTR — tag=" + el.tagName + " clientW=" + el.clientWidth);
-                } catch(e) {
-                    finish("EXCEPTION no dangling: " + e);
-                }
-            }
-        });
+        iDoc.documentElement.webkitRequestFullscreen();
 
-        popup = window.open("", "_blank", "width=400,height=300");
-        if (!popup) {
-            finish("popup bloqueado");
-            return;
-        }
-        popup.document.open();
-        popup.document.write('<!DOCTYPE html><html><body><p>Popup</p></body></html>');
-        popup.document.close();
-
-        iframe.contentDocument.documentElement.webkitRequestFullscreen();
-
-        // Estrutura IDÊNTICA ao teste original
         setTimeout(function() {
-            if (!popup || popup.closed) {
-                finish("popup já fechou");
-                return;
-            }
+            if (!popup || popup.closed) { finish("popup fechou mid-iter"); return; }
+
             popup.focus();
             window.focus();
             try { iframe.contentWindow.focus(); } catch(e) {}
 
             setTimeout(function() {
-                if (popup && !popup.closed) popup.close();
+                // Não fecha o popup — só muda foco de volta
+                window.focus();
 
                 focusTimer = setInterval(function() {
-                    if (!popup || popup.closed) {
-                        clearInterval(focusTimer);
-                        focusTimer = null;
+                    clearInterval(focusTimer);
+                    focusTimer = null;
 
-                        // Captura state antes de remover
-                        var fsEl = document.webkitFullscreenElement;
-                        var fsState = fsEl ? "ACTIVE tag=" + fsEl.tagName : "null";
+                    var fsBefore = document.webkitFullscreenElement;
+                    var preState = fsBefore ? "ACTIVE" : "null";
 
-                        iframe.remove();
+                    iframe.remove();
 
-                        // Verifica state DEPOIS de remover
-                        setTimeout(function() {
-                            var fsAfter = document.webkitFullscreenElement;
-                            if (fsAfter) {
-                                try {
-                                    finish("POST-REMOVE fs=" + fsAfter.tagName +
-                                           " w=" + fsAfter.clientWidth +
-                                           " [pre=" + fsState + "]");
-                                } catch(e) {
-                                    finish("POST-REMOVE EX: " + e + " [pre=" + fsState + "]");
-                                }
-                            } else {
-                                finish("clean [pre=" + fsState + "]");
+                    setTimeout(function() {
+                        var fsAfter = document.webkitFullscreenElement;
+                        if (fsAfter) {
+                            try {
+                                finish("POST-REMOVE fs ATIVO! tag=" + fsAfter.tagName +
+                                       " w=" + fsAfter.clientWidth +
+                                       " [pre=" + preState + "]");
+                            } catch(e) {
+                                finish("POST-REMOVE EXCEPTION: " + e);
                             }
-                        }, 50);
-                    }
+                        } else {
+                            finish("clean [pre=" + preState + "]");
+                        }
+                    }, 50);
                 }, 20);
             }, delay2);
         }, delay1);
@@ -134,9 +125,25 @@ function runIteration() {
 
 document.getElementById("run").onclick = function() {
     if (running) return;
-    running = true;
+
+    // Popup aberto via gesto direto do usuário — não será bloqueado
+    popup = window.open("", "_blank", "width=400,height=300");
+    if (!popup) {
+        document.getElementById("status").innerHTML = "Popup bloqueado!";
+        return;
+    }
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html><html><body>' +
+        '<h3>Popup Fuzzer</h3>' +
+        '<p>Mantém aberto durante o teste</p>' +
+        '</body></html>'
+    );
+    popup.document.close();
+
+    running   = true;
     iteration = 0;
-    delay1 = 0;
+    delay1    = 0;
     document.getElementById("log").innerHTML = "";
     document.getElementById("status").innerHTML = "Running...";
     runIteration();
@@ -144,8 +151,9 @@ document.getElementById("run").onclick = function() {
 
 document.getElementById("stop").onclick = function() {
     running = false;
+    if (popup && !popup.closed) popup.close();
     document.getElementById("status").innerHTML =
-        "Parado — iter=" + iteration + " último delay1=" + delay1 + "ms";
+        "Parado — iter=" + iteration + " último delay=" + delay1 + "ms";
 };
 </script>
 </body>
