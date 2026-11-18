@@ -1,31 +1,134 @@
-<!-- webkit-test-runner [ ShowModalDialogEnabled=true ] --><!DOCTYPE html>
 <html>
 <body>
-<div id="host" style="display:none"></div>
+<button id="run">Run V4 (Auto-Loop)</button>
+<button id="stop">Stop</button>
+<div id="status">Ready</div>
+<div id="log" style="font-family:monospace;font-size:11px;height:200px;overflow-y:auto;border:1px solid #ccc"></div>
 <script>
+/*
+  FUZZER DE TIMING — Varia sistematicamente o delay entre
+  webkitRequestFullscreen() e iframe.remove() para encontrar
+  a janela de race condition que causa UAF/crash.
+  
+  Monitora: webkitFullscreenElement pós-remove (dangling ptr),
+  exceptions, e mudanças inesperadas de estado.
+*/
 
+var running = false;
+var iteration = 0;
+var delay = 0; // ms — incrementa a cada iteração
 
-var host = document.getElementById('host');
-var sr = host.attachShadow({mode: 'open'});
-sr.innerHTML = '<picture id="pic"><source srcset="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"><img></picture>';
-var pic = sr.getElementById('pic');
+function log(msg) {
+    var div = document.getElementById("log");
+    var line = document.createElement("div");
+    line.textContent = "[" + iteration + "|" + delay + "ms] " + msg;
+    div.appendChild(line);
+    div.scrollTop = div.scrollHeight;
+}
 
-pic.addEventListener('load', function listener() {
-    pic.removeEventListener('load', listener, true);
-    // Removing the <img> from its <picture> re-enters ImageLoader::updatedHasPendingEvent()
-    // and arms m_derefElementTimer.
-    pic.textContent = '';
-    // showModalDialog spins a nested run loop which fires m_derefElementTimer, dropping
-    // m_protectedElement while ImageLoader::dispatchPendingLoadEvent() is still on the stack.
-    showModalDialog('resources/self-closing-modal-dialog.html');
+function runIteration() {
+    if (!running) return;
+    iteration++;
 
-    // The trailing updatedHasPendingEvent() (the crash point) runs after this handler
-    // returns, so finish on the next task rather than waiting a fixed delay.
-    setTimeout(function() {
-        document.write('PASS if no crash.');
+    var iframe = document.createElement("iframe");
+    iframe.style.cssText = "width:100px;height:100px;position:fixed;top:-200px";
+    document.body.appendChild(iframe);
 
-    }, 0);
-}, /*capture*/ true);
+    var popup = null;
+    var completed = false;
+
+    function finish(result) {
+        if (completed) return;
+        completed = true;
+
+        log(result);
+
+        // Avança delay: 0,0,0,10,10,10,20,20,20,...50,50,50 → loop
+        if (iteration % 3 === 0) {
+            delay = delay >= 500 ? 0 : delay + 10;
+        }
+
+        if (iframe.parentNode) iframe.remove();
+        if (popup && !popup.closed) try { popup.close(); } catch(e) {}
+
+        if (running) setTimeout(runIteration, 100);
+    }
+
+    iframe.onload = function() {
+        var iDoc = iframe.contentDocument;
+        iDoc.open();
+        iDoc.write('<html><body><div style="width:100%;height:100%;background:red"></div></body></html>');
+        iDoc.close();
+
+        popup = window.open("", "_blank", "width=200,height=200");
+        if (popup) {
+            popup.document.write('<html><body>popup</body></html>');
+            popup.document.close();
+        }
+
+        iDoc.documentElement.webkitRequestFullscreen();
+
+        // Instala listener ANTES do remove para capturar estado pós-free
+        document.addEventListener('webkitfullscreenchange', function onFsChange() {
+            document.removeEventListener('webkitfullscreenchange', onFsChange);
+            var el = document.webkitFullscreenElement;
+            if (el) {
+                try {
+                    // Se chegou aqui após remove(), é dangling pointer
+                    var tag = el.tagName;
+                    var id = el.id;
+                    finish("DANGLING PTR? tag=" + tag + " id=" + id);
+                } catch(e) {
+                    finish("EXCEPTION no dangling: " + e);
+                }
+            } else {
+                finish("fs=null (clean)");
+            }
+        });
+
+        setTimeout(function() {
+            // Foco antes do remove (mesma ideia do teste original)
+            if (popup && !popup.closed) popup.focus();
+            window.focus();
+            try { iframe.contentWindow.focus(); } catch(e) {}
+
+            if (popup && !popup.closed) {
+                try { popup.close(); } catch(e) {}
+            }
+
+            iframe.remove();
+
+            // Verifica estado do fullscreen imediatamente após remove
+            setTimeout(function() {
+                var el = document.webkitFullscreenElement;
+                if (el) {
+                    try {
+                        finish("POST-REMOVE fs still active! tag=" + el.tagName);
+                    } catch(e) {
+                        finish("POST-REMOVE EXCEPTION: " + e);
+                    }
+                } else {
+                    finish("clean exit");
+                }
+            }, 50);
+
+        }, delay);
+    };
+}
+
+document.getElementById("run").onclick = function() {
+    if (running) return;
+    running = true;
+    iteration = 0;
+    delay = 0;
+    document.getElementById("log").innerHTML = "";
+    runIteration();
+};
+
+document.getElementById("stop").onclick = function() {
+    running = false;
+    document.getElementById("status").innerHTML = "Stopped at iter=" + iteration + " delay=" + delay + "ms";
+};
 </script>
 </body>
 </html>
