@@ -6,42 +6,64 @@
 <body>
 <script src="resources/gc.js"></script>  <!-- mesmo gc.js que serve o teste 1 -->
 <script>
-function detachedShadowRootOf() {
+let capturedInnerShadow = null;
+
+// host criado implicitamente via innerHTML — NUNCA toca no host diretamente
+customElements.define('x-crash-host', class extends HTMLElement {
+    connectedCallback() {
+        // 'this' = o host (x-crash-host), mas NÃO armazenado em nenhuma variável
+        capturedInnerShadow = this.attachShadow({ mode: 'open' });
+        // sem filhos no light DOM → hasChildNodes() == false
+    }
+});
+
+function getDetachedShadowRoot() {
     const outer = document.createElement('div');
     document.body.appendChild(outer);
     const outerShadow = outer.attachShadow({ mode: 'open' });
 
-    const slotHost = document.createElement('div');
-    outerShadow.appendChild(slotHost);
-    const innerShadow = slotHost.attachShadow({ mode: 'open' });
+    // innerHTML cria x-crash-host sem wrapper JS persistente
+    outerShadow.innerHTML = '<x-crash-host></x-crash-host>';
+    // ↑ connectedCallback rodou → capturedInnerShadow está preenchido
+    // ↑ mas o host (x-crash-host) NUNCA foi salvo em variável JS
 
-    const slot = document.createElement('slot');
-    innerShadow.appendChild(slot);
+    const sr = capturedInnerShadow;
+    capturedInnerShadow = null; // limpa a global
 
-    const lightChild = document.createElement('span');
-    slotHost.appendChild(lightChild);
+    // Remove o host do DOM:
+    // - host.wrapper() → pode ser null (wrapper de 'this' em connectedCallback
+    //   é elegível para GC após retorno do callback)
+    // - host.hasChildNodes() == false → willCreatePossiblyOrphanedTreeByRemoval NÃO cria wrapper
+    outerShadow.replaceChildren();
 
-    // Captura a innerShadow (referência que mantém a shadow tree viva)
-    const shadowRoot = innerShadow;
-
-    lightChild.remove();
-    shadowRoot.replaceChildren();
-    outerShadow.replaceChildren(); // remove slotHost → slotHost fica orphaned
-
-    gc();  // força coleta — slotHost.hasChildNodes()==false → sem wrapper → freed
-    return shadowRoot;
+    return sr; // sr = innerShadow, sr.host = x-crash-host (sem JS ref)
 }
 
-const removedShadowRoot = detachedShadowRootOf();
+const removedShadowRoot = getDetachedShadowRoot();
 
-// Se m_host for zerado pelo destrutor → null (sem crash, bug observable)
-// Se m_host for dangling → crash potencial
-console.log('host:', removedShadowRoot.host);
-console.log('getRootNode:', removedShadowRoot.getRootNode({ composed: true }));
+// Força GC com o mesmo fallback do gc.js
+function gc() {
+    var gcRec = function(n) {
+        if (n < 1) return {};
+        var temp = {};
+        for (var i = 0; i < 100; i++)
+            temp.newProp = gcRec(n - 1);
+        return temp;
+    };
+    gcRec(10);
+}
 
-setTimeout(() => {
-    gc(); // segundo pass
-    console.log('host após 2º GC:', removedShadowRoot.host);
+gc();
+
+setTimeout(function() {
+    gc();
+    setTimeout(function() {
+        // Agora o host deve ter sido coletado
+        // se m_host foi zerado pelo destrutor → null (bug observable)
+        // se acesso ocorre antes do destrutor zerá-lo → crash
+        console.log('host:', removedShadowRoot.host);
+        console.log('getRootNode:', removedShadowRoot.getRootNode({ composed: true }));
+    }, 0);
 }, 0);
 </script>
 </body>
