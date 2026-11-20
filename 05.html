@@ -1,101 +1,284 @@
+
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit XML Compatibility</title>
+<style>
+body{background:#111;color:#eee;font:14px Arial;padding:15px}
+h3{color:#7db9ff}
+button{padding:12px;background:#2465a5;color:white;border:0;margin:5px}
+#log{background:#202020;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.ok{color:#65dc85}
+.fail{color:#ff6969}
+.warn{color:#ffc45c}
+</style>
+</head>
 <body>
 
-<!-- Scenario A: the host has no light DOM children at all, so hasChildNodes() is false. Script
-     holds a node *inside* the shadow tree, so observabilityOfRemovedNode() does report
-     MaybeObservableByRefPtr for it and only the hasChildNodes() gate can block the keep-alive. -->
-<div id="containerA"><div><template shadowrootmode="open"><x-inner-a></x-inner-a></template></div><img src="does-not-exist-a.png"></div>
+<h3>PS4 WebKit - XML Parser Compatibility</h3>
+<p>Commit: 2e63eaf64497d607927fde49ea16899b27a61b7f</p>
 
-<!-- Scenario B: the host has a light DOM child, so hasChildNodes() is true and the gate would pass.
-     Script holds only the ShadowRoot itself, and nothing else in the removed subtree is referenced
-     from JS, so the only node that could report MaybeObservableByRefPtr is the ShadowRoot. -->
-<div id="containerB"><div><template shadowrootmode="open"><x-inner-b></x-inner-b></template><span></span></div><img src="does-not-exist-b.png"></div>
+<div id="log">Initializing...</div>
 
-<!-- Control C: no shadow root anywhere. Script holds a light DOM child of the removed host. -->
-<div id="containerC"><div><span></span></div><img src="does-not-exist-c.png"></div>
+<button onclick="runCompatibility()">Check compatibility</button>
+<button onclick="runOriginal()">Run original test</button>
 
-<pre id="log"></pre>
-<script src="resources/js-test.js"></script>
 <script src="resources/gc.js"></script>
+
 <script>
-jsTestIsAsync = true;
+(function(){
 
-description('This tests removing a shadow host element while there is a strong reference to a node within its shadow tree');
+var log=document.getElementById("log");
+var results={};
 
-// Capture references without ever naming any of the three hosts in JS. Reading ShadowRoot.host (or
-// reaching a host any other way) before the removal creates a JS wrapper for it, which both fails
-// willCreatePossiblyOrphanedTreeByRemoval()'s !root.wrapper() gate and keeps the host alive by
-// itself. Either one masks the bug, so nothing below touches a host until after the removal.
-let innerElementA = null;
-let shadowRootA = null;
-let shadowRootB = null;
-const lightChildC = document.querySelector('#containerC span');
-
-customElements.define('x-inner-a', class extends HTMLElement {
-    connectedCallback() {
-        innerElementA = this;
-        shadowRootA = this.getRootNode();
-    }
-});
-
-customElements.define('x-inner-b', class extends HTMLElement {
-    connectedCallback() {
-        shadowRootB = this.getRootNode();
-    }
-});
-
-const results = [];
-
-function check(name, actual, expected)
-{
-    results.push(`${actual === expected ? 'PASS' : 'FAIL'}: ${name} (expected ${expected}, got ${actual})`);
+function output(name,status,detail){
+    var line="["+status+"] "+name+(detail?" : "+detail:"");
+    log.textContent+="\n"+line;
 }
 
-function describe(node)
-{
-    if (node === null)
-        return 'null';
-    if (node === shadowRootA || node === shadowRootB)
-        return 'the shadow root';
-    if (node instanceof ShadowRoot)
-        return 'some other shadow root';
-    if (node instanceof Element)
-        return `<${node.localName}>`;
-    return String(node);
+function check(name,fn){
+    try{
+        var value=fn();
+        results[name]=!!value;
+        output(name,value?"PASS":"FAIL",String(value));
+    }catch(e){
+        results[name]=false;
+        output(name,"ERROR",e.name+": "+e.message);
+    }
 }
 
-shouldNotBe('innerElementA', 'null');
-shouldBeTrue('shadowRootA instanceof ShadowRoot');
-shouldBeTrue('shadowRootB instanceof ShadowRoot');
-shouldBeTrue('lightChildC instanceof Element');
+window.runCompatibility=function(){
 
-// Drop scenario B's reference into the shadow tree so that the ShadowRoot is the only node in the
-// removed subtree that anything outside of it references.
-shadowRootB.replaceChildren();
+log.textContent="=== API COMPATIBILITY ===";
+results={};
 
-document.getElementById('containerA').textContent = '';
-document.getElementById('containerB').textContent = '';
-document.getElementById('containerC').textContent = '';
+check("document.createElement",function(){
+    return typeof document.createElement==="function";
+});
+
+check("HTMLElement",function(){
+    return typeof HTMLElement==="function";
+});
+
+check("customElements",function(){
+    return typeof customElements!=="undefined" &&
+    typeof customElements.define==="function";
+});
+
+check("Element.outerHTML",function(){
+    return "outerHTML" in document.createElement("div");
+});
+
+check("Element.innerHTML",function(){
+    return "innerHTML" in document.createElement("div");
+});
+
+check("Element.after",function(){
+    return typeof Element.prototype.after==="function";
+});
+
+check("document.adoptNode",function(){
+    return typeof document.adoptNode==="function";
+});
+
+check("document.createTreeWalker",function(){
+    return typeof document.createTreeWalker==="function";
+});
+
+check("TreeWalker.currentNode",function(){
+    return "currentNode" in document.createTreeWalker(document);
+});
+
+check("Node.getRootNode",function(){
+    return typeof Node.prototype.getRootNode==="function";
+});
+
+check("Node.ELEMENT_NODE",function(){
+    return Node.ELEMENT_NODE===1;
+});
+
+check("iframe",function(){
+    return typeof document.createElement("iframe").remove==="function";
+});
+
+check("Blob",function(){
+    return typeof Blob==="function";
+});
+
+check("URL.createObjectURL",function(){
+    return typeof URL.createObjectURL==="function";
+});
+
+check("setTimeout",function(){
+    return typeof setTimeout==="function";
+});
+
+check("gc.js",function(){
+    return typeof gc==="function";
+});
+
+check("XML MIME type",function(){
+    return typeof document.contentType==="string";
+});
+
+output("Compatibility checks","INFO","Completed");
+};
+
+window.parentDonor=null;
+window.childReady=null;
+
+window.runOriginal=function(){
+
+log.textContent="=== ORIGINAL TEST EXECUTION ===";
+
+if(typeof gc!=="function"){
+    output("GC","FAIL","resources/gc.js not loaded");
+    return;
+}
+
+if(typeof Blob!=="function" ||
+   typeof URL.createObjectURL!=="function"){
+    output("Blob / ObjectURL","FAIL","Required API unavailable");
+    return;
+}
+
+if(typeof customElements==="undefined" ||
+   typeof Element.prototype.after!=="function"){
+    output("Custom Elements / after","FAIL","Required API unavailable");
+    return;
+}
+
+window.parentDonor=document.createElement("input");
+parentDonor.type="radio";
+parentDonor.name="g";
+
+output("parentDonor","PASS","Created radio input");
+
+window.childReady=function(){
+
+output("childReady","PASS","Callback received");
+
+var escaped=window.parentDonor;
+
+if(!escaped || escaped.parentNode){
+    output("Escaped node","FAIL","Unexpected parentNode state");
+    return;
+}
+
+output("Escaped node","PASS","Node has no parent");
+
+try{
+
+document.adoptNode(escaped);
+output("adoptNode","PASS","Node adopted");
+
+window.walker=document.createTreeWalker(escaped);
+output("createTreeWalker","PASS","TreeWalker created");
+
+window.parentDonor=null;
+
+var frame=document.querySelector("iframe");
+
+if(!frame){
+    output("iframe removal","FAIL","Frame not found");
+    return;
+}
+
+frame.remove();
+output("iframe removal","PASS","Frame removed");
+
+setTimeout(function(){
+
+try{
 
 gc();
+output("GC","PASS","gc() executed");
 
-setTimeout(() => {
-    gc();
+var nodeType=walker.currentNode.getRootNode({composed:true}).nodeType;
 
-    shouldNotBe('shadowRootA.host', 'null');
-    shouldNotBe('innerElementA.getRootNode({composed: true})', 'shadowRootA');
-    shouldBe('innerElementA.getRootNode({composed: true})', 'shadowRootA.host');
+output("getRootNode","INFO","nodeType="+nodeType);
 
-    shouldNotBe('shadowRootB.host', 'null');
-    shouldNotBe('shadowRootB.getRootNode({composed: true})', 'shadowRootB');
-    shouldBe('shadowRootB.getRootNode({composed: true})', 'shadowRootB.host');
+if(nodeType===Node.ELEMENT_NODE){
+    output("Original assertion","PASS","Expected ELEMENT_NODE");
+}else{
+    output("Original assertion","FAIL","Unexpected nodeType="+nodeType);
+}
 
-    shouldBeTrue('lightChildC.parentNode instanceof Element');
-    shouldBe('lightChildC.getRootNode({composed: true})', 'lightChildC.parentNode');
+}catch(e){
+    output("Post-GC verification","ERROR",e.name+": "+e.message);
+}
 
-    finishJSTest();
-}, 0);
+},0);
+
+}catch(e){
+    output("Parent callback","ERROR",e.name+": "+e.message);
+}
+
+};
+
+var childSource='<?xml version="1.0"?>\n'+
+'<html xmlns="http://www.w3.org/1999/xhtml">\n'+
+'<body>\n'+
+'<div id="victim"></div>\n'+
+'<div id="cleanup"></div>\n'+
+'<script><![CDATA[\n'+
+'(() => {\n'+
+'class XFragmentEscape extends HTMLElement {\n'+
+'constructor() {\n'+
+'super();\n'+
+'parentLog("Custom Element constructor");\n'+
+'this.after(parent.parentDonor);\n'+
+'}\n'+
+'}\n'+
+'customElements.define("x-fragment-escape", XFragmentEscape);\n'+
+'parentLog("customElements.define executed");\n'+
+'try {\n'+
+'document.getElementById("victim").outerHTML = "<x-fragment-escape></x-fragment-escape><";\n'+
+'parentLog("outerHTML completed without exception");\n'+
+'} catch(error) {\n'+
+'parentLog("XML parsing exception",error.name+": "+error.message);\n'+
+'}\n'+
+'parentLog("Starting cleanup innerHTML");\n'+
+'document.getElementById("cleanup").innerHTML = \'<span xmlns="http://www.w3.org/1999/xhtml">cleanup</span>\';\n'+
+'parentLog("Cleanup completed");\n'+
+'parent.childReady();\n'+
+'})();\n'+
+']]><\/script>\n'+
+'</body>\n'+
+'</html>';
+
+window.parentLog=function(name,detail){
+    output(name,"INFO",detail||"");
+};
+
+try{
+
+var blob=new Blob([childSource],{type:"application/xhtml+xml"});
+output("Blob XHTML","PASS","Blob created");
+
+var url=URL.createObjectURL(blob);
+output("Object URL","PASS","URL created");
+
+var frame=document.createElement("iframe");
+frame.src=url;
+
+frame.onerror=function(){
+    output("iframe","ERROR","Frame loading error");
+};
+
+document.body.append(frame);
+output("iframe","INFO","XHTML document inserted");
+
+}catch(e){
+    output("Execution","ERROR",e.name+": "+e.message);
+}
+
+};
+
+runCompatibility();
+
+})();
 </script>
 </body>
 </html>
