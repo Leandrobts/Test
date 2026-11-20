@@ -1,76 +1,101 @@
 <!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8">
-  <title>PS4 Canvas 2D Reentrancy Check</title>
-</head>
 <body>
-  <button id="runBtn" type="button">Executar teste getContext("2d")</button>
-  <pre id="out"></pre>
 
-  <script>
-    (function () {
-      const out = document.getElementById("out");
-      const btn = document.getElementById("runBtn");
+<!-- Scenario A: the host has no light DOM children at all, so hasChildNodes() is false. Script
+     holds a node *inside* the shadow tree, so observabilityOfRemovedNode() does report
+     MaybeObservableByRefPtr for it and only the hasChildNodes() gate can block the keep-alive. -->
+<div id="containerA"><div><template shadowrootmode="open"><x-inner-a></x-inner-a></template></div><img src="does-not-exist-a.png"></div>
 
-      function log(msg) {
-        out.textContent += msg + "\n";
-      }
+<!-- Scenario B: the host has a light DOM child, so hasChildNodes() is true and the gate would pass.
+     Script holds only the ShadowRoot itself, and nothing else in the removed subtree is referenced
+     from JS, so the only node that could report MaybeObservableByRefPtr is the ShadowRoot. -->
+<div id="containerB"><div><template shadowrootmode="open"><x-inner-b></x-inner-b></template><span></span></div><img src="does-not-exist-b.png"></div>
 
-      function runTest() {
-        out.textContent = "";
-        log("Iniciando teste de canvas.getContext('2d')...");
+<!-- Control C: no shadow root anywhere. Script holds a light DOM child of the removed host. -->
+<div id="containerC"><div><span></span></div><img src="does-not-exist-c.png"></div>
 
-        try {
-          const canvas = document.createElement("canvas");
-          canvas.width = 128;
-          canvas.height = 128;
+<pre id="log"></pre>
+<script src="resources/js-test.js"></script>
+<script src="resources/gc.js"></script>
+<script>
+jsTestIsAsync = true;
 
-          const ctx1 = canvas.getContext("2d");
-          log("ctx1 criado: " + (ctx1 ? ctx1.constructor.name : "null"));
+description('This tests removing a shadow host element while there is a strong reference to a node within its shadow tree');
 
-          const ctx2 = canvas.getContext("2d");
-          log("ctx2 === ctx1: " + (ctx2 === ctx1));
+// Capture references without ever naming any of the three hosts in JS. Reading ShadowRoot.host (or
+// reaching a host any other way) before the removal creates a JS wrapper for it, which both fails
+// willCreatePossiblyOrphanedTreeByRemoval()'s !root.wrapper() gate and keeps the host alive by
+// itself. Either one masks the bug, so nothing below touches a host until after the removal.
+let innerElementA = null;
+let shadowRootA = null;
+let shadowRootB = null;
+const lightChildC = document.querySelector('#containerC span');
 
-          const glAttempt = canvas.getContext("webgl");
-          log("getContext('webgl') apos 2d: " + (glAttempt === null ? "null (esperado)" : typeof glAttempt));
+customElements.define('x-inner-a', class extends HTMLElement {
+    connectedCallback() {
+        innerElementA = this;
+        shadowRootA = this.getRootNode();
+    }
+});
 
-          // Teste de reentrancia via getter/setter ou evento durante mutacao de tamanho
-          let reentrantCtx = null;
-          const observerCanvas = document.createElement("canvas");
-          observerCanvas.width = 64;
-          observerCanvas.height = 64;
+customElements.define('x-inner-b', class extends HTMLElement {
+    connectedCallback() {
+        shadowRootB = this.getRootNode();
+    }
+});
 
-          Object.defineProperty(observerCanvas, "width", {
-            configurable: true,
-            get: function () {
-              return 64;
-            },
-            set: function (val) {
-              if (!reentrantCtx) {
-                reentrantCtx = observerCanvas.getContext("2d");
-              }
-              observerCanvas.setAttribute("width", String(val));
-            }
-          });
+const results = [];
 
-          observerCanvas.width = 100;
-          const afterCtx = observerCanvas.getContext("2d");
-          log("reentrantCtx === afterCtx: " + (reentrantCtx === afterCtx));
+function check(name, actual, expected)
+{
+    results.push(`${actual === expected ? 'PASS' : 'FAIL'}: ${name} (expected ${expected}, got ${actual})`);
+}
 
-          // Operacao basica no buffer para verificar estabilidade
-          ctx1.fillStyle = "#00ff00";
-          ctx1.fillRect(0, 0, 32, 32);
-          canvas.width = 256;
-          ctx1.fillRect(0, 0, 16, 16);
-          log("Resize + draw concluido sem excecao.");
-        } catch (err) {
-          log("Excecao capturada: " + (err && err.message ? err.message : String(err)));
-        }
-      }
+function describe(node)
+{
+    if (node === null)
+        return 'null';
+    if (node === shadowRootA || node === shadowRootB)
+        return 'the shadow root';
+    if (node instanceof ShadowRoot)
+        return 'some other shadow root';
+    if (node instanceof Element)
+        return `<${node.localName}>`;
+    return String(node);
+}
 
-      btn.addEventListener("click", runTest);
-    })();
-  </script>
+shouldNotBe('innerElementA', 'null');
+shouldBeTrue('shadowRootA instanceof ShadowRoot');
+shouldBeTrue('shadowRootB instanceof ShadowRoot');
+shouldBeTrue('lightChildC instanceof Element');
+
+// Drop scenario B's reference into the shadow tree so that the ShadowRoot is the only node in the
+// removed subtree that anything outside of it references.
+shadowRootB.replaceChildren();
+
+document.getElementById('containerA').textContent = '';
+document.getElementById('containerB').textContent = '';
+document.getElementById('containerC').textContent = '';
+
+gc();
+
+setTimeout(() => {
+    gc();
+
+    shouldNotBe('shadowRootA.host', 'null');
+    shouldNotBe('innerElementA.getRootNode({composed: true})', 'shadowRootA');
+    shouldBe('innerElementA.getRootNode({composed: true})', 'shadowRootA.host');
+
+    shouldNotBe('shadowRootB.host', 'null');
+    shouldNotBe('shadowRootB.getRootNode({composed: true})', 'shadowRootB');
+    shouldBe('shadowRootB.getRootNode({composed: true})', 'shadowRootB.host');
+
+    shouldBeTrue('lightChildC.parentNode instanceof Element');
+    shouldBe('lightChildC.getRootNode({composed: true})', 'lightChildC.parentNode');
+
+    finishJSTest();
+}, 0);
+</script>
 </body>
 </html>
