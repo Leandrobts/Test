@@ -1,51 +1,84 @@
 <!DOCTYPE html>
 <html>
 <body>
-  <button id="runBtn" type="button">Executar diagn�stico</button>
-  <div id="log"></div>
+<script>
+// POC 4: Reentrância via MutationObserver + Custom Element
+// durante o update de estilos / font processing
 
-  <script>
-    document.fonts;
+function log(message) {
+    document.body.appendChild(document.createTextNode(message));
+    document.body.appendChild(document.createElement("br"));
+}
 
-    function log(msg) {
-      const out = document.getElementById("log");
-      const line = document.createElement("div");
-      line.textContent = msg;
-      out.appendChild(line);
+function run() {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const shadowRoot = host.attachShadow({ mode: "open" });
+
+    const fontFaceStyle = document.createElement("style");
+    fontFaceStyle.textContent = `@font-face { font-family: reentryFont; src: url("resources/no-such-font-for-reentry.otf"); }`
+        + `.probe { font: 24px reentryFont; }`;
+    shadowRoot.appendChild(fontFaceStyle);
+
+    const probe = document.createElement("span");
+    probe.className = "probe";
+    probe.textContent = "A";
+    shadowRoot.appendChild(probe);
+
+    document.body.offsetHeight; // force layout
+
+    // Prepend de stylesheet
+    const prependedStyle = document.createElement("style");
+    prependedStyle.textContent = ".unused { color: red; }";
+    shadowRoot.prepend(prependedStyle);
+
+    let observerFired = 0;
+    let customElementFired = 0;
+
+    // 1. MutationObserver que remove o host quando algo muda no shadow
+    const observer = new MutationObserver(() => {
+        ++observerFired;
+        host.remove();
+    });
+    observer.observe(shadowRoot, { childList: true, subtree: true, attributes: true });
+
+    // 2. Custom Element cujo connectedCallback / attributeChangedCallback
+    // pode rodar durante o recalc de estilo
+    class ReentryElement extends HTMLElement {
+        static get observedAttributes() { return ["data-reentry"]; }
+        connectedCallback() {
+            ++customElementFired;
+            // Também tenta remover o host
+            if (host.isConnected)
+                host.remove();
+        }
+        attributeChangedCallback() {
+            ++customElementFired;
+            if (host.isConnected)
+                host.remove();
+        }
     }
+    customElements.define("reentry-el", ReentryElement);
 
-    function runDiagnostic() {
-      document.getElementById("log").textContent = "";
+    const reentryEl = document.createElement("reentry-el");
+    shadowRoot.appendChild(reentryEl);
 
-      const host = document.createElement("div");
-      document.body.appendChild(host);
-      const shadowRoot = host.attachShadow({ mode: "open" });
+    // Força mais atividade de fonte + estilo
+    document.fonts.load("24px reentryFont", "A").catch(() => {});
+    reentryEl.setAttribute("data-reentry", "1"); // dispara attributeChangedCallback
 
-      const fontStyle = document.createElement("style");
-      fontStyle.textContent =
-        `@font-face { font-family: testFont; src: url("resources/missing-font.otf"); }` +
-        `.sample { font: 20px testFont; }`;
-      shadowRoot.appendChild(fontStyle);
+    // Mutação que o observer vai ver
+    const extra = document.createElement("div");
+    shadowRoot.appendChild(extra);
 
-      const span = document.createElement("span");
-      span.className = "sample";
-      span.textContent = "A";
-      shadowRoot.appendChild(span);
+    document.styleSheets.length; // trigger de flush
 
-      void document.body.offsetHeight;
-      document.fonts.load("20px testFont", "A").catch(() => {});
-      log("status inicial: " + document.fonts.status);
+    log("MutationObserver fired: " + observerFired);
+    log("Custom Element callbacks: " + customElementFired);
+    log("PASS if no crash.");
+}
 
-      const extraStyle = document.createElement("style");
-      extraStyle.textContent = ".note { opacity: 1; }";
-      shadowRoot.prepend(extraStyle);
-
-      const sheetCount = document.styleSheets.length;
-      log("stylesheets: " + sheetCount);
-      log("status ap�s flush: " + document.fonts.status);
-    }
-
-    document.getElementById("runBtn").addEventListener("click", runDiagnostic);
-  </script>
+window.addEventListener("load", () => setTimeout(run, 0));
+</script>
 </body>
 </html>
