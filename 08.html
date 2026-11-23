@@ -1,35 +1,144 @@
 <!DOCTYPE html>
+<html>
 <body>
+<button id="btn-run" type="button">Run Test</button>
+<button id="btn-clear" type="button">Clear Log</button>
+<div id="log"></div>
+
 <script>
-function gc() {
-    function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-    gcRec(10);
+const logEl = document.getElementById("log");
+
+function log(msg) {
+    const p = document.createElement("div");
+    p.textContent = msg;
+    logEl.appendChild(p);
 }
 
-const canvas = document.createElement("canvas");
+function makeShadowHost(id) {
+    const host = document.createElement("div");
+    host.id = id;
+    document.body.appendChild(host);
+    const sr = host.attachShadow({ mode: "open" });
 
-let contextFromListener;
-canvas.addEventListener("webglcontextcreationerror", () => {
-    contextFromListener = canvas.getContext("2d");
-});
+    const st1 = document.createElement("style");
+    st1.textContent = ":host { color: green; } span { font-size: 16px; }";
+    sr.appendChild(st1);
 
-const ctx = canvas.getContext("2d", { failContextCreationForTesting: "FailPlatformContextCreation" });
+    const span = document.createElement("span");
+    span.textContent = "node-" + id;
+    sr.appendChild(span);
 
-gc();
+    return { host, sr, st1, span };
+}
 
-const log = [
-    `ctx = ${ctx}`,
-    `context from listener = ${contextFromListener.constructor.name}`,
-    `its canvas is the same element = ${contextFromListener.canvas === canvas}`,
-    `it still owns the slot = ${contextFromListener === canvas.getContext("2d")}`,
-    "PASS if no crash.",
-];
-document.body.appendChild(document.createElement("pre")).textContent = log.join("\n");
+// Gatilho 1: Prepend de stylesheet + leitura de document.styleSheets.length
+// Força flushPendingUpdate() / flushPendingDescendantUpdates() com mutação de DOM em callbacks
+function triggerStyleSheetFlush() {
+    log("[1] Testing stylesheet prepend + document.styleSheets.length");
+    const a = makeShadowHost("h1a");
+    const b = makeShadowHost("h1b");
+    document.body.offsetHeight;
+
+    const prepended = document.createElement("style");
+    prepended.textContent = "span { color: blue; }";
+    a.sr.prepend(prepended);
+
+    // Tenta provocar remoção do segundo host durante reavaliação/mutação relacionada
+    const observer = new MutationObserver(() => {
+        if (b.host.isConnected) {
+            b.host.remove();
+            log("  MutationObserver removed h1b");
+        }
+    });
+    observer.observe(a.sr, { childList: true, subtree: true });
+
+    const len = document.styleSheets.length;
+    observer.disconnect();
+    log("  styleSheets.length=" + len + " | h1a.connected=" + a.host.isConnected + " | h1b.connected=" + b.host.isConnected);
+}
+
+// Gatilho 2: Alteração de conteúdo de <style> dentro do shadow root + force layout
+function triggerStyleTextMutation() {
+    log("[2] Testing shadow <style> textContent mutation + layout flush");
+    const a = makeShadowHost("h2a");
+    const b = makeShadowHost("h2b");
+    document.body.offsetHeight;
+
+    a.st1.textContent = ":host { color: purple; } span { letter-spacing: 1px; }";
+    a.span.addEventListener("DOMSubtreeModified", () => {
+        if (b.host.isConnected) b.host.remove();
+    }, { once: true });
+
+    const h = document.body.offsetHeight;
+    log("  offsetHeight=" + h + " | h2a.connected=" + a.host.isConnected + " | h2b.connected=" + b.host.isConnected);
+}
+
+// Gatilho 3: Disparo de blur/focus em elemento dentro de shadow root durante flush
+function triggerFocusBlurReentry() {
+    log("[3] Testing focus/blur inside shadow root during style/layout flush");
+    const a = makeShadowHost("h3a");
+    const b = makeShadowHost("h3b");
+
+    const inp = document.createElement("input");
+    a.sr.appendChild(inp);
+    inp.focus();
+
+    inp.addEventListener("blur", () => {
+        if (b.host.isConnected) {
+            b.host.remove();
+            log("  blur removed h3b");
+        }
+    }, { once: true });
+
+    const prepended = document.createElement("style");
+    prepended.textContent = "input { outline: 2px solid black; }";
+    a.sr.prepend(prepended);
+
+    const len = document.styleSheets.length;
+    inp.blur();
+    log("  styleSheets.length=" + len + " | h3a.connected=" + a.host.isConnected + " | h3b.connected=" + b.host.isConnected);
+}
+
+// Gatilho 4: Custom element upgrade / attributeChangedCallback durante atualização de árvore/estilo
+function triggerCustomElementPath() {
+    log("[4] Testing custom element + shadow root update");
+    const tag = "x-probe-ce";
+    if (!customElements.get(tag)) {
+        customElements.define(tag, class extends HTMLElement {
+            static get observedAttributes() { return ["data-x"]; }
+            attributeChangedCallback() {
+                const target = document.getElementById("h4b");
+                if (target) target.remove();
+            }
+        });
+    }
+
+    const a = makeShadowHost("h4a");
+    const b = makeShadowHost("h4b");
+    const ce = document.createElement(tag);
+    a.sr.appendChild(ce);
+    document.body.offsetHeight;
+
+    ce.setAttribute("data-x", "1");
+    const prepended = document.createElement("style");
+    prepended.textContent = tag + " { display: block; }";
+    a.sr.prepend(prepended);
+
+    const len = document.styleSheets.length;
+    log("  styleSheets.length=" + len + " | h4a.connected=" + a.host.isConnected + " | h4b.connected=" + b.host.isConnected);
+}
+
+function runAll() {
+    log("=== Starting isolated triggers ===");
+    try { triggerStyleSheetFlush(); } catch (e) { log("ERR [1]: " + e); }
+    try { triggerStyleTextMutation(); } catch (e) { log("ERR [2]: " + e); }
+    try { triggerFocusBlurReentry(); } catch (e) { log("ERR [3]: " + e); }
+    try { triggerCustomElementPath(); } catch (e) { log("ERR [4]: " + e); }
+    log("=== Done (no crash if reached) ===");
+}
+
+document.getElementById("btn-run").addEventListener("click", runAll);
+document.getElementById("btn-clear").addEventListener("click", () => { logEl.textContent = ""; });
 </script>
+</body>
+</html>
