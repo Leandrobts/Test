@@ -1,35 +1,33 @@
 <!DOCTYPE html>
-<body>
+<p>This test passes if it does not crash.</p>
 <script>
-const canvas = document.createElement("canvas");
-canvas.width = 64;
-canvas.height = 64;
+const canvas = document.createElement('canvas');
+canvas.width = 1;
+canvas.height = 1;
+const dummies = [];
+for (let i = 0; i < 600; i++) {
+    const dummy = canvas.getContext('2d');
+    if (!dummy) break;
+    dummy.font = '10px "dummy' + i + '", sans-serif';
+    dummy.measureText('\u13A0\u13A2\u13A4');
+    dummies.push(dummy);
+}
 
-let contextFromListener = null;
-let reentrantTriggered = false;
-
-// Gancho de reentrância durante a obtenção/uso inicial do contexto 2d:
-// intercepta CanvasRenderingContext2D.prototype.save (chamado quando m_contextStateSaver é criado no buffer)
-// ou chama getContext("2d") reentrantemente a partir de um hook no ambiente.
-const origGetContext = HTMLCanvasElement.prototype.getContext;
-HTMLCanvasElement.prototype.getContext = function(type, attrs) {
-    const ctx = origGetContext.call(this, type, attrs);
-    if (!reentrantTriggered && type === "2d" && ctx) {
-        reentrantTriggered = true;
-        contextFromListener = origGetContext.call(this, "2d");
+const WORKER_BODY = `
+const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+const keepAlive = [];
+for (let attempt = 0; attempt < 2; attempt++) {
+    const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
+    const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
+    if (self.fonts && self.fonts.add) {
+        self.fonts.add(metricsDonor);
+        self.fonts.add(measured);
     }
-    return ctx;
-};
+    keepAlive.push(metricsDonor, measured);
+}
+postMessage('done');
+`;
 
-const ctx = canvas.getContext("2d");
-
-const log = [
-    `ctx = ${ctx}`,
-    `context from listener = ${contextFromListener ? contextFromListener.constructor.name : undefined}`,
-    `its canvas is the same element = ${ctx ? ctx.canvas === canvas : false}`,
-    `it still owns the slot = ${ctx === canvas.getContext("2d")}`,
-    "PASS if no crash.",
-];
-document.body.appendChild(document.createElement("pre")).textContent = log.join("\n");
+const worker = new Worker(URL.createObjectURL(new Blob([WORKER_BODY], { type: 'application/javascript' })));
+worker.onmessage = () => {};
 </script>
-</body>

