@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <body>
-<button id="run">Run Async GC Pressure Test</button>
+<button id="run">Run Short Cycle Test</button>
 <pre id="log"></pre>
 
 <script>
@@ -10,83 +10,63 @@ function log(msg) {
     logEl.textContent += msg + "\n";
 }
 
-function churnHeap(batches, itemsPerBatch) {
-    for (let b = 0; b < batches; b++) {
-        const chunk = new Array(itemsPerBatch);
-        for (let i = 0; i < itemsPerBatch; i++) {
-            chunk[i] = {
-                id: b + "_" + i,
-                buf: new Array(32).fill(i ^ b),
-                str: "gc_probe_" + b + "_" + i + "_0123456789abcdef0123456789abcdef"
-            };
-        }
+function allocCycle(n) {
+    for (let i = 0; i < n; i++) {
+        const tmp = { idx: i, tag: "cycle_" + i + "_abcdef0123456789" };
+        if (i % 64 === 0)
+            new Array(32).fill(tmp.tag);
     }
 }
 
-function createAndDeleteOuter() {
+function makeDetachedChild() {
     const style = document.createElement("style");
     document.head.appendChild(style);
     const sheet = style.sheet;
 
     sheet.insertRule(".outer { color: red; & .nested { color: blue; } }", 0);
-    const outer = sheet.cssRules[0];
-    if (!outer) {
-        log("No outer rule");
-        return null;
-    }
-
-    let list = outer.cssRules;
-    if (!list || list.length === 0) {
-        log("No nested rules");
-        return null;
-    }
-
-    const nested = list[0];
-    list = null;
-
-    log("Inserted outer & nested; deleting rule 0...");
+    const child = sheet.cssRules[0].cssRules[0];
     sheet.deleteRule(0);
-    log("After delete: sheet.cssRules.length=" + sheet.cssRules.length);
-
-    return nested;
+    style.remove();
+    return child;
 }
 
-function runAsyncWaves(nested, wave, maxWaves) {
-    churnHeap(120, 256);
-    log("Wave " + wave + "/" + maxWaves + " completed");
-
-    if (wave < maxWaves) {
-        setTimeout(() => runAsyncWaves(nested, wave + 1, maxWaves), 40);
-        return;
+function probeChild(child) {
+    try {
+        const pr = child.parentRule;
+        if (!pr)
+            return "parentRule=null";
+        return "parentRule=" + pr + " | sel=" + pr.selectorText;
+    } catch (e) {
+        return "ERR: " + e;
     }
-
-    setTimeout(() => {
-        try {
-            const pr = nested.parentRule;
-            log("Final nested.parentRule=" + pr);
-            if (pr) {
-                try {
-                    log("Final parent.selectorText=" + pr.selectorText);
-                } catch (eSel) {
-                    log("Error reading parent.selectorText: " + eSel);
-                }
-            }
-        } catch (ePr) {
-            log("Error reading nested.parentRule: " + ePr);
-        }
-    }, 60);
 }
 
 document.getElementById("run").addEventListener("click", () => {
     logEl.textContent = "";
     try {
-        const nested = createAndDeleteOuter();
-        if (!nested)
-            return;
+        let child = makeDetachedChild();
+        log("Init: " + probeChild(child));
 
-        setTimeout(() => runAsyncWaves(nested, 1, 8), 30);
+        let step = 1;
+        const maxSteps = 12;
+
+        function tick() {
+            allocCycle(3000);
+            log("Step " + step + "/" + maxSteps + ": " + probeChild(child));
+
+            if (step < maxSteps) {
+                step++;
+                setTimeout(tick, 25);
+            } else {
+                child = null;
+                allocCycle(3000);
+                log("Done (child cleared)");
+            }
+        }
+
+        setTimeout(tick, 25);
     } catch (e) {
-        log("Top-level error: " + e);
+        log("Top error: " + e);
     }
 });
 </script>
