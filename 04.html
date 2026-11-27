@@ -1,96 +1,48 @@
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Canvas2D measureText FontMetrics UAF (Main Thread + Ahem.woff)</title>
-</head>
-<body>
-<p>This test passes if it does not crash.</p>
-<pre id="log"></pre>
 <script>
-
-const log = (msg) => {
-    const el = document.getElementById('log');
-    if (el) el.textContent += msg + '\n';
-};
-
-// Espelha a estrutura do teste do commit 5ccd64b:
-// 1) Cria múltiplos contextos 2D com famílias distintas via ctx.font setter
-//    para pressionar o cache de fontes.
-// 2) Usa fonte local real em resources/Ahem.woff e aciona ctx.font + measureText()
-//    lendo as propriedades de TextMetrics após a medição.
-async function runAdaptedTest() {
-    const dummies = [];
-    for (let i = 0; i < 1000; i++) {
-        const c = document.createElement('canvas');
-        c.width = 1;
-        c.height = 1;
-        const dummyCtx = c.getContext('2d');
-        dummyCtx.font = '10px "dummyFamily' + i + '"';
-        dummies.push(c, dummyCtx);
-    }
-
-    const keepAlive = [];
-    for (let attempt = 0; attempt < 8; attempt++) {
-        const donorName = 'ahemDonor_' + attempt + '_' + Date.now();
-        const measuredName = 'ahemMeasured_' + attempt + '_' + Date.now();
-
-        const donorFace = new FontFace(donorName, 'url("resources/Ahem.woff")');
-        const measuredFace = new FontFace(measuredName, 'url("resources/Ahem.woff")', {
-            unicodeRange: 'U+0020-007F'
+fetch('resources/Ahem.woff')
+    .then(function(r) { return r.arrayBuffer(); })
+    .then(function(b) {
+        return new Promise(function(res, rej) {
+            var fr = new FileReader();
+            fr.onload  = function(e) { res(e.target.result); };
+            fr.onerror = rej;
+            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
         });
+    })
+    .then(function(dataUrl) {
 
-        document.fonts.add(donorFace);
-        document.fonts.add(measuredFace);
+        var dummies = [];
+        for (var i = 0; i < 500; i++) {
+            var d = document.createElement('canvas');
+            d.width = 1; d.height = 1;
+            d.getContext('2d').font = '10px "Z' + i + '"';
+            dummies.push(d);
+        }
 
-        const canvas = document.createElement('canvas');
+        var face = new FontFace('FallbackFam', 'url("' + dataUrl + '")');
+        document.fonts.add(face);
+        void face.loaded;
+
+        var canvas = document.createElement('canvas');
         canvas.width = 64;
         canvas.height = 64;
-        const ctx = canvas.getContext('2d');
+        document.body.appendChild(canvas);
+        var ctx = canvas.getContext('2d');
+        
+        ctx.font = '10px Times, FallbackFam';
 
-        // Gatilho via ctx.font setter
-        ctx.font = '20px ' + donorName + ', ' + measuredName;
-        keepAlive.push(donorFace, measuredFace, canvas, ctx);
-
-        // Dispara load() e testa measureText() tanto antes quanto após aguardar
-        const loadPromise = Promise.allSettled([donorFace.load(), measuredFace.load()]);
-
-        const tmBefore = ctx.measureText('A B C');
-        void tmBefore.width;
-        void tmBefore.fontBoundingBoxAscent;
-        void tmBefore.fontBoundingBoxDescent;
-        void tmBefore.emHeightAscent;
-        void tmBefore.emHeightDescent;
-        void tmBefore.hangingBaseline;
-        void tmBefore.ideographicBaseline;
-
-        await loadPromise;
-
-        // Reaplica ctx.font e mede novamente após carregamento de resources/Ahem.woff
-        ctx.font = '20px ' + donorName + ', ' + measuredName;
-        const tmAfter = ctx.measureText('A B C');
-        void tmAfter.width;
-        void tmAfter.fontBoundingBoxAscent;
-        void tmAfter.fontBoundingBoxDescent;
-        void tmAfter.emHeightAscent;
-        void tmAfter.emHeightDescent;
-        void tmAfter.hangingBaseline;
-        void tmAfter.ideographicBaseline;
-
-        log(
-            'attempt=' + attempt +
-            ' donor=' + donorFace.status +
-            ' measured=' + measuredFace.status +
-            ' fbaBefore=' + tmBefore.fontBoundingBoxAscent +
-            ' fbaAfter=' + tmAfter.fontBoundingBoxAscent
-        );
-    }
-    
-}
-
-runAdaptedTest().catch((err) => {
-    log('error: ' + err);    
-});
+        var reen = false;
+        Object.defineProperty(face, 'then', {
+            configurable: true,
+            get: function() {
+                if (reen) return undefined;
+                reen = true;
+                document.fonts.add(new FontFace('Unrelated', 'local("x")'));
+                reen = false;
+                return undefined;
+            }
+        });
+    //ctx.measureText('\u13A0\u13A2\u13A4');
+    });
 </script>
-</body>
-</html>
