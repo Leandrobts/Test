@@ -1,36 +1,177 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"></head>
-<body>
+<head>
+<meta charset="utf-8">
 <script>
+var focusoutCount = 0;
+var gcCount = 0;
+var logLines = [];
+
+function logStep(msg) {
+    var ts = Date.now();
+    logLines.push("[" + ts + "] " + msg);
+    var out = document.getElementById("log");
+    if (out)
+        out.textContent = logLines.join("\n");
+}
+
 function gc() {
+    gcCount++;
     function gcRec(n) {
-        if (n < 1) return {};
+        if (n < 1)
+            return {};
         var temp = { i: "ab" + i + (i / 100000) };
         temp += "foo";
         gcRec(n - 1);
     }
-    for (var i = 0; i < 10000; i++) gcRec(10);
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
 }
-var src = 'self.onmessage = function(e) { self.postMessage(e.data); };';
-var blobUrl = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
-for (var k = 0; k < 3; k++) {
-    var w = new Worker(blobUrl);
-    w.onmessage = function(e) {
-       // gc();
-        var fd = new FormData();
-        fd.append('a', e.data);
-        var response = new Response(fd);
-        Object.prototype.__defineGetter__('then', function() {
-            response = null;
+
+function f3() {
+    focusoutCount++;
+    logStep("f3() triggered by focusout (#" + focusoutCount + "), running gc()...");
+    gc();
+    logStep("f3() finished gc() #" + gcCount);
+}
+
+function inspectState(label, host, svg, anim, clip, styleEl, sr) {
+    var hostConnected = host ? host.isConnected : false;
+    var svgParent = svg && svg.parentNode ? svg.parentNode.nodeName : "null";
+    var svgInShadow = (svg && sr) ? (svg.parentNode === sr) : false;
+    var clipPathVal = "";
+    try {
+        if (svg)
+            clipPathVal = getComputedStyle(svg).clipPath;
+    } catch (e) {
+        clipPathVal = "err:" + e.name;
+    }
+    var sheetsLen = document.styleSheets ? document.styleSheets.length : -1;
+    var srSheetsLen = (sr && sr.styleSheets) ? sr.styleSheets.length : -1;
+    logStep(
+        label +
+        " | hostConn=" + hostConnected +
+        " | svgParent=" + svgParent +
+        " | svgInShadow=" + svgInShadow +
+        " | clipPath=" + clipPathVal +
+        " | sheets=" + sheetsLen +
+        " | srSheets=" + srSheetsLen +
+        " | focusouts=" + focusoutCount +
+        " | gcs=" + gcCount
+    );
+}
+
+function runCycle(cycleNum, doneCallback) {
+    logStep("=== Cycle " + cycleNum + " start ===");
+
+    var host = document.createElement("div");
+    host.id = "x5_" + cycleNum;
+    host.tabIndex = -1;
+    host.setAttribute("onfocusout", "f3()");
+
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.id = "x11_" + cycleNum;
+    svg.setAttribute("tabindex", "-1");
+
+    var anim = document.createElementNS("http://www.w3.org/2000/svg", "animateTransform");
+    anim.id = "x18_" + cycleNum;
+    anim.setAttribute("min", "0.5s");
+
+    var clipId = "x20_" + cycleNum;
+    var clip = document.createElementNS("http://www.w3.org/2000/svg", "clipPath");
+    clip.setAttribute("id", clipId);
+    clip.setAttribute("vector-effect", "non-scaling-size");
+    clip.setAttribute("clip-path", "url(#" + clipId + ")");
+    clip.setAttribute("markerUnits", "strokeWidth");
+    clip.setAttribute("clip", "rect(1em,auto,auto,546px)");
+    clip.setAttribute("patternUnits", "userSpaceOnUse");
+
+    var styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
+    styleEl.setAttribute("width", "0.20em");
+    styleEl.setAttribute("translate", "no");
+    styleEl.setAttribute("draggable", "true");
+    styleEl.setAttribute("itemref", "x50");
+    styleEl.setAttribute("itemgroup", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    styleEl.textContent = "svg { clip-path: url(#" + clipId + "); }";
+
+    clip.appendChild(styleEl);
+    svg.appendChild(anim);
+    svg.appendChild(clip);
+
+    var sandbox = document.createElement("div");
+    sandbox.appendChild(host);
+    sandbox.appendChild(svg);
+    document.body.appendChild(sandbox);
+
+    inspectState("after append to body", host, svg, anim, clip, styleEl, null);
+
+    var sr = null;
+    try {
+        sr = host.attachShadow({ mode: "open", delegatesFocus: false });
+        logStep("attachShadow succeeded");
+    } catch (e) {
+        logStep("attachShadow threw: " + e.name + ": " + e.message);
+        doneCallback();
+        return;
+    }
+
+    var st = anim.scrollTop;
+    logStep("read anim.scrollTop=" + st);
+
+    sr.appendChild(svg);
+    inspectState("after sr.appendChild(svg)", host, svg, anim, clip, styleEl, sr);
+
+    try {
+        host.focus();
+        logStep("called host.focus(), activeElement=" + (document.activeElement ? document.activeElement.id || document.activeElement.nodeName : "null"));
+        host.blur();
+        logStep("called host.blur(), activeElement=" + (document.activeElement ? document.activeElement.id || document.activeElement.nodeName : "null"));
+    } catch (e) {
+        logStep("focus/blur error: " + e.name + ": " + e.message);
+    }
+
+    logStep("calling gc() #1 after shadow append...");
+    gc();
+    inspectState("after gc() #1", host, svg, anim, clip, styleEl, sr);
+
+    setTimeout(function () {
+        logStep("setTimeout #1 fired; removing sandbox...");
+        if (sandbox.parentNode)
+            sandbox.parentNode.removeChild(sandbox);
+        inspectState("after removeChild(sandbox)", host, svg, anim, clip, styleEl, sr);
+
+        logStep("calling gc() #2 after removal...");
+        gc();
+        inspectState("after gc() #2", host, svg, anim, clip, styleEl, sr);
+
+        setTimeout(function () {
+            logStep("setTimeout #2 fired; calling gc() #3...");
             gc();
-        });
-    //    gc();
-        response.arrayBuffer();
-        w.terminate();
-    };
-    w.postMessage(new Blob(['aa']));
+            inspectState("after gc() #3", host, svg, anim, clip, styleEl, sr);
+            doneCallback();
+        }, 50);
+    }, 50);
+}
+
+function main() {
+    logStep("main() started; UA=" + navigator.userAgent);
+    var totalCycles = 3;
+    var current = 0;
+
+    function next() {
+        current++;
+        if (current <= totalCycles) {
+            runCycle(current, next);
+        } else {
+            logStep("=== All " + totalCycles + " cycles completed without crash ===");
+        }
+    }
+
+    next();
 }
 </script>
+</head>
+<body onload="main()">
+<pre id="log">Initializing...</pre>
 </body>
 </html>
