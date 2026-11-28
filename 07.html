@@ -1,34 +1,139 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>PS4 WebKit Input Types Diagnostic</title>
+</head>
 <body>
+<h1>PS4 WebKit Input Types Diagnostic</h1>
+
+<div id="controls"></div>
+<div id="log"></div>
+
 <script>
-function gc() {
-    function gcRec(n) {
-        if (n < 1)
-            return {};
-        var temp = { i: "ab" + i + (i / 100000) };
-        temp += "foo";
-        gcRec(n - 1);
-    }
-    for (var i = 0; i < 10000; i++)
-        gcRec(10);  
+var INPUT_TYPES = [
+    "date",
+    "datetime-local",
+    "datetime",
+    "time",
+    "month",
+    "week",
+    "color",
+    "number",
+    "range",
+    "email",
+    "url",
+    "tel",
+    "search",
+    "password",
+    "text",
+    "hidden",
+    "checkbox",
+    "radio",
+    "file",
+    "submit",
+    "reset",
+    "button",
+    "image"
+];
+
+function logLine(msg) {
+    var div = document.getElementById("log");
+    var p = document.createElement("p");
+    p.textContent = msg;
+    div.appendChild(p);
 }
 
-const style = document.createElement("style");
-document.head.appendChild(style);
-const sheet = style.sheet;
-sheet.insertRule(".outer { color: red; & .nested { color: blue; } }", 0);
+function buildInputs() {
+    var container = document.getElementById("controls");
+    for (var i = 0; i < INPUT_TYPES.length; i++) {
+        var t = INPUT_TYPES[i];
+        var p = document.createElement("p");
+        var label = document.createElement("label");
+        label.htmlFor = "inp_" + i;
+        label.textContent = t + ": ";
+        var input = document.createElement("input");
+        input.id = "inp_" + i;
+        input.type = t;
+        p.appendChild(label);
+        p.appendChild(input);
+        container.appendChild(p);
+    }
+}
 
-let nestedRules = sheet.cssRules[0].cssRules;
-sheet.deleteRule(0);
-gc();
+function testInputTypes() {
+    var supportedList = [];
+    var fallbackList = [];
 
-const nested = nestedRules[0];
-    gc();
-nestedRules = null;
-gc();
+    for (var i = 0; i < INPUT_TYPES.length; i++) {
+        var requested = INPUT_TYPES[i];
+        var el = document.createElement("input");
+        var threw = null;
+        try {
+            el.type = requested;
+        } catch (e) {
+            threw = e;
+        }
 
-document.write(nested.parentRule === null ? "PASS" : "FAIL: parentRule is " + nested.parentRule);
+        if (threw) {
+            logLine("Type '" + requested + "' -> threw: " + threw);
+            fallbackList.push(requested + "(err)");
+            continue;
+        }
+
+        var actual = el.type;
+        var matched = (actual === requested);
+        logLine("Requested: '" + requested + "' | Actual el.type: '" + actual + "' | Supported: " + matched);
+
+        if (matched) {
+            supportedList.push(requested);
+        } else {
+            fallbackList.push(requested + "->" + actual);
+        }
+    }
+
+    logLine("Summary SUPPORTED (" + supportedList.length + "): " + (supportedList.length ? supportedList.join(", ") : "none"));
+    logLine("Summary FALLBACK/OTHER (" + fallbackList.length + "): " + (fallbackList.length ? fallbackList.join(", ") : "none"));
+}
+
+function attachEventProbe() {
+    var sampleTypes = ["date", "datetime-local", "time", "month", "week", "number", "color", "range"];
+    for (var i = 0; i < sampleTypes.length; i++) {
+        (function(t) {
+            var el = document.createElement("input");
+            el.type = t;
+            el.addEventListener("input", function() {
+                logLine("Event 'input' on created type='" + t + "' (current el.type='" + el.type + "')");
+            });
+            el.addEventListener("change", function() {
+                logLine("Event 'change' on created type='" + t + "' (current el.type='" + el.type + "')");
+            });
+            if (el.type === t) {
+                try {
+                    el.focus();
+                    if (t === "number" || t === "range") {
+                        el.value = "5";
+                    } else if (t === "color") {
+                        el.value = "#ff0000";
+                    }
+                    el.dispatchEvent(new Event("input", { bubbles: true }));
+                    el.dispatchEvent(new Event("change", { bubbles: true }));
+                } catch (e) {
+                    logLine("Probe error on '" + t + "': " + e);
+                }
+            }
+        })(sampleTypes[i]);
+    }
+}
+
+window.addEventListener("load", function() {
+    logLine("UserAgent: " + navigator.userAgent);
+    logLine("Testing " + INPUT_TYPES.length + " input types...");
+    buildInputs();
+    testInputTypes();
+    attachEventProbe();
+    logLine("Done.");
+});
 </script>
 </body>
 </html>
