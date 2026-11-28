@@ -2,13 +2,14 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Consuming form data with empty blob - Opcoes A B C D</title>
+<title>Teste Opcoes A B C D - FormDataConsumer</title>
 </head>
 <body>
-<button id="runA">Rodar Opcao A (structuredClone)</button>
-<button id="runB">Rodar Opcao B (Worker postMessage)</button>
-<button id="runC">Rodar Opcao C (fetch + revoke + blob)</button>
-<button id="runD">Rodar Opcao D (FormData chave vazia)</button>
+<button id="btnA">Opcao A (structuredClone)</button>
+<button id="btnB">Opcao B (Worker postMessage)</button>
+<button id="btnC">Opcao C (fetch + revoke + blob)</button>
+<button id="btnD">Opcao D (FormData chave vazia)</button>
+<button id="btnAll">Rodar A, B, C e D</button>
 <pre id="log"></pre>
 <script>
 function gc() {
@@ -27,141 +28,139 @@ function log(msg) {
     document.getElementById('log').textContent += msg + '\n';
 }
 
-function sleep(ms) {
-    return new Promise(function(resolve) {
-        setTimeout(resolve, ms);
+function hookAndConsumeResponse(formData, label) {
+    var response = new Response(formData);
+    Object.prototype.__defineGetter__('then', function() {
+        response = null;
+        gc();
     });
+    gc();
+    var p = response.arrayBuffer();
+    if (p && typeof p.catch === 'function') {
+        p.catch(function(err) {
+            log('[' + label + '] arrayBuffer catch: ' + (err && err.message ? err.message : err));
+        });
+    }
 }
 
-function createBlobA() {
-    return new Promise(function(resolve, reject) {
+function runOptionA() {
+    log('[A] iniciando structuredClone...');
+    try {
         if (typeof structuredClone !== 'function') {
-            reject(new Error('structuredClone indisponivel'));
+            log('[A] structuredClone nao disponivel');
             return;
         }
-        var original = new Blob(['aa']);
-        var cloned = structuredClone(original);
-        original = null;
-        gc();
-        resolve(cloned);
-    });
+        for (var k = 0; k < 1; k++) {
+            var original = new Blob(['aa']);
+            var cloned = structuredClone(original);
+            original = null;
+            gc();
+            var fd = new FormData();
+            fd.append('a', cloned);
+            hookAndConsumeResponse(fd, 'A');
+        }
+        log('[A] concluido');
+    } catch (e) {
+        log('[A] erro: ' + e.name + ': ' + e.message);
+    }
 }
 
-function createBlobB() {
-    return new Promise(function(resolve, reject) {
+function runOptionB() {
+    log('[B] iniciando Worker postMessage...');
+    try {
         if (typeof Worker === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
-            reject(new Error('Worker ou URL.createObjectURL indisponivel'));
+            log('[B] Worker ou URL.createObjectURL nao disponivel');
             return;
         }
         var src = [
             'self.onmessage = function(e) {',
+            '    if (typeof gc === "function") gc();',
             '    self.postMessage(e.data);',
             '};'
         ].join('\n');
-        var url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
-        var w = new Worker(url);
+        var blobUrl = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
 
-        w.onmessage = function(e) {
-            URL.revokeObjectURL(url);
-            w.terminate();
-            gc();
-            resolve(e.data);
-        };
-
-        w.onerror = function(err) {
-            URL.revokeObjectURL(url);
-            w.terminate();
-            reject(new Error(err && err.message ? err.message : 'Worker error'));
-        };
-
-        w.postMessage(new Blob(['aa']));
-    });
+        for (var k = 0; k < 1; k++) {
+            (function(idx) {
+                var w = new Worker(blobUrl);
+                w.onmessage = function(e) {
+                    gc();
+                    try {
+                        var fd = new FormData();
+                        fd.append('a', e.data);
+                        hookAndConsumeResponse(fd, 'B#' + idx);
+                    } catch (err) {
+                        log('[B#' + idx + '] erro no onmessage: ' + err.name + ': ' + err.message);
+                    }
+                    w.terminate();
+                };
+                w.onerror = function(err) {
+                    log('[B#' + idx + '] worker error: ' + (err && err.message ? err.message : 'erro'));
+                };
+                w.postMessage(new Blob(['aa']));
+            })(k);
+        }
+        log('[B] mensagens enviadas');
+    } catch (e) {
+        log('[B] erro: ' + e.name + ': ' + e.message);
+    }
 }
 
-function createBlobC() {
-    return new Promise(function(resolve, reject) {
+function runOptionC() {
+    log('[C] iniciando fetch + revokeObjectURL + resp.blob()...');
+    try {
         if (typeof fetch !== 'function' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
-            reject(new Error('fetch ou URL.createObjectURL indisponivel'));
+            log('[C] fetch ou URL.createObjectURL nao disponivel');
             return;
         }
-        var url = URL.createObjectURL(new Blob(['aa']));
-        fetch(url).then(function(resp) {
-            URL.revokeObjectURL(url);
-            gc();
-            return resp.blob();
-        }).then(function(blob) {
-            gc();
-            resolve(blob);
-        }).catch(function(err) {
-            URL.revokeObjectURL(url);
-            reject(err);
-        });
-    });
+        for (var k = 0; k < 1; k++) {
+            (function(idx) {
+                var url = URL.createObjectURL(new Blob(['aa']));
+                fetch(url).then(function(resp) {
+                    URL.revokeObjectURL(url);
+                    gc();
+                    return resp.blob();
+                }).then(function(blob) {
+                    gc();
+                    var fd = new FormData();
+                    fd.append('a', blob);
+                    hookAndConsumeResponse(fd, 'C#' + idx);
+                }).catch(function(err) {
+                    log('[C#' + idx + '] fetch/blob catch: ' + (err && err.message ? err.message : err));
+                });
+            })(k);
+        }
+        log('[C] requisicoes disparadas');
+    } catch (e) {
+        log('[C] erro: ' + e.name + ': ' + e.message);
+    }
 }
 
-function runCommitStyleWithOption(option) {
-    var payloadPromise;
-
-    if (option === 'A') {
-        payloadPromise = createBlobA().then(function(blob) {
-            var fd = new FormData();
-            fd.append('a', blob);
-            return fd;
-        });
-    } else if (option === 'B') {
-        payloadPromise = createBlobB().then(function(blob) {
-            var fd = new FormData();
-            fd.append('a', blob);
-            return fd;
-        });
-    } else if (option === 'C') {
-        payloadPromise = createBlobC().then(function(blob) {
-            var fd = new FormData();
-            fd.append('a', blob);
-            return fd;
-        });
-    } else if (option === 'D') {
-        payloadPromise = new Promise(function(resolve) {
-            gc();
+function runOptionD() {
+    log('[D] iniciando FormData com valor vazio...');
+    try {
+        for (var k = 0; k < 1; k++) {
             var fd = new FormData();
             fd.append('key', '');
-            resolve(fd);
-        });
-    }
-
-    return payloadPromise.then(function(formData) {
-        return sleep(100).then(function() {
-            var response = new Response(formData);
-            Object.prototype.__defineGetter__('then', function() {
-                response = null;
-                gc();
-            });
-
-            return response.arrayBuffer();
-        });
-    });
-}
-
-function runLoop(option, count) {
-    log('[' + option + '] iniciando...');
-    var chain = Promise.resolve();
-    for (var i = 0; i < count; i++) {
-        (function(idx) {
-            chain = chain.then(function() {
-                return runCommitStyleWithOption(option).then(function() {
-                    log('[' + option + '] iteracao ' + idx + ': ok');
-                }, function(err) {
-                    log('[' + option + '] iteracao ' + idx + ': erro (' + (err && err.message ? err.message : err) + ')');
-                });
-            });
-        })(i);
+            hookAndConsumeResponse(fd, 'D');
+        }
+        log('[D] concluido');
+    } catch (e) {
+        log('[D] erro: ' + e.name + ': ' + e.message);
     }
 }
 
-document.getElementById('runA').onclick = function() { runLoop('A', 10); };
-document.getElementById('runB').onclick = function() { runLoop('B', 10); };
-document.getElementById('runC').onclick = function() { runLoop('C', 10); };
-document.getElementById('runD').onclick = function() { runLoop('D', 10); };
+document.getElementById('btnA').onclick = runOptionA;
+document.getElementById('btnB').onclick = runOptionB;
+document.getElementById('btnC').onclick = runOptionC;
+document.getElementById('btnD').onclick = runOptionD;
+document.getElementById('btnAll').onclick = function() {
+    document.getElementById('log').textContent = '';
+    runOptionA();
+    runOptionB();
+    runOptionC();
+    runOptionD();
+};
 </script>
 </body>
 </html>
